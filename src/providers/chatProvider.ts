@@ -5,8 +5,8 @@ import * as path from 'path';
 import { DeepSeekClient, Message as ApiMessage, ToolCall } from '../deepseekClient';
 import { StatusBar } from '../views/statusBar';
 import { ChatHistoryManager } from '../chatHistory/ChatHistoryManager';
-import { ChatHistoryViewProvider } from '../views/ChatHistoryViewProvider';
 import { DiffEngine } from '../utils/diff';
+import { logger } from '../utils/logger';
 import { workspaceTools, executeToolCall } from '../tools/workspaceTools';
 
 export class ChatProvider implements vscode.WebviewViewProvider {
@@ -141,12 +141,14 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       language
     );
     this.currentSessionId = session.id;
+    logger.sessionStart(session.id, session.title);
   }
 
   private stopGeneration() {
     if (this.abortController) {
       this.abortController.abort();
       this.abortController = null;
+      logger.apiAborted();
     }
     if (this._view) {
       this._view.webview.postMessage({ type: 'generationStopped' });
@@ -158,10 +160,12 @@ export class ChatProvider implements vscode.WebviewViewProvider {
 
     if (settings.model !== undefined) {
       await config.update('model', settings.model, vscode.ConfigurationTarget.Global);
+      logger.modelChanged(settings.model);
     }
 
     if (settings.temperature !== undefined) {
       await config.update('temperature', settings.temperature, vscode.ConfigurationTarget.Global);
+      logger.settingsChanged('temperature', settings.temperature);
     }
   }
 
@@ -263,9 +267,16 @@ The context lines (existing_method, another_existing_method) help locate where t
       isReasoner: isReasonerModel
     });
 
+    // Log the API request
+    const model = this.deepSeekClient.getModel();
+    const hasImages = attachments && attachments.length > 0;
+    const requestStartTime = Date.now();
+
     try {
       // Get current session messages for context (user message already saved above)
       const currentSession = await this.chatHistoryManager.getCurrentSession();
+      const messageCount = currentSession ? currentSession.messages.length : 1;
+      logger.apiRequest(model, messageCount, hasImages);
 
       // Build messages array - handle multimodal content if attachments present
       const historyMessages: ApiMessage[] = [];
@@ -327,14 +338,18 @@ The context lines (existing_method, another_existing_method) help locate where t
       });
 
       // Save assistant message to history
+      const tokenCount = this.deepSeekClient.estimateTokens(fullResponse + fullReasoning);
       if (this.currentSessionId && (fullResponse || fullReasoning)) {
         await this.chatHistoryManager.addMessageToCurrentSession({
           role: 'assistant',
           content: fullResponse,
           reasoning_content: fullReasoning || undefined,
-          tokens: this.deepSeekClient.estimateTokens(fullResponse + fullReasoning)
+          tokens: tokenCount
         });
       }
+
+      // Log successful response
+      logger.apiResponse(tokenCount, Date.now() - requestStartTime);
 
       // Update status bar
       this.statusBar.updateLastResponse();
@@ -345,7 +360,7 @@ The context lines (existing_method, another_existing_method) help locate where t
         return;
       }
       // Log the error
-      ChatHistoryViewProvider.logError(error.message, error.stack);
+      logger.error(error.message, error.stack);
       this._view.webview.postMessage({
         type: 'error',
         error: error.message
@@ -410,7 +425,10 @@ The context lines (existing_method, another_existing_method) help locate where t
 
       // Execute each tool call
       for (const toolCall of response.tool_calls) {
+        logger.toolCall(toolCall.function.name);
         const result = await executeToolCall(toolCall);
+        const success = !result.startsWith('Error:');
+        logger.toolResult(toolCall.function.name, success);
 
         // Add tool result to messages
         toolMessages.push({
@@ -715,7 +733,7 @@ The context lines (existing_method, another_existing_method) help locate where t
       await this.closeDiffEditor();
 
     } catch (error: any) {
-      ChatHistoryViewProvider.logError('Failed to apply code', error.message);
+      logger.error('Failed to apply code', error.message);
       this.sendCodeAppliedStatus(false, error.message);
     }
   }
@@ -828,12 +846,13 @@ The context lines (existing_method, another_existing_method) help locate where t
 
       // Track that we have an active diff
       this.activeDiffUri = proposedUri;
+      logger.diffShown(fileName);
 
       // Clean up provider after a delay
       setTimeout(() => disposable.dispose(), 300000); // 5 minutes
 
     } catch (error: any) {
-      ChatHistoryViewProvider.logError('Failed to show diff', error.message);
+      logger.error('Failed to show diff', error.message);
       vscode.window.showErrorMessage(`Failed to show diff: ${error.message}`);
     }
   }
@@ -892,6 +911,7 @@ The context lines (existing_method, another_existing_method) help locate where t
   }
 
   private sendCodeAppliedStatus(success: boolean, error?: string) {
+    logger.codeApplied(success);
     if (this._view) {
       this._view.webview.postMessage({
         type: 'codeApplied',
@@ -920,6 +940,7 @@ The context lines (existing_method, another_existing_method) help locate where t
     if (session && this._view) {
       this.currentSessionId = session.id;
       await this.chatHistoryManager.switchToSession(sessionId);
+      logger.sessionSwitch(sessionId);
 
       // Switch to the session's model
       if (session.model) {

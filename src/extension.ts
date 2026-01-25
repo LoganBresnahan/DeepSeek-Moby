@@ -7,6 +7,7 @@ import { StatusBar } from './views/statusBar';
 import { ConfigManager } from './utils/config';
 import { ChatHistoryManager } from './chatHistory/ChatHistoryManager';
 import { ChatHistoryViewProvider } from './views/ChatHistoryViewProvider';
+import { logger } from './utils/logger';
 
 let chatProvider: ChatProvider;
 let completionProvider: CompletionProvider;
@@ -109,7 +110,8 @@ function registerCommands(context: vscode.ExtensionContext) {
     { name: 'clearChatHistory', handler: () => commandProvider.clearChatHistory() },
     { name: 'searchChatHistory', handler: () => commandProvider.searchChatHistory() },
     { name: 'exportCurrentSession', handler: () => commandProvider.exportCurrentSession() },
-    { name: 'showStats', handler: () => chatHistoryViewProvider.showStatsModal() }
+    { name: 'showStats', handler: () => chatHistoryViewProvider.showStatsModal() },
+    { name: 'showLogs', handler: () => logger.show() }
   ];
 
   commands.forEach(({ name, handler }) => {
@@ -141,4 +143,5 @@ export function deactivate() {
   if (deepSeekClient) {
     deepSeekClient.dispose();
   }
+  logger.dispose();
 }

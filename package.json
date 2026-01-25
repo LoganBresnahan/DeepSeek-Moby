@@ -114,93 +114,98 @@
     "commands": [
       {
         "command": "deepseek.startChat",
-        "title": "DeepSeek: Open Chat",
-        "category": "DeepSeek"
+        "title": "DeepSeek Moby: Open Chat",
+        "category": "DeepSeek Moby"
       },
       {
         "command": "deepseek.explainCode",
-        "title": "DeepSeek: Explain This Code",
-        "category": "DeepSeek"
+        "title": "DeepSeek Moby: Explain This Code",
+        "category": "DeepSeek Moby"
       },
       {
         "command": "deepseek.refactorCode",
-        "title": "DeepSeek: Refactor This Code",
-        "category": "DeepSeek"
+        "title": "DeepSeek Moby: Refactor This Code",
+        "category": "DeepSeek Moby"
       },
       {
         "command": "deepseek.documentCode",
-        "title": "DeepSeek: Add Documentation",
-        "category": "DeepSeek"
+        "title": "DeepSeek Moby: Add Documentation",
+        "category": "DeepSeek Moby"
       },
       {
         "command": "deepseek.fixBugs",
-        "title": "DeepSeek: Find and Fix Bugs",
-        "category": "DeepSeek"
+        "title": "DeepSeek Moby: Find and Fix Bugs",
+        "category": "DeepSeek Moby"
       },
       {
         "command": "deepseek.optimizeCode",
-        "title": "DeepSeek: Optimize Performance",
-        "category": "DeepSeek"
+        "title": "DeepSeek Moby: Optimize Performance",
+        "category": "DeepSeek Moby"
       },
       {
         "command": "deepseek.generateTests",
-        "title": "DeepSeek: Generate Tests",
-        "category": "DeepSeek"
+        "title": "DeepSeek Moby: Generate Tests",
+        "category": "DeepSeek Moby"
       },
       {
         "command": "deepseek.clearConversation",
         "title": "Clear Chat",
-        "category": "DeepSeek"
+        "category": "DeepSeek Moby"
       },
       {
         "command": "deepseek.newChat",
         "title": "New Chat",
-        "category": "DeepSeek"
+        "category": "DeepSeek Moby"
       },
       {
         "command": "deepseek.insertCode",
-        "title": "DeepSeek: Insert Generated Code",
-        "category": "DeepSeek"
+        "title": "DeepSeek Moby: Insert Generated Code",
+        "category": "DeepSeek Moby"
       },
       {
         "command": "deepseek.switchModel",
-        "title": "DeepSeek: Switch Model",
-        "category": "DeepSeek"
+        "title": "DeepSeek Moby: Switch Model",
+        "category": "DeepSeek Moby"
       },
       {
         "command": "deepseek.showChatHistory",
-        "title": "DeepSeek: Show Chat History",
-        "category": "DeepSeek"
+        "title": "DeepSeek Moby: Show Chat History",
+        "category": "DeepSeek Moby"
       },
       {
         "command": "deepseek.exportChatHistory",
-        "title": "DeepSeek: Export All Chat History",
-        "category": "DeepSeek"
+        "title": "DeepSeek Moby: Export All Chat History",
+        "category": "DeepSeek Moby"
       },
       {
         "command": "deepseek.importChatHistory",
-        "title": "DeepSeek: Import Chat History",
-        "category": "DeepSeek"
+        "title": "DeepSeek Moby: Import Chat History",
+        "category": "DeepSeek Moby"
       },
       {
         "command": "deepseek.clearChatHistory",
-        "title": "DeepSeek: Clear All Chat History",
-        "category": "DeepSeek"
+        "title": "DeepSeek Moby: Clear All Chat History",
+        "category": "DeepSeek Moby"
       },
       {
         "command": "deepseek.searchChatHistory",
-        "title": "DeepSeek: Search Chat History",
-        "category": "DeepSeek"
+        "title": "DeepSeek Moby: Search Chat History",
+        "category": "DeepSeek Moby"
       },
       {
         "command": "deepseek.exportCurrentSession",
-        "title": "DeepSeek: Export Current Session",
-        "category": "DeepSeek"
+        "title": "DeepSeek Moby: Export Current Session",
+        "category": "DeepSeek Moby"
       },
       {
         "command": "deepseek.showStats",
         "title": "Statistics",
-        "category": "DeepSeek"
+        "category": "DeepSeek Moby"
+      },
+      {
+        "command": "deepseek.showLogs",
+        "title": "Show Log",
+        "category": "DeepSeek Moby"
       }
     ],
     "menus": {
@@ -242,6 +247,11 @@
           "command": "deepseek.newChat",
           "when": "view == deepseek-chat-view",
           "group": "navigation@1"
+        },
+        {
+          "command": "deepseek.showLogs",
+          "when": "view == deepseek-chat-view",
+          "group": "navigation@2"
         },
         {
           "command": "deepseek.showStats",

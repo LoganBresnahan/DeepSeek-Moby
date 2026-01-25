@@ -2,19 +2,11 @@ import * as vscode from 'vscode';
 import { ChatHistoryManager } from '../chatHistory/ChatHistoryManager';
 import { ChatProvider } from '../providers/chatProvider';
 
-export interface LogEntry {
-  timestamp: string;
-  level: 'error' | 'warning';
-  message: string;
-  details?: string;
-}
-
 export class ChatHistoryViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'deepseek-history-view';
   private _view?: vscode.WebviewView;
   private chatHistoryManager: ChatHistoryManager;
   private chatProvider: ChatProvider;
-  private static logs: LogEntry[] = [];
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
@@ -75,13 +67,6 @@ export class ChatHistoryViewProvider implements vscode.WebviewViewProvider {
           break;
         case 'getStats':
           await this.getStats();
-          break;
-        case 'getLogs':
-          this.sendLogs();
-          break;
-        case 'clearLogs':
-          ChatHistoryViewProvider.clearLogs();
-          this.sendLogs();
           break;
       }
     });
@@ -223,50 +208,6 @@ export class ChatHistoryViewProvider implements vscode.WebviewViewProvider {
     await this.getStats();
   }
 
-  // Static logging methods for use across the extension
-  public static logError(message: string, details?: string) {
-    ChatHistoryViewProvider.logs.push({
-      timestamp: new Date().toISOString(),
-      level: 'error',
-      message,
-      details
-    });
-    // Keep only last 100 logs
-    if (ChatHistoryViewProvider.logs.length > 100) {
-      ChatHistoryViewProvider.logs.shift();
-    }
-  }
-
-  public static logWarning(message: string, details?: string) {
-    ChatHistoryViewProvider.logs.push({
-      timestamp: new Date().toISOString(),
-      level: 'warning',
-      message,
-      details
-    });
-    // Keep only last 100 logs
-    if (ChatHistoryViewProvider.logs.length > 100) {
-      ChatHistoryViewProvider.logs.shift();
-    }
-  }
-
-  public static getLogs(): LogEntry[] {
-    return [...ChatHistoryViewProvider.logs];
-  }
-
-  public static clearLogs() {
-    ChatHistoryViewProvider.logs = [];
-  }
-
-  private sendLogs() {
-    if (this._view) {
-      this._view.webview.postMessage({
-        type: 'logsLoaded',
-        logs: ChatHistoryViewProvider.getLogs()
-      });
-    }
-  }
-
   private refreshHistory() {
     this.loadSessions();
   }
@@ -294,7 +235,6 @@ export class ChatHistoryViewProvider implements vscode.WebviewViewProvider {
             <h2>Chat History</h2>
             <div class="actions">
               <button id="refreshBtn" title="Refresh">↻</button>
-              <button id="logsBtn" title="View Logs">Logs</button>
               <button id="exportAllBtn" title="Export All">Export</button>
               <button id="clearAllBtn" title="Delete All">Delete All</button>
             </div>

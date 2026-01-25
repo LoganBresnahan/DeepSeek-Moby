@@ -7,7 +7,6 @@
   const sessionsList = document.getElementById('sessionsList');
   const searchInput = document.getElementById('searchInput');
   const refreshBtn = document.getElementById('refreshBtn');
-  const logsBtn = document.getElementById('logsBtn');
   const exportAllBtn = document.getElementById('exportAllBtn');
   const clearAllBtn = document.getElementById('clearAllBtn');
   let searchDebounceTimer = null;
@@ -20,7 +19,6 @@
       searchDebounceTimer = setTimeout(searchSessions, 200);
     });
     refreshBtn.addEventListener('click', loadSessions);
-    logsBtn.addEventListener('click', showLogsDialog);
     exportAllBtn.addEventListener('click', showExportAllDialog);
     clearAllBtn.addEventListener('click', clearAllHistory);
 
@@ -292,73 +290,6 @@
     if (dialog) dialog.remove();
   }
 
-  // Logs dialog functions
-  function showLogsDialog() {
-    vscode.postMessage({ type: 'getLogs' });
-  }
-
-  function renderLogsDialog(logs) {
-    closeLogsDialog();
-
-    const logsHtml = logs.length > 0
-      ? logs.slice().reverse().map(log => `
-          <div class="log-entry log-${log.level}">
-            <div class="log-header">
-              <span class="log-level">${log.level.toUpperCase()}</span>
-              <span class="log-time">${formatLogTime(log.timestamp)}</span>
-            </div>
-            <div class="log-message">${escapeHtml(log.message)}</div>
-            ${log.details ? `<div class="log-details">${escapeHtml(log.details)}</div>` : ''}
-          </div>
-        `).join('')
-      : '<div class="logs-empty">No logs recorded</div>';
-
-    // Create overlay
-    const overlay = document.createElement('div');
-    overlay.className = 'logs-dialog-overlay';
-    overlay.addEventListener('click', closeLogsDialog);
-
-    // Create dialog
-    const dialog = document.createElement('div');
-    dialog.className = 'logs-dialog';
-    dialog.innerHTML = `
-      <div class="logs-dialog-title">
-        <span>Logs (${logs.length})</span>
-        <div class="logs-dialog-actions">
-          ${logs.length > 0 ? '<button class="logs-clear-btn">Clear</button>' : ''}
-          <button class="logs-dialog-close">×</button>
-        </div>
-      </div>
-      <div class="logs-dialog-content">
-        ${logsHtml}
-      </div>
-    `;
-
-    // Add event handlers
-    dialog.querySelector('.logs-dialog-close').addEventListener('click', closeLogsDialog);
-    const clearBtn = dialog.querySelector('.logs-clear-btn');
-    if (clearBtn) {
-      clearBtn.addEventListener('click', () => {
-        vscode.postMessage({ type: 'clearLogs' });
-      });
-    }
-
-    document.body.appendChild(overlay);
-    document.body.appendChild(dialog);
-  }
-
-  function closeLogsDialog() {
-    const overlay = document.querySelector('.logs-dialog-overlay');
-    const dialog = document.querySelector('.logs-dialog');
-    if (overlay) overlay.remove();
-    if (dialog) dialog.remove();
-  }
-
-  function formatLogTime(timestamp) {
-    const date = new Date(timestamp);
-    return date.toLocaleTimeString() + ' ' + date.toLocaleDateString();
-  }
-
   function clearAllHistory() {
     vscode.postMessage({ type: 'clearAllHistory' });
   }
@@ -410,10 +341,6 @@
 
       case 'statsLoaded':
         showStatsDialog(message.stats);
-        break;
-
-      case 'logsLoaded':
-        renderLogsDialog(message.logs);
         break;
     }
   });
