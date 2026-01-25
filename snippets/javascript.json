@@ -1,0 +1,16 @@
+{
+  "DeepSeek Function": {
+    "prefix": "dsfunc",
+    "body": [
+      "/**",
+      " * ${1:function description}",
+      " * @param {${2:type}} ${3:param} - ${4:parameter description}",
+      " * @returns {${5:return type}} ${6:return description}",
+      " */",
+      "function ${7:functionName}(${3:param}) {",
+      "  ${8:// implementation}",
+      "}"
+    ],
+    "description": "DeepSeek generated function with JSDoc"
+  }
+}

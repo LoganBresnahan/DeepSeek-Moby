@@ -1,0 +1,18 @@
+{
+  "DeepSeek Function": {
+    "prefix": "dsfunc",
+    "body": [
+      "def ${1:function_name}(${2:param}):",
+      "    \"\"\"${3:Function description}",
+      "",
+      "    Args:",
+      "        ${2:param}: ${4:Parameter description}",
+      "",
+      "    Returns:",
+      "        ${5:Return description}",
+      "    \"\"\"",
+      "    ${6:pass}"
+    ],
+    "description": "DeepSeek generated function with docstring"
+  }
+}

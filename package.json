@@ -1,0 +1,329 @@
+{
+  "name": "deepseek-coder",
+  "displayName": "DeepSeek Coder",
+  "description": "Official DeepSeek AI assistant for VS Code with perfect formatting and chat history",
+  "version": "1.0.0",
+  "publisher": "deepseek",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Snippets",
+    "Machine Learning",
+    "AI"
+  ],
+  "keywords": [
+    "deepseek",
+    "ai",
+    "chatgpt",
+    "code completion",
+    "programming",
+    "assistant",
+    "chat history"
+  ],
+  "icon": "media/icon.svg",
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:deepseek.startChat",
+    "onView:deepseek-chat-view",
+    "onView:deepseek-history-view",
+    "onLanguage:javascript",
+    "onLanguage:typescript",
+    "onLanguage:python",
+    "onLanguage:java",
+    "onLanguage:cpp",
+    "onLanguage:go",
+    "onLanguage:rust",
+    "onLanguage:php",
+    "onLanguage:ruby",
+    "onLanguage:csharp"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "DeepSeek Moby",
+      "properties": {
+        "deepseek.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Your DeepSeek API key (get from platform.deepseek.com)",
+          "scope": "application"
+        },
+        "deepseek.model": {
+          "type": "string",
+          "default": "deepseek-chat",
+          "enum": [
+            "deepseek-chat",
+            "deepseek-reasoner"
+          ],
+          "enumDescriptions": [
+            "Standard chat model (DeepSeek-V3) - Fast, general purpose",
+            "Reasoning model (DeepSeek-R1) - Shows chain-of-thought, better for complex problems"
+          ],
+          "description": "Which DeepSeek model to use"
+        },
+        "deepseek.enableCompletions": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable inline code completions"
+        },
+        "deepseek.temperature": {
+          "type": "number",
+          "default": 0.7,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Creativity level (0=deterministic, 2=creative)"
+        },
+        "deepseek.maxTokens": {
+          "type": "number",
+          "default": 4096,
+          "minimum": 100,
+          "maximum": 65536,
+          "description": "Maximum tokens per response (reasoner model supports up to 64K)"
+        },
+        "deepseek.autoFormat": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically format code responses"
+        },
+        "deepseek.useLanguageFormatter": {
+          "type": "boolean",
+          "default": true,
+          "description": "Use VS Code's language formatter after AI responses"
+        },
+        "deepseek.showStatusBar": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show status bar with token usage"
+        },
+        "deepseek.maxHistorySessions": {
+          "type": "number",
+          "default": 100,
+          "minimum": 10,
+          "maximum": 1000,
+          "description": "Maximum number of chat sessions to keep in history"
+        },
+        "deepseek.autoSaveHistory": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically save chat history"
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "deepseek.startChat",
+        "title": "DeepSeek: Open Chat",
+        "category": "DeepSeek"
+      },
+      {
+        "command": "deepseek.explainCode",
+        "title": "DeepSeek: Explain This Code",
+        "category": "DeepSeek"
+      },
+      {
+        "command": "deepseek.refactorCode",
+        "title": "DeepSeek: Refactor This Code",
+        "category": "DeepSeek"
+      },
+      {
+        "command": "deepseek.documentCode",
+        "title": "DeepSeek: Add Documentation",
+        "category": "DeepSeek"
+      },
+      {
+        "command": "deepseek.fixBugs",
+        "title": "DeepSeek: Find and Fix Bugs",
+        "category": "DeepSeek"
+      },
+      {
+        "command": "deepseek.optimizeCode",
+        "title": "DeepSeek: Optimize Performance",
+        "category": "DeepSeek"
+      },
+      {
+        "command": "deepseek.generateTests",
+        "title": "DeepSeek: Generate Tests",
+        "category": "DeepSeek"
+      },
+      {
+        "command": "deepseek.clearConversation",
+        "title": "Clear Chat",
+        "category": "DeepSeek"
+      },
+      {
+        "command": "deepseek.newChat",
+        "title": "New Chat",
+        "category": "DeepSeek"
+      },
+      {
+        "command": "deepseek.insertCode",
+        "title": "DeepSeek: Insert Generated Code",
+        "category": "DeepSeek"
+      },
+      {
+        "command": "deepseek.switchModel",
+        "title": "DeepSeek: Switch Model",
+        "category": "DeepSeek"
+      },
+      {
+        "command": "deepseek.showChatHistory",
+        "title": "DeepSeek: Show Chat History",
+        "category": "DeepSeek"
+      },
+      {
+        "command": "deepseek.exportChatHistory",
+        "title": "DeepSeek: Export All Chat History",
+        "category": "DeepSeek"
+      },
+      {
+        "command": "deepseek.importChatHistory",
+        "title": "DeepSeek: Import Chat History",
+        "category": "DeepSeek"
+      },
+      {
+        "command": "deepseek.clearChatHistory",
+        "title": "DeepSeek: Clear All Chat History",
+        "category": "DeepSeek"
+      },
+      {
+        "command": "deepseek.searchChatHistory",
+        "title": "DeepSeek: Search Chat History",
+        "category": "DeepSeek"
+      },
+      {
+        "command": "deepseek.exportCurrentSession",
+        "title": "DeepSeek: Export Current Session",
+        "category": "DeepSeek"
+      },
+      {
+        "command": "deepseek.showStats",
+        "title": "Statistics",
+        "category": "DeepSeek"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "deepseek.explainCode",
+          "when": "editorHasSelection",
+          "group": "DeepSeek"
+        },
+        {
+          "command": "deepseek.refactorCode",
+          "when": "editorHasSelection",
+          "group": "DeepSeek"
+        },
+        {
+          "command": "deepseek.documentCode",
+          "when": "editorHasSelection",
+          "group": "DeepSeek"
+        },
+        {
+          "command": "deepseek.fixBugs",
+          "when": "editorHasSelection",
+          "group": "DeepSeek"
+        },
+        {
+          "command": "deepseek.optimizeCode",
+          "when": "editorHasSelection",
+          "group": "DeepSeek"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "deepseek.startChat",
+          "when": "true"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "deepseek.newChat",
+          "when": "view == deepseek-chat-view",
+          "group": "navigation@1"
+        },
+        {
+          "command": "deepseek.showStats",
+          "when": "view == deepseek-history-view",
+          "group": "navigation@1"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "deepseek-sidebar",
+          "title": "DeepSeek Moby",
+          "icon": "media/moby.png"
+        }
+      ]
+    },
+    "views": {
+      "deepseek-sidebar": [
+        {
+          "type": "webview",
+          "id": "deepseek-history-view",
+          "name": "History",
+          "contextualTitle": "Chat History",
+          "visibility": "collapsed"
+        },
+        {
+          "type": "webview",
+          "id": "deepseek-chat-view",
+          "name": "Chat",
+          "contextualTitle": "DeepSeek Moby Chat"
+        }
+      ]
+    },
+    "snippets": [
+      {
+        "language": "javascript",
+        "path": "./snippets/javascript.json"
+      },
+      {
+        "language": "python",
+        "path": "./snippets/python.json"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "webpack",
+    "watch": "webpack --watch",
+    "package": "webpack --mode production --devtool hidden-source-map",
+    "compile-tests": "tsc -p . --outDir out",
+    "watch-tests": "tsc -p . -w --outDir out",
+    "pretest": "npm run compile-tests && npm run compile",
+    "test": "node ./out/test/runTest.js"
+  },
+  "devDependencies": {
+    "@types/diff-match-patch": "^1.0.36",
+    "@types/node": "^18.x",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.13.1",
+    "@typescript-eslint/parser": "^6.13.1",
+    "esbuild": "^0.19.8",
+    "eslint": "^8.54.0",
+    "glob": "^10.3.10",
+    "ts-loader": "^9.5.1",
+    "typescript": "^5.3.2",
+    "webpack": "^5.89.0",
+    "webpack-cli": "^5.1.4"
+  },
+  "dependencies": {
+    "axios": "^1.6.2",
+    "diff-match-patch": "^1.0.5",
+    "events": "^3.3.0",
+    "highlight.js": "^11.11.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/deepseek-ai/deepseek-vscode.git"
+  },
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/deepseek-ai/deepseek-vscode/issues"
+  },
+  "homepage": "https://github.com/deepseek-ai/deepseek-vscode#readme"
+}
