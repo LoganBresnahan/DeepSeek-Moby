@@ -63,4 +63,4 @@ Official DeepSeek AI assistant for Visual Studio Code with perfect code formatti
 
 ## License
 
-MIT License
+AGPL
