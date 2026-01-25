@@ -1,6 +1,9 @@
-# DeepSeek VS Code Extension
+<img src="media/moby.png" height="100px" alt="Local icon" />
 
-Official DeepSeek AI assistant for Visual Studio Code with perfect code formatting.
+# DeepSeek Moby VS Code Extension 
+
+
+Un-official DeepSeek AI assistant for Visual Studio Code.
 
 ## Features
 
