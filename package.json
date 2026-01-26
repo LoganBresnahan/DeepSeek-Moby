@@ -22,7 +22,7 @@
     "assistant",
     "chat history"
   ],
-  "icon": "media/icon.svg",
+  "icon": "media/moby.png",
   "activationEvents": [
     "onStartupFinished",
     "onCommand:deepseek.startChat",
