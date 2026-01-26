@@ -225,7 +225,7 @@
   }
 
   // Stats dialog functions
-  function showStatsDialog(stats, balance) {
+  function showStatsDialog(stats, balance, tavilyStats, tavilyApiUsage) {
     closeStatsDialog();
 
     const modelEntries = Object.entries(stats.byModel || {});
@@ -248,6 +248,56 @@
           <span class="stats-row-value">${currencySymbol}${balance.balance} ${balance.currency}</span>
         </div>
       `;
+    }
+
+    // Format Tavily stats
+    let tavilyHtml = '';
+    if (tavilyApiUsage || (tavilyStats && tavilyStats.totalSearches > 0)) {
+      tavilyHtml = `
+        <div class="stats-section-divider"></div>
+        <div class="stats-section-title">🌐 Web Search (Tavily)</div>
+      `;
+
+      // Show real API balance if available
+      if (tavilyApiUsage) {
+        const statusClass = (tavilyApiUsage.remaining !== null && tavilyApiUsage.remaining < 100)
+          ? 'balance-low'
+          : 'balance-ok';
+
+        tavilyHtml += `
+          <div class="stats-row">
+            <span class="stats-row-label">Plan</span>
+            <span class="stats-row-value">${tavilyApiUsage.plan}</span>
+          </div>
+          <div class="stats-row">
+            <span class="stats-row-label">Credits Used</span>
+            <span class="stats-row-value">${tavilyApiUsage.used.toLocaleString()}</span>
+          </div>
+        `;
+
+        if (tavilyApiUsage.remaining !== null) {
+          tavilyHtml += `
+            <div class="stats-row stats-row-balance ${statusClass}">
+              <span class="stats-row-label">Credits Remaining</span>
+              <span class="stats-row-value">${tavilyApiUsage.remaining.toLocaleString()} / ${tavilyApiUsage.limit.toLocaleString()}</span>
+            </div>
+          `;
+        }
+      }
+
+      // Show local session stats
+      if (tavilyStats && tavilyStats.totalSearches > 0) {
+        tavilyHtml += `
+          <div class="stats-row">
+            <span class="stats-row-label">Session Searches</span>
+            <span class="stats-row-value">${tavilyStats.totalSearches}</span>
+          </div>
+          <div class="stats-row">
+            <span class="stats-row-label">Session Credits</span>
+            <span class="stats-row-value">${tavilyStats.totalCreditsUsed}</span>
+          </div>
+        `;
+      }
     }
 
     // Create overlay
@@ -285,6 +335,7 @@
           <span class="stats-row-label">By Model:</span>
           <div class="stats-model-list">${modelStatsHtml}</div>
         </div>
+        ${tavilyHtml}
       </div>
     `;
 
@@ -300,6 +351,34 @@
     const dialog = document.querySelector('.stats-dialog');
     if (overlay) overlay.remove();
     if (dialog) dialog.remove();
+  }
+
+  function showStatsLoading() {
+    closeStatsDialog();
+
+    // Create overlay
+    const overlay = document.createElement('div');
+    overlay.className = 'stats-dialog-overlay';
+    overlay.addEventListener('click', closeStatsDialog);
+
+    // Create loading dialog
+    const dialog = document.createElement('div');
+    dialog.className = 'stats-dialog';
+    dialog.innerHTML = `
+      <div class="stats-dialog-title">
+        <span>Chat Statistics</span>
+        <button class="stats-dialog-close">×</button>
+      </div>
+      <div class="stats-dialog-content stats-loading">
+        <div class="stats-spinner"></div>
+        <div class="stats-loading-text">Loading statistics...</div>
+      </div>
+    `;
+
+    dialog.querySelector('.stats-dialog-close').addEventListener('click', closeStatsDialog);
+
+    document.body.appendChild(overlay);
+    document.body.appendChild(dialog);
   }
 
   function clearAllHistory() {
@@ -351,8 +430,12 @@
         renderSessions(currentSessions);
         break;
 
+      case 'statsLoading':
+        showStatsLoading();
+        break;
+
       case 'statsLoaded':
-        showStatsDialog(message.stats, message.balance);
+        showStatsDialog(message.stats, message.balance, message.tavilyStats, message.tavilyApiUsage);
         break;
     }
   });

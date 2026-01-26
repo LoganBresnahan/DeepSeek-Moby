@@ -121,6 +121,25 @@ export const workspaceTools: Tool[] = [
   }
 ];
 
+// Web search tool - conditionally included when web search is enabled
+export const webSearchTool: Tool = {
+  type: 'function',
+  function: {
+    name: 'web_search',
+    description: 'Search the web for current information using Tavily. Use this when you need up-to-date information, recent documentation, news, or anything not in your training data.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'The search query to look up on the web'
+        }
+      },
+      required: ['query']
+    }
+  }
+};
+
 /**
  * Execute a tool call and return the result
  */

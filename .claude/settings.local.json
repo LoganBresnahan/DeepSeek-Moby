@@ -4,7 +4,8 @@
       "Bash(npx tsc:*)",
       "Bash(npm run compile:*)",
       "Bash(npm install:*)",
-      "WebFetch(domain:api-docs.deepseek.com)"
+      "WebFetch(domain:api-docs.deepseek.com)",
+      "WebFetch(domain:docs.tavily.com)"
     ]
   }
 }

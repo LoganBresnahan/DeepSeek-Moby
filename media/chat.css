@@ -653,8 +653,167 @@ code[class*="language-"] {
 }
 
 .grid-btn.search-btn {
-  opacity: 0.4;
-  cursor: not-allowed;
+  opacity: 0.7;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.grid-btn.search-btn:hover {
+  opacity: 1;
+}
+
+.grid-btn.search-btn.active {
+  opacity: 1;
+  background: var(--vscode-terminal-ansiGreen, #4ec9b0);
+  color: var(--vscode-editor-background);
+  border-color: var(--vscode-terminal-ansiGreen, #4ec9b0);
+}
+
+.grid-btn.search-btn.active:hover {
+  background: var(--vscode-terminal-ansiBrightGreen, #5fd7af);
+}
+
+/* Web Search Modal */
+.web-search-modal {
+  position: fixed;
+  background: var(--vscode-dropdown-background);
+  border: 1px solid var(--vscode-dropdown-border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  z-index: 1000;
+  min-width: 260px;
+  max-width: 300px;
+}
+
+.web-search-modal-title {
+  padding: 10px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--vscode-panel-border);
+  color: var(--vscode-foreground);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.web-search-modal-close {
+  background: transparent;
+  border: none;
+  color: var(--vscode-foreground);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 4px;
+  opacity: 0.7;
+}
+
+.web-search-modal-close:hover {
+  opacity: 1;
+}
+
+.web-search-modal-content {
+  padding: 12px;
+}
+
+.web-search-option {
+  margin-bottom: 12px;
+}
+
+.web-search-option label {
+  display: block;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+  margin-bottom: 6px;
+}
+
+.web-search-option input[type="range"] {
+  width: 100%;
+  height: 4px;
+  -webkit-appearance: none;
+  background: var(--vscode-scrollbarSlider-background);
+  border-radius: 2px;
+}
+
+.web-search-option input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 12px;
+  height: 12px;
+  background: var(--vscode-terminal-ansiGreen, #4ec9b0);
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.search-depth-options {
+  display: flex;
+  gap: 8px;
+}
+
+.depth-btn {
+  flex: 1;
+  padding: 8px;
+  background: transparent;
+  border: 1px solid var(--vscode-input-border);
+  border-radius: 4px;
+  cursor: pointer;
+  text-align: center;
+  color: var(--vscode-foreground);
+  transition: all 0.15s;
+}
+
+.depth-btn:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.depth-btn.active {
+  background: var(--vscode-terminal-ansiGreen, #4ec9b0);
+  color: var(--vscode-editor-background);
+  border-color: var(--vscode-terminal-ansiGreen, #4ec9b0);
+}
+
+.depth-name {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.depth-credits {
+  display: block;
+  font-size: 10px;
+  opacity: 0.8;
+}
+
+.web-search-enable-btn {
+  width: 100%;
+  padding: 10px;
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  transition: background 0.15s;
+}
+
+.web-search-enable-btn:hover {
+  background: var(--vscode-button-hoverBackground);
+}
+
+.web-search-clear-cache-btn {
+  width: 100%;
+  padding: 8px;
+  background: transparent;
+  color: var(--vscode-descriptionForeground);
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 11px;
+  margin-top: 8px;
+  transition: background 0.15s, color 0.15s;
+}
+
+.web-search-clear-cache-btn:hover {
+  background: var(--vscode-list-hoverBackground);
+  color: var(--vscode-foreground);
 }
 
 /* Commands Modal */

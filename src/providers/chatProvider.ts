@@ -9,6 +9,7 @@ import { DiffEngine } from '../utils/diff';
 import { logger } from '../utils/logger';
 import { workspaceTools, executeToolCall } from '../tools/workspaceTools';
 import { parseDSMLToolCalls, stripDSML } from '../utils/dsmlParser';
+import { TavilyClient, TavilySearchResponse } from '../clients/tavilyClient';
 
 export class ChatProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'deepseek-chat-view';
@@ -22,17 +23,26 @@ export class ChatProvider implements vscode.WebviewViewProvider {
   private diffEngine: DiffEngine;
   private activeDiffUri: vscode.Uri | null = null;
   private disposables: vscode.Disposable[] = [];
+  private tavilyClient: TavilyClient;
+  private webSearchEnabled: boolean = false;
+  private webSearchSettings: { searchesPerPrompt: number; searchDepth: 'basic' | 'advanced' } = {
+    searchesPerPrompt: 1,
+    searchDepth: 'basic'
+  };
+  private searchCache: Map<string, { results: string; timestamp: number }> = new Map();
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
     deepSeekClient: DeepSeekClient,
     statusBar: StatusBar,
-    chatHistoryManager: ChatHistoryManager
+    chatHistoryManager: ChatHistoryManager,
+    tavilyClient: TavilyClient
   ) {
     this.deepSeekClient = deepSeekClient;
     this.statusBar = statusBar;
     this.chatHistoryManager = chatHistoryManager;
     this.diffEngine = new DiffEngine();
+    this.tavilyClient = tavilyClient;
 
     // Load current session
     this.loadCurrentSession();
@@ -117,6 +127,18 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         case 'executeCommand':
           vscode.commands.executeCommand(data.command);
           break;
+        case 'toggleWebSearch':
+          this.toggleWebSearch(data.enabled);
+          break;
+        case 'updateWebSearchSettings':
+          this.updateWebSearchSettings(data.settings);
+          break;
+        case 'getWebSearchSettings':
+          this.sendWebSearchSettings();
+          break;
+        case 'clearSearchCache':
+          this.clearSearchCache();
+          break;
       }
     });
 
@@ -135,6 +157,9 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     if (this._view) {
       this._view.webview.postMessage({ type: 'clearChat' });
     }
+
+    // Clear search cache on new session
+    this.searchCache.clear();
 
     // Create a new session for fresh conversation
     const editor = vscode.window.activeTextEditor;
@@ -192,6 +217,67 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         maxToolCalls
       });
     }
+  }
+
+  private toggleWebSearch(enabled: boolean) {
+    this.webSearchEnabled = enabled;
+    if (enabled && !this.tavilyClient.isConfigured()) {
+      this._view?.webview.postMessage({
+        type: 'warning',
+        message: 'Tavily API key not configured. Please set it in VS Code settings (deepseek.tavilyApiKey).'
+      });
+      this.webSearchEnabled = false;
+      this._view?.webview.postMessage({ type: 'webSearchToggled', enabled: false });
+      return;
+    }
+    this._view?.webview.postMessage({ type: 'webSearchToggled', enabled });
+  }
+
+  private updateWebSearchSettings(settings: { searchesPerPrompt?: number; searchDepth?: 'basic' | 'advanced' }) {
+    if (settings.searchesPerPrompt !== undefined) {
+      this.webSearchSettings.searchesPerPrompt = settings.searchesPerPrompt;
+    }
+    if (settings.searchDepth !== undefined) {
+      this.webSearchSettings.searchDepth = settings.searchDepth;
+    }
+  }
+
+  private sendWebSearchSettings() {
+    this._view?.webview.postMessage({
+      type: 'webSearchSettings',
+      enabled: this.webSearchEnabled,
+      settings: this.webSearchSettings,
+      configured: this.tavilyClient.isConfigured()
+    });
+  }
+
+  private clearSearchCache() {
+    this.searchCache.clear();
+    logger.webSearchCacheCleared();
+    this._view?.webview.postMessage({
+      type: 'searchCacheCleared'
+    });
+  }
+
+  private formatSearchResults(response: TavilySearchResponse): string {
+    let output = `Web search results for: "${response.query}"\n`;
+    output += '─'.repeat(50) + '\n\n';
+
+    if (response.answer) {
+      output += `Summary: ${response.answer}\n\n`;
+    }
+
+    for (const result of response.results.slice(0, 5)) {
+      output += `**${result.title}**\n`;
+      output += `URL: ${result.url}\n`;
+      output += `${result.content.substring(0, 500)}${result.content.length > 500 ? '...' : ''}\n\n`;
+    }
+
+    return output;
+  }
+
+  public getTavilyClient(): TavilyClient {
+    return this.tavilyClient;
   }
 
   private async handleUserMessage(message: string, attachments?: Array<{base64: string, mimeType: string, name: string}>) {
@@ -270,6 +356,67 @@ The context lines (existing_method, another_existing_method) help locate where t
 `;
     if (editorContext) {
       systemPrompt += `\n${editorContext}`;
+    }
+
+    // Auto web search if enabled (search BEFORE DeepSeek, not via tool calls)
+    let webSearchContext = '';
+    if (this.webSearchEnabled && this.tavilyClient.isConfigured()) {
+      const cacheKey = message.toLowerCase().trim();
+      const cached = this.searchCache.get(cacheKey);
+
+      if (cached) {
+        // Use cached results
+        webSearchContext = cached.results;
+        logger.webSearchCached(message);
+        this._view?.webview.postMessage({ type: 'webSearchCached' });
+      } else {
+        try {
+          // Show searching indicator
+          this._view?.webview.postMessage({ type: 'webSearching' });
+          logger.webSearchRequest(message, this.webSearchSettings.searchDepth);
+
+          const searchStartTime = Date.now();
+          const searchResults = await this.tavilyClient.search(message, {
+            searchDepth: this.webSearchSettings.searchDepth
+          });
+          webSearchContext = this.formatSearchResults(searchResults);
+          logger.webSearchResult(searchResults.results.length, Date.now() - searchStartTime);
+
+          // Cache the results
+          this.searchCache.set(cacheKey, {
+            results: webSearchContext,
+            timestamp: Date.now()
+          });
+
+          this._view?.webview.postMessage({ type: 'webSearchComplete' });
+        } catch (error: any) {
+          logger.webSearchError(error.message);
+          this._view?.webview.postMessage({
+            type: 'warning',
+            message: `Web search failed: ${error.message}`
+          });
+        }
+      }
+    }
+
+    // Add search results to system prompt with context for LLM
+    if (webSearchContext) {
+      const today = new Date().toLocaleDateString('en-US', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric'
+      });
+      systemPrompt += `
+
+--- CURRENT WEB SEARCH RESULTS (${today}) ---
+The following are real-time web search results. Use this information to answer questions
+about current events, dates, times, news, or anything requiring up-to-date information.
+Do NOT say you lack access to current information - these results ARE current.
+
+${webSearchContext}
+--- END WEB SEARCH RESULTS ---
+`;
     }
 
     // Start streaming response
@@ -434,11 +581,14 @@ Now provide your final response based on what you learned. Do NOT attempt to use
         break;
       }
 
+      // Build tools array (web search is now handled before this loop, not as a tool)
+      const tools = workspaceTools;
+
       // Make a non-streaming call with tools
       const response = await this.deepSeekClient.chat(
         [...messages, ...toolMessages],
         systemPrompt,
-        { tools: workspaceTools }
+        { tools }
       );
 
       // Check for DSML-formatted tool calls in content (DeepSeek Chat uses this format
@@ -528,6 +678,7 @@ Now provide your final response based on what you learned. Do NOT attempt to use
           detail: detail.detail
         });
 
+        // Execute tool
         const result = await executeToolCall(toolCall);
         const success = !result.startsWith('Error:');
         logger.toolResult(toolCall.function.name, success);

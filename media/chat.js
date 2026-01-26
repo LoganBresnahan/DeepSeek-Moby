@@ -9,6 +9,8 @@
   let currentDiffedBlockId = null; // Track which block has active diff
   let currentToolCalls = []; // Track current tool calls for collapsible display
   let toolCallsContainerId = 0; // Counter for unique tool call container IDs
+  let webSearchEnabled = false;
+  let webSearchSettings = { searchesPerPrompt: 1, searchDepth: 'basic' };
 
   // DOM Elements
   const chatMessages = document.getElementById('chatMessages');
@@ -65,6 +67,21 @@
 
     // Stop button handler
     stopBtn.addEventListener('click', stopGeneration);
+
+    // Search button handler
+    const searchBtn = document.getElementById('searchBtn');
+    searchBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (webSearchEnabled) {
+        // Toggle off
+        webSearchEnabled = false;
+        searchBtn.classList.remove('active');
+        vscode.postMessage({ type: 'toggleWebSearch', enabled: false });
+      } else {
+        // Show settings modal
+        showWebSearchModal(searchBtn);
+      }
+    });
 
     // Model dropdown handlers
     modelBtn.addEventListener('click', toggleModelDropdown);
@@ -715,14 +732,6 @@
     { id: 'startChat', name: 'Open Chat', desc: 'Open the chat panel', icon: '💬' },
     { id: 'newChat', name: 'New Chat', desc: 'Start a new conversation', icon: '✨' },
     { id: 'switchModel', name: 'Switch Model', desc: 'Change AI model', icon: '🔄' },
-    { section: 'Code Actions' },
-    { id: 'explainCode', name: 'Explain Code', desc: 'Explain selected code', icon: '📖' },
-    { id: 'refactorCode', name: 'Refactor Code', desc: 'Improve code structure', icon: '🔧' },
-    { id: 'documentCode', name: 'Add Documentation', desc: 'Generate comments/docs', icon: '📝' },
-    { id: 'fixBugs', name: 'Find & Fix Bugs', desc: 'Detect and fix issues', icon: '🐛' },
-    { id: 'optimizeCode', name: 'Optimize', desc: 'Improve performance', icon: '⚡' },
-    { id: 'generateTests', name: 'Generate Tests', desc: 'Create unit tests', icon: '🧪' },
-    { id: 'insertCode', name: 'Insert Code', desc: 'Insert generated code', icon: '📥' },
     { section: 'History' },
     { id: 'showChatHistory', name: 'Show History', desc: 'View chat history', icon: '📚' },
     { id: 'exportChatHistory', name: 'Export History', desc: 'Export all chats', icon: '📤' },
@@ -734,6 +743,7 @@
 
   function showCommandsModal(btn) {
     closeCommandsModal();
+    closeWebSearchModal(); // Close other modal if open
 
     const modal = document.createElement('div');
     modal.className = 'commands-modal';
@@ -797,6 +807,95 @@
       modal.remove();
     }
     document.removeEventListener('click', handleCommandsModalOutsideClick);
+  }
+
+  // Web Search Modal
+  function showWebSearchModal(btn) {
+    closeWebSearchModal();
+    closeCommandsModal(); // Close other modal if open
+
+    const modal = document.createElement('div');
+    modal.className = 'web-search-modal';
+    modal.innerHTML = `
+      <div class="web-search-modal-title">
+        <span>Web Search Settings</span>
+        <button class="web-search-modal-close">&times;</button>
+      </div>
+      <div class="web-search-modal-content">
+        <div class="web-search-option">
+          <label>Searches per prompt: <span id="searchCountValue">${webSearchSettings.searchesPerPrompt}</span></label>
+          <input type="range" id="searchCountSlider" min="1" max="5" step="1" value="${webSearchSettings.searchesPerPrompt}">
+        </div>
+        <div class="web-search-option">
+          <label>Search depth:</label>
+          <div class="search-depth-options">
+            <button class="depth-btn ${webSearchSettings.searchDepth === 'basic' ? 'active' : ''}" data-depth="basic">
+              <span class="depth-name">Basic</span>
+              <span class="depth-credits">1 credit</span>
+            </button>
+            <button class="depth-btn ${webSearchSettings.searchDepth === 'advanced' ? 'active' : ''}" data-depth="advanced">
+              <span class="depth-name">Advanced</span>
+              <span class="depth-credits">2 credits</span>
+            </button>
+          </div>
+        </div>
+        <button class="web-search-enable-btn">Enable Web Search</button>
+        <button class="web-search-clear-cache-btn">Clear Cache</button>
+      </div>
+    `;
+
+    // Position above button
+    const rect = btn.getBoundingClientRect();
+    modal.style.bottom = (window.innerHeight - rect.top + 5) + 'px';
+    modal.style.left = rect.left + 'px';
+
+    // Event handlers
+    modal.querySelector('.web-search-modal-close').addEventListener('click', closeWebSearchModal);
+
+    modal.querySelector('#searchCountSlider').addEventListener('input', (e) => {
+      const value = e.target.value;
+      modal.querySelector('#searchCountValue').textContent = value;
+      webSearchSettings.searchesPerPrompt = parseInt(value, 10);
+    });
+
+    modal.querySelectorAll('.depth-btn').forEach(depthBtn => {
+      depthBtn.addEventListener('click', () => {
+        modal.querySelectorAll('.depth-btn').forEach(b => b.classList.remove('active'));
+        depthBtn.classList.add('active');
+        webSearchSettings.searchDepth = depthBtn.dataset.depth;
+      });
+    });
+
+    modal.querySelector('.web-search-enable-btn').addEventListener('click', () => {
+      webSearchEnabled = true;
+      btn.classList.add('active');
+      vscode.postMessage({ type: 'toggleWebSearch', enabled: true });
+      vscode.postMessage({ type: 'updateWebSearchSettings', settings: webSearchSettings });
+      closeWebSearchModal();
+    });
+
+    modal.querySelector('.web-search-clear-cache-btn').addEventListener('click', () => {
+      vscode.postMessage({ type: 'clearSearchCache' });
+      closeWebSearchModal();
+    });
+
+    document.body.appendChild(modal);
+
+    setTimeout(() => {
+      document.addEventListener('click', handleWebSearchModalOutsideClick);
+    }, 0);
+  }
+
+  function closeWebSearchModal() {
+    const modal = document.querySelector('.web-search-modal');
+    if (modal) modal.remove();
+    document.removeEventListener('click', handleWebSearchModalOutsideClick);
+  }
+
+  function handleWebSearchModalOutsideClick(e) {
+    if (!e.target.closest('.web-search-modal') && !e.target.closest('.search-btn')) {
+      closeWebSearchModal();
+    }
   }
 
   function saveState() {
@@ -1106,6 +1205,39 @@
           toolLimitSlider.value = message.maxToolCalls;
           toolLimitValue.textContent = message.maxToolCalls >= 100 ? '∞' : message.maxToolCalls;
         }
+        break;
+
+      case 'webSearchToggled':
+        webSearchEnabled = message.enabled;
+        const searchBtnEl = document.getElementById('searchBtn');
+        if (searchBtnEl) {
+          searchBtnEl.classList.toggle('active', message.enabled);
+        }
+        break;
+
+      case 'webSearchSettings':
+        webSearchEnabled = message.enabled;
+        webSearchSettings = message.settings || webSearchSettings;
+        const searchBtnSettings = document.getElementById('searchBtn');
+        if (searchBtnSettings) {
+          searchBtnSettings.classList.toggle('active', message.enabled);
+        }
+        break;
+
+      case 'searchCacheCleared':
+        showToast('Search cache cleared', 'info', null, true);
+        break;
+
+      case 'webSearching':
+        showToast('Searching the web...', 'info', null, false);
+        break;
+
+      case 'webSearchComplete':
+        clearToast();
+        break;
+
+      case 'webSearchCached':
+        showToast('Using cached search results', 'info', null, true);
         break;
 
       case 'generationStopped':
