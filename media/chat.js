@@ -7,6 +7,8 @@
   let codeBlockCounter = 0;
   let pendingAttachments = []; // Store {base64, mimeType, name}
   let currentDiffedBlockId = null; // Track which block has active diff
+  let currentToolCalls = []; // Track current tool calls for collapsible display
+  let toolCallsContainerId = 0; // Counter for unique tool call container IDs
 
   // DOM Elements
   const chatMessages = document.getElementById('chatMessages');
@@ -201,15 +203,15 @@
   }
 
   function showStopButton() {
+    // Hide send button and show stop button in its place
+    sendBtn.style.display = 'none';
     stopBtn.style.display = 'flex';
-    const buttonsLeft = document.querySelector('.input-buttons-left');
-    if (buttonsLeft) buttonsLeft.style.display = 'none';
   }
 
   function hideStopButton() {
+    // Hide stop button and show send button
     stopBtn.style.display = 'none';
-    const buttonsLeft = document.querySelector('.input-buttons-left');
-    if (buttonsLeft) buttonsLeft.style.display = 'flex';
+    sendBtn.style.display = 'flex';
     updateSendButtonState();
   }
 
@@ -418,6 +420,14 @@
     if (!skipSave) {
       saveState();
     }
+  }
+
+  function escapeHtml(text) {
+    if (!text) return '';
+    return text.replace(/&/g, '&amp;')
+               .replace(/</g, '&lt;')
+               .replace(/>/g, '&gt;')
+               .replace(/"/g, '&quot;');
   }
 
   function formatText(text) {
@@ -832,6 +842,78 @@
           streamingContent.innerHTML = formatCodeBlocks(currentResponse);
         }
         scrollToBottomIfNeeded();
+        break;
+
+      case 'toolCallsStart':
+        // Create collapsible tool calls container
+        currentToolCalls = message.tools;
+        toolCallsContainerId++;
+        const containerId = `tool-calls-${toolCallsContainerId}`;
+
+        const toolCallsHtml = `
+          <div class="tool-calls-container" id="${containerId}">
+            <div class="tool-calls-header" onclick="this.parentElement.classList.toggle('expanded')">
+              <span class="tool-calls-icon">▶</span>
+              <span class="tool-calls-title">Using ${message.tools.length} tool${message.tools.length > 1 ? 's' : ''}...</span>
+              <span class="tool-calls-summary"></span>
+            </div>
+            <div class="tool-calls-body">
+              ${message.tools.map((tool, i) => `
+                <div class="tool-call-item" id="${containerId}-item-${i}" data-status="pending">
+                  <span class="tool-call-status">⏳</span>
+                  <span class="tool-call-detail">${escapeHtml(tool.detail)}</span>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+        `;
+
+        // Append to streaming content
+        const streamContent = document.getElementById('streamingContent');
+        if (streamContent) {
+          streamContent.innerHTML += toolCallsHtml;
+        }
+        scrollToBottomIfNeeded();
+        break;
+
+      case 'toolCallUpdate':
+        // Update individual tool call status
+        const itemId = `tool-calls-${toolCallsContainerId}-item-${message.index}`;
+        const toolItem = document.getElementById(itemId);
+        if (toolItem) {
+          toolItem.dataset.status = message.status;
+          const statusEl = toolItem.querySelector('.tool-call-status');
+          if (statusEl) {
+            if (message.status === 'running') {
+              statusEl.textContent = '⏳';
+              statusEl.classList.add('spinning');
+            } else if (message.status === 'done') {
+              statusEl.textContent = '✓';
+              statusEl.classList.remove('spinning');
+            } else if (message.status === 'error') {
+              statusEl.textContent = '✗';
+              statusEl.classList.remove('spinning');
+            }
+          }
+        }
+        break;
+
+      case 'toolCallsEnd':
+        // Mark tool calls as complete, update title
+        const container = document.getElementById(`tool-calls-${toolCallsContainerId}`);
+        if (container) {
+          container.classList.add('complete');
+          const title = container.querySelector('.tool-calls-title');
+          if (title) {
+            const doneCount = container.querySelectorAll('[data-status="done"]').length;
+            const errorCount = container.querySelectorAll('[data-status="error"]').length;
+            title.textContent = `Used ${doneCount} tool${doneCount !== 1 ? 's' : ''}`;
+            if (errorCount > 0) {
+              title.textContent += ` (${errorCount} failed)`;
+            }
+          }
+        }
+        currentToolCalls = [];
         break;
 
       case 'endResponse':

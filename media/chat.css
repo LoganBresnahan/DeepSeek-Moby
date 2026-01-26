@@ -246,24 +246,15 @@ body {
   cursor: pointer;
 }
 
-/* Stop Button */
-.stop-btn {
-  flex-shrink: 0;
-  width: 32px;
-  height: 32px;
-  padding: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+/* Stop Button - replaces send button in grid during streaming */
+.grid-btn.stop-btn {
   background: var(--vscode-inputValidation-errorBackground, #5a1d1d);
   color: var(--vscode-errorForeground, #f48771);
   border: 1px solid var(--vscode-inputValidation-errorBorder, #be1100);
-  border-radius: 4px;
-  cursor: pointer;
-  transition: all 0.15s;
+  opacity: 1;
 }
 
-.stop-btn:hover {
+.grid-btn.stop-btn:hover {
   background: var(--vscode-inputValidation-errorBorder, #be1100);
 }
 
@@ -403,6 +394,96 @@ body {
 .code-block.tool-output .code-lang {
   color: var(--vscode-descriptionForeground);
   font-style: italic;
+}
+
+/* Collapsible Tool Calls Container */
+.tool-calls-container {
+  margin: 8px 0;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 6px;
+  background: var(--vscode-editor-background);
+  overflow: hidden;
+}
+
+.tool-calls-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--vscode-sideBar-background);
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.tool-calls-header:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.tool-calls-icon {
+  font-size: 10px;
+  transition: transform 0.2s;
+}
+
+.tool-calls-container.expanded .tool-calls-icon {
+  transform: rotate(90deg);
+}
+
+.tool-calls-title {
+  flex: 1;
+}
+
+.tool-calls-body {
+  display: none;
+  padding: 8px 12px;
+  border-top: 1px solid var(--vscode-panel-border);
+}
+
+.tool-calls-container.expanded .tool-calls-body {
+  display: block;
+}
+
+.tool-call-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 11px;
+  font-family: var(--vscode-editor-font-family);
+  color: var(--vscode-foreground);
+}
+
+.tool-call-status {
+  width: 16px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.tool-call-status.spinning {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.tool-call-item[data-status="done"] .tool-call-status {
+  color: var(--vscode-terminal-ansiGreen);
+}
+
+.tool-call-item[data-status="error"] .tool-call-status {
+  color: var(--vscode-errorForeground);
+}
+
+.tool-call-detail {
+  color: var(--vscode-textLink-foreground);
+  word-break: break-all;
+}
+
+.tool-calls-container.complete .tool-calls-header {
+  opacity: 0.7;
 }
 
 .message pre {

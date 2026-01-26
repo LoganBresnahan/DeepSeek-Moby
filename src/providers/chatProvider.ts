@@ -217,7 +217,11 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     const isReasonerModel = this.deepSeekClient.isReasonerModel();
 
     let systemPrompt = `You are DeepSeek Coder, an expert programming assistant integrated into VS Code.
+`;
 
+    // Only add tool instructions for non-reasoner models (reasoner can't use tools)
+    if (!isReasonerModel) {
+      systemPrompt += `
 You have access to tools that let you explore the codebase:
 - read_file: Read contents of any file in the workspace
 - search_files: Find files by name pattern (glob)
@@ -229,7 +233,10 @@ USE THESE TOOLS to understand the codebase before making suggestions. When the u
 1. First explore relevant files using the tools
 2. Read the actual source code to understand the context
 3. Then provide accurate, informed responses
+`;
+    }
 
+    systemPrompt += `
 IMPORTANT - When writing code changes:
 1. Include 2-3 UNCHANGED context lines BEFORE and AFTER your changes (this helps locate where to insert)
 2. Keep the same indentation style as the existing code
@@ -413,22 +420,59 @@ The context lines (existing_method, another_existing_method) help locate where t
         break;
       }
 
-      // Show user what tools are being used
-      const toolNames = response.tool_calls.map(tc => tc.function.name).join(', ');
-      this._view?.webview.postMessage({
-        type: 'streamToken',
-        token: `\n🔧 *Using tools: ${toolNames}*\n`
+      // Parse tool call details for better display
+      const toolDetails = response.tool_calls.map(tc => {
+        const name = tc.function.name;
+        let args: Record<string, string> = {};
+        try {
+          args = JSON.parse(tc.function.arguments);
+        } catch (e) { /* ignore */ }
+
+        // Create a user-friendly description
+        let detail = name;
+        if (name === 'read_file' && args.path) {
+          detail = `read: ${args.path}`;
+        } else if (name === 'search_files' && args.pattern) {
+          detail = `search: ${args.pattern}`;
+        } else if (name === 'grep_content' && args.query) {
+          detail = `grep: "${args.query}"`;
+        } else if (name === 'list_directory') {
+          detail = `list: ${args.path || '.'}`;
+        } else if (name === 'get_file_info' && args.path) {
+          detail = `info: ${args.path}`;
+        }
+        return { name, detail, args };
       });
 
-      // Add assistant message with tool calls (for context)
+      // Send tool calls start - frontend will render as collapsible
+      this._view?.webview.postMessage({
+        type: 'toolCallsStart',
+        tools: toolDetails.map(t => ({ name: t.name, detail: t.detail, status: 'pending' }))
+      });
+
+      // Add assistant message with tool calls (required for API contract)
+      const toolNames = response.tool_calls.map(tc => tc.function.name).join(', ');
       toolMessages.push({
         role: 'assistant',
-        content: response.content || `Calling tools: ${toolNames}`
+        content: response.content || `Calling tools: ${toolNames}`,
+        tool_calls: response.tool_calls
       });
 
       // Execute each tool call
-      for (const toolCall of response.tool_calls) {
+      for (let i = 0; i < response.tool_calls.length; i++) {
+        const toolCall = response.tool_calls[i];
+        const detail = toolDetails[i];
+
         logger.toolCall(toolCall.function.name);
+
+        // Update status to running
+        this._view?.webview.postMessage({
+          type: 'toolCallUpdate',
+          index: i,
+          status: 'running',
+          detail: detail.detail
+        });
+
         const result = await executeToolCall(toolCall);
         const success = !result.startsWith('Error:');
         logger.toolResult(toolCall.function.name, success);
@@ -440,12 +484,19 @@ The context lines (existing_method, another_existing_method) help locate where t
           tool_call_id: toolCall.id
         });
 
-        // Show tool call status to user (plain text, no code block)
+        // Update status to done
         this._view?.webview.postMessage({
-          type: 'streamToken',
-          token: `\n🔧 *Running ${toolCall.function.name}...*\n`
+          type: 'toolCallUpdate',
+          index: i,
+          status: success ? 'done' : 'error',
+          detail: detail.detail
         });
       }
+
+      // Mark tool calls section as complete
+      this._view?.webview.postMessage({
+        type: 'toolCallsEnd'
+      });
     }
 
     if (iterations >= maxIterations) {
@@ -1045,17 +1096,17 @@ The context lines (existing_method, another_existing_method) help locate where t
                     <path d="M1.724 1.053a.5.5 0 0 1 .545-.108l13 5.5a.5.5 0 0 1 0 .91l-13 5.5a.5.5 0 0 1-.69-.575l1.557-5.28-1.557-5.28a.5.5 0 0 1 .145-.467zM3.882 7.5l-1.06 3.593L12.14 8 2.822 4.907 3.882 8.5H8a.5.5 0 0 1 0 1H3.882z"/>
                   </svg>
                 </button>
+                <button id="stopBtn" class="grid-btn stop-btn" title="Stop generation" style="display: none;">
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                    <rect x="3" y="3" width="10" height="10" rx="1"/>
+                  </svg>
+                </button>
               </div>
               <textarea
                 id="messageInput"
                 placeholder="Seek deep..."
                 rows="1"
               ></textarea>
-              <button id="stopBtn" class="stop-btn" title="Stop generation" style="display: none;">
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-                  <rect x="3" y="3" width="10" height="10" rx="1"/>
-                </svg>
-              </button>
             </div>
             <input type="file" id="fileInput" accept="image/*" style="display: none" multiple>
             <div id="attachments" class="attachments"></div>

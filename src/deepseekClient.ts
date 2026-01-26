@@ -18,6 +18,7 @@ export interface Message {
   tokens?: number;
   reasoning_content?: string;
   tool_call_id?: string;
+  tool_calls?: ToolCall[];
 }
 
 export interface ToolFunction {
@@ -135,7 +136,8 @@ export class DeepSeekClient {
       const requestMessages = [...messages].map(m => ({
         role: m.role,
         content: m.content,
-        ...(m.tool_call_id && { tool_call_id: m.tool_call_id })
+        ...(m.tool_call_id && { tool_call_id: m.tool_call_id }),
+        ...(m.tool_calls && { tool_calls: m.tool_calls })
       }));
 
       if (systemPrompt) {
@@ -200,7 +202,8 @@ export class DeepSeekClient {
       const requestMessages = [...messages].map(m => ({
         role: m.role,
         content: m.content,
-        ...(m.tool_call_id && { tool_call_id: m.tool_call_id })
+        ...(m.tool_call_id && { tool_call_id: m.tool_call_id }),
+        ...(m.tool_calls && { tool_calls: m.tool_calls })
       }));
 
       if (systemPrompt) {
