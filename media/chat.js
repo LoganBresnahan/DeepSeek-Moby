@@ -26,6 +26,7 @@
 
   // Scroll tracking - don't auto-scroll if user has scrolled up
   let userHasScrolledUp = false;
+  let reasoningUserHasScrolledUp = false; // Separate tracking for reasoning content
   const SCROLL_THRESHOLD = 100; // pixels from bottom to consider "near bottom"
 
   // Current model state
@@ -46,6 +47,13 @@
     // File attachment handlers
     attachBtn.addEventListener('click', () => fileInput.click());
     fileInput.addEventListener('change', handleFileSelect);
+
+    // Help button handler
+    const helpBtn = document.getElementById('helpBtn');
+    helpBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      showCommandsModal(helpBtn);
+    });
 
     // Send button handler
     sendBtn.addEventListener('click', sendMessage);
@@ -109,6 +117,31 @@
   function scrollToBottomIfNeeded() {
     if (!userHasScrolledUp) {
       chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+  }
+
+  // Reasoning content scroll tracking (separate from main chat)
+  function isReasoningNearBottom() {
+    const reasoningContent = document.getElementById('streamingReasoningContent');
+    if (!reasoningContent) return true;
+    const scrollBottom = reasoningContent.scrollTop + reasoningContent.clientHeight;
+    return reasoningContent.scrollHeight - scrollBottom < SCROLL_THRESHOLD;
+  }
+
+  function handleReasoningScrollTracking() {
+    if (!isStreaming) {
+      reasoningUserHasScrolledUp = false;
+      return;
+    }
+    reasoningUserHasScrolledUp = !isReasoningNearBottom();
+  }
+
+  function scrollReasoningToBottomIfNeeded() {
+    if (!reasoningUserHasScrolledUp) {
+      const reasoningContent = document.getElementById('streamingReasoningContent');
+      if (reasoningContent) {
+        reasoningContent.scrollTop = reasoningContent.scrollHeight;
+      }
     }
   }
 
@@ -285,6 +318,13 @@
         code: code,
         language: lang
       });
+    }
+
+    if (target.classList.contains('collapse-btn')) {
+      const codeBlock = target.closest('.code-block');
+      const isCollapsed = codeBlock.classList.toggle('collapsed');
+      target.textContent = isCollapsed ? '▶' : '▼';
+      target.title = isCollapsed ? 'Expand code' : 'Collapse code';
     }
   }
 
@@ -526,6 +566,7 @@
               <button class="code-action-btn copy-btn" title="Copy code">Copy</button>
               <button class="code-action-btn diff-btn" title="Show diff">Diff</button>
               <button class="code-action-btn apply-btn" title="Apply to editor">Apply</button>
+              <button class="code-action-btn collapse-btn" title="Collapse code">▼</button>
             </div>`;
 
       const codeBlockHtml = `
@@ -613,6 +654,96 @@
     }
   }
 
+  // Commands modal
+  const commands = [
+    { section: 'Chat' },
+    { id: 'startChat', name: 'Open Chat', desc: 'Open the chat panel', icon: '💬' },
+    { id: 'newChat', name: 'New Chat', desc: 'Start a new conversation', icon: '✨' },
+    { id: 'switchModel', name: 'Switch Model', desc: 'Change AI model', icon: '🔄' },
+    { section: 'Code Actions' },
+    { id: 'explainCode', name: 'Explain Code', desc: 'Explain selected code', icon: '📖' },
+    { id: 'refactorCode', name: 'Refactor Code', desc: 'Improve code structure', icon: '🔧' },
+    { id: 'documentCode', name: 'Add Documentation', desc: 'Generate comments/docs', icon: '📝' },
+    { id: 'fixBugs', name: 'Find & Fix Bugs', desc: 'Detect and fix issues', icon: '🐛' },
+    { id: 'optimizeCode', name: 'Optimize', desc: 'Improve performance', icon: '⚡' },
+    { id: 'generateTests', name: 'Generate Tests', desc: 'Create unit tests', icon: '🧪' },
+    { id: 'insertCode', name: 'Insert Code', desc: 'Insert generated code', icon: '📥' },
+    { section: 'History' },
+    { id: 'showChatHistory', name: 'Show History', desc: 'View chat history', icon: '📚' },
+    { id: 'exportChatHistory', name: 'Export History', desc: 'Export all chats', icon: '📤' },
+    { id: 'searchChatHistory', name: 'Search History', desc: 'Search past chats', icon: '🔍' },
+    { section: 'Other' },
+    { id: 'showStats', name: 'Show Stats', desc: 'View usage statistics', icon: '📊' },
+    { id: 'showLogs', name: 'Show Logs', desc: 'View extension logs', icon: '📋' }
+  ];
+
+  function showCommandsModal(btn) {
+    closeCommandsModal();
+
+    const modal = document.createElement('div');
+    modal.className = 'commands-modal';
+    modal.innerHTML = `
+      <div class="commands-modal-title">
+        <span>Commands</span>
+        <button class="commands-modal-close">×</button>
+      </div>
+      <div class="commands-list">
+        ${commands.map(cmd => {
+          if (cmd.section) {
+            return `<div class="commands-section-title">${cmd.section}</div>`;
+          }
+          return `
+            <div class="command-item" data-command="${cmd.id}">
+              <span class="command-icon">${cmd.icon}</span>
+              <div class="command-info">
+                <div class="command-name">${cmd.name}</div>
+                <div class="command-desc">${cmd.desc}</div>
+              </div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    `;
+
+    // Position above the button
+    const rect = btn.getBoundingClientRect();
+    modal.style.bottom = `${window.innerHeight - rect.top + 5}px`;
+    modal.style.left = `${rect.left}px`;
+
+    // Close button handler
+    modal.querySelector('.commands-modal-close').addEventListener('click', closeCommandsModal);
+
+    // Command click handlers
+    modal.querySelectorAll('.command-item').forEach(item => {
+      item.addEventListener('click', () => {
+        const commandId = item.dataset.command;
+        vscode.postMessage({ type: 'executeCommand', command: `deepseek.${commandId}` });
+        closeCommandsModal();
+      });
+    });
+
+    document.body.appendChild(modal);
+
+    // Close when clicking outside
+    setTimeout(() => {
+      document.addEventListener('click', handleCommandsModalOutsideClick);
+    }, 0);
+  }
+
+  function handleCommandsModalOutsideClick(e) {
+    if (!e.target.closest('.commands-modal') && !e.target.closest('.help-btn')) {
+      closeCommandsModal();
+    }
+  }
+
+  function closeCommandsModal() {
+    const modal = document.querySelector('.commands-modal');
+    if (modal) {
+      modal.remove();
+    }
+    document.removeEventListener('click', handleCommandsModalOutsideClick);
+  }
+
   function saveState() {
     const messages = Array.from(document.querySelectorAll('.message')).map(el => {
       const reasoningEl = el.querySelector('.reasoning-body');
@@ -670,8 +801,16 @@
         streamHTML += '<div class="content" id="streamingContent"></div>';
         streamContainer.innerHTML = streamHTML;
         chatMessages.appendChild(streamContainer);
+
+        // Add scroll listener for reasoning content if present
+        const reasoningBody = document.getElementById('streamingReasoningContent');
+        if (reasoningBody) {
+          reasoningBody.addEventListener('scroll', handleReasoningScrollTracking);
+        }
+
         // Reset scroll tracking for new response and scroll to bottom
         userHasScrolledUp = false;
+        reasoningUserHasScrolledUp = false;
         chatMessages.scrollTop = chatMessages.scrollHeight;
         break;
 
@@ -680,8 +819,8 @@
         const reasoningContent = document.getElementById('streamingReasoningContent');
         if (reasoningContent) {
           reasoningContent.innerHTML = formatText(currentReasoning);
-          // Auto-scroll the reasoning box itself
-          reasoningContent.scrollTop = reasoningContent.scrollHeight;
+          // Smart scroll - only if user hasn't scrolled up in reasoning
+          scrollReasoningToBottomIfNeeded();
         }
         scrollToBottomIfNeeded();
         break;
@@ -697,6 +836,7 @@
 
       case 'endResponse':
         isStreaming = false;
+        reasoningUserHasScrolledUp = false;
         hideTypingIndicator();
         hideStopButton();
         // Replace streaming container with final message
@@ -742,6 +882,7 @@
 
       case 'error':
         isStreaming = false;
+        reasoningUserHasScrolledUp = false;
         hideTypingIndicator();
         hideStopButton();
         const errorStreamEl = document.getElementById('streamingMessage');
@@ -769,6 +910,7 @@
 
       case 'generationStopped':
         isStreaming = false;
+        reasoningUserHasScrolledUp = false;
         hideTypingIndicator();
         hideStopButton();
         const stoppedStreamEl = document.getElementById('streamingMessage');

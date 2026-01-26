@@ -6,7 +6,6 @@
   // DOM Elements
   const sessionsList = document.getElementById('sessionsList');
   const searchInput = document.getElementById('searchInput');
-  const refreshBtn = document.getElementById('refreshBtn');
   const exportAllBtn = document.getElementById('exportAllBtn');
   const clearAllBtn = document.getElementById('clearAllBtn');
   let searchDebounceTimer = null;
@@ -18,7 +17,6 @@
       clearTimeout(searchDebounceTimer);
       searchDebounceTimer = setTimeout(searchSessions, 200);
     });
-    refreshBtn.addEventListener('click', loadSessions);
     exportAllBtn.addEventListener('click', showExportAllDialog);
     clearAllBtn.addEventListener('click', clearAllHistory);
 

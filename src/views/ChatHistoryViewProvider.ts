@@ -167,7 +167,7 @@ export class ChatHistoryViewProvider implements vscode.WebviewViewProvider {
 
   private async clearAllHistory() {
     const result = await vscode.window.showWarningMessage(
-      'Delete ALL chat history? This cannot be undone.',
+      'Delete ALL chat history? This will also clear your current chat.',
       { modal: true },
       'Delete All',
       'Cancel'
@@ -175,6 +175,8 @@ export class ChatHistoryViewProvider implements vscode.WebviewViewProvider {
 
     if (result === 'Delete All') {
       await this.chatHistoryManager.clearAllHistory();
+      // Also clear the current chat in the chat view
+      await this.chatProvider.clearConversation();
       vscode.window.showInformationMessage('All chat history deleted');
     }
   }
@@ -234,7 +236,6 @@ export class ChatHistoryViewProvider implements vscode.WebviewViewProvider {
           <div class="header">
             <h2>Chat History</h2>
             <div class="actions">
-              <button id="refreshBtn" title="Refresh">↻</button>
               <button id="exportAllBtn" title="Export All">Export</button>
               <button id="clearAllBtn" title="Delete All">Delete All</button>
             </div>

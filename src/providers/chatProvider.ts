@@ -113,6 +113,9 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         case 'getSettings':
           this.sendCurrentSettings();
           break;
+        case 'executeCommand':
+          vscode.commands.executeCommand(data.command);
+          break;
       }
     });
 
@@ -1021,13 +1024,23 @@ The context lines (existing_method, another_existing_method) help locate where t
 
           <div class="input-area">
             <div class="input-row">
-              <div class="input-buttons-left">
-                <button id="attachBtn" class="attach-btn" title="Attach image">
+              <div class="input-buttons-grid">
+                <button id="helpBtn" class="grid-btn help-btn" title="Commands">
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 13A6 6 0 1 1 8 2a6 6 0 0 1 0 12zm-.5-3h1v1h-1v-1zm.5-7a2.5 2.5 0 0 0-2.5 2.5h1A1.5 1.5 0 1 1 8 8c-.55 0-1 .45-1 1v1h1v-.8c0-.11.09-.2.2-.2h.3a2.5 2.5 0 0 0 0-5z"/>
+                  </svg>
+                </button>
+                <button id="attachBtn" class="grid-btn attach-btn" title="Attach image">
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
                     <path d="M4.5 3a2.5 2.5 0 0 1 5 0v9a1.5 1.5 0 0 1-3 0V5a.5.5 0 0 1 1 0v7a.5.5 0 0 0 1 0V3a1.5 1.5 0 1 0-3 0v9a2.5 2.5 0 0 0 5 0V5a.5.5 0 0 1 1 0v7a3.5 3.5 0 1 1-7 0V3z"/>
                   </svg>
                 </button>
-                <button id="sendBtn" class="send-btn" title="Send message">
+                <button id="searchBtn" class="grid-btn search-btn" title="Web search (coming soon)">
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zM2 8a6 6 0 0 1 11.77-1.5H11.5a.5.5 0 0 0 0 1h2.27A6 6 0 0 1 2 8zm6.5-5.5v2a.5.5 0 0 1-1 0v-2a.5.5 0 0 1 1 0zM8 14a6 6 0 0 1-5.77-4.5h2.27a.5.5 0 0 0 0-1H2.23A6 6 0 0 1 8 14zm.5-1.5v-2a.5.5 0 0 0-1 0v2a.5.5 0 0 0 1 0z"/>
+                  </svg>
+                </button>
+                <button id="sendBtn" class="grid-btn send-btn" title="Send message">
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
                     <path d="M1.724 1.053a.5.5 0 0 1 .545-.108l13 5.5a.5.5 0 0 1 0 .91l-13 5.5a.5.5 0 0 1-.69-.575l1.557-5.28-1.557-5.28a.5.5 0 0 1 .145-.467zM3.882 7.5l-1.06 3.593L12.14 8 2.822 4.907 3.882 8.5H8a.5.5 0 0 1 0 1H3.882z"/>
                   </svg>

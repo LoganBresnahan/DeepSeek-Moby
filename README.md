@@ -1,6 +1,6 @@
 <img src="media/moby.png" height="100px" alt="Local icon" />
 
-# DeepSeek Moby VS Code Extension 
+# DeepSeek Moby, a VS Code Extension 
 
 
 Un-official DeepSeek AI assistant for Visual Studio Code.
