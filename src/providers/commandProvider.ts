@@ -181,7 +181,7 @@ export class CommandProvider {
 
   async switchModel() {
     const currentModel = this.config.get<string>('model');
-    const newModel = currentModel === 'deepseek-chat' ? 'deepseek-coder' : 'deepseek-chat';
+    const newModel = currentModel === 'deepseek-chat' ? 'deepseek-reasoner' : 'deepseek-chat';
     
     await this.config.update('model', newModel);
     

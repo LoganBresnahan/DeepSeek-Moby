@@ -5,10 +5,10 @@
 ### Added
 - Initial release of DeepSeek VS Code extension
 - Interactive chat sidebar with conversation history
-- Inline code completions using DeepSeek Coder
+- Inline code completions using DeepSeek Moby
 - Code actions: Explain, Refactor, Document, Fix, Optimize, Test
 - Advanced formatting engine with language-specific rules
-- Support for both deepseek-chat and deepseek-coder models
+- Support for both deepseek-chat and deepseek-reasoner models
 - Status bar with token usage tracking
 - Configuration for API key, model selection, and formatting options
 - Multi-language support (Python, JavaScript, Java, C++, Go, Rust, etc.)

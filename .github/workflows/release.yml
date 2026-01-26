@@ -73,7 +73,7 @@ jobs:
       - name: Upload VSIX artifact
         uses: actions/upload-artifact@v4
         with:
-          name: deepseek-coder-vsix
+          name: deepseek-moby-vsix
           path: '*.vsix'
           retention-days: 30
 

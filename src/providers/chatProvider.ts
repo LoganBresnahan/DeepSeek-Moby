@@ -310,7 +310,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     const editorContext = await this.getEditorContext();
     const isReasonerModel = this.deepSeekClient.isReasonerModel();
 
-    let systemPrompt = `You are DeepSeek Coder, an expert programming assistant integrated into VS Code.
+    let systemPrompt = `You are DeepSeek Moby, an expert programming assistant integrated into VS Code.
 `;
 
     // Only add tool instructions for non-reasoner models (reasoner can't use tools)

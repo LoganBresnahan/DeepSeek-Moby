@@ -1,6 +1,6 @@
 {
-  "name": "deepseek-coder",
-  "displayName": "DeepSeek Coder",
+  "name": "deepseek-moby",
+  "displayName": "DeepSeek Moby",
   "description": "Official DeepSeek AI assistant for VS Code with perfect formatting and chat history",
   "version": "1.0.0",
   "publisher": "deepseek",
