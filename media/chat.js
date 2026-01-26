@@ -23,6 +23,9 @@
   const currentModelName = document.getElementById('currentModelName');
   const tempSlider = document.getElementById('tempSlider');
   const tempValue = document.getElementById('tempValue');
+  const toolLimitSlider = document.getElementById('toolLimitSlider');
+  const toolLimitValue = document.getElementById('toolLimitValue');
+  const toolLimitControl = document.getElementById('toolLimitControl');
   const toastContainer = document.getElementById('toastContainer');
   let toastTimeout = null;
 
@@ -69,6 +72,7 @@
       option.addEventListener('click', () => selectModel(option.dataset.model));
     });
     tempSlider.addEventListener('input', updateTemperature);
+    toolLimitSlider.addEventListener('input', updateToolLimit);
 
     // Close dropdown when clicking outside
     document.addEventListener('click', (e) => {
@@ -91,6 +95,12 @@
 
     // Initialize send button state
     updateSendButtonState();
+
+    // Restore previous state if webview was recreated
+    const previousState = vscode.getState();
+    if (previousState && previousState.messages && previousState.messages.length > 0) {
+      previousState.messages.forEach(msg => addMessage(msg, true));
+    }
   }
 
   function updateSendButtonState() {
@@ -188,6 +198,11 @@
     document.querySelectorAll('.model-option').forEach(option => {
       option.classList.toggle('selected', option.dataset.model === model);
     });
+
+    // Show tool limit control only for chat model (not reasoner)
+    if (toolLimitControl) {
+      toolLimitControl.style.display = model === 'deepseek-chat' ? 'block' : 'none';
+    }
   }
 
   function updateTemperature() {
@@ -195,6 +210,15 @@
     vscode.postMessage({
       type: 'updateSettings',
       settings: { temperature: parseFloat(tempSlider.value) }
+    });
+  }
+
+  function updateToolLimit() {
+    const value = parseInt(toolLimitSlider.value);
+    toolLimitValue.textContent = value >= 100 ? '∞' : value;
+    vscode.postMessage({
+      type: 'updateSettings',
+      settings: { maxToolCalls: value }
     });
   }
 
@@ -405,7 +429,9 @@
     contentEl.className = 'content';
 
     if (message.role === 'assistant') {
-      contentEl.innerHTML = formatCodeBlocks(message.content);
+      // Include tool calls HTML if present (preserved from streaming)
+      const toolCallsPrefix = message.toolCallsHtml || '';
+      contentEl.innerHTML = toolCallsPrefix + formatCodeBlocks(message.content);
     } else {
       contentEl.textContent = message.content;
     }
@@ -445,6 +471,25 @@
     html = html.replace(/\n/g, '<br>');
 
     return html;
+  }
+
+  /**
+   * Strip DSML (DeepSeek Markup Language) from content
+   * DSML is used by DeepSeek for tool calls but should not be displayed to users
+   */
+  function stripDSMLFromContent(content) {
+    if (!content || !content.includes('<｜DSML｜')) {
+      return content;
+    }
+
+    // Remove the entire function_calls block
+    let stripped = content.replace(/<｜DSML｜function_calls>[\s\S]*?(?:<\/｜DSML｜function_calls>|$)/g, '');
+
+    // Also remove any standalone DSML tags that might be left
+    stripped = stripped.replace(/<｜DSML｜[^>]*>[\s\S]*?<｜DSML｜[^>]*>/g, '');
+    stripped = stripped.replace(/<\/?｜DSML｜[^>]*>/g, '');
+
+    return stripped.trim();
   }
 
   // Simple syntax highlighter for common languages
@@ -757,10 +802,26 @@
   function saveState() {
     const messages = Array.from(document.querySelectorAll('.message')).map(el => {
       const reasoningEl = el.querySelector('.reasoning-body');
+      const contentEl = el.querySelector('.content');
+      const toolCallsContainer = contentEl?.querySelector('.tool-calls-container');
+
+      // Extract text content without the tool calls HTML
+      let textContent = '';
+      if (contentEl) {
+        // Clone and remove tool calls to get clean text
+        const clone = contentEl.cloneNode(true);
+        const toolCallsInClone = clone.querySelector('.tool-calls-container');
+        if (toolCallsInClone) {
+          toolCallsInClone.remove();
+        }
+        textContent = clone.textContent || '';
+      }
+
       return {
         role: el.classList.contains('user') ? 'user' : 'assistant',
-        content: el.querySelector('.content')?.textContent || '',
-        reasoning_content: reasoningEl ? reasoningEl.textContent : undefined
+        content: textContent,
+        reasoning_content: reasoningEl ? reasoningEl.textContent : undefined,
+        toolCallsHtml: toolCallsContainer ? toolCallsContainer.outerHTML : undefined
       };
     });
 
@@ -839,7 +900,25 @@
         currentResponse += message.token;
         const streamingContent = document.getElementById('streamingContent');
         if (streamingContent) {
-          streamingContent.innerHTML = formatCodeBlocks(currentResponse);
+          // Preserve tool call containers by saving and restoring them
+          const toolCallContainers = streamingContent.querySelectorAll('.tool-calls-container');
+          const savedContainers = Array.from(toolCallContainers).map(el => el.cloneNode(true));
+
+          // Update content (strip any DSML markup before displaying)
+          const cleanResponse = stripDSMLFromContent(currentResponse);
+          streamingContent.innerHTML = formatCodeBlocks(cleanResponse);
+
+          // Re-append tool call containers at the beginning
+          if (savedContainers.length > 0) {
+            const firstChild = streamingContent.firstChild;
+            savedContainers.forEach(container => {
+              if (firstChild) {
+                streamingContent.insertBefore(container, firstChild);
+              } else {
+                streamingContent.appendChild(container);
+              }
+            });
+          }
         }
         scrollToBottomIfNeeded();
         break;
@@ -898,6 +977,32 @@
         }
         break;
 
+      case 'toolCallsUpdate':
+        // Update existing tool calls container with new/additional tools
+        // (Used when tool loop has multiple iterations)
+        currentToolCalls = message.tools;
+        const existingContainer = document.getElementById(`tool-calls-${toolCallsContainerId}`);
+        if (existingContainer) {
+          // Update header title
+          const headerTitle = existingContainer.querySelector('.tool-calls-title');
+          if (headerTitle) {
+            headerTitle.textContent = `Using ${message.tools.length} tool${message.tools.length > 1 ? 's' : ''}...`;
+          }
+
+          // Update body with all tools
+          const body = existingContainer.querySelector('.tool-calls-body');
+          if (body) {
+            body.innerHTML = message.tools.map((tool, i) => `
+              <div class="tool-call-item" id="tool-calls-${toolCallsContainerId}-item-${i}" data-status="${tool.status}">
+                <span class="tool-call-status">${tool.status === 'done' ? '✓' : tool.status === 'error' ? '✗' : '⏳'}</span>
+                <span class="tool-call-detail">${escapeHtml(tool.detail)}</span>
+              </div>
+            `).join('');
+          }
+        }
+        scrollToBottomIfNeeded();
+        break;
+
       case 'toolCallsEnd':
         // Mark tool calls as complete, update title
         const container = document.getElementById(`tool-calls-${toolCallsContainerId}`);
@@ -924,11 +1029,20 @@
         // Replace streaming container with final message
         const streamingEl = document.getElementById('streamingMessage');
         if (streamingEl) {
+          // Preserve tool calls container before removing streaming element
+          const toolCallsContainer = streamingEl.querySelector('.tool-calls-container');
+          const toolCallsHtml = toolCallsContainer ? toolCallsContainer.outerHTML : '';
+
           streamingEl.remove();
+
+          // Strip DSML from final response before adding message
+          const cleanContent = stripDSMLFromContent(currentResponse);
+
           addMessage({
             role: 'assistant',
-            content: currentResponse,
-            reasoning_content: currentReasoning || undefined
+            content: cleanContent,
+            reasoning_content: currentReasoning || undefined,
+            toolCallsHtml: toolCallsHtml // Pass tool calls HTML to preserve
           });
         }
         saveState();
@@ -988,6 +1102,10 @@
           tempSlider.value = message.temperature;
           tempValue.textContent = message.temperature;
         }
+        if (message.maxToolCalls !== undefined) {
+          toolLimitSlider.value = message.maxToolCalls;
+          toolLimitValue.textContent = message.maxToolCalls >= 100 ? '∞' : message.maxToolCalls;
+        }
         break;
 
       case 'generationStopped':
@@ -999,11 +1117,20 @@
         if (stoppedStreamEl) {
           // Keep partial response if any
           if (currentResponse || currentReasoning) {
+            // Preserve tool calls container
+            const stoppedToolCalls = stoppedStreamEl.querySelector('.tool-calls-container');
+            const stoppedToolCallsHtml = stoppedToolCalls ? stoppedToolCalls.outerHTML : '';
+
             stoppedStreamEl.remove();
+
+            // Strip DSML from partial response
+            const cleanStoppedContent = stripDSMLFromContent(currentResponse);
+
             addMessage({
               role: 'assistant',
-              content: currentResponse + '\n\n*[Generation stopped]*',
-              reasoning_content: currentReasoning || undefined
+              content: cleanStoppedContent + '\n\n*[Generation stopped]*',
+              reasoning_content: currentReasoning || undefined,
+              toolCallsHtml: stoppedToolCallsHtml
             });
           } else {
             stoppedStreamEl.remove();

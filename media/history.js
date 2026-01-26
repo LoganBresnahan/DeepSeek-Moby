@@ -225,7 +225,7 @@
   }
 
   // Stats dialog functions
-  function showStatsDialog(stats) {
+  function showStatsDialog(stats, balance) {
     closeStatsDialog();
 
     const modelEntries = Object.entries(stats.byModel || {});
@@ -236,6 +236,19 @@
     const avgMessages = stats.totalSessions > 0
       ? (stats.totalMessages / stats.totalSessions).toFixed(1)
       : '0';
+
+    // Format balance display
+    let balanceHtml = '';
+    if (balance) {
+      const currencySymbol = balance.currency === 'USD' ? '$' : (balance.currency === 'CNY' ? '¥' : '');
+      const statusClass = balance.available ? 'balance-ok' : 'balance-low';
+      balanceHtml = `
+        <div class="stats-row stats-row-balance ${statusClass}">
+          <span class="stats-row-label">💰 API Balance</span>
+          <span class="stats-row-value">${currencySymbol}${balance.balance} ${balance.currency}</span>
+        </div>
+      `;
+    }
 
     // Create overlay
     const overlay = document.createElement('div');
@@ -251,6 +264,7 @@
         <button class="stats-dialog-close">×</button>
       </div>
       <div class="stats-dialog-content">
+        ${balanceHtml}
         <div class="stats-row">
           <span class="stats-row-label">Total Sessions</span>
           <span class="stats-row-value">${stats.totalSessions}</span>
@@ -338,7 +352,7 @@
         break;
 
       case 'statsLoaded':
-        showStatsDialog(message.stats);
+        showStatsDialog(message.stats, message.balance);
         break;
     }
   });

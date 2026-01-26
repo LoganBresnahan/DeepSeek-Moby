@@ -241,9 +241,31 @@ body {
   -webkit-appearance: none;
   width: 12px;
   height: 12px;
-  background: var(--vscode-button-background);
+  background: #e74c3c;
+  box-shadow: 0 0 4px rgba(231, 76, 60, 0.5);
   border-radius: 50%;
   cursor: pointer;
+}
+
+.temperature-control input[type="range"]::-webkit-slider-thumb:hover {
+  background: #ff6b5b;
+}
+
+#toolLimitSlider::-webkit-slider-thumb {
+  background: #e74c3c;
+  box-shadow: 0 0 4px rgba(231, 76, 60, 0.5);
+}
+
+#toolLimitSlider::-webkit-slider-thumb:hover {
+  background: #ff6b5b;
+}
+
+.tool-limit-hint {
+  display: block;
+  font-size: 10px;
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.7;
+  margin-top: 4px;
 }
 
 /* Stop Button - replaces send button in grid during streaming */

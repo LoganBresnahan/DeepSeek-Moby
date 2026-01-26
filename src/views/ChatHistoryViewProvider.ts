@@ -1,20 +1,24 @@
 import * as vscode from 'vscode';
 import { ChatHistoryManager } from '../chatHistory/ChatHistoryManager';
 import { ChatProvider } from '../providers/chatProvider';
+import { DeepSeekClient } from '../deepseekClient';
 
 export class ChatHistoryViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'deepseek-history-view';
   private _view?: vscode.WebviewView;
   private chatHistoryManager: ChatHistoryManager;
   private chatProvider: ChatProvider;
+  private deepSeekClient: DeepSeekClient;
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
     chatHistoryManager: ChatHistoryManager,
-    chatProvider: ChatProvider
+    chatProvider: ChatProvider,
+    deepSeekClient: DeepSeekClient
   ) {
     this.chatHistoryManager = chatHistoryManager;
     this.chatProvider = chatProvider;
+    this.deepSeekClient = deepSeekClient;
     
     // Listen for session changes
     this.chatHistoryManager.onSessionsChangedEvent(() => {
@@ -194,10 +198,20 @@ export class ChatHistoryViewProvider implements vscode.WebviewViewProvider {
 
   private async getStats() {
     const stats = await this.chatHistoryManager.getSessionStats();
+
+    // Fetch balance from DeepSeek API
+    let balance = null;
+    try {
+      balance = await this.deepSeekClient.getBalance();
+    } catch (e) {
+      // Silently fail if balance fetch fails
+    }
+
     if (this._view) {
       this._view.webview.postMessage({
         type: 'statsLoaded',
-        stats
+        stats,
+        balance
       });
     }
   }

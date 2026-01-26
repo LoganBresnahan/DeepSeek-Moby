@@ -396,3 +396,24 @@
   padding: 2px 0;
 }
 
+/* Balance Display Styles */
+.stats-row-balance {
+  background: var(--vscode-input-background);
+  border-radius: 4px;
+  padding: 10px 12px !important;
+  margin-bottom: 8px;
+}
+
+.stats-row-balance .stats-row-value {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.stats-row-balance.balance-ok .stats-row-value {
+  color: #4caf50;
+}
+
+.stats-row-balance.balance-low .stats-row-value {
+  color: #f44336;
+}
+

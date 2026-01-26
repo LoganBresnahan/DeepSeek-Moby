@@ -8,6 +8,7 @@ import { ChatHistoryManager } from '../chatHistory/ChatHistoryManager';
 import { DiffEngine } from '../utils/diff';
 import { logger } from '../utils/logger';
 import { workspaceTools, executeToolCall } from '../tools/workspaceTools';
+import { parseDSMLToolCalls, stripDSML } from '../utils/dsmlParser';
 
 export class ChatProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'deepseek-chat-view';
@@ -158,7 +159,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async updateSettings(settings: { model?: string; temperature?: number }) {
+  private async updateSettings(settings: { model?: string; temperature?: number; maxToolCalls?: number }) {
     const config = vscode.workspace.getConfiguration('deepseek');
 
     if (settings.model !== undefined) {
@@ -170,18 +171,25 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       await config.update('temperature', settings.temperature, vscode.ConfigurationTarget.Global);
       logger.settingsChanged('temperature', settings.temperature);
     }
+
+    if (settings.maxToolCalls !== undefined) {
+      await config.update('maxToolCalls', settings.maxToolCalls, vscode.ConfigurationTarget.Global);
+      logger.settingsChanged('maxToolCalls', settings.maxToolCalls);
+    }
   }
 
   private sendCurrentSettings() {
     const config = vscode.workspace.getConfiguration('deepseek');
     const model = config.get<string>('model') || 'deepseek-chat';
     const temperature = config.get<number>('temperature') ?? 0.7;
+    const maxToolCalls = config.get<number>('maxToolCalls') ?? 25;
 
     if (this._view) {
       this._view.webview.postMessage({
         type: 'settings',
         model,
-        temperature
+        temperature,
+        maxToolCalls
       });
     }
   }
@@ -310,10 +318,23 @@ The context lines (existing_method, another_existing_method) help locate where t
       }
 
       // Tool calling loop (only for non-reasoner models)
+      let streamingSystemPrompt = systemPrompt;
       if (!isReasonerModel) {
-        const toolMessages = await this.runToolLoop(historyMessages, systemPrompt, signal);
+        const { toolMessages, limitReached } = await this.runToolLoop(historyMessages, systemPrompt, signal);
         // Add tool interactions to history for context
         historyMessages.push(...toolMessages);
+
+        // If tools were used, update system prompt to indicate exploration is complete
+        // This prevents the model from trying to use tools during streaming
+        if (toolMessages.length > 0) {
+          const limitWarning = limitReached
+            ? `\n\nNOTE: The tool calling limit was reached. Summarize what you were able to accomplish and explain what remains to be done.`
+            : '';
+          streamingSystemPrompt = systemPrompt + `
+
+IMPORTANT: The tool exploration phase is now complete. You have already gathered the necessary information using tools.
+Now provide your final response based on what you learned. Do NOT attempt to use any more tools or output any tool-calling markup - just provide your answer directly in plain text.${limitWarning}`;
+        }
       }
 
       const _response = await this.deepSeekClient.streamChat(
@@ -325,7 +346,7 @@ The context lines (existing_method, another_existing_method) help locate where t
             token
           });
         },
-        systemPrompt,
+        streamingSystemPrompt,
         // Reasoning callback for deepseek-reasoner
         isReasonerModel ? (reasoningToken) => {
           fullReasoning += reasoningToken;
@@ -337,22 +358,26 @@ The context lines (existing_method, another_existing_method) help locate where t
         { signal }
       );
 
+      // Strip any DSML markup from the final response (DeepSeek sometimes
+      // outputs DSML in streamed content even after tool calls are done)
+      const cleanResponse = stripDSML(fullResponse);
+
       // Finalize response
       this._view.webview.postMessage({
         type: 'endResponse',
         message: {
           role: 'assistant',
-          content: fullResponse,
+          content: cleanResponse,
           reasoning_content: fullReasoning || undefined
         }
       });
 
-      // Save assistant message to history
-      const tokenCount = this.deepSeekClient.estimateTokens(fullResponse + fullReasoning);
-      if (this.currentSessionId && (fullResponse || fullReasoning)) {
+      // Save assistant message to history (with clean response)
+      const tokenCount = this.deepSeekClient.estimateTokens(cleanResponse + fullReasoning);
+      if (this.currentSessionId && (cleanResponse || fullReasoning)) {
         await this.chatHistoryManager.addMessageToCurrentSession({
           role: 'assistant',
-          content: fullResponse,
+          content: cleanResponse,
           reasoning_content: fullReasoning || undefined,
           tokens: tokenCount
         });
@@ -388,10 +413,18 @@ The context lines (existing_method, another_existing_method) help locate where t
     messages: ApiMessage[],
     systemPrompt: string,
     signal: AbortSignal
-  ): Promise<ApiMessage[]> {
+  ): Promise<{ toolMessages: ApiMessage[]; limitReached: boolean }> {
     const toolMessages: ApiMessage[] = [];
-    const maxIterations = 10; // Prevent infinite loops
+    // Get max tool calls from config (100 = no limit)
+    const config = vscode.workspace.getConfiguration('deepseek');
+    const configuredLimit = config.get<number>('maxToolCalls') ?? 25;
+    const maxIterations = configuredLimit >= 100 ? Infinity : configuredLimit;
     let iterations = 0;
+
+    // Track ALL tool calls across all iterations for unified display
+    const allToolDetails: Array<{ name: string; detail: string; status: string }> = [];
+    let toolContainerStarted = false;
+    let globalToolIndex = 0;
 
     while (iterations < maxIterations) {
       iterations++;
@@ -408,15 +441,29 @@ The context lines (existing_method, another_existing_method) help locate where t
         { tools: workspaceTools }
       );
 
+      // Check for DSML-formatted tool calls in content (DeepSeek Chat uses this format
+      // instead of the standard OpenAI function calling format)
+      if ((!response.tool_calls || response.tool_calls.length === 0) && response.content) {
+        const dsmlCalls = parseDSMLToolCalls(response.content);
+        if (dsmlCalls && dsmlCalls.length > 0) {
+          // Convert DSML calls to standard ToolCall format
+          response.tool_calls = dsmlCalls.map(dc => ({
+            id: dc.id,
+            type: 'function' as const,
+            function: {
+              name: dc.name,
+              arguments: JSON.stringify(dc.arguments)
+            }
+          }));
+          // Strip DSML from content to avoid displaying raw markup
+          response.content = stripDSML(response.content);
+        }
+      }
+
       // If no tool calls, we're done with the tool loop
       if (!response.tool_calls || response.tool_calls.length === 0) {
-        // If there's content, add it as an assistant message for context
-        if (response.content) {
-          toolMessages.push({
-            role: 'assistant',
-            content: response.content
-          });
-        }
+        // Don't add the final content to history - let the streaming response be the complete reply
+        // Adding partial content here causes the model to try continuing with tool calls during streaming
         break;
       }
 
@@ -444,17 +491,23 @@ The context lines (existing_method, another_existing_method) help locate where t
         return { name, detail, args };
       });
 
-      // Send tool calls start - frontend will render as collapsible
+      // Add to global tracking
+      const newTools = toolDetails.map(t => ({ name: t.name, detail: t.detail, status: 'pending' }));
+      allToolDetails.push(...newTools);
+
+      // Create or update tool calls container - send ALL tools each time
       this._view?.webview.postMessage({
-        type: 'toolCallsStart',
-        tools: toolDetails.map(t => ({ name: t.name, detail: t.detail, status: 'pending' }))
+        type: toolContainerStarted ? 'toolCallsUpdate' : 'toolCallsStart',
+        tools: allToolDetails
       });
+      toolContainerStarted = true;
 
       // Add assistant message with tool calls (required for API contract)
-      const toolNames = response.tool_calls.map(tc => tc.function.name).join(', ');
+      // Use empty content if no real content - the tool_calls field is what matters
+      // Avoid placeholder text like "Calling tools:" as it can appear in the output
       toolMessages.push({
         role: 'assistant',
-        content: response.content || `Calling tools: ${toolNames}`,
+        content: response.content || '',
         tool_calls: response.tool_calls
       });
 
@@ -462,13 +515,15 @@ The context lines (existing_method, another_existing_method) help locate where t
       for (let i = 0; i < response.tool_calls.length; i++) {
         const toolCall = response.tool_calls[i];
         const detail = toolDetails[i];
+        const currentIndex = globalToolIndex + i;
 
         logger.toolCall(toolCall.function.name);
 
         // Update status to running
+        allToolDetails[currentIndex].status = 'running';
         this._view?.webview.postMessage({
           type: 'toolCallUpdate',
-          index: i,
+          index: currentIndex,
           status: 'running',
           detail: detail.detail
         });
@@ -485,28 +540,35 @@ The context lines (existing_method, another_existing_method) help locate where t
         });
 
         // Update status to done
+        allToolDetails[currentIndex].status = success ? 'done' : 'error';
         this._view?.webview.postMessage({
           type: 'toolCallUpdate',
-          index: i,
+          index: currentIndex,
           status: success ? 'done' : 'error',
           detail: detail.detail
         });
       }
 
-      // Mark tool calls section as complete
+      // Update global index for next iteration
+      globalToolIndex += response.tool_calls.length;
+    }
+
+    // Mark tool calls section as complete (only if we had any tools)
+    if (toolContainerStarted) {
       this._view?.webview.postMessage({
         type: 'toolCallsEnd'
       });
     }
 
-    if (iterations >= maxIterations) {
+    const limitReached = iterations >= maxIterations && maxIterations !== Infinity;
+    if (limitReached) {
       this._view?.webview.postMessage({
         type: 'warning',
-        message: 'Tool calling limit reached. Proceeding with available context.'
+        message: `Tool calling limit (${configuredLimit}) reached. The task may require multiple requests to complete.`
       });
     }
 
-    return toolMessages;
+    return { toolMessages, limitReached };
   }
 
   private async getEditorContext(): Promise<string> {
@@ -1066,6 +1128,11 @@ The context lines (existing_method, another_existing_method) help locate where t
                     <label>Temperature: <span id="tempValue">0.7</span></label>
                     <input type="range" id="tempSlider" min="0" max="2" step="0.1" value="0.7">
                   </div>
+                  <div id="toolLimitControl" class="temperature-control" style="display: block;">
+                    <label>Tool Limit: <span id="toolLimitValue">25</span></label>
+                    <input type="range" id="toolLimitSlider" min="5" max="100" step="5" value="25">
+                    <span class="tool-limit-hint">100 = No limit</span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1088,7 +1155,14 @@ The context lines (existing_method, another_existing_method) help locate where t
                 </button>
                 <button id="searchBtn" class="grid-btn search-btn" title="Web search (coming soon)">
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-                    <path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zM2 8a6 6 0 0 1 11.77-1.5H11.5a.5.5 0 0 0 0 1h2.27A6 6 0 0 1 2 8zm6.5-5.5v2a.5.5 0 0 1-1 0v-2a.5.5 0 0 1 1 0zM8 14a6 6 0 0 1-5.77-4.5h2.27a.5.5 0 0 0 0-1H2.23A6 6 0 0 1 8 14zm.5-1.5v-2a.5.5 0 0 0-1 0v2a.5.5 0 0 0 1 0z"/>
+                    <!-- Globe circle -->
+                    <circle cx="6" cy="6" r="5.5" fill="none" stroke="currentColor" stroke-width="1"/>
+                    <!-- Horizontal line (equator) -->
+                    <path d="M0.5 6h11" stroke="currentColor" stroke-width="0.8" fill="none"/>
+                    <!-- Vertical ellipse (meridian) -->
+                    <ellipse cx="6" cy="6" rx="2.5" ry="5.5" fill="none" stroke="currentColor" stroke-width="0.8"/>
+                    <!-- Magnifying glass handle -->
+                    <path d="M10 10l4.5 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
                   </svg>
                 </button>
                 <button id="sendBtn" class="grid-btn send-btn" title="Send message">

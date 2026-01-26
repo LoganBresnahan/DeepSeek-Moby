@@ -44,7 +44,8 @@ export async function activate(context: vscode.ExtensionContext) {
   chatHistoryViewProvider = new ChatHistoryViewProvider(
     context.extensionUri,
     chatHistoryManager,
-    chatProvider
+    chatProvider,
+    deepSeekClient
   );
   
   // Initialize completion provider (inline suggestions)

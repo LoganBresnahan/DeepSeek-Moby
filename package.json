@@ -75,6 +75,13 @@
           "maximum": 2,
           "description": "Creativity level (0=deterministic, 2=creative)"
         },
+        "deepseek.maxToolCalls": {
+          "type": "number",
+          "default": 25,
+          "minimum": 5,
+          "maximum": 100,
+          "description": "Maximum tool calls per request (100=no limit, only applies to Chat model)"
+        },
         "deepseek.maxTokens": {
           "type": "number",
           "default": 4096,
@@ -247,11 +254,6 @@
           "command": "deepseek.newChat",
           "when": "view == deepseek-chat-view",
           "group": "navigation@1"
-        },
-        {
-          "command": "deepseek.showLogs",
-          "when": "view == deepseek-chat-view",
-          "group": "navigation@2"
         },
         {
           "command": "deepseek.showStats",

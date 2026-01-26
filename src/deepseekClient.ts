@@ -240,8 +240,44 @@ export class DeepSeekClient {
         let fullResponse = '';
         let fullReasoning = '';
         let usage: ChatResponse['usage'];
+        let resolved = false;  // Prevent double resolution
+
+        // Inactivity timeout - resolve if no data for 30 seconds
+        const INACTIVITY_TIMEOUT_MS = 30000;
+        let inactivityTimer: NodeJS.Timeout | null = null;
+
+        const clearInactivityTimer = () => {
+          if (inactivityTimer) {
+            clearTimeout(inactivityTimer);
+            inactivityTimer = null;
+          }
+        };
+
+        const resetInactivityTimer = () => {
+          clearInactivityTimer();
+          inactivityTimer = setTimeout(() => {
+            if (!resolved && (fullResponse || fullReasoning)) {
+              resolved = true;
+              resolve({
+                content: fullResponse,
+                reasoning_content: fullReasoning || undefined,
+                usage: usage || {
+                  prompt_tokens: this.estimateTokens(JSON.stringify(requestMessages)),
+                  completion_tokens: this.estimateTokens(fullResponse),
+                  total_tokens: 0
+                }
+              });
+            }
+          }, INACTIVITY_TIMEOUT_MS);
+        };
+
+        // Start the inactivity timer
+        resetInactivityTimer();
 
         response.data.on('data', (chunk: Buffer) => {
+          // Reset inactivity timer on each data chunk
+          resetInactivityTimer();
+
           const lines = chunk.toString().split('\n').filter(line => line.trim() !== '');
 
           for (const line of lines) {
@@ -249,15 +285,19 @@ export class DeepSeekClient {
               const data = line.slice(6);
 
               if (data === '[DONE]') {
-                resolve({
-                  content: fullResponse,
-                  reasoning_content: fullReasoning || undefined,
-                  usage: usage || {
-                    prompt_tokens: this.estimateTokens(JSON.stringify(requestMessages)),
-                    completion_tokens: this.estimateTokens(fullResponse),
-                    total_tokens: 0
-                  }
-                });
+                if (!resolved) {
+                  resolved = true;
+                  clearInactivityTimer();
+                  resolve({
+                    content: fullResponse,
+                    reasoning_content: fullReasoning || undefined,
+                    usage: usage || {
+                      prompt_tokens: this.estimateTokens(JSON.stringify(requestMessages)),
+                      completion_tokens: this.estimateTokens(fullResponse),
+                      total_tokens: 0
+                    }
+                  });
+                }
                 return;
               }
 
@@ -289,12 +329,31 @@ export class DeepSeekClient {
         });
 
         response.data.on('error', (error: any) => {
-          reject(this.handleError(error));
+          if (!resolved) {
+            resolved = true;
+            clearInactivityTimer();
+            reject(this.handleError(error));
+          }
         });
 
         response.data.on('end', () => {
-          if (!fullResponse && !fullReasoning) {
-            reject(new Error('No response received from DeepSeek'));
+          // Always resolve if we have data, even if [DONE] wasn't received
+          if (!resolved) {
+            resolved = true;
+            clearInactivityTimer();
+            if (fullResponse || fullReasoning) {
+              resolve({
+                content: fullResponse,
+                reasoning_content: fullReasoning || undefined,
+                usage: usage || {
+                  prompt_tokens: this.estimateTokens(JSON.stringify(requestMessages)),
+                  completion_tokens: this.estimateTokens(fullResponse),
+                  total_tokens: 0
+                }
+              });
+            } else {
+              reject(new Error('No response received from DeepSeek'));
+            }
           }
         });
       });
@@ -515,6 +574,34 @@ export class DeepSeekClient {
       return new Error('Cannot connect to DeepSeek API. Check your internet connection.');
     }
     return new Error(error.message || 'Unknown error occurred');
+  }
+
+  // Fetch account balance from DeepSeek API
+  async getBalance(): Promise<{ available: boolean; balance: string; currency: string } | null> {
+    try {
+      const apiKey = this.getApiKey();
+      const response = await this.axiosInstance.get('/user/balance', {
+        headers: {
+          'Authorization': `Bearer ${apiKey}`
+        }
+      });
+
+      const data = response.data;
+      if (data.balance_infos && data.balance_infos.length > 0) {
+        // Prefer USD, fall back to first available
+        const usdBalance = data.balance_infos.find((b: any) => b.currency === 'USD');
+        const balanceInfo = usdBalance || data.balance_infos[0];
+        return {
+          available: data.is_available,
+          balance: balanceInfo.total_balance,
+          currency: balanceInfo.currency
+        };
+      }
+      return null;
+    } catch (error: any) {
+      console.error('Failed to fetch balance:', error.message);
+      return null;
+    }
   }
 
   dispose() {
