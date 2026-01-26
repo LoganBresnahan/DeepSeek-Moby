@@ -37,3 +37,6 @@ coverage/
 
 # Anthropic
 .claude/*
+
+# Me
+PLAN.md

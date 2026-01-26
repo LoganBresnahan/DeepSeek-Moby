@@ -188,6 +188,8 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     const config = vscode.workspace.getConfiguration('deepseek');
 
     if (settings.model !== undefined) {
+      // Set model immediately on client (VS Code config has propagation delay)
+      this.deepSeekClient.setModel(settings.model);
       await config.update('model', settings.model, vscode.ConfigurationTarget.Global);
       logger.modelChanged(settings.model);
     }
@@ -280,7 +282,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     return this.tavilyClient;
   }
 
-  private async handleUserMessage(message: string, attachments?: Array<{base64: string, mimeType: string, name: string}>) {
+  private async handleUserMessage(message: string, attachments?: Array<{content: string, name: string, size: number}>) {
     if (!this._view) {
       return;
     }
@@ -434,14 +436,14 @@ ${webSearchContext}
 
     // Log the API request
     const model = this.deepSeekClient.getModel();
-    const hasImages = attachments && attachments.length > 0;
+    const hasAttachments = attachments && attachments.length > 0;
     const requestStartTime = Date.now();
 
     try {
       // Get current session messages for context (user message already saved above)
       const currentSession = await this.chatHistoryManager.getCurrentSession();
       const messageCount = currentSession ? currentSession.messages.length : 1;
-      logger.apiRequest(model, messageCount, hasImages);
+      logger.apiRequest(model, messageCount, hasAttachments);
 
       // Build messages array - handle multimodal content if attachments present
       const historyMessages: ApiMessage[] = [];
@@ -454,14 +456,23 @@ ${webSearchContext}
         }
       }
 
-      // If this message has attachments, show warning (DeepSeek chat models don't support vision yet)
+      // If this message has file attachments, include their contents in the context
       if (attachments && attachments.length > 0) {
-        // DeepSeek's standard models don't support vision
-        // Show a warning but still send the text message
-        this._view?.webview.postMessage({
-          type: 'warning',
-          message: 'Note: DeepSeek chat models do not currently support image analysis. Your text message will be sent without the images.'
-        });
+        // Build file context to prepend to the last user message
+        let fileContext = '\n\n--- Attached Files ---\n';
+        for (const attachment of attachments) {
+          const content = attachment.content || '';
+          fileContext += `\n### File: ${attachment.name}\n\`\`\`\n${content}\n\`\`\`\n`;
+        }
+        fileContext += '--- End Attached Files ---\n';
+
+        // Append file context to the last user message
+        if (historyMessages.length > 0) {
+          const lastMsg = historyMessages[historyMessages.length - 1];
+          if (lastMsg.role === 'user') {
+            lastMsg.content = lastMsg.content + fileContext;
+          }
+        }
       }
 
       // Tool calling loop (only for non-reasoner models)
@@ -543,9 +554,21 @@ Now provide your final response based on what you learned. Do NOT attempt to use
       }
       // Log the error
       logger.error(error.message, error.stack);
+
+      // Check if error is related to context length and provide helpful message about attachments
+      let errorMessage = error.message;
+      const lowerMessage = errorMessage.toLowerCase();
+      if (lowerMessage.includes('context') || lowerMessage.includes('token') || lowerMessage.includes('length') || lowerMessage.includes('too long')) {
+        const totalAttachmentSize = attachments ? attachments.reduce((sum, a) => sum + (a.content?.length || 0), 0) : 0;
+        if (totalAttachmentSize > 0) {
+          const sizeKB = (totalAttachmentSize / 1024).toFixed(1);
+          errorMessage = `Context limit exceeded. Your attached files total ${sizeKB}KB - try attaching smaller or fewer files.`;
+        }
+      }
+
       this._view.webview.postMessage({
         type: 'error',
-        error: error.message
+        error: errorMessage
       });
     } finally {
       this.abortController = null;
@@ -1236,13 +1259,13 @@ Now provide your final response based on what you learned. Do NOT attempt to use
 
   private getHtmlForWebview(webview: vscode.Webview): string {
     const scriptUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this._extensionUri, 'media', 'chat.js')
+      vscode.Uri.joinPath(this._extensionUri, 'dist', 'media', 'chat.js')
     );
     const styleUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this._extensionUri, 'media', 'chat.css')
+      vscode.Uri.joinPath(this._extensionUri, 'dist', 'media', 'chat.css')
     );
     const iconUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this._extensionUri, 'media', 'moby.png')
+      vscode.Uri.joinPath(this._extensionUri, 'dist', 'media', 'moby.png')
     );
 
     return `
@@ -1299,7 +1322,7 @@ Now provide your final response based on what you learned. Do NOT attempt to use
                     <path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 13A6 6 0 1 1 8 2a6 6 0 0 1 0 12zm-.5-3h1v1h-1v-1zm.5-7a2.5 2.5 0 0 0-2.5 2.5h1A1.5 1.5 0 1 1 8 8c-.55 0-1 .45-1 1v1h1v-.8c0-.11.09-.2.2-.2h.3a2.5 2.5 0 0 0 0-5z"/>
                   </svg>
                 </button>
-                <button id="attachBtn" class="grid-btn attach-btn" title="Attach image">
+                <button id="attachBtn" class="grid-btn attach-btn" title="Attach file">
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
                     <path d="M4.5 3a2.5 2.5 0 0 1 5 0v9a1.5 1.5 0 0 1-3 0V5a.5.5 0 0 1 1 0v7a.5.5 0 0 0 1 0V3a1.5 1.5 0 1 0-3 0v9a2.5 2.5 0 0 0 5 0V5a.5.5 0 0 1 1 0v7a3.5 3.5 0 1 1-7 0V3z"/>
                   </svg>
@@ -1333,7 +1356,7 @@ Now provide your final response based on what you learned. Do NOT attempt to use
                 rows="1"
               ></textarea>
             </div>
-            <input type="file" id="fileInput" accept="image/*" style="display: none" multiple>
+            <input type="file" id="fileInput" accept=".js,.ts,.jsx,.tsx,.py,.java,.go,.rs,.cpp,.c,.h,.cs,.rb,.php,.swift,.kt,.scala,.vue,.svelte,.json,.yaml,.yml,.toml,.xml,.env,.ini,.conf,.md,.txt,.rst,.log,.html,.css,.scss,.less,.sh,.bash,.zsh,.sql,.graphql,.proto" style="display: none" multiple>
             <div id="attachments" class="attachments"></div>
           </div>
         </div>

@@ -254,10 +254,10 @@ export class ChatHistoryViewProvider implements vscode.WebviewViewProvider {
 
   private getHtmlForWebview(webview: vscode.Webview): string {
     const scriptUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this._extensionUri, 'media', 'history.js')
+      vscode.Uri.joinPath(this._extensionUri, 'dist', 'media', 'history.js')
     );
     const styleUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this._extensionUri, 'media', 'history.css')
+      vscode.Uri.joinPath(this._extensionUri, 'dist', 'media', 'history.css')
     );
 
     return `

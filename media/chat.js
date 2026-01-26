@@ -260,20 +260,23 @@
   function handleFileSelect(e) {
     const files = Array.from(e.target.files);
     files.forEach(file => {
-      if (file.type.startsWith('image/')) {
-        const reader = new FileReader();
-        reader.onload = (event) => {
-          const base64 = event.target.result.split(',')[1];
-          const attachment = {
-            base64,
-            mimeType: file.type,
-            name: file.name
-          };
-          pendingAttachments.push(attachment);
-          renderAttachmentPreview(attachment);
+      // Read text files
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const content = event.target.result;
+        const attachment = {
+          content,
+          name: file.name,
+          size: file.size
         };
-        reader.readAsDataURL(file);
-      }
+        pendingAttachments.push(attachment);
+        renderAttachmentPreview(attachment);
+        updateSendButtonState();
+      };
+      reader.onerror = () => {
+        showToast(`Failed to read file: ${file.name}`, 'error');
+      };
+      reader.readAsText(file);
     });
     // Clear input so same file can be selected again
     fileInput.value = '';
@@ -282,9 +285,13 @@
   // Render attachment preview
   function renderAttachmentPreview(attachment) {
     const preview = document.createElement('div');
-    preview.className = 'attachment-preview';
+    preview.className = 'attachment-preview file-attachment';
+    const ext = attachment.name.split('.').pop().toLowerCase();
+    const sizeKB = (attachment.size / 1024).toFixed(1);
     preview.innerHTML = `
-      <img src="data:${attachment.mimeType};base64,${attachment.base64}" alt="${attachment.name}">
+      <span class="file-icon">📄</span>
+      <span class="file-name" title="${attachment.name}">${attachment.name}</span>
+      <span class="file-size">${sizeKB}KB</span>
       <button class="attachment-remove" title="Remove">×</button>
     `;
     preview.querySelector('.attachment-remove').addEventListener('click', () => {
@@ -293,6 +300,7 @@
         pendingAttachments.splice(idx, 1);
       }
       preview.remove();
+      updateSendButtonState();
     });
     attachmentsContainer.appendChild(preview);
   }
@@ -376,11 +384,11 @@
     const message = messageInput.value.trim();
     if ((!message && pendingAttachments.length === 0) || isStreaming) return;
 
-    // Add user message to UI immediately (with images)
+    // Add user message to UI immediately (with file names)
     addMessage({
       role: 'user',
       content: message,
-      images: pendingAttachments.map(a => `data:${a.mimeType};base64,${a.base64}`)
+      files: pendingAttachments.map(a => a.name)
     });
 
     messageInput.value = '';
@@ -408,23 +416,17 @@
 
     messageEl.appendChild(roleEl);
 
-    // Display images if present
-    if (message.images && message.images.length > 0) {
-      const imagesEl = document.createElement('div');
-      imagesEl.className = 'message-images';
-      message.images.forEach(imgSrc => {
-        const img = document.createElement('img');
-        img.src = imgSrc;
-        img.className = 'message-image';
-        img.title = 'Click to view full size';
-        img.addEventListener('click', () => {
-          // Open image in new window/tab
-          const win = window.open();
-          win.document.write(`<img src="${imgSrc}" style="max-width:100%">`);
-        });
-        imagesEl.appendChild(img);
+    // Display attached files if present
+    if (message.files && message.files.length > 0) {
+      const filesEl = document.createElement('div');
+      filesEl.className = 'message-files';
+      message.files.forEach(fileName => {
+        const fileEl = document.createElement('span');
+        fileEl.className = 'message-file-tag';
+        fileEl.innerHTML = `📄 ${escapeHtml(fileName)}`;
+        filesEl.appendChild(fileEl);
       });
-      messageEl.appendChild(imagesEl);
+      messageEl.appendChild(filesEl);
     }
 
     // Add reasoning content if present (for deepseek-reasoner)
@@ -729,9 +731,7 @@
   // Commands modal
   const commands = [
     { section: 'Chat' },
-    { id: 'startChat', name: 'Open Chat', desc: 'Open the chat panel', icon: '💬' },
     { id: 'newChat', name: 'New Chat', desc: 'Start a new conversation', icon: '✨' },
-    { id: 'switchModel', name: 'Switch Model', desc: 'Change AI model', icon: '🔄' },
     { section: 'History' },
     { id: 'showChatHistory', name: 'Show History', desc: 'View chat history', icon: '📚' },
     { id: 'exportChatHistory', name: 'Export History', desc: 'Export all chats', icon: '📤' },
@@ -824,7 +824,7 @@
       <div class="web-search-modal-content">
         <div class="web-search-option">
           <label>Searches per prompt: <span id="searchCountValue">${webSearchSettings.searchesPerPrompt}</span></label>
-          <input type="range" id="searchCountSlider" min="1" max="5" step="1" value="${webSearchSettings.searchesPerPrompt}">
+          <input type="range" id="searchCountSlider" min="1" max="20" step="1" value="${webSearchSettings.searchesPerPrompt}">
         </div>
         <div class="web-search-option">
           <label>Search depth:</label>

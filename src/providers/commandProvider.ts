@@ -182,9 +182,11 @@ export class CommandProvider {
   async switchModel() {
     const currentModel = this.config.get<string>('model');
     const newModel = currentModel === 'deepseek-chat' ? 'deepseek-reasoner' : 'deepseek-chat';
-    
+
+    // Set model immediately on client (VS Code config has propagation delay)
+    this.deepSeekClient.setModel(newModel);
     await this.config.update('model', newModel);
-    
+
     vscode.window.showInformationMessage(`Switched to ${newModel} model`);
     this.statusBar.updateModel(newModel);
   }
