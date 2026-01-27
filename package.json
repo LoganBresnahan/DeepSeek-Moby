@@ -1,6 +1,6 @@
 {
-  "name": "deepseek-coder",
-  "displayName": "DeepSeek Coder",
+  "name": "deepseek-moby",
+  "displayName": "DeepSeek Moby",
   "description": "Official DeepSeek AI assistant for VS Code with perfect formatting and chat history",
   "version": "1.0.0",
   "publisher": "deepseek",
@@ -115,6 +115,32 @@
           "type": "boolean",
           "default": true,
           "description": "Automatically save chat history"
+        },
+        "deepseek.tavilyApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Your Tavily API key for web search (get from tavily.com)",
+          "scope": "application"
+        },
+        "deepseek.tavilySearchesPerPrompt": {
+          "type": "number",
+          "default": 1,
+          "minimum": 1,
+          "maximum": 20,
+          "description": "Number of web searches allowed per prompt request"
+        },
+        "deepseek.tavilySearchDepth": {
+          "type": "string",
+          "default": "basic",
+          "enum": [
+            "basic",
+            "advanced"
+          ],
+          "enumDescriptions": [
+            "Basic search (1 credit per search)",
+            "Advanced search with deeper content extraction (2 credits per search)"
+          ],
+          "description": "Tavily search depth mode"
         }
       }
     },
@@ -126,32 +152,32 @@
       },
       {
         "command": "deepseek.explainCode",
-        "title": "DeepSeek Moby: Explain This Code",
+        "title": "[Experimental] DeepSeek Moby: Explain This Code",
         "category": "DeepSeek Moby"
       },
       {
         "command": "deepseek.refactorCode",
-        "title": "DeepSeek Moby: Refactor This Code",
+        "title": "[Experimental] DeepSeek Moby: Refactor This Code",
         "category": "DeepSeek Moby"
       },
       {
         "command": "deepseek.documentCode",
-        "title": "DeepSeek Moby: Add Documentation",
+        "title": "[Experimental] DeepSeek Moby: Add Documentation",
         "category": "DeepSeek Moby"
       },
       {
         "command": "deepseek.fixBugs",
-        "title": "DeepSeek Moby: Find and Fix Bugs",
+        "title": "[Experimental] DeepSeek Moby: Find and Fix Bugs",
         "category": "DeepSeek Moby"
       },
       {
         "command": "deepseek.optimizeCode",
-        "title": "DeepSeek Moby: Optimize Performance",
+        "title": "[Experimental] DeepSeek Moby: Optimize Performance",
         "category": "DeepSeek Moby"
       },
       {
         "command": "deepseek.generateTests",
-        "title": "DeepSeek Moby: Generate Tests",
+        "title": "[Experimental] DeepSeek Moby: Generate Tests",
         "category": "DeepSeek Moby"
       },
       {
@@ -166,7 +192,7 @@
       },
       {
         "command": "deepseek.insertCode",
-        "title": "DeepSeek Moby: Insert Generated Code",
+        "title": "[Experimental] DeepSeek Moby: Insert Generated Code",
         "category": "DeepSeek Moby"
       },
       {
@@ -301,9 +327,10 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run package",
-    "compile": "webpack",
-    "watch": "webpack --watch",
-    "package": "webpack --mode production --devtool hidden-source-map",
+    "build:media": "node scripts/build-media.js",
+    "compile": "npm run build:media && webpack",
+    "watch": "npm run build:media && webpack --watch",
+    "package": "npm run build:media && webpack --mode production --devtool hidden-source-map",
     "compile-tests": "tsc -p . --outDir out",
     "watch-tests": "tsc -p . -w --outDir out",
     "pretest": "npm run compile-tests && npm run compile",
@@ -315,7 +342,7 @@
     "@types/vscode": "^1.85.0",
     "@typescript-eslint/eslint-plugin": "^6.13.1",
     "@typescript-eslint/parser": "^6.13.1",
-    "esbuild": "^0.19.8",
+    "esbuild": "^0.19.12",
     "eslint": "^8.54.0",
     "glob": "^10.3.10",
     "ts-loader": "^9.5.1",

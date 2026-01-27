@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { ChatHistoryManager } from '../chatHistory/ChatHistoryManager';
 import { ChatProvider } from '../providers/chatProvider';
 import { DeepSeekClient } from '../deepseekClient';
+import { TavilyClient } from '../clients/tavilyClient';
 
 export class ChatHistoryViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'deepseek-history-view';
@@ -9,16 +10,19 @@ export class ChatHistoryViewProvider implements vscode.WebviewViewProvider {
   private chatHistoryManager: ChatHistoryManager;
   private chatProvider: ChatProvider;
   private deepSeekClient: DeepSeekClient;
+  private tavilyClient: TavilyClient;
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
     chatHistoryManager: ChatHistoryManager,
     chatProvider: ChatProvider,
-    deepSeekClient: DeepSeekClient
+    deepSeekClient: DeepSeekClient,
+    tavilyClient: TavilyClient
   ) {
     this.chatHistoryManager = chatHistoryManager;
     this.chatProvider = chatProvider;
     this.deepSeekClient = deepSeekClient;
+    this.tavilyClient = tavilyClient;
     
     // Listen for session changes
     this.chatHistoryManager.onSessionsChangedEvent(() => {
@@ -207,11 +211,26 @@ export class ChatHistoryViewProvider implements vscode.WebviewViewProvider {
       // Silently fail if balance fetch fails
     }
 
+    // Get Tavily search stats (local tracking)
+    const tavilyStats = this.tavilyClient.getUsageStats();
+
+    // Get real Tavily API usage (from /usage endpoint)
+    let tavilyApiUsage = null;
+    if (this.tavilyClient.isConfigured()) {
+      try {
+        tavilyApiUsage = await this.tavilyClient.getApiUsage();
+      } catch (e) {
+        // Silently fail if API usage fetch fails
+      }
+    }
+
     if (this._view) {
       this._view.webview.postMessage({
         type: 'statsLoaded',
         stats,
-        balance
+        balance,
+        tavilyStats,
+        tavilyApiUsage
       });
     }
   }
@@ -219,6 +238,11 @@ export class ChatHistoryViewProvider implements vscode.WebviewViewProvider {
   public async showStatsModal() {
     // Reveal the history view first to ensure webview is available
     this.reveal();
+
+    // Show loading state first
+    if (this._view) {
+      this._view.webview.postMessage({ type: 'statsLoading' });
+    }
 
     // Get stats and send to webview
     await this.getStats();
@@ -230,10 +254,10 @@ export class ChatHistoryViewProvider implements vscode.WebviewViewProvider {
 
   private getHtmlForWebview(webview: vscode.Webview): string {
     const scriptUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this._extensionUri, 'media', 'history.js')
+      vscode.Uri.joinPath(this._extensionUri, 'dist', 'media', 'history.js')
     );
     const styleUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this._extensionUri, 'media', 'history.css')
+      vscode.Uri.joinPath(this._extensionUri, 'dist', 'media', 'history.css')
     );
 
     return `

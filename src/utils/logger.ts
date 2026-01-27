@@ -118,6 +118,28 @@ class Logger {
     this.info(`Diff shown: ${file}`);
   }
 
+  // Web search events (Tavily)
+  public webSearchRequest(query: string, searchDepth: string) {
+    this.info(`🌐 Web search: "${query}"`, `Depth: ${searchDepth}`);
+  }
+
+  public webSearchResult(resultCount: number, durationMs: number) {
+    const duration = (durationMs / 1000).toFixed(2);
+    this.info(`🌐 Web search complete: ${resultCount} results in ${duration}s`);
+  }
+
+  public webSearchCached(query: string) {
+    this.info(`🌐 Web search (cached): "${query}"`);
+  }
+
+  public webSearchError(error: string) {
+    this.error(`🌐 Web search failed: ${error}`);
+  }
+
+  public webSearchCacheCleared() {
+    this.info('🌐 Web search cache cleared');
+  }
+
   // Show the output channel
   public show() {
     this.outputChannel.show(true);

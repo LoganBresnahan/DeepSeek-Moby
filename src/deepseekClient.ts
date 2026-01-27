@@ -82,6 +82,7 @@ export class DeepSeekClient {
   private config: ConfigManager;
   private context: vscode.ExtensionContext;
   private conversationHistory: Message[] = [];
+  private modelOverride: string | null = null;
 
   constructor(context: vscode.ExtensionContext) {
     this.context = context;
@@ -118,7 +119,13 @@ export class DeepSeekClient {
   }
 
   getModel(): string {
-    return this.config.get<string>('model') || 'deepseek-chat';
+    // Use override if set (for immediate model changes before config propagates)
+    return this.modelOverride ?? this.config.get<string>('model') ?? 'deepseek-chat';
+  }
+
+  setModel(model: string): void {
+    // Set override for immediate effect, VS Code config may have propagation delay
+    this.modelOverride = model;
   }
 
   isReasonerModel(): boolean {

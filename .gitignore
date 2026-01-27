@@ -34,3 +34,9 @@ coverage/
 *.tmp
 *.temp
 .cache/
+
+# Anthropic
+.claude/*
+
+# Me
+PLAN.md

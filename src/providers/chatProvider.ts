@@ -9,6 +9,7 @@ import { DiffEngine } from '../utils/diff';
 import { logger } from '../utils/logger';
 import { workspaceTools, executeToolCall } from '../tools/workspaceTools';
 import { parseDSMLToolCalls, stripDSML } from '../utils/dsmlParser';
+import { TavilyClient, TavilySearchResponse } from '../clients/tavilyClient';
 
 export class ChatProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'deepseek-chat-view';
@@ -22,17 +23,26 @@ export class ChatProvider implements vscode.WebviewViewProvider {
   private diffEngine: DiffEngine;
   private activeDiffUri: vscode.Uri | null = null;
   private disposables: vscode.Disposable[] = [];
+  private tavilyClient: TavilyClient;
+  private webSearchEnabled: boolean = false;
+  private webSearchSettings: { searchesPerPrompt: number; searchDepth: 'basic' | 'advanced' } = {
+    searchesPerPrompt: 1,
+    searchDepth: 'basic'
+  };
+  private searchCache: Map<string, { results: string; timestamp: number }> = new Map();
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
     deepSeekClient: DeepSeekClient,
     statusBar: StatusBar,
-    chatHistoryManager: ChatHistoryManager
+    chatHistoryManager: ChatHistoryManager,
+    tavilyClient: TavilyClient
   ) {
     this.deepSeekClient = deepSeekClient;
     this.statusBar = statusBar;
     this.chatHistoryManager = chatHistoryManager;
     this.diffEngine = new DiffEngine();
+    this.tavilyClient = tavilyClient;
 
     // Load current session
     this.loadCurrentSession();
@@ -117,6 +127,18 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         case 'executeCommand':
           vscode.commands.executeCommand(data.command);
           break;
+        case 'toggleWebSearch':
+          this.toggleWebSearch(data.enabled);
+          break;
+        case 'updateWebSearchSettings':
+          this.updateWebSearchSettings(data.settings);
+          break;
+        case 'getWebSearchSettings':
+          this.sendWebSearchSettings();
+          break;
+        case 'clearSearchCache':
+          this.clearSearchCache();
+          break;
       }
     });
 
@@ -135,6 +157,9 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     if (this._view) {
       this._view.webview.postMessage({ type: 'clearChat' });
     }
+
+    // Clear search cache on new session
+    this.searchCache.clear();
 
     // Create a new session for fresh conversation
     const editor = vscode.window.activeTextEditor;
@@ -163,6 +188,8 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     const config = vscode.workspace.getConfiguration('deepseek');
 
     if (settings.model !== undefined) {
+      // Set model immediately on client (VS Code config has propagation delay)
+      this.deepSeekClient.setModel(settings.model);
       await config.update('model', settings.model, vscode.ConfigurationTarget.Global);
       logger.modelChanged(settings.model);
     }
@@ -194,7 +221,68 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async handleUserMessage(message: string, attachments?: Array<{base64: string, mimeType: string, name: string}>) {
+  private toggleWebSearch(enabled: boolean) {
+    this.webSearchEnabled = enabled;
+    if (enabled && !this.tavilyClient.isConfigured()) {
+      this._view?.webview.postMessage({
+        type: 'warning',
+        message: 'Tavily API key not configured. Please set it in VS Code settings (deepseek.tavilyApiKey).'
+      });
+      this.webSearchEnabled = false;
+      this._view?.webview.postMessage({ type: 'webSearchToggled', enabled: false });
+      return;
+    }
+    this._view?.webview.postMessage({ type: 'webSearchToggled', enabled });
+  }
+
+  private updateWebSearchSettings(settings: { searchesPerPrompt?: number; searchDepth?: 'basic' | 'advanced' }) {
+    if (settings.searchesPerPrompt !== undefined) {
+      this.webSearchSettings.searchesPerPrompt = settings.searchesPerPrompt;
+    }
+    if (settings.searchDepth !== undefined) {
+      this.webSearchSettings.searchDepth = settings.searchDepth;
+    }
+  }
+
+  private sendWebSearchSettings() {
+    this._view?.webview.postMessage({
+      type: 'webSearchSettings',
+      enabled: this.webSearchEnabled,
+      settings: this.webSearchSettings,
+      configured: this.tavilyClient.isConfigured()
+    });
+  }
+
+  private clearSearchCache() {
+    this.searchCache.clear();
+    logger.webSearchCacheCleared();
+    this._view?.webview.postMessage({
+      type: 'searchCacheCleared'
+    });
+  }
+
+  private formatSearchResults(response: TavilySearchResponse): string {
+    let output = `Web search results for: "${response.query}"\n`;
+    output += '─'.repeat(50) + '\n\n';
+
+    if (response.answer) {
+      output += `Summary: ${response.answer}\n\n`;
+    }
+
+    for (const result of response.results.slice(0, 5)) {
+      output += `**${result.title}**\n`;
+      output += `URL: ${result.url}\n`;
+      output += `${result.content.substring(0, 500)}${result.content.length > 500 ? '...' : ''}\n\n`;
+    }
+
+    return output;
+  }
+
+  public getTavilyClient(): TavilyClient {
+    return this.tavilyClient;
+  }
+
+  private async handleUserMessage(message: string, attachments?: Array<{content: string, name: string, size: number}>) {
     if (!this._view) {
       return;
     }
@@ -224,7 +312,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     const editorContext = await this.getEditorContext();
     const isReasonerModel = this.deepSeekClient.isReasonerModel();
 
-    let systemPrompt = `You are DeepSeek Coder, an expert programming assistant integrated into VS Code.
+    let systemPrompt = `You are DeepSeek Moby, an expert programming assistant integrated into VS Code.
 `;
 
     // Only add tool instructions for non-reasoner models (reasoner can't use tools)
@@ -272,6 +360,67 @@ The context lines (existing_method, another_existing_method) help locate where t
       systemPrompt += `\n${editorContext}`;
     }
 
+    // Auto web search if enabled (search BEFORE DeepSeek, not via tool calls)
+    let webSearchContext = '';
+    if (this.webSearchEnabled && this.tavilyClient.isConfigured()) {
+      const cacheKey = message.toLowerCase().trim();
+      const cached = this.searchCache.get(cacheKey);
+
+      if (cached) {
+        // Use cached results
+        webSearchContext = cached.results;
+        logger.webSearchCached(message);
+        this._view?.webview.postMessage({ type: 'webSearchCached' });
+      } else {
+        try {
+          // Show searching indicator
+          this._view?.webview.postMessage({ type: 'webSearching' });
+          logger.webSearchRequest(message, this.webSearchSettings.searchDepth);
+
+          const searchStartTime = Date.now();
+          const searchResults = await this.tavilyClient.search(message, {
+            searchDepth: this.webSearchSettings.searchDepth
+          });
+          webSearchContext = this.formatSearchResults(searchResults);
+          logger.webSearchResult(searchResults.results.length, Date.now() - searchStartTime);
+
+          // Cache the results
+          this.searchCache.set(cacheKey, {
+            results: webSearchContext,
+            timestamp: Date.now()
+          });
+
+          this._view?.webview.postMessage({ type: 'webSearchComplete' });
+        } catch (error: any) {
+          logger.webSearchError(error.message);
+          this._view?.webview.postMessage({
+            type: 'warning',
+            message: `Web search failed: ${error.message}`
+          });
+        }
+      }
+    }
+
+    // Add search results to system prompt with context for LLM
+    if (webSearchContext) {
+      const today = new Date().toLocaleDateString('en-US', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric'
+      });
+      systemPrompt += `
+
+--- CURRENT WEB SEARCH RESULTS (${today}) ---
+The following are real-time web search results. Use this information to answer questions
+about current events, dates, times, news, or anything requiring up-to-date information.
+Do NOT say you lack access to current information - these results ARE current.
+
+${webSearchContext}
+--- END WEB SEARCH RESULTS ---
+`;
+    }
+
     // Start streaming response
     let fullResponse = '';
     let fullReasoning = '';
@@ -287,14 +436,14 @@ The context lines (existing_method, another_existing_method) help locate where t
 
     // Log the API request
     const model = this.deepSeekClient.getModel();
-    const hasImages = attachments && attachments.length > 0;
+    const hasAttachments = attachments && attachments.length > 0;
     const requestStartTime = Date.now();
 
     try {
       // Get current session messages for context (user message already saved above)
       const currentSession = await this.chatHistoryManager.getCurrentSession();
       const messageCount = currentSession ? currentSession.messages.length : 1;
-      logger.apiRequest(model, messageCount, hasImages);
+      logger.apiRequest(model, messageCount, hasAttachments);
 
       // Build messages array - handle multimodal content if attachments present
       const historyMessages: ApiMessage[] = [];
@@ -307,14 +456,23 @@ The context lines (existing_method, another_existing_method) help locate where t
         }
       }
 
-      // If this message has attachments, show warning (DeepSeek chat models don't support vision yet)
+      // If this message has file attachments, include their contents in the context
       if (attachments && attachments.length > 0) {
-        // DeepSeek's standard models don't support vision
-        // Show a warning but still send the text message
-        this._view?.webview.postMessage({
-          type: 'warning',
-          message: 'Note: DeepSeek chat models do not currently support image analysis. Your text message will be sent without the images.'
-        });
+        // Build file context to prepend to the last user message
+        let fileContext = '\n\n--- Attached Files ---\n';
+        for (const attachment of attachments) {
+          const content = attachment.content || '';
+          fileContext += `\n### File: ${attachment.name}\n\`\`\`\n${content}\n\`\`\`\n`;
+        }
+        fileContext += '--- End Attached Files ---\n';
+
+        // Append file context to the last user message
+        if (historyMessages.length > 0) {
+          const lastMsg = historyMessages[historyMessages.length - 1];
+          if (lastMsg.role === 'user') {
+            lastMsg.content = lastMsg.content + fileContext;
+          }
+        }
       }
 
       // Tool calling loop (only for non-reasoner models)
@@ -396,9 +554,21 @@ Now provide your final response based on what you learned. Do NOT attempt to use
       }
       // Log the error
       logger.error(error.message, error.stack);
+
+      // Check if error is related to context length and provide helpful message about attachments
+      let errorMessage = error.message;
+      const lowerMessage = errorMessage.toLowerCase();
+      if (lowerMessage.includes('context') || lowerMessage.includes('token') || lowerMessage.includes('length') || lowerMessage.includes('too long')) {
+        const totalAttachmentSize = attachments ? attachments.reduce((sum, a) => sum + (a.content?.length || 0), 0) : 0;
+        if (totalAttachmentSize > 0) {
+          const sizeKB = (totalAttachmentSize / 1024).toFixed(1);
+          errorMessage = `Context limit exceeded. Your attached files total ${sizeKB}KB - try attaching smaller or fewer files.`;
+        }
+      }
+
       this._view.webview.postMessage({
         type: 'error',
-        error: error.message
+        error: errorMessage
       });
     } finally {
       this.abortController = null;
@@ -434,11 +604,14 @@ Now provide your final response based on what you learned. Do NOT attempt to use
         break;
       }
 
+      // Build tools array (web search is now handled before this loop, not as a tool)
+      const tools = workspaceTools;
+
       // Make a non-streaming call with tools
       const response = await this.deepSeekClient.chat(
         [...messages, ...toolMessages],
         systemPrompt,
-        { tools: workspaceTools }
+        { tools }
       );
 
       // Check for DSML-formatted tool calls in content (DeepSeek Chat uses this format
@@ -528,6 +701,7 @@ Now provide your final response based on what you learned. Do NOT attempt to use
           detail: detail.detail
         });
 
+        // Execute tool
         const result = await executeToolCall(toolCall);
         const success = !result.startsWith('Error:');
         logger.toolResult(toolCall.function.name, success);
@@ -1085,13 +1259,13 @@ Now provide your final response based on what you learned. Do NOT attempt to use
 
   private getHtmlForWebview(webview: vscode.Webview): string {
     const scriptUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this._extensionUri, 'media', 'chat.js')
+      vscode.Uri.joinPath(this._extensionUri, 'dist', 'media', 'chat.js')
     );
     const styleUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this._extensionUri, 'media', 'chat.css')
+      vscode.Uri.joinPath(this._extensionUri, 'dist', 'media', 'chat.css')
     );
     const iconUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this._extensionUri, 'media', 'moby.png')
+      vscode.Uri.joinPath(this._extensionUri, 'dist', 'media', 'moby.png')
     );
 
     return `
@@ -1148,12 +1322,12 @@ Now provide your final response based on what you learned. Do NOT attempt to use
                     <path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 13A6 6 0 1 1 8 2a6 6 0 0 1 0 12zm-.5-3h1v1h-1v-1zm.5-7a2.5 2.5 0 0 0-2.5 2.5h1A1.5 1.5 0 1 1 8 8c-.55 0-1 .45-1 1v1h1v-.8c0-.11.09-.2.2-.2h.3a2.5 2.5 0 0 0 0-5z"/>
                   </svg>
                 </button>
-                <button id="attachBtn" class="grid-btn attach-btn" title="Attach image">
+                <button id="attachBtn" class="grid-btn attach-btn" title="Attach file">
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
                     <path d="M4.5 3a2.5 2.5 0 0 1 5 0v9a1.5 1.5 0 0 1-3 0V5a.5.5 0 0 1 1 0v7a.5.5 0 0 0 1 0V3a1.5 1.5 0 1 0-3 0v9a2.5 2.5 0 0 0 5 0V5a.5.5 0 0 1 1 0v7a3.5 3.5 0 1 1-7 0V3z"/>
                   </svg>
                 </button>
-                <button id="searchBtn" class="grid-btn search-btn" title="Web search (coming soon)">
+                <button id="searchBtn" class="grid-btn search-btn" title="Web search">
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
                     <!-- Globe circle -->
                     <circle cx="6" cy="6" r="5.5" fill="none" stroke="currentColor" stroke-width="1"/>
@@ -1182,7 +1356,7 @@ Now provide your final response based on what you learned. Do NOT attempt to use
                 rows="1"
               ></textarea>
             </div>
-            <input type="file" id="fileInput" accept="image/*" style="display: none" multiple>
+            <input type="file" id="fileInput" accept=".js,.ts,.jsx,.tsx,.py,.java,.go,.rs,.cpp,.c,.h,.cs,.rb,.php,.swift,.kt,.scala,.vue,.svelte,.json,.yaml,.yml,.toml,.xml,.env,.ini,.conf,.md,.txt,.rst,.log,.html,.css,.scss,.less,.sh,.bash,.zsh,.sql,.graphql,.proto" style="display: none" multiple>
             <div id="attachments" class="attachments"></div>
           </div>
         </div>

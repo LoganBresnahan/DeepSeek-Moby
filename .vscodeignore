@@ -1,6 +1,7 @@
 .vscode/**
 .vscode-test/**
 src/**
+scripts/**
 .gitignore
 .yarnrc
 .vscode
@@ -11,3 +12,5 @@ package-lock.json
 yarn.lock
 *.ts
 !*.d.ts
+media/*.js
+media/*.css

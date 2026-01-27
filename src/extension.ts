@@ -7,6 +7,7 @@ import { StatusBar } from './views/statusBar';
 import { ConfigManager } from './utils/config';
 import { ChatHistoryManager } from './chatHistory/ChatHistoryManager';
 import { ChatHistoryViewProvider } from './views/ChatHistoryViewProvider';
+import { TavilyClient } from './clients/tavilyClient';
 import { logger } from './utils/logger';
 
 let chatProvider: ChatProvider;
@@ -16,6 +17,7 @@ let statusBar: StatusBar;
 let deepSeekClient: DeepSeekClient;
 let chatHistoryManager: ChatHistoryManager;
 let chatHistoryViewProvider: ChatHistoryViewProvider;
+let tavilyClient: TavilyClient;
 
 export async function activate(context: vscode.ExtensionContext) {
   console.log('DeepSeek Moby extension is now active!');
@@ -31,13 +33,17 @@ export async function activate(context: vscode.ExtensionContext) {
   
   // Initialize status bar
   statusBar = new StatusBar(context, deepSeekClient, chatHistoryManager);
-  
+
+  // Initialize Tavily client for web search
+  tavilyClient = new TavilyClient(context);
+
   // Initialize chat provider (sidebar)
   chatProvider = new ChatProvider(
-    context.extensionUri, 
-    deepSeekClient, 
+    context.extensionUri,
+    deepSeekClient,
     statusBar,
-    chatHistoryManager
+    chatHistoryManager,
+    tavilyClient
   );
   
   // Initialize chat history view provider
@@ -45,7 +51,8 @@ export async function activate(context: vscode.ExtensionContext) {
     context.extensionUri,
     chatHistoryManager,
     chatProvider,
-    deepSeekClient
+    deepSeekClient,
+    tavilyClient
   );
   
   // Initialize completion provider (inline suggestions)
