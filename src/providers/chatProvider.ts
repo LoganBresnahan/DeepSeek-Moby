@@ -334,26 +334,40 @@ USE THESE TOOLS to understand the codebase before making suggestions. When the u
 
     systemPrompt += `
 IMPORTANT - When writing code changes:
-1. Include 2-3 UNCHANGED context lines BEFORE and AFTER your changes (this helps locate where to insert)
-2. Keep the same indentation style as the existing code
-3. For NEW methods/functions, include the surrounding class/module definition line as context
-4. Do NOT include "# File:" headers unless replacing the entire file
-5. Preserve existing code structure - only show the parts that change plus context
 
-Example of good code output (adding a new method):
-\`\`\`ruby
+**For EDITING existing code**, output a SINGLE code block with SEARCH/REPLACE format:
+
+\`\`\`
+<<<<<<< SEARCH
+def example(x)
+  return x + 1
+end
+=======
+def example(x)
+  return x * 2
+end
+>>>>>>> REPLACE
+\`\`\`
+
+CRITICAL RULES:
+1. The <<<<<<< SEARCH, =======, and >>>>>>> REPLACE markers MUST be INSIDE the code block
+2. Output ONE code block containing the entire search/replace - NOT separate "before" and "after" blocks
+3. Copy the EXACT code from the file for the SEARCH section (including whitespace and comments)
+4. Do NOT explain the change outside the code block - put everything in ONE code block
+5. The user clicks "Apply" on the code block and it automatically replaces the matching code
+
+**For ADDING new code** (new functions, methods), include surrounding context:
+\`\`\`
   def existing_method
-    # existing code here
+    # existing code
   end
 
   def new_method_i_am_adding
-    # new code
+    # new code here
   end
 
   def another_existing_method
 \`\`\`
-
-The context lines (existing_method, another_existing_method) help locate where to insert the new code.
 
 `;
     if (editorContext) {
@@ -1029,30 +1043,34 @@ Now provide your final response based on what you learned. Do NOT attempt to use
   }
 
   private async closeDiffEditor() {
-    // Close any diff editors with our scheme
-    if (this.activeDiffUri) {
-      // Find and close tabs with deepseek-diff scheme
-      const tabsToClose: vscode.Tab[] = [];
+    // Find and close tabs with deepseek-diff scheme (always check, not just when activeDiffUri is set)
+    const tabsToClose: vscode.Tab[] = [];
 
-      for (const tabGroup of vscode.window.tabGroups.all) {
-        for (const tab of tabGroup.tabs) {
-          // Check if this is a diff tab (TabInputTextDiff has original and modified)
-          const input = tab.input as any;
-          if (input?.original?.scheme === 'deepseek-diff' ||
-              input?.modified?.scheme === 'deepseek-diff') {
-            tabsToClose.push(tab);
-          }
+    for (const tabGroup of vscode.window.tabGroups.all) {
+      for (const tab of tabGroup.tabs) {
+        // Check if this is a diff tab (TabInputTextDiff has original and modified)
+        const input = tab.input as any;
+        if (input?.original?.scheme === 'deepseek-diff' ||
+            input?.modified?.scheme === 'deepseek-diff') {
+          tabsToClose.push(tab);
         }
       }
-
-      // Close all found diff tabs
-      for (const tab of tabsToClose) {
-        await vscode.window.tabGroups.close(tab);
-      }
-
-      this.activeDiffUri = null;
-      this.notifyDiffClosed();
     }
+
+    // Close all found diff tabs
+    if (tabsToClose.length > 0) {
+      logger.info(`Closing ${tabsToClose.length} diff tab(s)`);
+      for (const tab of tabsToClose) {
+        try {
+          await vscode.window.tabGroups.close(tab);
+        } catch (e) {
+          // Tab might already be closed
+        }
+      }
+    }
+
+    this.activeDiffUri = null;
+    this.notifyDiffClosed();
   }
 
   private async showDiff(code: string, language: string) {
