@@ -140,6 +140,38 @@ export const webSearchTool: Tool = {
   }
 };
 
+// Apply code edit tool - for chat model only (reasoner can't use tools)
+// Provides structured output with guaranteed file path
+export const applyCodeEditTool: Tool = {
+  type: 'function',
+  function: {
+    name: 'apply_code_edit',
+    description: 'Apply code changes to a specific file. Use this when you want to edit or update code in a file. This ensures the file path is correctly specified.',
+    parameters: {
+      type: 'object',
+      properties: {
+        file: {
+          type: 'string',
+          description: 'The relative path to the file to edit (e.g., "src/index.ts", "CHANGELOG.md")'
+        },
+        code: {
+          type: 'string',
+          description: 'The code content to apply. Use SEARCH/REPLACE format for edits or full content for new code.'
+        },
+        language: {
+          type: 'string',
+          description: 'The programming language of the code (e.g., "typescript", "javascript", "markdown")'
+        },
+        description: {
+          type: 'string',
+          description: 'Brief description of what this edit does'
+        }
+      },
+      required: ['file', 'code']
+    }
+  }
+};
+
 /**
  * Execute a tool call and return the result
  */
@@ -176,6 +208,11 @@ export async function executeToolCall(toolCall: ToolCall): Promise<string> {
 
       case 'get_file_info':
         return await getFileInfo(workspacePath, args.path);
+
+      case 'apply_code_edit':
+        // This tool doesn't execute anything - it's for signaling edit intent with structured file path
+        // The file path tracking happens in chatProvider.ts
+        return `Acknowledged: Code edit for file "${args.file}" will be applied. ${args.description || ''}`;
 
       default:
         return `Error: Unknown function "${functionName}"`;

@@ -119,7 +119,12 @@ function registerCommands(context: vscode.ExtensionContext) {
     { name: 'searchChatHistory', handler: () => commandProvider.searchChatHistory() },
     { name: 'exportCurrentSession', handler: () => commandProvider.exportCurrentSession() },
     { name: 'showStats', handler: () => chatHistoryViewProvider.showStatsModal() },
-    { name: 'showLogs', handler: () => logger.show() }
+    { name: 'showLogs', handler: () => logger.show() },
+
+    // Diff quick pick command
+    { name: 'showDiffQuickPick', handler: async () => {
+      await chatProvider.showDiffQuickPick();
+    }}
   ];
 
   commands.forEach(({ name, handler }) => {

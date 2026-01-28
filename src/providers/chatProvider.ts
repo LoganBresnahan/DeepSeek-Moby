@@ -7,9 +7,18 @@ import { StatusBar } from '../views/statusBar';
 import { ChatHistoryManager } from '../chatHistory/ChatHistoryManager';
 import { DiffEngine } from '../utils/diff';
 import { logger } from '../utils/logger';
-import { workspaceTools, executeToolCall } from '../tools/workspaceTools';
+import { workspaceTools, applyCodeEditTool, executeToolCall } from '../tools/workspaceTools';
 import { parseDSMLToolCalls, stripDSML } from '../utils/dsmlParser';
 import { TavilyClient, TavilySearchResponse } from '../clients/tavilyClient';
+
+interface DiffMetadata {
+  proposedUri: vscode.Uri;        // The "modified" side of the diff
+  originalUri: vscode.Uri;        // The "original" side of the diff
+  targetFilePath: string;         // Actual file path (e.g., "src/file.ts")
+  code: string;                   // Full code including "# File:" header
+  language: string;               // Language identifier
+  timestamp: number;              // When this diff was created
+}
 
 export class ChatProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'deepseek-chat-view';
@@ -21,7 +30,10 @@ export class ChatProvider implements vscode.WebviewViewProvider {
   private lastActiveEditorUri: vscode.Uri | null = null;
   private abortController: AbortController | null = null;
   private diffEngine: DiffEngine;
-  private activeDiffUri: vscode.Uri | null = null;
+  private activeDiffs: Map<string, DiffMetadata> = new Map();
+  private diffTabGroupId: number | null = null;
+  private diffCleanupTimer: NodeJS.Timeout | null = null;
+  private diffStatusBarItem: vscode.StatusBarItem;
   private disposables: vscode.Disposable[] = [];
   private tavilyClient: TavilyClient;
   private webSearchEnabled: boolean = false;
@@ -30,6 +42,18 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     searchDepth: 'basic'
   };
   private searchCache: Map<string, { results: string; timestamp: number }> = new Map();
+  // Edit mode state
+  private editMode: 'manual' | 'ask' | 'auto' = 'manual';
+  private processedCodeBlocks = new Set<string>();
+
+  // Debouncing state for ask mode (reduces duplicate diffs when LLM iterates)
+  private pendingDiffs = new Map<string, { code: string; language: string; timer: NodeJS.Timeout }>();
+
+  // File tracking state
+  private selectedFiles = new Map<string, string>(); // path → content (user-selected files)
+  private readFilesInTurn = new Set<string>(); // Track ALL files read by LLM during conversation turn
+  private userMessageIntent: string | null = null; // Extracted file intent from user message
+  private fileModalOpen = false; // Track whether file selection modal is open
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
@@ -44,20 +68,120 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     this.diffEngine = new DiffEngine();
     this.tavilyClient = tavilyClient;
 
+    // Create status bar item for diff tracking
+    this.diffStatusBarItem = vscode.window.createStatusBarItem(
+      vscode.StatusBarAlignment.Left,
+      100 // Priority: higher = more to the left
+    );
+    this.diffStatusBarItem.command = 'deepseek.showDiffQuickPick';
+    this.diffStatusBarItem.tooltip = 'Click to review pending diffs';
+    this.disposables.push(this.diffStatusBarItem);
+
     // Load current session
     this.loadCurrentSession();
 
     // Track when diff editors are closed
     this.disposables.push(
       vscode.window.onDidChangeVisibleTextEditors((editors) => {
-        if (this.activeDiffUri) {
-          // Check if our diff editor is still visible
-          const diffStillOpen = editors.some(e =>
-            e.document.uri.scheme === 'deepseek-diff'
-          );
-          if (!diffStillOpen) {
-            this.activeDiffUri = null;
-            this.notifyDiffClosed();
+        logger.info(`[OVERLAY-DEBUG] onDidChangeVisibleTextEditors fired with ${editors.length} editors`);
+
+        // Log all editor URIs for debugging
+        for (const editor of editors) {
+          logger.info(`[OVERLAY-DEBUG] Editor URI: ${editor.document.uri.toString()}, scheme: ${editor.document.uri.scheme}`);
+        }
+
+        // Check which diffs are still open
+        const openDiffUris = new Set<string>();
+        for (const editor of editors) {
+          if (editor.document.uri.scheme === 'deepseek-diff') {
+            openDiffUris.add(editor.document.uri.toString());
+          }
+        }
+        logger.info(`[OVERLAY-DEBUG] Currently tracking ${this.activeDiffs.size} diffs`);
+        logger.info(`[OVERLAY-DEBUG] Found ${openDiffUris.size} visible diff editors`);
+
+        // Clear any pending cleanup timer
+        if (this.diffCleanupTimer) {
+          logger.info(`[OVERLAY-DEBUG] Cancelling previous cleanup timer`);
+          clearTimeout(this.diffCleanupTimer);
+          this.diffCleanupTimer = null;
+        }
+
+        // Find closed diffs
+        const closedDiffs: string[] = [];
+        for (const [uriKey, metadata] of this.activeDiffs.entries()) {
+          const proposedVisible = openDiffUris.has(metadata.proposedUri.toString());
+          const originalVisible = openDiffUris.has(metadata.originalUri.toString());
+
+          logger.info(`[OVERLAY-DEBUG] Checking ${metadata.targetFilePath}: proposed=${proposedVisible}, original=${originalVisible}`);
+
+          if (!proposedVisible && !originalVisible) {
+            closedDiffs.push(uriKey);
+            logger.info(`[OVERLAY-DEBUG] Marking ${metadata.targetFilePath} for potential removal`);
+          }
+        }
+
+        if (closedDiffs.length > 0) {
+          // Debounce the removal - wait 300ms before actually removing
+          // This handles race conditions when switching between diff tabs
+          logger.info(`[OVERLAY-DEBUG] Scheduling cleanup of ${closedDiffs.length} diffs in 300ms`);
+          this.diffCleanupTimer = setTimeout(() => {
+            logger.info(`[OVERLAY-DEBUG] Cleanup timer fired - removing ${closedDiffs.length} diffs`);
+            for (const uriKey of closedDiffs) {
+              this.activeDiffs.delete(uriKey);
+            }
+            this.updateDiffStatusBar();
+            this.notifyDiffListChanged();
+            this.diffCleanupTimer = null;
+          }, 300);
+        } else {
+          logger.info(`[OVERLAY-DEBUG] No diffs to remove`);
+        }
+      })
+    );
+
+    // Track when active editor changes (to update which diff is active)
+    this.disposables.push(
+      vscode.window.onDidChangeActiveTextEditor((editor) => {
+        if (!editor || !this._view) return;
+
+        // Check if the active editor is a diff editor
+        if (editor.document.uri.scheme === 'deepseek-diff') {
+          // Find which diff this corresponds to
+          const uriString = editor.document.uri.toString();
+
+          for (const [key, metadata] of this.activeDiffs.entries()) {
+            if (metadata.proposedUri.toString() === uriString ||
+                metadata.originalUri.toString() === uriString) {
+              // Notify frontend which diff is now active
+              this._view.webview.postMessage({
+                type: 'activeDiffChanged',
+                filePath: metadata.targetFilePath
+              });
+              logger.info(`[ChatProvider] Active diff changed to: ${metadata.targetFilePath}`);
+              break;
+            }
+          }
+        }
+      })
+    );
+
+    // Track when new files are opened (for live modal updates)
+    this.disposables.push(
+      vscode.workspace.onDidOpenTextDocument((document) => {
+        // If file modal is open, send updated open files list
+        if (this.fileModalOpen) {
+          const validSchemes = ['file', 'vscode-remote'];
+          if (validSchemes.includes(document.uri.scheme) && !document.isClosed) {
+            const relativePath = vscode.workspace.asRelativePath(document.uri);
+
+            // Skip VS Code internal files
+            if (!relativePath.startsWith('extension-output-') &&
+                !relativePath.includes('[') &&
+                !document.isUntitled) {
+              logger.info(`[ChatProvider] File opened while modal open: ${relativePath} - refreshing list`);
+              this.sendOpenFiles();
+            }
           }
         }
       })
@@ -72,6 +196,22 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     if (this._view) {
       this._view.webview.postMessage({ type: 'diffClosed' });
     }
+  }
+
+  private notifyDiffListChanged() {
+    if (!this._view) return;
+
+    // Convert Map to array for frontend
+    const diffList = Array.from(this.activeDiffs.values()).map(meta => ({
+      filePath: meta.targetFilePath,
+      timestamp: meta.timestamp,
+      proposedUri: meta.proposedUri.toString()
+    }));
+
+    this._view.webview.postMessage({
+      type: 'diffListChanged',
+      diffs: diffList
+    });
   }
 
   private async loadCurrentSession() {
@@ -138,6 +278,42 @@ export class ChatProvider implements vscode.WebviewViewProvider {
           break;
         case 'clearSearchCache':
           this.clearSearchCache();
+          break;
+        case 'setEditMode':
+          this.setEditMode(data.mode);
+          break;
+        case 'showLogs':
+          // Show the DeepSeek output channel (logs)
+          logger.show();
+          break;
+        case 'rejectEdit':
+          await this.rejectEdit(data.filePath);
+          break;
+        // REMOVED: Modal overlay message handlers (replaced with toolbar buttons)
+        // case 'acceptDiff': ...
+        // case 'rejectDiff': ...
+        // case 'acceptAllDiffs': ...
+        // case 'rejectAllDiffs': ...
+        // case 'focusDiff': ...
+        case 'getOpenFiles':
+          await this.sendOpenFiles();
+          break;
+        case 'fileModalOpened':
+          this.fileModalOpen = true;
+          logger.info('[ChatProvider] File modal opened - live updates enabled');
+          break;
+        case 'fileModalClosed':
+          this.fileModalOpen = false;
+          logger.info('[ChatProvider] File modal closed - live updates disabled');
+          break;
+        case 'searchFiles':
+          await this.handleFileSearch(data.query);
+          break;
+        case 'getFileContent':
+          await this.sendFileContent(data.filePath);
+          break;
+        case 'setSelectedFiles':
+          await this.setSelectedFiles(data.files);
           break;
       }
     });
@@ -210,6 +386,10 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     const model = config.get<string>('model') || 'deepseek-chat';
     const temperature = config.get<number>('temperature') ?? 0.7;
     const maxToolCalls = config.get<number>('maxToolCalls') ?? 25;
+    const editMode = config.get<string>('editMode') || 'manual';
+
+    // Sync internal state with config
+    this.editMode = editMode as 'manual' | 'ask' | 'auto';
 
     if (this._view) {
       this._view.webview.postMessage({
@@ -217,6 +397,11 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         model,
         temperature,
         maxToolCalls
+      });
+      // Send edit mode separately
+      this._view.webview.postMessage({
+        type: 'editModeSettings',
+        mode: editMode
       });
     }
   }
@@ -261,6 +446,158 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  private setEditMode(mode: 'manual' | 'ask' | 'auto') {
+    this.editMode = mode;
+    logger.info(`[ChatProvider] Edit mode changed to: ${mode}`);
+    // Persist to settings
+    const config = vscode.workspace.getConfiguration('deepseek');
+    config.update('editMode', mode, vscode.ConfigurationTarget.Global);
+  }
+
+  private async rejectEdit(filePath: string) {
+    logger.info(`[ChatProvider] Edit rejected for: ${filePath}`);
+    // Close diff without applying
+    await this.closeDiffEditor();
+    this._view?.webview.postMessage({ type: 'editRejected', filePath });
+  }
+
+  // ============================================
+  // FILE SELECTION METHODS
+  // ============================================
+
+  private async sendOpenFiles() {
+    const openFiles: string[] = [];
+    const allUris = new Set<string>();
+
+    // Use tab groups API to get ALL open tabs (even background/unfocused ones)
+    // This is more reliable than workspace.textDocuments which may miss deferred tabs
+    const tabGroups = vscode.window.tabGroups.all;
+    logger.info(`[ChatProvider] Scanning ${tabGroups.length} tab groups for open files`);
+
+    for (const group of tabGroups) {
+      logger.info(`[ChatProvider]   Tab group has ${group.tabs.length} tabs`);
+      for (const tab of group.tabs) {
+        if (tab.input instanceof vscode.TabInputText) {
+          const uri = tab.input.uri;
+          allUris.add(uri.toString());
+          logger.info(`[ChatProvider]     Found tab: ${vscode.workspace.asRelativePath(uri)}`);
+        }
+      }
+    }
+
+    logger.info(`[ChatProvider] Total unique file URIs from tabs: ${allUris.size}`);
+
+    // Process all unique URIs
+    for (const uriString of allUris) {
+      const uri = vscode.Uri.parse(uriString);
+      const relativePath = vscode.workspace.asRelativePath(uri);
+
+      // Log each document
+      logger.info(`[ChatProvider] Processing: ${relativePath} | scheme: ${uri.scheme}`);
+
+      // Include file and vscode-remote schemes (for WSL/SSH/containers)
+      const validSchemes = ['file', 'vscode-remote'];
+      if (!validSchemes.includes(uri.scheme)) {
+        logger.info(`[ChatProvider]   → Skipped (invalid scheme: ${uri.scheme})`);
+        continue;
+      }
+
+      // Skip VS Code internal files (output channels, debug console, etc.)
+      if (relativePath.startsWith('extension-output-') ||
+          relativePath.includes('[')) {
+        logger.info(`[ChatProvider]   → Skipped (VS Code internal file)`);
+        continue;
+      }
+
+      openFiles.push(relativePath);
+      logger.info(`[ChatProvider]   → ✓ INCLUDED in open files list`);
+    }
+
+    logger.info(`[ChatProvider] Sending ${openFiles.length} open files to frontend: ${JSON.stringify(openFiles)}`);
+    this._view?.webview.postMessage({
+      type: 'openFiles',
+      files: openFiles
+    });
+  }
+
+  private async handleFileSearch(query: string) {
+    logger.info(`[ChatProvider] File search requested: "${query}"`);
+    const results: string[] = [];
+
+    try {
+      // Use VS Code's findFiles API to search (case-sensitive by default)
+      // Convert query to glob pattern if it doesn't contain wildcards
+      let pattern = query;
+      if (!query.includes('*') && !query.includes('?')) {
+        pattern = `**/*${query}*`;
+      }
+
+      logger.info(`[ChatProvider] Searching with pattern: "${pattern}"`);
+
+      const files = await vscode.workspace.findFiles(
+        pattern,
+        '**/node_modules/**',
+        50 // Limit to 50 results
+      );
+
+      for (const file of files) {
+        const relativePath = vscode.workspace.asRelativePath(file);
+        results.push(relativePath);
+        logger.info(`[ChatProvider] Found file: ${relativePath}`);
+      }
+
+      logger.info(`[ChatProvider] File search for "${query}" returned ${results.length} results`);
+    } catch (error: any) {
+      logger.error(`[ChatProvider] File search error: ${error.message}`);
+    }
+
+    this._view?.webview.postMessage({
+      type: 'searchResults',
+      results: results
+    });
+  }
+
+  private async sendFileContent(filePath: string) {
+    try {
+      // Resolve relative path to absolute
+      const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+      if (!workspaceFolder) {
+        logger.error('[ChatProvider] No workspace folder found');
+        return;
+      }
+
+      const absolutePath = vscode.Uri.joinPath(workspaceFolder.uri, filePath);
+      const content = await vscode.workspace.fs.readFile(absolutePath);
+      const textContent = Buffer.from(content).toString('utf8');
+
+      logger.info(`[ChatProvider] Sending file content for: ${filePath} (${textContent.length} chars)`);
+
+      this._view?.webview.postMessage({
+        type: 'fileContent',
+        filePath: filePath,
+        content: textContent
+      });
+    } catch (error: any) {
+      logger.error(`[ChatProvider] Error reading file ${filePath}: ${error.message}`);
+      vscode.window.showErrorMessage(`Failed to read file: ${filePath}`);
+    }
+  }
+
+  private async setSelectedFiles(files: Array<{ path: string; content: string }>) {
+    this.selectedFiles.clear();
+
+    for (const file of files) {
+      this.selectedFiles.set(file.path, file.content);
+    }
+
+    logger.info(`[ChatProvider] Updated selected files: ${this.selectedFiles.size} files`);
+
+    // Log file paths for debugging
+    for (const path of this.selectedFiles.keys()) {
+      logger.info(`[ChatProvider]   - ${path}`);
+    }
+  }
+
   private formatSearchResults(response: TavilySearchResponse): string {
     let output = `Web search results for: "${response.query}"\n`;
     output += '─'.repeat(50) + '\n\n';
@@ -286,6 +623,15 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     if (!this._view) {
       return;
     }
+
+    // Clear processed code blocks for new conversation turn
+    this.processedCodeBlocks.clear();
+    // Clear read files tracking
+    this.readFilesInTurn.clear();
+    // Extract user intent from message (for file path inference)
+    this.userMessageIntent = this.extractFileIntent(message);
+    // Clear any pending debounced diffs
+    this.clearPendingDiffs();
 
     // Get or create current session
     if (!this.currentSessionId) {
@@ -334,6 +680,27 @@ USE THESE TOOLS to understand the codebase before making suggestions. When the u
 
     systemPrompt += `
 IMPORTANT - When writing code changes:
+
+**CRITICAL: File Path Requirement**
+You MUST include a file path comment as the FIRST LINE of EVERY code block using this EXACT format:
+
+# File: path/to/file.ext
+
+Examples:
+\`\`\`markdown
+# File: CHANGELOG.md
+## Version 2.0.0
+- New features
+\`\`\`
+
+\`\`\`typescript
+# File: src/providers/chatProvider.ts
+export function helper() {
+  return "updated";
+}
+\`\`\`
+
+This is MANDATORY. Code blocks without file paths at the first line cannot be applied correctly.
 
 **For EDITING existing code**, output a SINGLE code block with SEARCH/REPLACE format:
 
@@ -489,10 +856,33 @@ ${webSearchContext}
         }
       }
 
+      // If user has selected files for context, include them
+      if (this.selectedFiles.size > 0) {
+        let selectedFilesContext = '\n\n--- Selected Files for Context ---\n';
+        logger.info(`[ChatProvider] Injecting ${this.selectedFiles.size} selected files into context`);
+
+        for (const [filePath, content] of this.selectedFiles.entries()) {
+          selectedFilesContext += `\n### File: ${filePath}\n\`\`\`\n${content}\n\`\`\`\n`;
+          logger.info(`[ChatProvider] ✓ Added selected file to context: ${filePath} (${content.length} chars)`);
+        }
+        selectedFilesContext += '--- End Selected Files ---\n';
+
+        // Append to the last user message
+        if (historyMessages.length > 0) {
+          const lastMsg = historyMessages[historyMessages.length - 1];
+          if (lastMsg.role === 'user') {
+            lastMsg.content = lastMsg.content + selectedFilesContext;
+            logger.info(`[ChatProvider] ✓ Selected files context injected into user message`);
+          }
+        }
+      }
+
       // Tool calling loop (only for non-reasoner models)
       let streamingSystemPrompt = systemPrompt;
+      let toolCallsForHistory: Array<{ name: string; detail: string; status: string }> = [];
       if (!isReasonerModel) {
-        const { toolMessages, limitReached } = await this.runToolLoop(historyMessages, systemPrompt, signal);
+        const { toolMessages, limitReached, allToolDetails: toolDetails } = await this.runToolLoop(historyMessages, systemPrompt, signal);
+        toolCallsForHistory = toolDetails;
         // Add tool interactions to history for context
         historyMessages.push(...toolMessages);
 
@@ -511,12 +901,50 @@ Now provide your final response based on what you learned. Do NOT attempt to use
 
       const _response = await this.deepSeekClient.streamChat(
         historyMessages,
-        (token) => {
+        async (token) => {
           fullResponse += token;
           this._view?.webview.postMessage({
             type: 'streamToken',
             token
           });
+
+          // Detect complete code blocks and auto-show diff in "ask" mode
+          if (this.editMode === 'ask') {
+            const codeBlockRegex = /```(\w+)?\n([\s\S]*?)\n```/g;
+            const matches = [...fullResponse.matchAll(codeBlockRegex)];
+
+            for (const match of matches) {
+              const language = match[1] || 'plaintext';
+              const code = match[2];
+
+              // Skip tool outputs
+              if (language === 'tool-output') {
+                continue;
+              }
+
+              // IMPORTANT: Only auto-show diff if code has explicit # File: header
+              // This prevents false positives when LLM shows explanatory code
+              const hasFileHeader = /^#\s*File:\s*(.+?)$/m.test(code);
+              if (!hasFileHeader) {
+                logger.info(`[ChatProvider] Skipping auto-diff for code block without # File: header (likely explanatory code)`);
+                continue;
+              }
+
+              // Create unique identifier for this block
+              const blockId = `${match.index}-${match[0].length}`;
+
+              // Skip if already processed
+              if (this.processedCodeBlocks.has(blockId)) {
+                continue;
+              }
+
+              // Mark as processed
+              this.processedCodeBlocks.add(blockId);
+
+              // Use debounced diff display (waits 2.5s to batch rapid LLM iterations)
+              this.handleDebouncedDiff(code, language);
+            }
+          }
         },
         streamingSystemPrompt,
         // Reasoning callback for deepseek-reasoner
@@ -551,6 +979,7 @@ Now provide your final response based on what you learned. Do NOT attempt to use
           role: 'assistant',
           content: cleanResponse,
           reasoning_content: fullReasoning || undefined,
+          toolCalls: toolCallsForHistory.length > 0 ? toolCallsForHistory : undefined,
           tokens: tokenCount
         });
       }
@@ -597,7 +1026,7 @@ Now provide your final response based on what you learned. Do NOT attempt to use
     messages: ApiMessage[],
     systemPrompt: string,
     signal: AbortSignal
-  ): Promise<{ toolMessages: ApiMessage[]; limitReached: boolean }> {
+  ): Promise<{ toolMessages: ApiMessage[]; limitReached: boolean; allToolDetails: Array<{ name: string; detail: string; status: string }> }> {
     const toolMessages: ApiMessage[] = [];
     // Get max tool calls from config (100 = no limit)
     const config = vscode.workspace.getConfiguration('deepseek');
@@ -619,7 +1048,8 @@ Now provide your final response based on what you learned. Do NOT attempt to use
       }
 
       // Build tools array (web search is now handled before this loop, not as a tool)
-      const tools = workspaceTools;
+      // Add apply_code_edit tool for chat model (reasoner can't use tools)
+      const tools = [...workspaceTools, applyCodeEditTool];
 
       // Make a non-streaming call with tools
       const response = await this.deepSeekClient.chat(
@@ -720,6 +1150,51 @@ Now provide your final response based on what you learned. Do NOT attempt to use
         const success = !result.startsWith('Error:');
         logger.toolResult(toolCall.function.name, success);
 
+        // Track ALL read files for auto-diff and inference
+        if (toolCall.function.name === 'read' && success) {
+          try {
+            logger.info(`[ChatProvider] Tool arguments raw: ${toolCall.function.arguments}`);
+            const args = JSON.parse(toolCall.function.arguments);
+            logger.info(`[ChatProvider] Parsed args: ${JSON.stringify(args)}`);
+            if (args.file_path) {
+              this.readFilesInTurn.add(args.file_path);
+              logger.info(`[ChatProvider] ✓ Tracked read file: ${args.file_path} (total: ${this.readFilesInTurn.size})`);
+            } else {
+              logger.warn(`[ChatProvider] ✗ read tool called but no file_path in args`);
+            }
+          } catch (e) {
+            logger.error(`[ChatProvider] ✗ Failed to parse tool arguments: ${e}`);
+          }
+        }
+
+        // Track apply_code_edit tool calls for file path extraction
+        if (toolCall.function.name === 'apply_code_edit' && success) {
+          try {
+            logger.info(`[ChatProvider] apply_code_edit tool called - args: ${toolCall.function.arguments}`);
+            const args = JSON.parse(toolCall.function.arguments);
+            logger.info(`[ChatProvider] Parsed apply_code_edit args: ${JSON.stringify(args)}`);
+            if (args.file) {
+              this.readFilesInTurn.add(args.file);
+              logger.info(`[ChatProvider] ✓ Tracked file from apply_code_edit: ${args.file} (total tracked: ${this.readFilesInTurn.size})`);
+
+              // If in ask mode, trigger auto-diff with the code from the tool call
+              if (this.editMode === 'ask' && args.code) {
+                logger.info(`[ChatProvider] Triggering auto-diff for apply_code_edit in ask mode`);
+                // Add # File: header to the code
+                const codeWithHeader = `# File: ${args.file}\n${args.code}`;
+                const language = args.language || 'plaintext';
+
+                // Trigger auto-diff (this will open diff and show accept/reject overlay)
+                await this.handleAutoShowDiff(codeWithHeader, language);
+              }
+            } else {
+              logger.warn(`[ChatProvider] ✗ apply_code_edit called but no file in args`);
+            }
+          } catch (e) {
+            logger.error(`[ChatProvider] ✗ Failed to parse apply_code_edit arguments: ${e}`);
+          }
+        }
+
         // Add tool result to messages
         toolMessages.push({
           role: 'tool',
@@ -750,13 +1225,14 @@ Now provide your final response based on what you learned. Do NOT attempt to use
 
     const limitReached = iterations >= maxIterations && maxIterations !== Infinity;
     if (limitReached) {
+      const totalToolCalls = globalToolIndex;
       this._view?.webview.postMessage({
         type: 'warning',
-        message: `Tool calling limit (${configuredLimit}) reached. The task may require multiple requests to complete.`
+        message: `Tool iteration limit reached (${iterations} iterations, ${totalToolCalls} total tool calls). The task may require multiple requests to complete.`
       });
     }
 
-    return { toolMessages, limitReached };
+    return { toolMessages, limitReached, allToolDetails };
   }
 
   private async getEditorContext(): Promise<string> {
@@ -973,24 +1449,91 @@ Now provide your final response based on what you learned. Do NOT attempt to use
   }
 
   private async applyCode(code: string, language: string) {
-    // Strip "# File:" header if present (AI convention)
+    // NEW: Determine which diff this applies to
+    const activeEditor = vscode.window.activeTextEditor;
+    let targetMetadata: DiffMetadata | undefined;
+
+    if (activeEditor && activeEditor.document.uri.scheme === 'deepseek-diff') {
+      // User is viewing a diff - apply that one
+      const uriKey = activeEditor.document.uri.toString();
+      targetMetadata = this.activeDiffs.get(uriKey);
+
+      if (!targetMetadata) {
+        // Try to find by matching the URI on either side of diff
+        for (const [key, meta] of this.activeDiffs.entries()) {
+          if (meta.proposedUri.toString() === uriKey ||
+              meta.originalUri.toString() === uriKey) {
+            targetMetadata = meta;
+            break;
+          }
+        }
+      }
+    }
+
+    if (!targetMetadata && this.activeDiffs.size > 0) {
+      // Fallback: Use most recent diff (last in queue)
+      const diffs = Array.from(this.activeDiffs.values())
+        .sort((a, b) => b.timestamp - a.timestamp);
+      targetMetadata = diffs[0];
+      logger.info(`[ChatProvider] No active diff editor, using most recent diff: ${targetMetadata.targetFilePath}`);
+    }
+
+    // Extract file path from code or use metadata
+    const filePathMatch = code.match(/^#\s*File:\s*(.+?)$/m);
+    let targetFilePath = filePathMatch ? filePathMatch[1].trim() : null;
+
+    // If we have metadata and no explicit file path, use metadata's file path
+    if (!targetFilePath && targetMetadata) {
+      targetFilePath = targetMetadata.targetFilePath;
+      logger.info(`[ChatProvider] Using file path from diff metadata: ${targetFilePath}`);
+    }
+
+    // Strip "# File:" header
     const cleanCode = code.replace(/^#\s*File:.*\n/i, '');
 
-    // Find the target editor - prefer last tracked real file over diff view
     let editor = vscode.window.activeTextEditor;
 
-    // If current editor is a diff view or virtual doc, find the real file
-    if (editor && (editor.document.uri.scheme === 'deepseek-diff' || editor.document.uri.scheme === 'git')) {
-      // Try to find an editor with a real file
-      const realEditor = vscode.window.visibleTextEditors.find(e =>
-        e.document.uri.scheme === 'file' && !e.document.uri.path.includes('deepseek-diff')
-      );
-      if (realEditor) {
-        editor = realEditor;
-      } else if (this.lastActiveEditorUri) {
-        // Open the last known real file
-        const doc = await vscode.workspace.openTextDocument(this.lastActiveEditorUri);
-        editor = await vscode.window.showTextDocument(doc);
+    // If a specific file path is mentioned, try to find/open that file
+    if (targetFilePath) {
+      const workspaceFolders = vscode.workspace.workspaceFolders;
+      if (workspaceFolders && workspaceFolders.length > 0) {
+        let foundDoc: vscode.TextDocument | undefined;
+
+        // Try each workspace folder
+        for (const folder of workspaceFolders) {
+          const fullPath = vscode.Uri.joinPath(folder.uri, targetFilePath);
+          try {
+            foundDoc = await vscode.workspace.openTextDocument(fullPath);
+            break;
+          } catch (error) {
+            continue;
+          }
+        }
+
+        if (foundDoc) {
+          // Open the document and use it
+          editor = await vscode.window.showTextDocument(foundDoc, { preview: false });
+        } else {
+          vscode.window.showWarningMessage(`File not found in workspace: ${targetFilePath}`);
+          this.sendCodeAppliedStatus(false, `File not found: ${targetFilePath}`);
+          return;
+        }
+      }
+    } else {
+      // No file path specified - find the target editor
+      // If current editor is a diff view or virtual doc, find the real file
+      if (editor && (editor.document.uri.scheme === 'deepseek-diff' || editor.document.uri.scheme === 'git')) {
+        // Try to find an editor with a real file
+        const realEditor = vscode.window.visibleTextEditors.find(e =>
+          e.document.uri.scheme === 'file' && !e.document.uri.path.includes('deepseek-diff')
+        );
+        if (realEditor) {
+          editor = realEditor;
+        } else if (this.lastActiveEditorUri) {
+          // Open the last known real file
+          const doc = await vscode.workspace.openTextDocument(this.lastActiveEditorUri);
+          editor = await vscode.window.showTextDocument(doc);
+        }
       }
     }
 
@@ -1010,8 +1553,10 @@ Now provide your final response based on what you learned. Do NOT attempt to use
       const currentContent = document.getText();
       const selection = editor.selection;
 
-      // If there's a selection, replace it directly
-      if (!selection.isEmpty) {
+      // Only use selection replacement if:
+      // 1. We didn't explicitly open a file (no targetFilePath)
+      // 2. There's a non-empty selection
+      if (!targetFilePath && !selection.isEmpty) {
         await editor.edit((editBuilder) => {
           editBuilder.replace(selection, cleanCode);
         });
@@ -1033,8 +1578,13 @@ Now provide your final response based on what you learned. Do NOT attempt to use
 
       this.sendCodeAppliedStatus(result.success, result.success ? undefined : 'Patch applied with fallback');
 
-      // Close the diff editor and notify webview
-      await this.closeDiffEditor();
+      // Close only the specific diff if we identified it
+      if (targetMetadata) {
+        await this.closeSingleDiff(targetMetadata);
+      } else {
+        // Fallback: close all diffs (old behavior)
+        await this.closeDiffEditor();
+      }
 
     } catch (error: any) {
       logger.error('Failed to apply code', error.message);
@@ -1042,8 +1592,36 @@ Now provide your final response based on what you learned. Do NOT attempt to use
     }
   }
 
+  private async closeSingleDiff(metadata: DiffMetadata) {
+    // Find and close the tab for this specific diff
+    for (const tabGroup of vscode.window.tabGroups.all) {
+      for (const tab of tabGroup.tabs) {
+        const input = tab.input as any;
+        if (input?.original?.toString() === metadata.originalUri.toString() ||
+            input?.modified?.toString() === metadata.proposedUri.toString()) {
+          try {
+            await vscode.window.tabGroups.close(tab);
+          } catch (e) {
+            // Tab might already be closed
+          }
+          break;
+        }
+      }
+    }
+
+    // Remove from tracking
+    this.activeDiffs.delete(metadata.proposedUri.toString());
+    logger.info(`Closed diff for: ${metadata.targetFilePath}`);
+
+    // Update status bar
+    this.updateDiffStatusBar();
+
+    // Notify frontend
+    this.notifyDiffListChanged();
+  }
+
   private async closeDiffEditor() {
-    // Find and close tabs with deepseek-diff scheme (always check, not just when activeDiffUri is set)
+    // Find and close tabs with deepseek-diff scheme
     const tabsToClose: vscode.Tab[] = [];
 
     for (const tabGroup of vscode.window.tabGroups.all) {
@@ -1069,40 +1647,308 @@ Now provide your final response based on what you learned. Do NOT attempt to use
       }
     }
 
-    this.activeDiffUri = null;
-    this.notifyDiffClosed();
+    // Clear all tracked diffs
+    this.activeDiffs.clear();
+    this.diffTabGroupId = null;
+
+    // Update status bar
+    this.updateDiffStatusBar();
+
+    this.notifyDiffListChanged();
+  }
+
+  private async acceptSpecificDiff(filePath: string) {
+    const metadata = Array.from(this.activeDiffs.values())
+      .find(m => m.targetFilePath === filePath);
+
+    if (metadata) {
+      logger.info(`[ChatProvider] Accepting specific diff for: ${filePath}`);
+      await this.applyCode(metadata.code, metadata.language);
+    } else {
+      logger.warn(`[ChatProvider] No diff found for: ${filePath}`);
+    }
+  }
+
+  private async rejectSpecificDiff(filePath: string) {
+    const metadata = Array.from(this.activeDiffs.values())
+      .find(m => m.targetFilePath === filePath);
+
+    if (metadata) {
+      logger.info(`[ChatProvider] Rejecting specific diff for: ${filePath}`);
+      await this.closeSingleDiff(metadata);
+    } else {
+      logger.warn(`[ChatProvider] No diff found for: ${filePath}`);
+    }
+  }
+
+  private async acceptAllDiffs() {
+    // Apply in chronological order (oldest first)
+    const sorted = Array.from(this.activeDiffs.values())
+      .sort((a, b) => a.timestamp - b.timestamp);
+
+    logger.info(`[ChatProvider] Accepting all ${sorted.length} diffs`);
+
+    for (const meta of sorted) {
+      await this.applyCode(meta.code, meta.language);
+    }
+  }
+
+  private async rejectAllDiffs() {
+    // Create copy since closeSingleDiff modifies the map
+    const allDiffs = Array.from(this.activeDiffs.values());
+
+    logger.info(`[ChatProvider] Rejecting all ${allDiffs.length} diffs`);
+
+    for (const meta of allDiffs) {
+      await this.closeSingleDiff(meta);
+    }
+  }
+
+  private async focusSpecificDiff(filePath: string) {
+    const metadata = Array.from(this.activeDiffs.values())
+      .find(m => m.targetFilePath === filePath);
+
+    if (!metadata) {
+      logger.warn(`[ChatProvider] No diff found for: ${filePath}`);
+      return;
+    }
+
+    // Re-open the diff to bring it to front
+    await vscode.commands.executeCommand('vscode.diff',
+      metadata.originalUri,
+      metadata.proposedUri,
+      `${filePath} ↔ With Changes`
+    );
+
+    logger.info(`[ChatProvider] Focused diff for: ${filePath}`);
+  }
+
+  /**
+   * Updates the status bar item to show current diff count
+   */
+  private updateDiffStatusBar(): void {
+    const diffCount = this.activeDiffs.size;
+
+    if (diffCount === 0) {
+      this.diffStatusBarItem.hide();
+    } else {
+      const plural = diffCount === 1 ? 'diff' : 'diffs';
+      this.diffStatusBarItem.text = `$(diff) DeepSeek: ${diffCount} ${plural}`;
+      this.diffStatusBarItem.backgroundColor = new vscode.ThemeColor(
+        'statusBarItem.warningBackground'
+      );
+      this.diffStatusBarItem.show();
+    }
+  }
+
+  /**
+   * Shows quick pick menu for managing diffs
+   */
+  public async showDiffQuickPick(): Promise<void> {
+    if (this.activeDiffs.size === 0) {
+      vscode.window.showInformationMessage('No pending diffs');
+      return;
+    }
+
+    // Group diffs by file path
+    const diffsByFile = new Map<string, DiffMetadata[]>();
+
+    for (const [key, meta] of this.activeDiffs.entries()) {
+      const filePath = meta.targetFilePath;
+      if (!diffsByFile.has(filePath)) {
+        diffsByFile.set(filePath, []);
+      }
+      diffsByFile.get(filePath)!.push(meta);
+    }
+
+    // Create quick pick items
+    interface DiffQuickPickItem extends vscode.QuickPickItem {
+      metadata: DiffMetadata;
+      action?: 'accept' | 'reject';
+    }
+
+    const items: DiffQuickPickItem[] = [];
+
+    for (const [filePath, metas] of diffsByFile.entries()) {
+      const fileName = path.basename(filePath);
+      const diffCount = metas.length;
+      const label = diffCount > 1
+        ? `$(file) ${fileName} (${diffCount} diffs)`
+        : `$(file) ${fileName}`;
+
+      // Add item for each diff
+      for (let i = 0; i < metas.length; i++) {
+        const meta = metas[i];
+        const itemLabel = diffCount > 1 ? `  ${label} - Diff ${i + 1}` : label;
+
+        items.push({
+          label: itemLabel,
+          description: path.dirname(filePath),
+          detail: `Created ${this.formatTimestamp(meta.timestamp)}`,
+          metadata: meta,
+          buttons: [
+            {
+              iconPath: new vscode.ThemeIcon('check'),
+              tooltip: 'Accept changes'
+            },
+            {
+              iconPath: new vscode.ThemeIcon('close'),
+              tooltip: 'Reject changes'
+            }
+          ]
+        });
+      }
+    }
+
+    // Show quick pick
+    const quickPick = vscode.window.createQuickPick<DiffQuickPickItem>();
+    quickPick.items = items;
+    quickPick.placeholder = 'Select a diff to review (Enter to focus, click buttons to accept/reject)';
+    quickPick.matchOnDescription = true;
+    quickPick.matchOnDetail = true;
+
+    // Handle item selection (Enter key or click)
+    quickPick.onDidAccept(async () => {
+      const selected = quickPick.selectedItems[0];
+      if (selected) {
+        // Focus the diff editor
+        await this.focusDiff(selected.metadata);
+      }
+    });
+
+    // Handle button clicks (Accept/Reject)
+    quickPick.onDidTriggerItemButton(async (e) => {
+      const item = e.item;
+      const button = e.button;
+
+      if (button.tooltip === 'Accept changes') {
+        await this.acceptSpecificDiff(item.metadata.targetFilePath);
+        logger.info(`[QuickPick] Accepted diff for ${item.metadata.targetFilePath}`);
+      } else if (button.tooltip === 'Reject changes') {
+        await this.rejectSpecificDiff(item.metadata.targetFilePath);
+        logger.info(`[QuickPick] Rejected diff for ${item.metadata.targetFilePath}`);
+      }
+
+      // Refresh the quick pick items
+      const remainingItems = quickPick.items.filter(i =>
+        i.metadata.targetFilePath !== item.metadata.targetFilePath
+      );
+
+      if (remainingItems.length === 0) {
+        quickPick.hide();
+        vscode.window.showInformationMessage('All diffs processed!');
+      } else {
+        quickPick.items = remainingItems;
+      }
+    });
+
+    quickPick.show();
+  }
+
+  /**
+   * Focuses a specific diff editor
+   */
+  private async focusDiff(metadata: DiffMetadata): Promise<void> {
+    // Find the diff editor tab
+    for (const tabGroup of vscode.window.tabGroups.all) {
+      for (const tab of tabGroup.tabs) {
+        if (tab.input instanceof vscode.TabInputTextDiff) {
+          // Check if this is our diff
+          if (tab.input.modified.toString() === metadata.proposedUri.toString()) {
+            // Focus this tab
+            await vscode.window.showTextDocument(metadata.proposedUri, {
+              viewColumn: tabGroup.viewColumn,
+              preview: false
+            });
+            return;
+          }
+        }
+      }
+    }
+
+    logger.warn(`[ChatProvider] Could not find diff editor for ${metadata.targetFilePath}`);
+  }
+
+  /**
+   * Formats timestamp for display
+   */
+  private formatTimestamp(timestamp: number): string {
+    const now = Date.now();
+    const diffMs = now - timestamp;
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMs / 3600000);
+
+    if (diffMins < 1) return 'just now';
+    if (diffMins < 60) return `${diffMins}m ago`;
+    if (diffHours < 24) return `${diffHours}h ago`;
+    return new Date(timestamp).toLocaleString();
   }
 
   private async showDiff(code: string, language: string) {
-    let editor = vscode.window.activeTextEditor;
+    // Extract file path from "# File:" header if present
+    const filePathMatch = code.match(/^#\s*File:\s*(.+?)$/m);
+    const targetFilePath = filePathMatch ? filePathMatch[1].trim() : null;
 
-    // If current editor isn't a file (e.g., diff view is active), try to use the last tracked editor
-    if (!editor || editor.document.uri.scheme !== 'file') {
-      if (this.lastActiveEditorUri) {
-        // Try to find the editor with our tracked URI
-        const existingDoc = vscode.workspace.textDocuments.find(
-          doc => doc.uri.toString() === this.lastActiveEditorUri?.toString()
-        );
-        if (existingDoc) {
-          // Use the existing document
-          editor = { document: existingDoc } as vscode.TextEditor;
+    let editor = vscode.window.activeTextEditor;
+    let document: vscode.TextDocument | undefined;
+
+    // If a specific file path is mentioned, try to find/open that file
+    if (targetFilePath) {
+      // Try to find the file in workspace
+      const workspaceFolders = vscode.workspace.workspaceFolders;
+      if (workspaceFolders && workspaceFolders.length > 0) {
+        // Try each workspace folder
+        for (const folder of workspaceFolders) {
+          const fullPath = vscode.Uri.joinPath(folder.uri, targetFilePath);
+          try {
+            // Check if file exists and open it (don't show in editor, just load the document)
+            document = await vscode.workspace.openTextDocument(fullPath);
+            // Update tracked editor URI for later use
+            this.lastActiveEditorUri = document.uri;
+            break;
+          } catch (error) {
+            // File not found in this workspace folder, try next
+            continue;
+          }
+        }
+
+        if (!document) {
+          vscode.window.showWarningMessage(`File not found in workspace: ${targetFilePath}`);
+          return;
+        }
+      } else {
+        vscode.window.showWarningMessage('No workspace folder open');
+        return;
+      }
+    } else {
+      // No file path specified - use active editor
+      // If current editor isn't a file (e.g., diff view is active), try to use the last tracked editor
+      if (!editor || editor.document.uri.scheme !== 'file') {
+        if (this.lastActiveEditorUri) {
+          // Try to find the editor with our tracked URI
+          const existingDoc = vscode.workspace.textDocuments.find(
+            doc => doc.uri.toString() === this.lastActiveEditorUri?.toString()
+          );
+          if (existingDoc) {
+            document = existingDoc;
+          } else {
+            vscode.window.showWarningMessage('No active editor to compare with');
+            return;
+          }
         } else {
           vscode.window.showWarningMessage('No active editor to compare with');
           return;
         }
       } else {
-        vscode.window.showWarningMessage('No active editor to compare with');
-        return;
+        // Track this editor so Apply can find it later
+        this.lastActiveEditorUri = editor.document.uri;
+        document = editor.document;
       }
-    } else {
-      // Track this editor so Apply can find it later
-      this.lastActiveEditorUri = editor.document.uri;
     }
 
     try {
-      const document = editor.document;
       const originalContent = document.getText();
-      const selection = editor.selection;
+      const selection = editor?.selection;
 
       // Strip "# File:" header if present
       const cleanCode = code.replace(/^#\s*File:.*\n/i, '');
@@ -1110,7 +1956,10 @@ Now provide your final response based on what you learned. Do NOT attempt to use
       // Create the proposed content by applying the code to the current file
       let proposedContent: string;
 
-      if (selection && !selection.isEmpty) {
+      // Only use selection replacement if:
+      // 1. We didn't explicitly open a file (no targetFilePath)
+      // 2. There's an active editor with a non-empty selection
+      if (!targetFilePath && selection && !selection.isEmpty && editor) {
         // If there's a selection, replace it
         const before = originalContent.substring(0, document.offsetAt(selection.start));
         const after = originalContent.substring(document.offsetAt(selection.end));
@@ -1144,17 +1993,77 @@ Now provide your final response based on what you learned. Do NOT attempt to use
 
       const disposable = vscode.workspace.registerTextDocumentContentProvider('deepseek-diff', provider);
 
-      // Show diff editor
+      // Show diff editor in dedicated tab group
       const fileName = document.fileName.split('/').pop() || 'file';
-      await vscode.commands.executeCommand('vscode.diff',
-        originalUri,
-        proposedUri,
-        `${fileName} ↔ With Changes (Review & close to cancel)`
-      );
 
-      // Track that we have an active diff
-      this.activeDiffUri = proposedUri;
+      // Find or create dedicated diff tab group
+      let diffTabGroup: vscode.TabGroup | undefined;
+
+      // Check if we have a tracked diff tab group that still exists
+      if (this.diffTabGroupId !== null) {
+        diffTabGroup = vscode.window.tabGroups.all.find(g => g.viewColumn === this.diffTabGroupId);
+      }
+
+      // If no existing diff tab group, create one by splitting to the right
+      if (!diffTabGroup) {
+        // Get the rightmost tab group to split from
+        const rightmostGroup = vscode.window.tabGroups.all
+          .reduce((max, g) => (!max || (g.viewColumn ?? 0) > (max.viewColumn ?? 0)) ? g : max,
+                  vscode.window.tabGroups.all[0]);
+
+        // Calculate the new view column (to the right)
+        const newViewColumn = (rightmostGroup?.viewColumn ?? vscode.ViewColumn.One) + 1;
+
+        // Open diff in new column (splits to the right)
+        // Use preview: false to ensure it opens as a permanent tab
+        await vscode.commands.executeCommand('vscode.diff',
+          originalUri,
+          proposedUri,
+          `${fileName} ↔ With Changes`,
+          {
+            viewColumn: newViewColumn,
+            preview: false,
+            preserveFocus: true
+          }
+        );
+
+        // Track the new diff tab group
+        this.diffTabGroupId = newViewColumn;
+        logger.info(`Created new diff tab group at view column ${newViewColumn}`);
+      } else {
+        // Open diff in existing diff tab group as a NEW TAB
+        // CRITICAL: Use preview: false to prevent replacing existing diffs
+        await vscode.commands.executeCommand('vscode.diff',
+          originalUri,
+          proposedUri,
+          `${fileName} ↔ With Changes`,
+          {
+            viewColumn: diffTabGroup.viewColumn,
+            preview: false,
+            preserveFocus: true
+          }
+        );
+        logger.info(`Opened new diff tab in existing group at view column ${diffTabGroup.viewColumn}`);
+      }
+
+      // Track this diff in the Map
+      const metadata: DiffMetadata = {
+        proposedUri,
+        originalUri,
+        targetFilePath: targetFilePath || vscode.workspace.asRelativePath(document.uri),
+        code,
+        language,
+        timestamp
+      };
+
+      this.activeDiffs.set(proposedUri.toString(), metadata);
       logger.diffShown(fileName);
+
+      // Update status bar
+      this.updateDiffStatusBar();
+
+      // Notify frontend of updated diff list
+      this.notifyDiffListChanged();
 
       // Clean up provider after a delay
       setTimeout(() => disposable.dispose(), 300000); // 5 minutes
@@ -1165,23 +2074,260 @@ Now provide your final response based on what you learned. Do NOT attempt to use
     }
   }
 
-  private async closeDiff() {
-    // Close any diff editor that's currently open
-    if (this.activeDiffUri) {
-      // Find and close the diff editor tab
-      for (const group of vscode.window.tabGroups.all) {
-        for (const tab of group.tabs) {
-          if (tab.input instanceof vscode.TabInputTextDiff) {
-            const diffInput = tab.input as vscode.TabInputTextDiff;
-            if (diffInput.modified.scheme === 'deepseek-diff' || diffInput.original.scheme === 'deepseek-diff') {
-              await vscode.window.tabGroups.close(tab);
-              break;
-            }
+  /**
+   * Clears all pending debounced diffs
+   */
+  private clearPendingDiffs(): void {
+    for (const [filePath, pending] of this.pendingDiffs.entries()) {
+      clearTimeout(pending.timer);
+      logger.info(`[ChatProvider] Cleared pending diff timer for ${filePath}`);
+    }
+    this.pendingDiffs.clear();
+  }
+
+  /**
+   * Handles debounced diff display for ask mode.
+   * Waits 2.5 seconds after the last code block for the same file before showing the diff.
+   * This batches rapid LLM iterations (e.g., "oh wait, let me update that again").
+   */
+  private handleDebouncedDiff(code: string, language: string): void {
+    // Extract file path from code
+    const filePathMatch = code.match(/^#\s*File:\s*(.+?)$/m);
+    const filePath = filePathMatch ? filePathMatch[1].trim() : 'unknown';
+
+    logger.info(`[ChatProvider] Debouncing diff for ${filePath} (2.5s delay)`);
+
+    // Check if there's already a pending diff for this file
+    const existing = this.pendingDiffs.get(filePath);
+
+    if (existing) {
+      // Clear the old timer
+      clearTimeout(existing.timer);
+      logger.info(`[ChatProvider] Replaced pending diff for ${filePath} (LLM iteration detected)`);
+    }
+
+    // Create new timer
+    const timer = setTimeout(async () => {
+      logger.info(`[ChatProvider] Debounce timer expired for ${filePath}, showing diff now`);
+      this.pendingDiffs.delete(filePath);
+      await this.handleAutoShowDiff(code, language);
+    }, 2500); // 2.5 second debounce
+
+    // Store the pending diff
+    this.pendingDiffs.set(filePath, { code, language, timer });
+  }
+
+  private async handleAutoShowDiff(code: string, language: string) {
+    try {
+      logger.info(`[ChatProvider] Starting auto-show diff (language: ${language}, editMode: ${this.editMode})`);
+
+      // Layer 1: Extract explicit file path from code (# File: header)
+      logger.info(`[FileResolver] Strategy 0: Checking # File: header in code...`);
+      const filePathMatch = code.match(/^#\s*File:\s*(.+?)$/m);
+      let filePath = filePathMatch ? filePathMatch[1].trim() : null;
+
+      if (filePath) {
+        logger.info(`[FileResolver] ✓ Strategy 0 SUCCESS: Found # File: header "${filePath}"`);
+      } else {
+        logger.warn(`[FileResolver] ✗ Strategy 0 FAILED: No # File: header found`);
+
+        // Layer 2-6: Use multi-layer resolution (inference + interactive fallback)
+        filePath = await this.resolveFilePath(code, language);
+
+        if (filePath) {
+          // Inject the resolved file path into the code
+          code = `# File: ${filePath}\n${code}`;
+          logger.info(`[ChatProvider] Injected inferred file path: ${filePath}`);
+        } else {
+          logger.error(`[ChatProvider] Could not determine target file - skipping auto-diff`);
+          vscode.window.showWarningMessage(
+            'Could not determine which file to edit. Please add a "# File: path" comment to the code block.'
+          );
+          return;
+        }
+      }
+
+      // Auto-show the diff
+      logger.info(`[ChatProvider] Opening diff editor for file: ${filePath}`);
+      await this.showDiff(code, language);
+
+      // Send confirmation request to frontend (for ask mode)
+      this._view?.webview.postMessage({
+        type: 'showEditConfirm',
+        filePath,
+        code,
+        language
+      });
+
+      logger.info(`[ChatProvider] ✓ Auto-showed diff for "${filePath}" in ask mode`);
+    } catch (error: any) {
+      logger.error('[ChatProvider] Failed to auto-show diff:', error.message);
+      vscode.window.showErrorMessage(`Failed to show diff: ${error.message}`);
+    }
+  }
+
+  /**
+   * Extract file intent from user's message
+   * Returns file path if user explicitly mentioned a file to edit
+   */
+  private extractFileIntent(message: string): string | null {
+    const patterns = [
+      // "update the changelog" -> CHANGELOG.md
+      { regex: /(?:update|edit|modify|change|fix)\s+(?:the\s+)?(changelog)/i, file: 'CHANGELOG.md' },
+      { regex: /(?:update|edit|modify|change|fix)\s+(?:the\s+)?(readme)/i, file: 'README.md' },
+      { regex: /(?:update|edit|modify|change|fix)\s+(?:the\s+)?(package\.json|package)/i, file: 'package.json' },
+
+      // "edit src/utils/helper.ts" - captures full path
+      { regex: /(?:update|edit|modify|change|fix)\s+(\S+\.\w+)/i, file: '$1' }
+    ];
+
+    for (const { regex, file } of patterns) {
+      const match = message.match(regex);
+      if (match) {
+        const resolved = file.startsWith('$') ? match[1] : file;
+        logger.info(`[FileResolver] Extracted file intent from message: "${resolved}"`);
+        return resolved;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Infer file path from context when # File: header is missing
+   * Uses multiple strategies with detailed logging
+   */
+  private inferFilePath(code: string, language: string): string | null {
+    logger.info(`[FileResolver] Starting file path inference (language: ${language})`);
+
+    // Strategy 1: Check user's message intent
+    logger.info(`[FileResolver] Strategy 1: Checking user message intent...`);
+    if (this.userMessageIntent) {
+      logger.info(`[FileResolver] ✓ Strategy 1 SUCCESS: Using file intent "${this.userMessageIntent}"`);
+      return this.userMessageIntent;
+    } else {
+      logger.warn(`[FileResolver] ✗ Strategy 1 FAILED: No user intent extracted`);
+    }
+
+    // Strategy 2: Check selected files
+    logger.info(`[FileResolver] Strategy 2: Checking selected files (${this.selectedFiles.size} selected)...`);
+    if (this.selectedFiles.size === 1) {
+      const file = Array.from(this.selectedFiles.keys())[0];
+      logger.info(`[FileResolver] ✓ Strategy 2 SUCCESS: Single selected file "${file}"`);
+      return file;
+    } else if (this.selectedFiles.size > 1) {
+      logger.warn(`[FileResolver] ✗ Strategy 2 FAILED: Multiple files selected (${this.selectedFiles.size})`);
+    } else {
+      logger.warn(`[FileResolver] ✗ Strategy 2 FAILED: No files selected`);
+    }
+
+    // Strategy 3: Check read files - single file rule
+    logger.info(`[FileResolver] Strategy 3: Checking read files (${this.readFilesInTurn.size} read)...`);
+    if (this.readFilesInTurn.size === 1) {
+      const file = Array.from(this.readFilesInTurn)[0];
+      logger.info(`[FileResolver] ✓ Strategy 3 SUCCESS: Single read file "${file}"`);
+      return file;
+    } else if (this.readFilesInTurn.size > 1) {
+      logger.warn(`[FileResolver] ✗ Strategy 3 FAILED: Multiple files read (${this.readFilesInTurn.size})`);
+    } else {
+      logger.warn(`[FileResolver] ✗ Strategy 3 FAILED: No files read`);
+    }
+
+    // Strategy 4: Match by language/extension
+    logger.info(`[FileResolver] Strategy 4: Matching by extension for language "${language}"...`);
+    const extMap: Record<string, string[]> = {
+      markdown: ['.md'],
+      typescript: ['.ts', '.tsx'],
+      javascript: ['.js', '.jsx'],
+      python: ['.py'],
+      json: ['.json'],
+      css: ['.css'],
+      html: ['.html']
+    };
+
+    const extensions = extMap[language] || [];
+    if (extensions.length > 0) {
+      // Check selected files first
+      if (this.selectedFiles.size > 0) {
+        for (const file of this.selectedFiles.keys()) {
+          if (extensions.some(ext => file.endsWith(ext))) {
+            logger.info(`[FileResolver] ✓ Strategy 4 SUCCESS: Matched selected file by extension "${file}"`);
+            return file;
           }
         }
       }
-      this.activeDiffUri = null;
+
+      // Then check read files
+      if (this.readFilesInTurn.size > 0) {
+        for (const file of this.readFilesInTurn) {
+          if (extensions.some(ext => file.endsWith(ext))) {
+            logger.info(`[FileResolver] ✓ Strategy 4 SUCCESS: Matched read file by extension "${file}"`);
+            return file;
+          }
+        }
+      }
+
+      logger.warn(`[FileResolver] ✗ Strategy 4 FAILED: No files match extensions ${extensions.join(', ')}`);
+    } else {
+      logger.warn(`[FileResolver] ✗ Strategy 4 FAILED: Unknown language "${language}"`);
     }
+
+    logger.warn(`[FileResolver] All inference strategies failed`);
+    return null;
+  }
+
+  /**
+   * Resolve file path using inference + interactive fallback
+   * Returns null if unable to determine file
+   */
+  private async resolveFilePath(code: string, language: string): Promise<string | null> {
+    // Try inference first
+    const inferred = this.inferFilePath(code, language);
+    if (inferred) {
+      return inferred;
+    }
+
+    // Strategy 5: Interactive quick picker as last resort
+    logger.info(`[FileResolver] Strategy 5: Showing interactive quick picker...`);
+    const availableFiles = Array.from(new Set([
+      ...this.selectedFiles.keys(),
+      ...this.readFilesInTurn
+    ]));
+
+    if (availableFiles.length > 1) {
+      const selected = await vscode.window.showQuickPick(availableFiles, {
+        placeHolder: 'Which file should these changes apply to?',
+        title: 'Select target file for code changes'
+      });
+
+      if (selected) {
+        logger.info(`[FileResolver] ✓ Strategy 5 SUCCESS: User selected "${selected}"`);
+        return selected;
+      } else {
+        logger.warn(`[FileResolver] ✗ Strategy 5 FAILED: User cancelled selection`);
+      }
+    } else {
+      logger.warn(`[FileResolver] ✗ Strategy 5 FAILED: No available files to choose from`);
+    }
+
+    // Fallback: Use active editor if nothing else works
+    logger.info(`[FileResolver] Strategy 6 (Fallback): Using active editor...`);
+    const editor = vscode.window.activeTextEditor;
+    if (editor) {
+      const relativePath = vscode.workspace.asRelativePath(editor.document.uri);
+      logger.info(`[FileResolver] ✓ Strategy 6 SUCCESS: Active editor "${relativePath}"`);
+      return relativePath;
+    } else {
+      logger.warn(`[FileResolver] ✗ Strategy 6 FAILED: No active editor`);
+    }
+
+    logger.error(`[FileResolver] COMPLETE FAILURE: Unable to determine target file`);
+    return null;
+  }
+
+  private async closeDiff() {
+    // Close all diff editors (delegates to closeDiffEditor which handles activeDiffs)
+    await this.closeDiffEditor();
   }
 
   private mapLanguage(language: string): string {
@@ -1237,7 +2383,8 @@ Now provide your final response based on what you learned. Do NOT attempt to use
         history: currentSession.messages.map(msg => ({
           role: msg.role,
           content: msg.content,
-          reasoning_content: msg.reasoning_content
+          reasoning_content: msg.reasoning_content,
+          toolCalls: msg.toolCalls
         }))
       });
     }
@@ -1269,7 +2416,8 @@ Now provide your final response based on what you learned. Do NOT attempt to use
         history: session.messages.map(msg => ({
           role: msg.role,
           content: msg.content,
-          reasoning_content: msg.reasoning_content
+          reasoning_content: msg.reasoning_content,
+          toolCalls: msg.toolCalls
         }))
       });
     }
@@ -1321,9 +2469,9 @@ Now provide your final response based on what you learned. Do NOT attempt to use
                     <input type="range" id="tempSlider" min="0" max="2" step="0.1" value="0.7">
                   </div>
                   <div id="toolLimitControl" class="temperature-control" style="display: block;">
-                    <label>Tool Limit: <span id="toolLimitValue">25</span></label>
+                    <label>Tool Iterations: <span id="toolLimitValue">25</span></label>
                     <input type="range" id="toolLimitSlider" min="5" max="100" step="5" value="25">
-                    <span class="tool-limit-hint">100 = No limit</span>
+                    <span class="tool-limit-hint">Limits tool calling loops (each loop can have multiple tools). 100 = No limit</span>
                   </div>
                 </div>
               </div>
@@ -1335,6 +2483,27 @@ Now provide your final response based on what you learned. Do NOT attempt to use
           <div class="input-area">
             <div class="input-row">
               <div class="input-buttons-grid">
+                <!-- Row 1: Files + Edit Mode -->
+                <button id="filesBtn" class="grid-btn files-btn" title="Select files for context">
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M14.5 2h-6L7 .5 1.5 1v13l.5.5h12l.5-.5v-12l-.5-.5zM14 14H2V2h4.5l1.5 1.5h6V14z"/>
+                  </svg>
+                  <!-- Keep water spurt CSS for future use (not triggered) -->
+                  <div class="water-spurt">
+                    <div class="droplet"></div>
+                    <div class="droplet"></div>
+                    <div class="droplet"></div>
+                    <div class="droplet"></div>
+                    <div class="droplet"></div>
+                  </div>
+                </button>
+                <button id="editModeBtn" class="grid-btn edit-mode-btn" title="Edit mode: Manual">
+                  <svg id="editModeIcon" width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                    <!-- Letter "M" for Manual mode -->
+                    <text x="8" y="11" font-size="10" font-weight="bold" text-anchor="middle" fill="currentColor">M</text>
+                  </svg>
+                </button>
+                <!-- Row 2: Help + Attach -->
                 <button id="helpBtn" class="grid-btn help-btn" title="Commands">
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
                     <path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 13A6 6 0 1 1 8 2a6 6 0 0 1 0 12zm-.5-3h1v1h-1v-1zm.5-7a2.5 2.5 0 0 0-2.5 2.5h1A1.5 1.5 0 1 1 8 8c-.55 0-1 .45-1 1v1h1v-.8c0-.11.09-.2.2-.2h.3a2.5 2.5 0 0 0 0-5z"/>
@@ -1368,14 +2537,96 @@ Now provide your final response based on what you learned. Do NOT attempt to use
                   </svg>
                 </button>
               </div>
-              <textarea
-                id="messageInput"
-                placeholder="Seek deep..."
-                rows="1"
-              ></textarea>
+              <div class="input-textarea-wrapper">
+                <textarea
+                  id="messageInput"
+                  placeholder="Seek deep..."
+                  rows="1"
+                ></textarea>
+                <!-- Status Panel - Messages, Warnings, Errors -->
+                <div class="status-panel">
+                  <div class="status-panel-moby" id="statusPanelMoby">
+                    <img src="${iconUri}" alt="Moby">
+                    <div class="water-spurt">
+                      <div class="droplet"></div>
+                      <div class="droplet"></div>
+                      <div class="droplet"></div>
+                      <div class="droplet"></div>
+                      <div class="droplet"></div>
+                    </div>
+                  </div>
+                  <div class="status-panel-left">
+                    <div class="status-panel-messages" id="statusPanelMessages"></div>
+                  </div>
+                  <!-- Resizable separator -->
+                  <div class="status-panel-separator" id="statusPanelSeparator"></div>
+                  <div class="status-panel-right">
+                    <div class="status-panel-warnings" id="statusPanelWarnings"></div>
+                    <button class="status-panel-logs-btn" id="statusPanelLogsBtn" title="Show Logs">
+                      <svg viewBox="0 0 16 16" fill="currentColor">
+                        <path d="M3 3h10v1H3V3zm0 3h10v1H3V6zm0 3h7v1H3V9zm0 3h10v1H3v-1z"/>
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- File chips - show selected files for context -->
+            <div id="fileChipsContainer" class="file-chips-container" style="display: none;">
+              <span class="file-chips-label">Context:</span>
+              <div id="fileChips"></div>
             </div>
             <input type="file" id="fileInput" accept=".js,.ts,.jsx,.tsx,.py,.java,.go,.rs,.cpp,.c,.h,.cs,.rb,.php,.swift,.kt,.scala,.vue,.svelte,.json,.yaml,.yml,.toml,.xml,.env,.ini,.conf,.md,.txt,.rst,.log,.html,.css,.scss,.less,.sh,.bash,.zsh,.sql,.graphql,.proto" style="display: none" multiple>
             <div id="attachments" class="attachments"></div>
+          </div>
+        </div>
+
+        <!-- File selection modal -->
+        <div id="fileModalOverlay" class="file-modal-overlay" style="display: none;">
+          <div class="file-modal">
+            <div class="file-modal-header">
+              <h3 class="file-modal-title">Select Files for Context</h3>
+              <button id="fileModalClose" class="file-modal-close">&times;</button>
+            </div>
+            <div class="file-modal-body">
+              <!-- Open files section -->
+              <div class="file-section">
+                <div class="file-section-header">Open Files (<span id="openFilesCount">0</span>)</div>
+                <div id="openFilesList" class="open-files-list">
+                  <div class="file-search-no-results">No files currently open</div>
+                </div>
+              </div>
+
+              <!-- Search section -->
+              <div class="file-section">
+                <div class="file-section-header">Search Files</div>
+                <input
+                  type="text"
+                  id="fileSearchInput"
+                  class="file-search-input"
+                  placeholder="🔍 Type to search files. Searching is case sensitive"
+                />
+                <div id="fileSearchResults" class="file-search-results" style="display: none;">
+                  <!-- Search results will be inserted here -->
+                </div>
+              </div>
+
+              <!-- Selected files section -->
+              <div class="file-section">
+                <div class="selected-files-header">
+                  <div class="file-section-header">Selected Files (<span id="selectedFilesCount">0</span>)</div>
+                  <button id="clearSelectedBtn" class="selected-files-clear" style="display: none;">Clear All</button>
+                </div>
+                <div id="selectedFilesList" class="selected-files-list">
+                  <div class="selected-files-empty">No files selected</div>
+                </div>
+              </div>
+            </div>
+            <div class="file-modal-footer">
+              <button id="fileModalCancel" class="file-modal-btn file-modal-btn-cancel">Cancel</button>
+              <button id="fileModalAdd" class="file-modal-btn file-modal-btn-add" disabled>Add to Context</button>
+            </div>
           </div>
         </div>
 

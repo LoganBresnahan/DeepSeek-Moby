@@ -12,7 +12,7 @@ body {
 }
 
 .header {
-  padding: 10px 8px;
+  padding: 4px;
   border-bottom: none;
   display: flex;
   justify-content: space-between;
@@ -146,7 +146,7 @@ body {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 4px 10px;
+  padding: 3px;
   font-size: 12px;
   background: var(--vscode-button-secondaryBackground, var(--vscode-input-background));
   color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
@@ -269,15 +269,16 @@ body {
 }
 
 /* Stop Button - replaces send button in grid during streaming */
+/* Styled to match edit mode button (solid red background) */
 .grid-btn.stop-btn {
-  background: var(--vscode-inputValidation-errorBackground, #5a1d1d);
-  color: var(--vscode-errorForeground, #f48771);
-  border: 1px solid var(--vscode-inputValidation-errorBorder, #be1100);
+  background: #e74856;
+  color: var(--vscode-editor-background);
+  border: none;
   opacity: 1;
 }
 
 .grid-btn.stop-btn:hover {
-  background: var(--vscode-inputValidation-errorBorder, #be1100);
+  background: #f85866;
 }
 
 .chat-messages {
@@ -605,15 +606,25 @@ code[class*="language-"] {
 .input-row {
   display: flex;
   gap: 8px;
-  align-items: flex-end;
+  align-items: flex-start;
 }
 
-/* 2x2 Button Grid */
+/* 3x2 Button Grid */
 .input-buttons-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
+  grid-template-rows: repeat(3, 1fr);
   gap: 4px;
   flex-shrink: 0;
+}
+
+/* Textarea and Status Panel Wrapper */
+.input-textarea-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+  height: -webkit-fill-available;
 }
 
 .grid-btn {
@@ -674,6 +685,290 @@ code[class*="language-"] {
 .grid-btn.search-btn.active:hover {
   background: var(--vscode-terminal-ansiBrightGreen, #5fd7af);
 }
+
+/* Files button (left of edit mode) */
+.grid-btn.files-btn {
+  position: relative;
+  overflow: visible;  /* Allow water spurt to show outside (if re-enabled) */
+  opacity: 0.7;
+  transition: all 0.2s;
+}
+
+.grid-btn.files-btn:hover {
+  opacity: 1;
+}
+
+.grid-btn.files-btn.active {
+  opacity: 1;
+  background: var(--vscode-terminal-ansiGreen, #4ec9b0);
+  color: var(--vscode-editor-background);
+  border-color: var(--vscode-terminal-ansiGreen, #4ec9b0);
+}
+
+.grid-btn.files-btn.active:hover {
+  background: var(--vscode-terminal-ansiBrightGreen, #5fd7af);
+}
+
+.grid-btn.files-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* Water spurt animation container */
+.water-spurt {
+  position: absolute;
+  top: -8px;
+  left: 50%;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.water-spurt .droplet {
+  position: absolute;
+  width: 4px;
+  height: 4px;
+  background: #4fc3f7;
+  border-radius: 50%;
+  opacity: 0;
+}
+
+/* Water spurt animation trigger - COMMENTED OUT for future use */
+/* Uncomment and change .files-btn to re-enable */
+/*
+.files-btn.spurting .water-spurt .droplet {
+  animation: spurt 0.6s ease-out forwards;
+}
+
+.files-btn.spurting .droplet:nth-child(1) { animation-delay: 0ms; left: -6px; }
+.files-btn.spurting .droplet:nth-child(2) { animation-delay: 50ms; left: 0px; }
+.files-btn.spurting .droplet:nth-child(3) { animation-delay: 100ms; left: 6px; }
+.files-btn.spurting .droplet:nth-child(4) { animation-delay: 75ms; left: -3px; }
+.files-btn.spurting .droplet:nth-child(5) { animation-delay: 125ms; left: 3px; }
+*/
+
+@keyframes spurt {
+  0% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-20px) scale(0.5);
+  }
+}
+
+/* Water spurt animation for status panel moby icon */
+.status-panel-moby.spurting .water-spurt .droplet {
+  animation: spurt 0.6s ease-out forwards;
+}
+
+.status-panel-moby.spurting .droplet:nth-child(1) { animation-delay: 0ms; left: -6px; }
+.status-panel-moby.spurting .droplet:nth-child(2) { animation-delay: 50ms; left: 0px; }
+.status-panel-moby.spurting .droplet:nth-child(3) { animation-delay: 100ms; left: 6px; }
+.status-panel-moby.spurting .droplet:nth-child(4) { animation-delay: 75ms; left: -3px; }
+.status-panel-moby.spurting .droplet:nth-child(5) { animation-delay: 125ms; left: 3px; }
+
+/* Colored water spurt variants */
+.status-panel-moby.spurt-blue .water-spurt .droplet {
+  background: #4fc3f7; /* Blue for messages */
+}
+
+.status-panel-moby.spurt-yellow .water-spurt .droplet {
+  background: #cca700; /* Yellow for warnings */
+}
+
+.status-panel-moby.spurt-red .water-spurt .droplet {
+  background: #f48771; /* Red for errors */
+}
+
+/* Edit mode button states */
+.grid-btn.edit-mode-btn {
+  /* Default: Manual mode (M) - subtle like folder/attachment buttons */
+  /* Uses default .grid-btn styling (transparent, opacity 0.7) */
+  opacity: 0.7;
+}
+
+.grid-btn.edit-mode-btn:hover {
+  opacity: 1;
+  background: var(--vscode-toolbar-hoverBackground);
+}
+
+.grid-btn.edit-mode-btn.state-ask {
+  /* Ask mode (Q) - green like web search active */
+  opacity: 1;
+  background: var(--vscode-terminal-ansiGreen, #4ec9b0);
+  color: var(--vscode-editor-background);
+  border-color: var(--vscode-terminal-ansiGreen, #4ec9b0);
+}
+
+.grid-btn.edit-mode-btn.state-ask:hover {
+  background: var(--vscode-terminal-ansiBrightGreen, #5fd7af);
+}
+
+.grid-btn.edit-mode-btn.state-auto {
+  /* Auto mode (A) - blue */
+  opacity: 1;
+  background: var(--vscode-terminal-ansiBlue, #3b8eea);
+  color: var(--vscode-editor-background);
+  border-color: var(--vscode-terminal-ansiBlue, #3b8eea);
+}
+
+.grid-btn.edit-mode-btn.state-auto:hover {
+  background: var(--vscode-terminal-ansiBrightBlue, #5ca8ff);
+}
+
+/* Status Panel - Messages, Warnings, Errors */
+.status-panel {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 32px; /* 1 button height */
+  padding: 0 2px;
+  border-radius: 4px;
+  background: rgba(79, 195, 247, 0.08); /* Light blue background */
+  border: 1px solid rgba(79, 195, 247, 0.2);
+  flex: 1; /* Allows flex-grow: 2 on textarea to work */
+}
+
+.status-panel-moby {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  overflow: visible; /* Allow water spurt to show outside */
+}
+
+.status-panel-moby img {
+  width: 18px;
+  height: 18px;
+}
+
+.status-panel-left {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0; /* Allow text truncation */
+}
+
+.status-panel-messages {
+  flex: 1;
+  font-size: 13px; /* Increased from 11px */
+  color: var(--vscode-descriptionForeground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  cursor: default; /* Show tooltip on hover */
+}
+
+.status-panel-right {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.status-panel-separator {
+  width: 2px; /* Increased from 1px for visibility */
+  height: 20px;
+  background: var(--vscode-panel-border); /* More visible color */
+  cursor: col-resize;
+  flex-shrink: 0;
+  position: relative;
+  margin: 0 3px;
+  opacity: 0.6;
+}
+
+.status-panel-separator:hover {
+  background: var(--vscode-focusBorder);
+  width: 3px; /* Increased from 2px */
+  opacity: 1;
+}
+
+.status-panel-separator::after {
+  content: '';
+  position: absolute;
+  top: -4px;
+  bottom: -4px;
+  left: -3px;
+  right: -3px;
+  /* Invisible hit area for easier grabbing */
+}
+
+.status-panel-warnings {
+  flex: 1;
+  font-size: 13px; /* Increased from 11px */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  min-width: 0;
+  cursor: default; /* Show tooltip on hover */
+  padding: 0 5px;
+}
+
+.status-panel-warnings.warning {
+  color: var(--vscode-editorWarning-foreground, #f9a825);
+}
+
+.status-panel-warnings.error {
+  color: var(--vscode-errorForeground, #e74856);
+}
+
+/* Background styling for warnings and errors */
+.status-panel-right.warning-bg {
+  background: rgba(249, 168, 37, 0.15); /* Translucent yellow, slightly more opaque */
+  border: 1px solid rgba(249, 168, 37, 0.5);
+  border-radius: 3px;
+  box-sizing: border-box; /* Include border in width calculation */
+}
+
+.status-panel-right.error-bg {
+  background: rgba(231, 72, 86, 0.15); /* Translucent red, slightly more opaque */
+  border: 1px solid rgba(231, 72, 86, 0.5);
+  border-radius: 3px;
+  box-sizing: border-box; /* Include border in width calculation */
+}
+
+.status-panel-logs-btn {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: var(--vscode-foreground);
+  border: 1px solid var(--vscode-input-border);
+  border-radius: 3px;
+  cursor: pointer;
+  opacity: 0.6;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+
+.status-panel-logs-btn:hover {
+  opacity: 1;
+  background: var(--vscode-toolbar-hoverBackground);
+}
+
+.status-panel-logs-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* Accept/Reject overlay for code changes */
+/* REMOVED: Modal overlay styles (replaced with toolbar buttons) */
+/* .edit-confirm-overlay, .diff-list-overlay, and related styles removed */
 
 /* Web Search Modal */
 .web-search-modal {
@@ -1005,6 +1300,7 @@ code[class*="language-"] {
 
 textarea {
   flex: 1;
+  flex-grow: 2;
   padding: 10px 12px;
   border: 1px solid var(--vscode-input-border);
   background: var(--vscode-input-background);
@@ -1013,7 +1309,7 @@ textarea {
   font-family: var(--vscode-font-family);
   font-size: 13px;
   resize: none;
-  min-height: 80px;
+  height: 68px; /* 2 button heights (32px * 2) + 1 gap (4px) */
   max-height: 200px;
   line-height: 1.4;
   box-sizing: border-box;
@@ -1144,4 +1440,390 @@ textarea::placeholder {
 .chat-messages::-webkit-scrollbar-thumb:hover,
 .reasoning-body::-webkit-scrollbar-thumb:hover {
   background: var(--vscode-scrollbarSlider-hoverBackground);
+}
+
+/* ============================================
+   FILE SELECTION MODAL
+   ============================================ */
+
+/* Modal overlay */
+.file-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  animation: fadeIn 0.15s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Modal container */
+.file-modal {
+  background: var(--vscode-editor-background);
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 6px;
+  width: 90%;
+  max-width: 600px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  animation: slideUp 0.2s ease;
+  overflow-x: hidden;
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Modal header */
+.file-modal-header {
+  padding: 16px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.file-modal-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--vscode-foreground);
+}
+
+.file-modal-close {
+  background: transparent;
+  border: none;
+  color: var(--vscode-foreground);
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 18px;
+  line-height: 1;
+  opacity: 0.7;
+}
+
+.file-modal-close:hover {
+  opacity: 1;
+  background: var(--vscode-toolbar-hoverBackground);
+}
+
+/* Modal body - scrollable content */
+.file-modal-body {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* Section headers */
+.file-section-header {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--vscode-descriptionForeground);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+
+/* Open files list */
+.open-files-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 4px;
+  padding: 8px;
+}
+
+.open-file-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: background 0.1s ease;
+}
+
+.open-file-item:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.open-file-checkbox {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
+.open-file-name {
+  font-size: 13px;
+  color: var(--vscode-foreground);
+  font-family: var(--vscode-editor-font-family);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Search section */
+.file-search-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.file-search-input {
+  width: 100%;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-family: var(--vscode-font-family);
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border);
+  border-radius: 4px;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.file-search-input:focus {
+  border-color: var(--vscode-focusBorder);
+}
+
+.file-search-input::placeholder {
+  color: var(--vscode-input-placeholderForeground);
+}
+
+.file-search-results {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 150px;
+  overflow-y: auto;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 4px;
+  padding: 8px;
+  background: var(--vscode-editor-background);
+}
+
+.file-search-result-item {
+  padding: 6px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: var(--vscode-editor-font-family);
+  color: var(--vscode-foreground);
+  transition: background 0.1s ease;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-search-result-item:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.file-search-no-results {
+  padding: 12px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+}
+
+/* Selected files section */
+.selected-files-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.selected-files-clear {
+  background: transparent;
+  border: none;
+  color: var(--vscode-textLink-foreground);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+.selected-files-clear:hover {
+  text-decoration: underline;
+  background: var(--vscode-toolbar-hoverBackground);
+}
+
+.selected-files-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 4px;
+  padding: 8px;
+  min-height: 60px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.selected-files-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 60px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+  font-style: italic;
+}
+
+.selected-file-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: var(--vscode-editor-font-family);
+}
+
+.selected-file-name {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.selected-file-remove {
+  background: transparent;
+  border: none;
+  color: currentColor;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 3px;
+  font-size: 14px;
+  line-height: 1;
+  opacity: 0.7;
+}
+
+.selected-file-remove:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* Modal footer */
+.file-modal-footer {
+  padding: 12px 16px;
+  border-top: 1px solid var(--vscode-panel-border);
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.file-modal-btn {
+  padding: 6px 16px;
+  font-size: 12px;
+  border-radius: 4px;
+  border: none;
+  cursor: pointer;
+  font-family: var(--vscode-font-family);
+}
+
+.file-modal-btn-cancel {
+  background: transparent;
+  color: var(--vscode-foreground);
+  border: 1px solid var(--vscode-button-border, var(--vscode-contrastBorder, transparent));
+}
+
+.file-modal-btn-cancel:hover {
+  background: var(--vscode-toolbar-hoverBackground);
+}
+
+.file-modal-btn-add {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  font-weight: 500;
+}
+
+.file-modal-btn-add:hover {
+  background: var(--vscode-button-hoverBackground);
+}
+
+.file-modal-btn-add:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ============================================
+   FILE CHIPS (below input area)
+   ============================================ */
+
+.file-chips-container {
+  display: none !important; /* Hide file chips - use green button indicator instead */
+}
+
+.file-chips-label {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  margin-right: 4px;
+}
+
+.file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+  border-radius: 12px;
+  font-size: 11px;
+  font-family: var(--vscode-editor-font-family);
+  max-width: 200px;
+}
+
+.file-chip-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-chip-remove {
+  background: transparent;
+  border: none;
+  color: currentColor;
+  cursor: pointer;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0.7;
+  display: flex;
+  align-items: center;
+}
+
+.file-chip-remove:hover {
+  opacity: 1;
 }

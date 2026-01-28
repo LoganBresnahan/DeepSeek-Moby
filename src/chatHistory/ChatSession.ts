@@ -6,6 +6,7 @@ export interface Message {
   timestamp: Date;
   tokens?: number;
   reasoning_content?: string;
+  toolCalls?: Array<{ name: string; detail: string; status: string }>;
 }
 
 export interface ChatSession {

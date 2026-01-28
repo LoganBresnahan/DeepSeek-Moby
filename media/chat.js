@@ -12,6 +12,28 @@
   let webSearchEnabled = false;
   let webSearchSettings = { searchesPerPrompt: 1, searchDepth: 'basic' };
 
+  // Edit mode state
+  let editMode = 'manual'; // 'manual' | 'ask' | 'auto'
+  const editModes = ['manual', 'ask', 'auto'];
+  const editModeLabels = {
+    manual: 'Manual',
+    ask: 'Ask before applying',
+    auto: 'Auto-apply'
+  };
+
+  // Edit queue for ask mode
+  let editQueue = [];
+  let currentEdit = null;
+
+  // Multi-diff queue state
+  let pendingDiffs = []; // Array of { filePath, timestamp, proposedUri }
+  let activeDiffPath = null; // Currently focused diff
+
+  // File selection state
+  let selectedFiles = new Map(); // path -> content
+  let openFiles = []; // List of currently open file paths
+  let searchResults = []; // Search results from backend
+
   // DOM Elements
   const chatMessages = document.getElementById('chatMessages');
   const messageInput = document.getElementById('messageInput');
@@ -31,6 +53,34 @@
   const toastContainer = document.getElementById('toastContainer');
   let toastTimeout = null;
 
+  // File selection modal elements
+  const fileModalOverlay = document.getElementById('fileModalOverlay');
+  const fileModalClose = document.getElementById('fileModalClose');
+  const fileModalCancel = document.getElementById('fileModalCancel');
+  const fileModalAdd = document.getElementById('fileModalAdd');
+  const openFilesList = document.getElementById('openFilesList');
+  const openFilesCount = document.getElementById('openFilesCount');
+  const fileSearchInput = document.getElementById('fileSearchInput');
+  const fileSearchResults = document.getElementById('fileSearchResults');
+  const selectedFilesList = document.getElementById('selectedFilesList');
+  const selectedFilesCount = document.getElementById('selectedFilesCount');
+  const clearSelectedBtn = document.getElementById('clearSelectedBtn');
+  const fileChipsContainer = document.getElementById('fileChipsContainer');
+  const fileChips = document.getElementById('fileChips');
+
+  // Status panel elements
+  const statusPanelMoby = document.getElementById('statusPanelMoby');
+  const statusPanelMessages = document.getElementById('statusPanelMessages');
+  const statusPanelWarnings = document.getElementById('statusPanelWarnings');
+  const statusPanelLogsBtn = document.getElementById('statusPanelLogsBtn');
+  const statusPanelLeft = document.querySelector('.status-panel-left');
+  const statusPanelRight = document.querySelector('.status-panel-right');
+  const statusPanelSeparator = document.getElementById('statusPanelSeparator');
+
+  // Timeout tracking to prevent conflicts
+  let statusMessageTimeout = null;
+  let statusWarningTimeout = null;
+
   // Scroll tracking - don't auto-scroll if user has scrolled up
   let userHasScrolledUp = false;
   let reasoningUserHasScrolledUp = false; // Separate tracking for reasoning content
@@ -38,6 +88,306 @@
 
   // Current model state
   let currentModel = 'deepseek-chat';
+
+  // ============================================
+  // FILE SELECTION MODAL FUNCTIONS (MOVED OUTSIDE INIT FOR MESSAGE HANDLER ACCESS)
+  // ============================================
+
+  // Open file selection modal
+  function openFileModal() {
+    // Show loading state for open files
+    openFilesList.innerHTML = '<div class="file-search-no-results">Loading open files...</div>';
+    openFilesCount.textContent = '0';
+
+    // Request open files from backend
+    vscode.postMessage({ type: 'getOpenFiles' });
+
+    // Notify backend that modal is now open (for live updates)
+    vscode.postMessage({ type: 'fileModalOpened' });
+
+    // Show modal
+    fileModalOverlay.style.display = 'flex';
+
+    // Focus search input
+    setTimeout(() => fileSearchInput.focus(), 100);
+  }
+
+  // Close file selection modal
+  function closeFileModal() {
+    // Notify backend that modal is now closed
+    vscode.postMessage({ type: 'fileModalClosed' });
+
+    fileModalOverlay.style.display = 'none';
+    fileSearchInput.value = '';
+    fileSearchResults.style.display = 'none';
+    fileSearchResults.innerHTML = '';
+  }
+
+  // Load open files into the modal
+  function loadOpenFiles(files) {
+    console.log('[DIAGNOSTIC] loadOpenFiles called with:', files);
+    openFiles = files;
+    openFilesCount.textContent = files.length;
+
+    if (files.length === 0) {
+      console.log('[DIAGNOSTIC] No files provided - showing "No files currently open"');
+      openFilesList.innerHTML = '<div class="file-search-no-results">No files currently open</div>';
+      return;
+    }
+
+    console.log('[DIAGNOSTIC] Loading', files.length, 'files into modal');
+
+    openFilesList.innerHTML = '';
+    for (const filePath of files) {
+      const item = document.createElement('div');
+      item.className = 'open-file-item';
+
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.className = 'open-file-checkbox';
+      checkbox.checked = selectedFiles.has(filePath);
+      checkbox.addEventListener('change', () => toggleFileSelection(filePath, checkbox.checked));
+
+      const name = document.createElement('span');
+      name.className = 'open-file-name';
+      name.textContent = filePath;
+      name.title = filePath;
+
+      item.appendChild(checkbox);
+      item.appendChild(name);
+      item.addEventListener('click', (e) => {
+        if (e.target !== checkbox) {
+          checkbox.checked = !checkbox.checked;
+          toggleFileSelection(filePath, checkbox.checked);
+        }
+      });
+
+      openFilesList.appendChild(item);
+    }
+  }
+
+  // Handle file search
+  function handleFileSearch() {
+    const query = fileSearchInput.value.trim();
+
+    if (query.length === 0) {
+      fileSearchResults.style.display = 'none';
+      fileSearchResults.innerHTML = '';
+      return;
+    }
+
+    // Request search results from backend
+    vscode.postMessage({ type: 'searchFiles', query });
+  }
+
+  // Display search results
+  function displaySearchResults(results) {
+    console.log('[DIAGNOSTIC] displaySearchResults called with:', results);
+    searchResults = results;
+
+    if (results.length === 0) {
+      console.log('[DIAGNOSTIC] No search results - showing "No files found"');
+      fileSearchResults.innerHTML = '<div class="file-search-no-results">No files found</div>';
+      fileSearchResults.style.display = 'block';
+      return;
+    }
+
+    console.log('[DIAGNOSTIC] Displaying', results.length, 'search results');
+    fileSearchResults.innerHTML = '';
+    fileSearchResults.style.display = 'block';
+
+    for (const filePath of results) {
+      const item = document.createElement('div');
+      item.className = 'file-search-result-item';
+      item.textContent = filePath;
+      item.title = filePath;
+
+      item.addEventListener('click', () => {
+        toggleFileSelection(filePath, true);
+        // Clear search
+        fileSearchInput.value = '';
+        fileSearchResults.style.display = 'none';
+      });
+
+      fileSearchResults.appendChild(item);
+    }
+  }
+
+  // Toggle file selection
+  function toggleFileSelection(filePath, selected) {
+    if (selected) {
+      // Request file content from backend
+      vscode.postMessage({ type: 'getFileContent', filePath });
+    } else {
+      selectedFiles.delete(filePath);
+      updateSelectedFilesList();
+      updateModalAddButton();
+    }
+  }
+
+  // Add file to selected files (called when content is received)
+  function addFileToSelection(filePath, content) {
+    selectedFiles.set(filePath, content);
+    updateSelectedFilesList();
+    updateModalAddButton();
+
+    // Update checkbox in open files list if present
+    const checkboxes = openFilesList.querySelectorAll('.open-file-checkbox');
+    checkboxes.forEach(cb => {
+      const item = cb.closest('.open-file-item');
+      const name = item.querySelector('.open-file-name');
+      if (name && name.textContent === filePath) {
+        cb.checked = true;
+      }
+    });
+  }
+
+  // Update files button state (green when files selected)
+  function updateFilesButtonState() {
+    const filesBtn = document.getElementById('filesBtn');
+    if (filesBtn) {
+      filesBtn.classList.toggle('active', selectedFiles.size > 0);
+    }
+  }
+
+  // Update selected files list in modal
+  function updateSelectedFilesList() {
+    selectedFilesCount.textContent = selectedFiles.size;
+
+    if (selectedFiles.size === 0) {
+      selectedFilesList.innerHTML = '<div class="selected-files-empty">No files selected</div>';
+      clearSelectedBtn.style.display = 'none';
+      updateFilesButtonState();
+      return;
+    }
+
+    clearSelectedBtn.style.display = 'inline-block';
+    selectedFilesList.innerHTML = '';
+
+    for (const [filePath, content] of selectedFiles.entries()) {
+      const chip = document.createElement('div');
+      chip.className = 'selected-file-chip';
+
+      const name = document.createElement('span');
+      name.className = 'selected-file-name';
+      name.textContent = filePath;
+      name.title = filePath;
+
+      const removeBtn = document.createElement('button');
+      removeBtn.className = 'selected-file-remove';
+      removeBtn.textContent = '×';
+      removeBtn.title = 'Remove';
+      removeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleFileSelection(filePath, false);
+      });
+
+      chip.appendChild(name);
+      chip.appendChild(removeBtn);
+      selectedFilesList.appendChild(chip);
+    }
+
+    updateFilesButtonState();
+  }
+
+  // Update Add button state
+  function updateModalAddButton() {
+    fileModalAdd.disabled = selectedFiles.size === 0;
+  }
+
+  // Add files to context (close modal and render chips)
+  function addFilesToContext() {
+    // Send selected files to backend
+    const filesData = Array.from(selectedFiles.entries()).map(([path, content]) => ({
+      path,
+      content
+    }));
+    vscode.postMessage({ type: 'setSelectedFiles', files: filesData });
+
+    // Render file chips
+    renderFileChips();
+
+    // Close modal
+    closeFileModal();
+  }
+
+  // Clear all selected files
+  function clearAllSelected() {
+    selectedFiles.clear();
+    updateSelectedFilesList();
+    updateModalAddButton();
+
+    // Uncheck all checkboxes in open files list
+    const checkboxes = openFilesList.querySelectorAll('.open-file-checkbox');
+    checkboxes.forEach(cb => cb.checked = false);
+  }
+
+  // Render file chips below input area
+  function renderFileChips() {
+    if (selectedFiles.size === 0) {
+      fileChipsContainer.style.display = 'none';
+      fileChips.innerHTML = '';
+      return;
+    }
+
+    fileChipsContainer.style.display = 'flex';
+    fileChips.innerHTML = '';
+
+    for (const [filePath, content] of selectedFiles.entries()) {
+      const chip = document.createElement('div');
+      chip.className = 'file-chip';
+
+      const name = document.createElement('span');
+      name.className = 'file-chip-name';
+      name.textContent = filePath;
+      name.title = filePath;
+
+      const removeBtn = document.createElement('button');
+      removeBtn.className = 'file-chip-remove';
+      removeBtn.textContent = '×';
+      removeBtn.title = 'Remove';
+      removeBtn.addEventListener('click', () => {
+        selectedFiles.delete(filePath);
+        renderFileChips();
+
+        // Notify backend
+        const filesData = Array.from(selectedFiles.entries()).map(([path, content]) => ({
+          path,
+          content
+        }));
+        vscode.postMessage({ type: 'setSelectedFiles', files: filesData });
+      });
+
+      chip.appendChild(name);
+      chip.appendChild(removeBtn);
+      fileChips.appendChild(chip);
+    }
+  }
+
+  // ============================================
+  // EDIT MODE ICON UPDATER (MOVED OUTSIDE INIT FOR MESSAGE HANDLER ACCESS)
+  // ============================================
+  function updateEditModeIcon(mode) {
+    const editModeIcon = document.getElementById('editModeIcon');
+    if (!editModeIcon) return;
+
+    if (mode === 'manual') {
+      // Letter "M" for Manual
+      editModeIcon.innerHTML = `
+        <text x="8" y="11" font-size="10" font-weight="bold" text-anchor="middle" fill="currentColor">M</text>
+      `;
+    } else if (mode === 'ask') {
+      // Letter "Q" for asQ (question/ask)
+      editModeIcon.innerHTML = `
+        <text x="8" y="11" font-size="10" font-weight="bold" text-anchor="middle" fill="currentColor">Q</text>
+      `;
+    } else if (mode === 'auto') {
+      // Letter "A" for Auto
+      editModeIcon.innerHTML = `
+        <text x="8" y="11" font-size="10" font-weight="bold" text-anchor="middle" fill="currentColor">A</text>
+      `;
+    }
+  }
 
   // Initialize
   function init() {
@@ -68,6 +418,13 @@
     // Stop button handler
     stopBtn.addEventListener('click', stopGeneration);
 
+    // Status panel logs button handler
+    if (statusPanelLogsBtn) {
+      statusPanelLogsBtn.addEventListener('click', () => {
+        vscode.postMessage({ type: 'showLogs' });
+      });
+    }
+
     // Search button handler
     const searchBtn = document.getElementById('searchBtn');
     searchBtn.addEventListener('click', (e) => {
@@ -82,6 +439,87 @@
         showWebSearchModal(searchBtn);
       }
     });
+
+    // ============================================
+    // FILE SELECTION MODAL EVENT LISTENERS
+    // ============================================
+
+    // Files button handler
+    const filesBtn = document.getElementById('filesBtn');
+    if (filesBtn) {
+      filesBtn.addEventListener('click', openFileModal);
+    }
+
+    // Modal event listeners
+    if (fileModalClose) {
+      fileModalClose.addEventListener('click', closeFileModal);
+    }
+    if (fileModalCancel) {
+      fileModalCancel.addEventListener('click', closeFileModal);
+    }
+    if (fileModalAdd) {
+      fileModalAdd.addEventListener('click', addFilesToContext);
+    }
+    if (clearSelectedBtn) {
+      clearSelectedBtn.addEventListener('click', clearAllSelected);
+    }
+    if (fileModalOverlay) {
+      fileModalOverlay.addEventListener('click', (e) => {
+        if (e.target === fileModalOverlay) {
+          closeFileModal();
+        }
+      });
+    }
+
+    // File search input handler (debounced)
+    let searchTimeout = null;
+    if (fileSearchInput) {
+      fileSearchInput.addEventListener('input', () => {
+        clearTimeout(searchTimeout);
+        searchTimeout = setTimeout(handleFileSearch, 300);
+      });
+    }
+
+    /* Water spurt animation code - COMMENTED OUT for future use
+    if (filesBtn) {
+      filesBtn.addEventListener('click', () => {
+        filesBtn.classList.remove('spurting');
+        void filesBtn.offsetWidth;
+        filesBtn.classList.add('spurting');
+        setTimeout(() => {
+          filesBtn.classList.remove('spurting');
+        }, 700);
+      });
+    }
+    */
+
+    // Edit mode button handler - cycles through manual/ask/auto
+    const editModeBtn = document.getElementById('editModeBtn');
+    if (editModeBtn) {
+      // Initialize button state - remove any leftover classes on page load
+      editModeBtn.classList.remove('state-manual', 'state-ask', 'state-auto');
+
+      editModeBtn.addEventListener('click', () => {
+        const currentIndex = editModes.indexOf(editMode);
+        editMode = editModes[(currentIndex + 1) % editModes.length];
+
+        // Update button class
+        editModeBtn.classList.remove('state-manual', 'state-ask', 'state-auto');
+        if (editMode !== 'manual') {
+          editModeBtn.classList.add(`state-${editMode}`);
+        }
+        editModeBtn.title = `Edit mode: ${editModeLabels[editMode]}`;
+
+        // Update icon based on mode
+        updateEditModeIcon(editMode);
+
+        // Notify backend
+        vscode.postMessage({ type: 'setEditMode', mode: editMode });
+
+        // Show in status bar (left side - informative)
+        showStatusMessage(`Edit mode: ${editModeLabels[editMode]}`);
+      });
+    }
 
     // Model dropdown handlers
     modelBtn.addEventListener('click', toggleModelDropdown);
@@ -448,8 +886,11 @@
     contentEl.className = 'content';
 
     if (message.role === 'assistant') {
-      // Include tool calls HTML if present (preserved from streaming)
-      const toolCallsPrefix = message.toolCallsHtml || '';
+      // Reconstruct tool calls HTML from structured data if present
+      let toolCallsPrefix = '';
+      if (message.toolCalls && message.toolCalls.length > 0) {
+        toolCallsPrefix = generateToolCallsHtml(message.toolCalls);
+      }
       contentEl.innerHTML = toolCallsPrefix + formatCodeBlocks(message.content);
     } else {
       contentEl.textContent = message.content;
@@ -490,6 +931,42 @@
     html = html.replace(/\n/g, '<br>');
 
     return html;
+  }
+
+  /**
+   * Generate tool calls HTML from structured data
+   * Used when loading history to reconstruct the tool calls UI
+   */
+  function generateToolCallsHtml(toolCalls) {
+    if (!toolCalls || toolCalls.length === 0) return '';
+
+    const containerId = `tool-calls-history-${Date.now()}`;
+    const doneCount = toolCalls.filter(t => t.status === 'done').length;
+    const errorCount = toolCalls.filter(t => t.status === 'error').length;
+
+    const toolsHtml = toolCalls.map((tool, i) => {
+      const statusIcon = tool.status === 'done' ? '✓' : tool.status === 'error' ? '✗' : '⏳';
+      return `
+        <div class="tool-call-item" id="${containerId}-item-${i}" data-status="${tool.status}">
+          <span class="tool-call-status">${statusIcon}</span>
+          <span class="tool-call-detail">${escapeHtml(tool.detail)}</span>
+        </div>
+      `;
+    }).join('');
+
+    const title = `Used ${doneCount} tool${doneCount !== 1 ? 's' : ''}` +
+                  (errorCount > 0 ? ` (${errorCount} failed)` : '');
+
+    return `
+      <div class="tool-calls-container complete" id="${containerId}">
+        <div class="tool-calls-header" onclick="this.parentElement.classList.toggle('expanded')">
+          <span class="tool-calls-icon">▶</span>
+          <span class="tool-calls-title">${title}</span>
+          <span class="tool-calls-summary"></span>
+        </div>
+        <div class="tool-calls-body">${toolsHtml}</div>
+      </div>
+    `;
   }
 
   /**
@@ -728,6 +1205,190 @@
     }
   }
 
+  // Status Panel Functions - Water Spurt Animations
+  function triggerMobySpurt(color) {
+    // Remove existing color classes
+    statusPanelMoby.classList.remove('spurt-blue', 'spurt-yellow', 'spurt-red', 'spurting');
+
+    // Add the color class
+    statusPanelMoby.classList.add(`spurt-${color}`);
+
+    // Force reflow to restart animation
+    void statusPanelMoby.offsetWidth;
+
+    // Add spurting class to trigger animation
+    statusPanelMoby.classList.add('spurting');
+
+    // Remove spurting class after animation completes
+    setTimeout(() => {
+      statusPanelMoby.classList.remove('spurting');
+    }, 700);
+  }
+
+  function showStatusMessage(message) {
+    // Clear existing timeout
+    if (statusMessageTimeout) {
+      clearTimeout(statusMessageTimeout);
+      statusMessageTimeout = null;
+    }
+
+    // Left side - informative messages
+    statusPanelMessages.textContent = message;
+    statusPanelMessages.title = message; // Tooltip shows full message
+    triggerMobySpurt('blue');
+
+    // Auto-clear after 5 seconds
+    statusMessageTimeout = setTimeout(() => {
+      statusPanelMessages.textContent = '';
+      statusPanelMessages.title = '';
+      statusMessageTimeout = null;
+    }, 5000);
+  }
+
+  function showStatusWarning(message) {
+    // Clear existing timeout
+    if (statusWarningTimeout) {
+      clearTimeout(statusWarningTimeout);
+      statusWarningTimeout = null;
+    }
+
+    // Right side - warnings
+    statusPanelWarnings.textContent = message;
+    statusPanelWarnings.title = message; // Tooltip shows full message
+    statusPanelWarnings.classList.remove('error');
+    statusPanelWarnings.classList.add('warning');
+
+    // Add background styling
+    statusPanelRight.classList.remove('error-bg');
+    statusPanelRight.classList.add('warning-bg');
+
+    triggerMobySpurt('yellow');
+
+    // Auto-clear after 8 seconds
+    statusWarningTimeout = setTimeout(() => {
+      statusPanelWarnings.textContent = '';
+      statusPanelWarnings.title = '';
+      statusPanelWarnings.classList.remove('warning');
+      statusPanelRight.classList.remove('warning-bg');
+      statusWarningTimeout = null;
+    }, 8000);
+  }
+
+  function showStatusError(message) {
+    // Clear existing timeout
+    if (statusWarningTimeout) {
+      clearTimeout(statusWarningTimeout);
+      statusWarningTimeout = null;
+    }
+
+    // Right side - errors
+    statusPanelWarnings.textContent = message;
+    statusPanelWarnings.title = message; // Tooltip shows full message
+    statusPanelWarnings.classList.remove('warning');
+    statusPanelWarnings.classList.add('error');
+
+    // Add background styling
+    statusPanelRight.classList.remove('warning-bg');
+    statusPanelRight.classList.add('error-bg');
+
+    triggerMobySpurt('red');
+
+    // Auto-clear after 10 seconds
+    statusWarningTimeout = setTimeout(() => {
+      statusPanelWarnings.textContent = '';
+      statusPanelWarnings.title = '';
+      statusPanelWarnings.classList.remove('error');
+      statusPanelRight.classList.remove('error-bg');
+      statusWarningTimeout = null;
+    }, 10000);
+  }
+
+  function clearStatus() {
+    // Clear timeouts
+    if (statusMessageTimeout) {
+      clearTimeout(statusMessageTimeout);
+      statusMessageTimeout = null;
+    }
+    if (statusWarningTimeout) {
+      clearTimeout(statusWarningTimeout);
+      statusWarningTimeout = null;
+    }
+
+    // Clear messages and classes
+    statusPanelMessages.textContent = '';
+    statusPanelMessages.title = '';
+    statusPanelWarnings.textContent = '';
+    statusPanelWarnings.title = '';
+    statusPanelWarnings.classList.remove('warning', 'error');
+    statusPanelRight.classList.remove('warning-bg', 'error-bg');
+  }
+
+  // Resizable separator for status panel
+  let isResizing = false;
+  let startX = 0;
+  let startLeftWidth = 0;
+  let startRightWidth = 0;
+
+  if (statusPanelSeparator) {
+    statusPanelSeparator.addEventListener('mousedown', (e) => {
+      isResizing = true;
+      startX = e.clientX;
+
+      // Get current widths
+      const leftRect = statusPanelLeft.getBoundingClientRect();
+      const rightRect = statusPanelRight.getBoundingClientRect();
+      startLeftWidth = leftRect.width;
+      startRightWidth = rightRect.width;
+
+      // Prevent text selection during drag
+      e.preventDefault();
+      document.body.style.userSelect = 'none';
+      document.body.style.cursor = 'col-resize';
+    });
+
+    document.addEventListener('mousemove', (e) => {
+      if (!isResizing) return;
+
+      const deltaX = e.clientX - startX;
+
+      // Calculate total available width for flexible panels
+      // This is the sum of left and right, excluding fixed elements
+      const totalFlexWidth = startLeftWidth + startRightWidth;
+
+      // Calculate new widths with delta
+      let newLeftWidth = startLeftWidth + deltaX;
+      let newRightWidth = startRightWidth - deltaX;
+
+      // Constrain to min 20% and max 80% of flexible space
+      const minWidth = totalFlexWidth * 0.2;
+      const maxWidth = totalFlexWidth * 0.8;
+
+      if (newLeftWidth < minWidth) {
+        newLeftWidth = minWidth;
+        newRightWidth = totalFlexWidth - minWidth;
+      } else if (newLeftWidth > maxWidth) {
+        newLeftWidth = maxWidth;
+        newRightWidth = totalFlexWidth - maxWidth;
+      }
+
+      // Ensure both stay within bounds
+      newRightWidth = Math.max(minWidth, Math.min(maxWidth, newRightWidth));
+      newLeftWidth = totalFlexWidth - newRightWidth;
+
+      // Update using pixel widths to prevent overflow
+      statusPanelLeft.style.flex = `0 0 ${newLeftWidth}px`;
+      statusPanelRight.style.flex = `0 0 ${newRightWidth}px`;
+    });
+
+    document.addEventListener('mouseup', () => {
+      if (isResizing) {
+        isResizing = false;
+        document.body.style.userSelect = '';
+        document.body.style.cursor = '';
+      }
+    });
+  }
+
   // Commands modal
   const commands = [
     { section: 'Chat' },
@@ -738,7 +1399,11 @@
     { id: 'searchChatHistory', name: 'Search History', desc: 'Search past chats', icon: '🔍' },
     { section: 'Other' },
     { id: 'showStats', name: 'Show Stats', desc: 'View usage statistics', icon: '📊' },
-    { id: 'showLogs', name: 'Show Logs', desc: 'View extension logs', icon: '📋' }
+    { id: 'showLogs', name: 'Show Logs', desc: 'View extension logs', icon: '📋' },
+    { section: 'Debug' },
+    { id: 'testError', name: 'Test Error', desc: 'Trigger a test error message', icon: '🔴' },
+    { id: 'testWarning', name: 'Test Warning', desc: 'Trigger a test warning message', icon: '🟡' },
+    { id: 'testMessage', name: 'Test Message', desc: 'Trigger a test info message', icon: '🔵' }
   ];
 
   function showCommandsModal(btn) {
@@ -782,6 +1447,24 @@
     modal.querySelectorAll('.command-item').forEach(item => {
       item.addEventListener('click', () => {
         const commandId = item.dataset.command;
+
+        // Handle test commands locally
+        if (commandId === 'testError') {
+          showStatusError('This is a test error message');
+          closeCommandsModal();
+          return;
+        }
+        if (commandId === 'testWarning') {
+          showStatusWarning('This is a test warning message');
+          closeCommandsModal();
+          return;
+        }
+        if (commandId === 'testMessage') {
+          showStatusMessage('This is a test info message');
+          closeCommandsModal();
+          return;
+        }
+
         vscode.postMessage({ type: 'executeCommand', command: `deepseek.${commandId}` });
         closeCommandsModal();
       });
@@ -898,6 +1581,98 @@
     }
   }
 
+  // Edit confirm overlay for ask mode
+  function showEditConfirm(filePath, code, language) {
+    // Remove any existing overlay
+    hideEditConfirm();
+
+    const overlay = document.createElement('div');
+    overlay.className = 'edit-confirm-overlay';
+    overlay.id = 'editConfirmOverlay';
+
+    const queueInfo = editQueue.length > 0 ? `<span class="edit-confirm-queue">+${editQueue.length} more</span>` : '';
+
+    overlay.innerHTML = `
+      <span class="edit-confirm-text">Apply changes to</span>
+      <span class="edit-confirm-file" title="${escapeHtml(filePath)}">${escapeHtml(filePath)}</span>
+      ${queueInfo}
+      <button class="edit-confirm-btn accept" id="acceptEditBtn">Accept</button>
+      <button class="edit-confirm-btn reject" id="rejectEditBtn">Reject</button>
+    `;
+
+    document.body.appendChild(overlay);
+
+    currentEdit = { filePath, code, language };
+
+    document.getElementById('acceptEditBtn').addEventListener('click', () => {
+      vscode.postMessage({ type: 'applyCode', code, language, confirmed: true });
+      hideEditConfirm();
+      processNextEdit();
+    });
+
+    document.getElementById('rejectEditBtn').addEventListener('click', () => {
+      vscode.postMessage({ type: 'rejectEdit', filePath });
+      hideEditConfirm();
+      processNextEdit();
+    });
+  }
+
+  function hideEditConfirm() {
+    const existing = document.getElementById('editConfirmOverlay');
+    if (existing) existing.remove();
+    currentEdit = null;
+  }
+
+  function queueEdit(edit) {
+    if (!currentEdit) {
+      // No pending edit, show immediately
+      processEdit(edit);
+    } else {
+      // Queue it and update the overlay badge
+      editQueue.push(edit);
+      updateQueueBadge();
+    }
+  }
+
+  function processNextEdit() {
+    if (editQueue.length > 0) {
+      const next = editQueue.shift();
+      processEdit(next);
+    }
+  }
+
+  function processEdit(edit) {
+    currentEdit = edit;
+    // Note: Don't call showDiff here - the backend already opened it in ask mode
+    // This function is only for showing the accept/reject overlay
+    showEditConfirm(edit.filePath, edit.code, edit.language);
+  }
+
+  function updateQueueBadge() {
+    const overlay = document.getElementById('editConfirmOverlay');
+    if (!overlay) return;
+
+    let badge = overlay.querySelector('.edit-confirm-queue');
+    if (editQueue.length > 0) {
+      if (!badge) {
+        badge = document.createElement('span');
+        badge.className = 'edit-confirm-queue';
+        const rejectBtn = overlay.querySelector('.reject');
+        if (rejectBtn) {
+          overlay.insertBefore(badge, rejectBtn);
+        }
+      }
+      badge.textContent = `+${editQueue.length} more`;
+    } else if (badge) {
+      badge.remove();
+    }
+  }
+
+  // Multi-diff list overlay functions - REMOVED (replaced with toolbar buttons)
+  // function showDiffListOverlay() { ... }
+  // function hideDiffListOverlay() { ... }
+  // function updateDiffList() { ... }
+
   function saveState() {
     const messages = Array.from(document.querySelectorAll('.message')).map(el => {
       const reasoningEl = el.querySelector('.reasoning-body');
@@ -931,6 +1706,14 @@
   window.addEventListener('message', (event) => {
     const message = event.data;
 
+    // DIAGNOSTIC: Log all incoming messages
+    console.log('[DIAGNOSTIC] Received message:', message.type, message);
+
+    // DIAGNOSTIC: Specifically log file-related messages
+    if (message.type === 'openFiles' || message.type === 'searchResults' || message.type === 'fileContent') {
+      console.log('[DIAGNOSTIC] FILE MESSAGE:', JSON.stringify(message));
+    }
+
     switch (message.type) {
       case 'addMessage':
         // Only add assistant messages from backend (user messages added locally)
@@ -946,6 +1729,7 @@
         isReasonerMode = message.isReasoner || false;
         showTypingIndicator(isReasonerMode);
         showStopButton();
+        showStatusMessage('Moby is seeking...');
 
         // Create empty message container for streaming
         const streamContainer = document.createElement('div');
@@ -1125,24 +1909,52 @@
         reasoningUserHasScrolledUp = false;
         hideTypingIndicator();
         hideStopButton();
+        clearStatus();
         // Replace streaming container with final message
         const streamingEl = document.getElementById('streamingMessage');
         if (streamingEl) {
-          // Preserve tool calls container before removing streaming element
-          const toolCallsContainer = streamingEl.querySelector('.tool-calls-container');
-          const toolCallsHtml = toolCallsContainer ? toolCallsContainer.outerHTML : '';
+          // Preserve ALL tool calls containers before removing streaming element
+          const toolCallsContainers = streamingEl.querySelectorAll('.tool-calls-container');
+          const toolCallsHtml = Array.from(toolCallsContainers).map(c => c.outerHTML).join('');
 
           streamingEl.remove();
 
           // Strip DSML from final response before adding message
           const cleanContent = stripDSMLFromContent(currentResponse);
 
-          addMessage({
-            role: 'assistant',
-            content: cleanContent,
-            reasoning_content: currentReasoning || undefined,
-            toolCallsHtml: toolCallsHtml // Pass tool calls HTML to preserve
-          });
+          // Create final message with tool calls HTML preserved (for current session display)
+          // When loaded from history, toolCalls structured data will be used instead
+          const messageEl = document.createElement('div');
+          messageEl.className = 'message assistant';
+
+          const roleEl = document.createElement('div');
+          roleEl.className = 'role';
+          roleEl.textContent = 'DeepSeek Moby';
+          messageEl.appendChild(roleEl);
+
+          // Add reasoning if present
+          if (currentReasoning) {
+            const reasoningEl = document.createElement('div');
+            reasoningEl.className = 'reasoning-content';
+            reasoningEl.innerHTML = `
+              <div class="reasoning-header" onclick="this.parentElement.classList.toggle('collapsed')">
+                <span class="reasoning-icon">💭</span>
+                <span>Chain of Thought</span>
+                <span class="reasoning-toggle">▼</span>
+              </div>
+              <div class="reasoning-body">${formatText(currentReasoning)}</div>
+            `;
+            messageEl.appendChild(reasoningEl);
+          }
+
+          // Add content with tool calls HTML prepended
+          const contentEl = document.createElement('div');
+          contentEl.className = 'content';
+          contentEl.innerHTML = toolCallsHtml + formatCodeBlocks(cleanContent);
+          messageEl.appendChild(contentEl);
+
+          chatMessages.appendChild(messageEl);
+          chatMessages.scrollTop = chatMessages.scrollHeight;
         }
         saveState();
         break;
@@ -1173,6 +1985,66 @@
           }
           currentDiffedBlockId = null;
         }
+        // If diff was closed manually while we have pending edit, treat as reject
+        if (currentEdit) {
+          hideEditConfirm();
+          processNextEdit();
+        }
+        break;
+
+      case 'showEditConfirm':
+        // NOTE: This is now handled by the new multi-diff overlay system
+        // The diffListChanged message already triggers the overlay display
+        // This case is kept for backward compatibility but does nothing
+        break;
+
+      case 'editRejected':
+        // Backend confirms edit was rejected
+        showToast('Edit rejected', 'warning', null, true);
+        break;
+
+      // REMOVED: Modal overlay message handlers (replaced with toolbar buttons)
+      // case 'diffListChanged': ...
+      // case 'activeDiffChanged': ...
+
+      case 'editModeSettings':
+        // Sync edit mode from backend (on startup or settings change)
+        if (message.mode && editModes.includes(message.mode)) {
+          editMode = message.mode;
+          const editModeBtn = document.getElementById('editModeBtn');
+          if (editModeBtn) {
+            // Remove ALL state classes first
+            editModeBtn.classList.remove('state-manual', 'state-ask', 'state-auto');
+
+            // Only add state class for non-manual modes
+            if (editMode === 'ask') {
+              editModeBtn.classList.add('state-ask');
+            } else if (editMode === 'auto') {
+              editModeBtn.classList.add('state-auto');
+            }
+            // manual mode: no class added (uses default styling)
+
+            editModeBtn.title = `Edit mode: ${editModeLabels[editMode]}`;
+
+            // Update icon to match the mode
+            updateEditModeIcon(editMode);
+          }
+        }
+        break;
+
+      case 'openFiles':
+        // Receive list of currently open files
+        loadOpenFiles(message.files || []);
+        break;
+
+      case 'searchResults':
+        // Receive file search results
+        displaySearchResults(message.results || []);
+        break;
+
+      case 'fileContent':
+        // Receive file content after selection
+        addFileToSelection(message.filePath, message.content);
         break;
 
       case 'error':
@@ -1184,11 +2056,11 @@
         if (errorStreamEl) {
           errorStreamEl.remove();
         }
-        showStatus(`Error: ${message.error}`, true);
+        showStatusError(`Error: ${message.error}`);
         break;
 
       case 'warning':
-        showStatus(`⚠️ ${message.message}`, false);
+        showStatusWarning(message.message);
         break;
 
       case 'settings':
