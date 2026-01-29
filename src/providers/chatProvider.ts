@@ -20,6 +20,7 @@ interface DiffMetadata {
   timestamp: number;              // When this diff was created
   iteration: number;              // Edit iteration number (1, 2, 3, etc.)
   diffId: string;                 // Unique ID for this specific diff
+  superseded?: boolean;           // True if a newer iteration exists for same file
 }
 
 export class ChatProvider implements vscode.WebviewViewProvider {
@@ -59,7 +60,8 @@ export class ChatProvider implements vscode.WebviewViewProvider {
   private currentResponseFileChanges: Array<{ filePath: string; status: 'applied' | 'rejected' | 'pending'; iteration: number }> = [];
 
   // Flag to prevent onDidCloseTextDocument from removing diffs we're intentionally closing
-  private closingDiffIntentionally: string | null = null; // diffId being closed
+  // Use a counter instead of boolean to handle nested/overlapping close operations
+  private closingDiffsInProgress: number = 0;
 
   // File tracking state
   private selectedFiles = new Map<string, string>(); // path → content (user-selected files)
@@ -103,11 +105,12 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         for (const [uriKey, metadata] of this.activeDiffs.entries()) {
           if (metadata.proposedUri.toString() === document.uri.toString() ||
               metadata.originalUri.toString() === document.uri.toString()) {
-            // If we're intentionally closing a diff, ignore ALL close events
+            // If we're intentionally closing any diff, ignore ALL close events
             // We handle removal manually in closeSingleDiff to avoid race conditions
-            // (VS Code fires close events for documents we're programmatically closing)
-            if (this.closingDiffIntentionally) {
-              logger.info(`[OVERLAY-DEBUG] Ignoring close for ${metadata.targetFilePath} - intentional close in progress (${this.closingDiffIntentionally})`);
+            // (VS Code fires close events for documents we're programmatically closing,
+            // and sometimes for OTHER diffs in the same tab group)
+            if (this.closingDiffsInProgress > 0) {
+              logger.info(`[OVERLAY-DEBUG] Ignoring close for ${metadata.targetFilePath} - ${this.closingDiffsInProgress} intentional close(s) in progress`);
               return;
             }
             // User manually closed the diff tab
@@ -189,7 +192,8 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       status: 'pending' as const,
       proposedUri: meta.proposedUri.toString(),
       iteration: meta.iteration,
-      diffId: meta.diffId
+      diffId: meta.diffId,
+      superseded: meta.superseded || false
     }));
 
     const resolvedDiffsList = this.resolvedDiffs.map(d => ({
@@ -197,7 +201,8 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       timestamp: d.timestamp,
       status: d.status,
       iteration: d.iteration,
-      diffId: d.diffId
+      diffId: d.diffId,
+      superseded: false
     }));
 
     // Combine and sort by timestamp
@@ -1670,9 +1675,48 @@ Now provide your final response based on what you learned. Do NOT attempt to use
     }
   }
 
+  /**
+   * Close just the diff tab without removing from tracking.
+   * Used for superseded diffs where we want to close the tab but keep showing
+   * the entry in the dropdown as "Newer Version Below".
+   */
+  private async closeDiffTabOnly(metadata: DiffMetadata) {
+    // Increment counter to prevent onDidCloseTextDocument from removing ANY diffs
+    this.closingDiffsInProgress++;
+    logger.info(`[OVERLAY-DEBUG] Closing tab only for ${metadata.targetFilePath} (counter: ${this.closingDiffsInProgress})`);
+
+    try {
+      // Find and close the tab for this specific diff
+      for (const tabGroup of vscode.window.tabGroups.all) {
+        for (const tab of tabGroup.tabs) {
+          const input = tab.input as any;
+          if (input?.original?.toString() === metadata.originalUri.toString() ||
+              input?.modified?.toString() === metadata.proposedUri.toString()) {
+            try {
+              await vscode.window.tabGroups.close(tab);
+              logger.info(`[ChatProvider] Closed superseded diff tab for: ${metadata.targetFilePath}`);
+            } catch (e) {
+              // Tab might already be closed
+            }
+            break;
+          }
+        }
+      }
+      // Note: We intentionally do NOT remove from activeDiffs or update status bar here
+      // The entry stays in tracking so it shows as "Newer Version Below" in the dropdown
+    } finally {
+      setTimeout(() => {
+        this.closingDiffsInProgress = Math.max(0, this.closingDiffsInProgress - 1);
+        logger.info(`[OVERLAY-DEBUG] Tab close complete, counter now: ${this.closingDiffsInProgress}`);
+      }, 500);
+    }
+  }
+
   private async closeSingleDiff(metadata: DiffMetadata) {
-    // Set flag to prevent onDidCloseTextDocument from removing OTHER diffs
-    this.closingDiffIntentionally = metadata.diffId;
+    // Increment counter to prevent onDidCloseTextDocument from removing ANY diffs
+    // VS Code sometimes fires close events for other diffs in the same tab group
+    this.closingDiffsInProgress++;
+    logger.info(`[OVERLAY-DEBUG] Starting intentional close for ${metadata.targetFilePath} (counter: ${this.closingDiffsInProgress})`);
 
     try {
       // Find and close the tab for this specific diff
@@ -1701,10 +1745,12 @@ Now provide your final response based on what you learned. Do NOT attempt to use
       // Notify frontend
       this.notifyDiffListChanged();
     } finally {
-      // Clear flag after a small delay to allow document close events to settle
+      // Decrement counter after a delay to allow all document close events to settle
+      // Use 500ms to be safe - VS Code close events can be delayed
       setTimeout(() => {
-        this.closingDiffIntentionally = null;
-      }, 100);
+        this.closingDiffsInProgress = Math.max(0, this.closingDiffsInProgress - 1);
+        logger.info(`[OVERLAY-DEBUG] Intentional close complete, counter now: ${this.closingDiffsInProgress}`);
+      }, 500);
     }
   }
 
@@ -1749,9 +1795,87 @@ Now provide your final response based on what you learned. Do NOT attempt to use
     const metadata = Array.from(this.activeDiffs.values())
       .find(m => m.diffId === diffId);
 
-    if (metadata) {
-      logger.info(`[ChatProvider] Accepting specific diff: ${diffId} (${metadata.targetFilePath})`);
-      // Track as resolved BEFORE applying (which removes from activeDiffs)
+    if (!metadata) {
+      logger.warn(`[ChatProvider] No diff found for diffId: ${diffId}`);
+      return;
+    }
+
+    // Check if this diff is superseded
+    if (metadata.superseded) {
+      logger.warn(`[ChatProvider] Cannot accept superseded diff: ${diffId}`);
+      this._view?.webview.postMessage({
+        type: 'warning',
+        message: `This version has been superseded by a newer edit. Please use the newer version.`
+      });
+      return;
+    }
+
+    logger.info(`[ChatProvider] Accepting specific diff: ${diffId} (${metadata.targetFilePath})`);
+
+    try {
+      // Open the target file directly using the metadata's file path
+      const workspaceFolders = vscode.workspace.workspaceFolders;
+      if (!workspaceFolders || workspaceFolders.length === 0) {
+        throw new Error('No workspace folder open');
+      }
+
+      let fileUri: vscode.Uri | undefined;
+      for (const folder of workspaceFolders) {
+        const possibleUri = vscode.Uri.joinPath(folder.uri, metadata.targetFilePath);
+        try {
+          await vscode.workspace.fs.stat(possibleUri);
+          fileUri = possibleUri;
+          break;
+        } catch {
+          // File doesn't exist in this folder, might need to create it
+        }
+      }
+
+      // If file doesn't exist, create it (for new file diffs)
+      if (!fileUri) {
+        fileUri = vscode.Uri.joinPath(workspaceFolders[0].uri, metadata.targetFilePath);
+        // Ensure parent directory exists
+        const parentDir = vscode.Uri.joinPath(fileUri, '..');
+        try {
+          await vscode.workspace.fs.createDirectory(parentDir);
+        } catch {
+          // Directory might already exist
+        }
+      }
+
+      // Open the document
+      let document: vscode.TextDocument;
+      try {
+        document = await vscode.workspace.openTextDocument(fileUri);
+      } catch {
+        // File doesn't exist, create empty
+        await vscode.workspace.fs.writeFile(fileUri, new Uint8Array());
+        document = await vscode.workspace.openTextDocument(fileUri);
+      }
+
+      const currentContent = document.getText();
+
+      // Strip "# File:" header from the code
+      const cleanCode = metadata.code.replace(/^#\s*File:.*\n/i, '');
+
+      // Use DiffEngine to apply changes
+      const result = this.diffEngine.applyChanges(currentContent, cleanCode);
+
+      // Apply the changes
+      const edit = new vscode.WorkspaceEdit();
+      const fullRange = new vscode.Range(
+        document.positionAt(0),
+        document.positionAt(currentContent.length)
+      );
+      edit.replace(fileUri, fullRange, result.content);
+      await vscode.workspace.applyEdit(edit);
+
+      // Save the document
+      await document.save();
+
+      logger.info(`Code applied to: ${metadata.targetFilePath}`);
+
+      // Track as resolved
       this.resolvedDiffs.push({
         filePath: metadata.targetFilePath,
         timestamp: metadata.timestamp,
@@ -1759,11 +1883,18 @@ Now provide your final response based on what you learned. Do NOT attempt to use
         iteration: metadata.iteration,
         diffId: metadata.diffId
       });
+
       // Update status in current response file changes for history
       this.updateFileChangeStatus(metadata.targetFilePath, metadata.iteration, 'applied');
-      await this.applyCode(metadata.code, metadata.language);
-    } else {
-      logger.warn(`[ChatProvider] No diff found for diffId: ${diffId}`);
+
+      // Close the specific diff tab
+      await this.closeSingleDiff(metadata);
+
+      this.sendCodeAppliedStatus(true);
+
+    } catch (error: any) {
+      logger.error(`[ChatProvider] Failed to accept diff ${diffId}:`, error.message);
+      this.sendCodeAppliedStatus(false, error.message);
     }
   }
 
@@ -1771,22 +1902,28 @@ Now provide your final response based on what you learned. Do NOT attempt to use
     const metadata = Array.from(this.activeDiffs.values())
       .find(m => m.diffId === diffId);
 
-    if (metadata) {
-      logger.info(`[ChatProvider] Rejecting specific diff: ${diffId} (${metadata.targetFilePath})`);
-      // Track as resolved BEFORE closing (which removes from activeDiffs)
-      this.resolvedDiffs.push({
-        filePath: metadata.targetFilePath,
-        timestamp: metadata.timestamp,
-        status: 'rejected',
-        iteration: metadata.iteration,
-        diffId: metadata.diffId
-      });
-      // Update status in current response file changes for history
-      this.updateFileChangeStatus(metadata.targetFilePath, metadata.iteration, 'rejected');
-      await this.closeSingleDiff(metadata);
-    } else {
+    if (!metadata) {
       logger.warn(`[ChatProvider] No diff found for diffId: ${diffId}`);
+      return;
     }
+
+    // Check if this diff is superseded - allow rejection to clean up the entry
+    logger.info(`[ChatProvider] Rejecting specific diff: ${diffId} (${metadata.targetFilePath})`);
+
+    // Track as resolved
+    this.resolvedDiffs.push({
+      filePath: metadata.targetFilePath,
+      timestamp: metadata.timestamp,
+      status: 'rejected',
+      iteration: metadata.iteration,
+      diffId: metadata.diffId
+    });
+
+    // Update status in current response file changes for history
+    this.updateFileChangeStatus(metadata.targetFilePath, metadata.iteration, 'rejected');
+
+    // Close the specific diff tab
+    await this.closeSingleDiff(metadata);
   }
 
   private updateFileChangeStatus(filePath: string, iteration: number, status: 'applied' | 'rejected') {
@@ -2287,6 +2424,17 @@ Now provide your final response based on what you learned. Do NOT attempt to use
         logger.info(`Opened new diff tab in existing group at view column ${diffTabGroup.viewColumn}`);
       }
 
+      // Mark any existing diffs for the same file as superseded and collect them for closing
+      // This happens when LLM creates multiple iterations for the same file
+      const supersededDiffs: DiffMetadata[] = [];
+      for (const [key, existingMeta] of this.activeDiffs.entries()) {
+        if (existingMeta.targetFilePath === targetPath && !existingMeta.superseded) {
+          existingMeta.superseded = true;
+          supersededDiffs.push(existingMeta);
+          logger.info(`[ChatProvider] Marked diff iteration ${existingMeta.iteration} for ${targetPath} as superseded`);
+        }
+      }
+
       // Track this diff in the Map
       const metadata: DiffMetadata = {
         proposedUri,
@@ -2296,7 +2444,8 @@ Now provide your final response based on what you learned. Do NOT attempt to use
         language,
         timestamp,
         iteration,
-        diffId
+        diffId,
+        superseded: false
       };
 
       this.activeDiffs.set(proposedUri.toString(), metadata);
@@ -2314,6 +2463,13 @@ Now provide your final response based on what you learned. Do NOT attempt to use
 
       // Notify frontend of updated diff list
       this.notifyDiffListChanged();
+
+      // Close superseded diff tabs (do this after notifying frontend so they see the superseded state first)
+      // Use closeDiffTabOnly to keep entries in activeDiffs for dropdown display as "Newer Version Below"
+      for (const supersededMeta of supersededDiffs) {
+        logger.info(`[ChatProvider] Closing superseded diff tab for ${supersededMeta.targetFilePath} (iteration ${supersededMeta.iteration})`);
+        await this.closeDiffTabOnly(supersededMeta);
+      }
 
       // Clean up provider after a delay
       setTimeout(() => disposable.dispose(), 300000); // 5 minutes
@@ -2815,12 +2971,13 @@ Now provide your final response based on what you learned. Do NOT attempt to use
                   <div class="status-panel-separator" id="statusPanelSeparator"></div>
                   <div class="status-panel-right">
                     <div class="status-panel-warnings" id="statusPanelWarnings"></div>
-                    <button class="status-panel-logs-btn" id="statusPanelLogsBtn" title="Show Logs">
-                      <svg viewBox="0 0 16 16" fill="currentColor">
-                        <path d="M3 3h10v1H3V3zm0 3h10v1H3V6zm0 3h7v1H3V9zm0 3h10v1H3v-1z"/>
-                      </svg>
-                    </button>
                   </div>
+                  <!-- Logs button outside of flexing right panel so it stays anchored -->
+                  <button class="status-panel-logs-btn" id="statusPanelLogsBtn" title="Show Logs">
+                    <svg viewBox="0 0 16 16" fill="currentColor">
+                      <path d="M3 3h10v1H3V3zm0 3h10v1H3V6zm0 3h7v1H3V9zm0 3h10v1H3v-1z"/>
+                    </svg>
+                  </button>
                 </div>
               </div>
             </div>

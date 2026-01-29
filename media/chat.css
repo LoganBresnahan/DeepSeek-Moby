@@ -682,6 +682,24 @@ body {
   flex-shrink: 0;
 }
 
+.pending-change-superseded-label {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--vscode-textLink-foreground, #3794ff);
+  background: rgba(55, 148, 255, 0.15);
+  padding: 2px 8px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.pending-change-status.superseded {
+  color: var(--vscode-textLink-foreground, #3794ff);
+}
+
+.pending-change-item[data-superseded="true"] {
+  opacity: 0.8;
+}
+
 .pending-changes-container.auto-mode .pending-change-item {
   padding: 4px 0;
 }

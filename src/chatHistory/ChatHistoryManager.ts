@@ -20,7 +20,7 @@ export class ChatHistoryManager {
     language?: string,
     filePath?: string
   ): Promise<ChatSession> {
-    const session = this.storage.createSession(initialMessage, model, language, filePath);
+    const session = await this.storage.createSession(initialMessage, model, language, filePath);
     this.onSessionsChanged.fire();
     return session;
   }
@@ -34,10 +34,10 @@ export class ChatHistoryManager {
         'deepseek-chat'
       );
     }
-    
+
     const sessionId = this.storage.getCurrentSession()?.id;
     if (sessionId) {
-      this.storage.addMessage(sessionId, message);
+      await this.storage.addMessage(sessionId, message);
       this.onSessionsChanged.fire();
     }
   }
@@ -55,17 +55,17 @@ export class ChatHistoryManager {
   }
 
   async switchToSession(sessionId: string): Promise<void> {
-    this.storage.setCurrentSession(sessionId);
+    await this.storage.setCurrentSession(sessionId);
     this.onSessionsChanged.fire();
   }
 
   async deleteSession(sessionId: string): Promise<void> {
-    this.storage.deleteSession(sessionId);
+    await this.storage.deleteSession(sessionId);
     this.onSessionsChanged.fire();
   }
 
   async clearAllHistory(): Promise<void> {
-    this.storage.clearAllSessions();
+    await this.storage.clearAllSessions();
     this.onSessionsChanged.fire();
   }
 
@@ -113,7 +113,7 @@ export class ChatHistoryManager {
   }
 
   async importSession(data: string): Promise<ChatSession | null> {
-    const session = this.storage.importSession(data);
+    const session = await this.storage.importSession(data);
     if (session) {
       this.onSessionsChanged.fire();
     }
@@ -122,13 +122,13 @@ export class ChatHistoryManager {
 
   async exportAllSessions(format: 'json' | 'markdown' | 'txt' = 'json'): Promise<string> {
     const sessions = this.storage.getAllSessions();
-    
+
     switch (format) {
       case 'json':
         return JSON.stringify(sessions, null, 2);
-        
+
       case 'markdown':
-        return sessions.map(session => 
+        return sessions.map(session =>
           `# ${session.title}\n` +
           `**Created:** ${session.createdAt.toLocaleString()}  \n` +
           `**Model:** ${session.model}  \n` +
@@ -136,16 +136,16 @@ export class ChatHistoryManager {
           (session.filePath ? `**File:** ${session.filePath}  \n` : '') +
           (session.tags.length ? `**Tags:** ${session.tags.join(', ')}  \n` : '') +
           `\n## Conversation\n` +
-          session.messages.map(msg => 
+          session.messages.map(msg =>
             `### ${msg.role === 'user' ? 'You' : 'DeepSeek Moby'}\n` +
             `*${msg.timestamp.toLocaleTimeString()}*\n\n` +
             '```' + (session.language || 'text') + '\n' +
             msg.content + '\n```\n'
           ).join('\n') + '\n---\n'
         ).join('\n');
-        
+
       case 'txt':
-        return sessions.map(session => 
+        return sessions.map(session =>
           `=== ${session.title} ===\n` +
           `Created: ${session.createdAt.toLocaleString()}\n` +
           `Model: ${session.model}\n` +
@@ -153,7 +153,7 @@ export class ChatHistoryManager {
           (session.filePath ? `File: ${session.filePath}\n` : '') +
           (session.tags.length ? `Tags: ${session.tags.join(', ')}\n` : '') +
           `\nConversation:\n` +
-          session.messages.map(msg => 
+          session.messages.map(msg =>
             `[${msg.timestamp.toLocaleTimeString()}] ${msg.role === 'user' ? 'You' : 'DeepSeek Moby'}:\n` +
             msg.content + '\n'
           ).join('\n') + '\n\n'
@@ -179,7 +179,7 @@ export class ChatHistoryManager {
       session.messages.forEach(msg => {
         totalTokens += msg.tokens || estimateTokens(msg.content);
       });
-      
+
       byModel[session.model] = (byModel[session.model] || 0) + 1;
       if (session.language) {
         byLanguage[session.language] = (byLanguage[session.language] || 0) + 1;
@@ -199,7 +199,7 @@ export class ChatHistoryManager {
     const session = this.storage.getSession(sessionId);
     if (session && !session.tags.includes(tag)) {
       session.tags.push(tag);
-      this.storage.updateSession(sessionId, { tags: session.tags });
+      await this.storage.updateSession(sessionId, { tags: session.tags });
       this.onSessionsChanged.fire();
     }
   }
@@ -208,7 +208,7 @@ export class ChatHistoryManager {
     const session = this.storage.getSession(sessionId);
     if (session) {
       const newTags = session.tags.filter(t => t !== tag);
-      this.storage.updateSession(sessionId, { tags: newTags });
+      await this.storage.updateSession(sessionId, { tags: newTags });
       this.onSessionsChanged.fire();
     }
   }
@@ -219,7 +219,7 @@ export class ChatHistoryManager {
   }
 
   async renameSession(sessionId: string, newTitle: string): Promise<void> {
-    this.storage.updateSession(sessionId, { title: newTitle });
+    await this.storage.updateSession(sessionId, { title: newTitle });
     this.onSessionsChanged.fire();
   }
 
@@ -229,13 +229,13 @@ export class ChatHistoryManager {
 
     const duplicated: ChatSession = {
       ...session,
-      id: generateSessionId(), // ✅ Now this works!
+      id: generateSessionId(),
       title: `${session.title} (Copy)`,
       createdAt: new Date(),
       updatedAt: new Date()
     };
 
-    this.storage.updateSession(duplicated.id, duplicated);
+    await this.storage.updateSession(duplicated.id, duplicated);
     this.onSessionsChanged.fire();
     return duplicated;
   }
@@ -246,7 +246,7 @@ export class ChatHistoryManager {
     return currentSession?.messages || [];
   }
 
-  // Helper method for backward compatibility  
+  // Helper method for backward compatibility
   async clearConversationHistory(): Promise<void> {
     // This clears just the current conversation, not the entire history
     await this.startNewSession();

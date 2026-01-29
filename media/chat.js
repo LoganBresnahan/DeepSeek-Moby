@@ -1046,8 +1046,9 @@
       const iterationLabel = diff.iteration > 1 ? ` (${diff.iteration})` : '';
       const fileName = baseFileName + iterationLabel;
       const status = diff.status || 'pending';
-      const statusClass = status === 'applied' ? 'applied' : status === 'rejected' ? 'rejected' : 'pending';
-      const statusIcon = status === 'applied' ? '✓' : status === 'rejected' ? '✗' : '●';
+      const isSuperseded = diff.superseded === true;
+      const statusClass = status === 'applied' ? 'applied' : status === 'rejected' ? 'rejected' : isSuperseded ? 'superseded' : 'pending';
+      const statusIcon = status === 'applied' ? '✓' : status === 'rejected' ? '✗' : isSuperseded ? '↓' : '●';
       const diffId = diff.diffId || diff.filePath; // Fallback for old data
 
       // Show action buttons/labels based on mode and status
@@ -1061,6 +1062,9 @@
       } else if (status === 'rejected') {
         // Ask mode with rejected status: show "Rejected" label in red
         actionsHtml = `<span class="pending-change-rejected-label">Rejected</span>`;
+      } else if (isSuperseded) {
+        // Superseded: show "Newer Version ↓" label instead of action buttons
+        actionsHtml = `<span class="pending-change-superseded-label">Newer Version ↓</span>`;
       } else if (status === 'pending') {
         // Ask mode with pending status: show accept/reject buttons
         actionsHtml = `
@@ -1071,12 +1075,12 @@
         `;
       }
 
-      // Only make clickable if it's a pending diff (has a diff to focus)
-      const fileClickable = status === 'pending' ? `data-action="focus" data-diffid="${escapeHtml(diffId)}"` : '';
-      const fileClass = status === 'pending' ? 'pending-change-file' : 'pending-change-file no-click';
+      // Superseded items are not clickable (their diff tab may be closed)
+      const fileClickable = (status === 'pending' && !isSuperseded) ? `data-action="focus" data-diffid="${escapeHtml(diffId)}"` : '';
+      const fileClass = (status === 'pending' && !isSuperseded) ? 'pending-change-file' : 'pending-change-file no-click';
 
       return `
-        <div class="pending-change-item" data-diffid="${escapeHtml(diffId)}" data-status="${status}">
+        <div class="pending-change-item" data-diffid="${escapeHtml(diffId)}" data-status="${status}" data-superseded="${isSuperseded}">
           <span class="pending-change-status ${statusClass}">${statusIcon}</span>
           <span class="${fileClass}" ${fileClickable} title="${escapeHtml(diff.filePath)}">${escapeHtml(fileName)}</span>
           ${actionsHtml}
@@ -1104,8 +1108,9 @@
     const iterationLabel = diff.iteration > 1 ? ` (${diff.iteration})` : '';
     const fileName = baseFileName + iterationLabel;
     const status = diff.status || 'pending';
-    const statusClass = status === 'applied' ? 'applied' : status === 'rejected' ? 'rejected' : 'pending';
-    const statusIcon = status === 'applied' ? '✓' : status === 'rejected' ? '✗' : '●';
+    const isSuperseded = diff.superseded === true;
+    const statusClass = status === 'applied' ? 'applied' : status === 'rejected' ? 'rejected' : isSuperseded ? 'superseded' : 'pending';
+    const statusIcon = status === 'applied' ? '✓' : status === 'rejected' ? '✗' : isSuperseded ? '↓' : '●';
     const diffId = diff.diffId || diff.filePath;
 
     let actionsHtml = '';
@@ -1115,6 +1120,9 @@
       actionsHtml = `<span class="pending-change-auto-label">Accepted</span>`;
     } else if (status === 'rejected') {
       actionsHtml = `<span class="pending-change-rejected-label">Rejected</span>`;
+    } else if (isSuperseded) {
+      // Superseded: show "Newer Version ↓" label instead of action buttons
+      actionsHtml = `<span class="pending-change-superseded-label">Newer Version ↓</span>`;
     } else if (status === 'pending') {
       actionsHtml = `
         <div class="pending-change-actions">
@@ -1124,11 +1132,12 @@
       `;
     }
 
-    const fileClickable = status === 'pending' ? `data-action="focus" data-diffid="${escapeHtml(diffId)}"` : '';
-    const fileClass = status === 'pending' ? 'pending-change-file' : 'pending-change-file no-click';
+    // Superseded items are not clickable (their diff tab may be closed)
+    const fileClickable = (status === 'pending' && !isSuperseded) ? `data-action="focus" data-diffid="${escapeHtml(diffId)}"` : '';
+    const fileClass = (status === 'pending' && !isSuperseded) ? 'pending-change-file' : 'pending-change-file no-click';
 
     return `
-      <div class="pending-change-item" data-diffid="${escapeHtml(diffId)}" data-status="${status}">
+      <div class="pending-change-item" data-diffid="${escapeHtml(diffId)}" data-status="${status}" data-superseded="${isSuperseded}">
         <span class="pending-change-status ${statusClass}">${statusIcon}</span>
         <span class="${fileClass}" ${fileClickable} title="${escapeHtml(diff.filePath)}">${escapeHtml(fileName)}</span>
         ${actionsHtml}
@@ -1203,9 +1212,11 @@
         // Item still exists - update it in place
         const newStatus = diff.status || 'pending';
         const oldStatus = item.dataset.status;
+        const newSuperseded = diff.superseded === true;
+        const oldSuperseded = item.dataset.superseded === 'true';
 
-        if (newStatus !== oldStatus) {
-          // Status changed - update the item
+        if (newStatus !== oldStatus || newSuperseded !== oldSuperseded) {
+          // Status or superseded flag changed - update the item
           const newItemHtml = generatePendingChangeItemHtml(diff, isAutoMode);
           item.outerHTML = newItemHtml;
         }
