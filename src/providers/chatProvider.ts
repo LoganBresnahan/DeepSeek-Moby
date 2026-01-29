@@ -10,6 +10,15 @@ import { logger } from '../utils/logger';
 import { workspaceTools, applyCodeEditTool, executeToolCall } from '../tools/workspaceTools';
 import { parseDSMLToolCalls, stripDSML } from '../utils/dsmlParser';
 import { TavilyClient, TavilySearchResponse } from '../clients/tavilyClient';
+import {
+  parseShellCommands,
+  containsShellCommands,
+  executeShellCommands,
+  formatShellResultsForContext,
+  getReasonerShellPrompt,
+  stripShellTags,
+  ShellResult
+} from '../tools/reasonerShellExecutor';
 
 interface DiffMetadata {
   proposedUri: vscode.Uri;        // The "modified" side of the diff
@@ -712,8 +721,12 @@ which I already edited - would you like me to update it?"
     let systemPrompt = `You are DeepSeek Moby, an expert programming assistant integrated into VS Code.
 `;
 
-    // Only add tool instructions for non-reasoner models (reasoner can't use tools)
-    if (!isReasonerModel) {
+    // Add exploration capabilities based on model type
+    if (isReasonerModel) {
+      // Reasoner uses shell commands instead of native tool calling
+      systemPrompt += getReasonerShellPrompt();
+    } else {
+      // Chat model uses native tool calling
       systemPrompt += `
 You have access to tools that let you explore the codebase:
 - read_file: Read contents of any file in the workspace
@@ -862,6 +875,13 @@ ${webSearchContext}
     // Start streaming response
     let fullResponse = '';
     let fullReasoning = '';
+    let accumulatedResponse = '';  // For reasoner: accumulates responses across shell iterations
+
+    // Per-iteration tracking for R1 continuation (reasoning AND content)
+    let reasoningIterations: string[] = [];
+    let currentIterationReasoning = '';
+    let contentIterations: string[] = [];
+    let currentIterationContent = '';
 
     // Clear file changes tracking for this response
     this.currentResponseFileChanges = [];
@@ -961,68 +981,214 @@ Now provide your final response based on what you learned. Do NOT attempt to use
         }
       }
 
-      const _response = await this.deepSeekClient.streamChat(
-        historyMessages,
-        async (token) => {
-          fullResponse += token;
+      // Shell execution tracking for history
+      let shellResultsForHistory: ShellResult[] = [];
+
+      // Reasoner shell loop - run shell commands if R1 outputs them
+      const maxShellIterations = 5;  // Prevent infinite loops
+      let shellIteration = 0;
+      let currentSystemPrompt = streamingSystemPrompt;
+      let currentHistoryMessages = [...historyMessages];
+
+      // Store original user message for re-injection in continuation prompts
+      // This ensures R1 doesn't "forget" the task after shell exploration
+      const originalUserMessage = message;
+
+      do {
+        // Track iteration-specific response (accumulated response is declared outside try block)
+        let iterationResponse = '';
+
+        // Log iteration start for debugging R1 continuation
+        if (isReasonerModel) {
+          logger.info(`[R1-Shell] Starting iteration ${shellIteration + 1}, messages in context: ${currentHistoryMessages.length}`);
+          // Notify frontend of new iteration for per-iteration thinking dropdowns
           this._view?.webview.postMessage({
-            type: 'streamToken',
-            token
+            type: 'iterationStart',
+            iteration: shellIteration + 1  // 1-indexed for display
           });
+        }
 
-          // Detect complete code blocks and auto-show diff in "ask" mode
-          if (this.editMode === 'ask') {
-            const codeBlockRegex = /```(\w+)?\n([\s\S]*?)\n```/g;
-            const matches = [...fullResponse.matchAll(codeBlockRegex)];
+        const _response = await this.deepSeekClient.streamChat(
+          currentHistoryMessages,
+          async (token) => {
+            iterationResponse += token;
+            accumulatedResponse += token;
+            currentIterationContent += token;  // Track content per iteration
+            this._view?.webview.postMessage({
+              type: 'streamToken',
+              token
+            });
 
-            for (const match of matches) {
-              const language = match[1] || 'plaintext';
-              const code = match[2];
+            // Detect complete code blocks and auto-handle in "ask" or "auto" mode
+            if (this.editMode === 'ask' || this.editMode === 'auto') {
+              const codeBlockRegex = /```(\w+)?\n([\s\S]*?)\n```/g;
+              const matches = [...accumulatedResponse.matchAll(codeBlockRegex)];
 
-              // Skip tool outputs
-              if (language === 'tool-output') {
-                continue;
+              for (const match of matches) {
+                const language = match[1] || 'plaintext';
+                const code = match[2];
+
+                // Skip tool outputs
+                if (language === 'tool-output') {
+                  continue;
+                }
+
+                // IMPORTANT: Only auto-process if code has explicit # File: header
+                // This prevents false positives when LLM shows explanatory code
+                const fileHeaderMatch = code.match(/^#\s*File:\s*(.+?)$/m);
+                if (!fileHeaderMatch) {
+                  logger.info(`[ChatProvider] Skipping auto-diff for code block without # File: header (likely explanatory code)`);
+                  continue;
+                }
+
+                // Create unique identifier for this block
+                const blockId = `${match.index}-${match[0].length}`;
+
+                // Skip if already processed
+                if (this.processedCodeBlocks.has(blockId)) {
+                  continue;
+                }
+
+                // Mark as processed
+                this.processedCodeBlocks.add(blockId);
+
+                if (this.editMode === 'ask') {
+                  // Use debounced diff display (waits 2.5s to batch rapid LLM iterations)
+                  this.handleDebouncedDiff(code, language);
+                } else if (this.editMode === 'auto') {
+                  // Auto-apply directly
+                  const filePath = fileHeaderMatch[1].trim();
+                  const codeWithoutHeader = code.replace(/^#\s*File:.*\n/i, '');
+                  logger.info(`[ChatProvider] Auto-applying code block for: ${filePath}`);
+                  this.applyCodeDirectlyForAutoMode(filePath, codeWithoutHeader, 'Auto-applied from code block');
+                }
               }
-
-              // IMPORTANT: Only auto-show diff if code has explicit # File: header
-              // This prevents false positives when LLM shows explanatory code
-              const hasFileHeader = /^#\s*File:\s*(.+?)$/m.test(code);
-              if (!hasFileHeader) {
-                logger.info(`[ChatProvider] Skipping auto-diff for code block without # File: header (likely explanatory code)`);
-                continue;
-              }
-
-              // Create unique identifier for this block
-              const blockId = `${match.index}-${match[0].length}`;
-
-              // Skip if already processed
-              if (this.processedCodeBlocks.has(blockId)) {
-                continue;
-              }
-
-              // Mark as processed
-              this.processedCodeBlocks.add(blockId);
-
-              // Use debounced diff display (waits 2.5s to batch rapid LLM iterations)
-              this.handleDebouncedDiff(code, language);
             }
-          }
-        },
-        streamingSystemPrompt,
-        // Reasoning callback for deepseek-reasoner
-        isReasonerModel ? (reasoningToken) => {
-          fullReasoning += reasoningToken;
-          this._view?.webview.postMessage({
-            type: 'streamReasoning',
-            token: reasoningToken
-          });
-        } : undefined,
-        { signal }
-      );
+          },
+          currentSystemPrompt,
+          // Reasoning callback for deepseek-reasoner
+          isReasonerModel ? (reasoningToken) => {
+            fullReasoning += reasoningToken;
+            currentIterationReasoning += reasoningToken;  // Track per-iteration
+            this._view?.webview.postMessage({
+              type: 'streamReasoning',
+              token: reasoningToken
+            });
+          } : undefined,
+          { signal }
+        );
 
-      // Strip any DSML markup from the final response (DeepSeek sometimes
-      // outputs DSML in streamed content even after tool calls are done)
-      const cleanResponse = stripDSML(fullResponse);
+        // Log iteration completion for debugging R1 continuation
+        if (isReasonerModel) {
+          logger.info(`[R1-Shell] Iteration ${shellIteration + 1} complete, response length: ${iterationResponse.length} chars`);
+          logger.info(`[R1-Shell] Response preview: ${iterationResponse.substring(0, 300).replace(/\n/g, '\\n')}...`);
+
+          // Save iteration reasoning AND content, reset for next iteration
+          if (currentIterationReasoning) {
+            reasoningIterations.push(currentIterationReasoning);
+            currentIterationReasoning = '';
+          }
+          if (currentIterationContent) {
+            contentIterations.push(currentIterationContent);
+            currentIterationContent = '';
+          }
+        }
+
+        // Check for shell commands in THIS iteration's response (not accumulated)
+        if (isReasonerModel && containsShellCommands(iterationResponse)) {
+          shellIteration++;
+          logger.info(`[R1-Shell] Iteration ${shellIteration}: found shell commands`);
+
+          // Parse and execute shell commands from this iteration
+          const commands = parseShellCommands(iterationResponse);
+          const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
+          if (commands.length > 0 && workspacePath) {
+            // Notify frontend about shell execution
+            this._view?.webview.postMessage({
+              type: 'shellExecuting',
+              commands: commands.map(c => c.command)
+            });
+
+            // Execute commands
+            const results = await executeShellCommands(commands, workspacePath);
+            shellResultsForHistory.push(...results);
+
+            // Notify frontend of results
+            this._view?.webview.postMessage({
+              type: 'shellResults',
+              results: results.map(r => ({
+                command: r.command,
+                output: r.output.substring(0, 500) + (r.output.length > 500 ? '...' : ''),
+                success: r.success
+              }))
+            });
+
+            // Add to context and continue
+            const resultsContext = formatShellResultsForContext(results);
+
+            // Add assistant response with shell commands to API context (for continuation)
+            currentHistoryMessages.push({
+              role: 'assistant',
+              content: iterationResponse
+            });
+
+            // Add shell results as user message (like tool results in chat model)
+            // Include original user request so R1 doesn't "forget" the task
+            currentHistoryMessages.push({
+              role: 'user',
+              content: `Shell command results:\n${resultsContext}
+
+---
+REMINDER - Your original task was:
+"${originalUserMessage}"
+
+You have explored the codebase. Now you MUST either:
+1. Run additional shell commands if you need more information, OR
+2. Produce the code edits using properly formatted code blocks with # File: headers
+
+Do NOT just describe what you found. Complete the original task with actual code changes.`
+            });
+
+            // Update system prompt for continuation - reinforce the code edit requirement
+            // Include original task to prevent R1 from losing context
+            currentSystemPrompt = streamingSystemPrompt + `
+
+The shell commands have been executed and results are provided.
+ORIGINAL TASK: "${originalUserMessage}"
+
+You MUST now complete this task:
+- If you need more information, run additional shell commands
+- Otherwise, produce the code edits in properly formatted code blocks with # File: headers
+- Your response is NOT complete until you provide the actual code changes
+- Do NOT end with just analysis or description - include the code edits`;
+
+            logger.info(`[R1-Shell] Injected ${results.length} shell results for task: "${originalUserMessage.substring(0, 50)}...", continuing...`);
+          }
+        } else {
+          // No shell commands or not reasoner - break the loop
+          if (isReasonerModel) {
+            logger.info(`[R1-Shell] Loop exiting: iteration=${shellIteration}, hasShellCommands=false, responseLength=${iterationResponse.length}`);
+          }
+          break;
+        }
+      } while (shellIteration < maxShellIterations && isReasonerModel);
+
+      if (shellIteration >= maxShellIterations) {
+        logger.warn(`[ChatProvider] Reasoner shell loop limit reached (${maxShellIterations} iterations)`);
+      }
+
+      // Push final iteration's content (if the loop exited without shell commands)
+      if (currentIterationContent) {
+        contentIterations.push(currentIterationContent);
+        currentIterationContent = '';
+      }
+
+      // Strip any DSML markup and shell tags from the final response
+      // (DeepSeek chat outputs DSML, Reasoner outputs <shell> tags)
+      // Use accumulatedResponse to include all content from all shell iterations
+      let cleanResponse = stripDSML(accumulatedResponse);
+      cleanResponse = stripShellTags(cleanResponse);
 
       // Finalize response
       this._view.webview.postMessage({
@@ -1030,9 +1196,21 @@ Now provide your final response based on what you learned. Do NOT attempt to use
         message: {
           role: 'assistant',
           content: cleanResponse,
-          reasoning_content: fullReasoning || undefined
+          reasoning_content: fullReasoning || undefined,
+          reasoning_iterations: reasoningIterations.length > 0 ? reasoningIterations : undefined,
+          content_iterations: contentIterations.length > 0 ? contentIterations : undefined,
+          editMode: this.editMode
         }
       });
+
+      // Convert shell results to tool call format for history
+      // Use 'done' not 'success' to match frontend expectation for status icons
+      const shellToolCalls = shellResultsForHistory.map(r => ({
+        name: 'shell',
+        detail: r.command,
+        status: r.success ? 'done' : 'error'
+      }));
+      const allToolCalls = [...toolCallsForHistory, ...shellToolCalls];
 
       // Save assistant message to history (with clean response)
       const tokenCount = this.deepSeekClient.estimateTokens(cleanResponse + fullReasoning);
@@ -1041,8 +1219,11 @@ Now provide your final response based on what you learned. Do NOT attempt to use
           role: 'assistant',
           content: cleanResponse,
           reasoning_content: fullReasoning || undefined,
-          toolCalls: toolCallsForHistory.length > 0 ? toolCallsForHistory : undefined,
+          reasoning_iterations: reasoningIterations.length > 0 ? reasoningIterations : undefined,
+          content_iterations: contentIterations.length > 0 ? contentIterations : undefined,
+          toolCalls: allToolCalls.length > 0 ? allToolCalls : undefined,
           fileChanges: this.currentResponseFileChanges.length > 0 ? this.currentResponseFileChanges : undefined,
+          editMode: this.editMode,
           tokens: tokenCount
         });
       }
@@ -1056,15 +1237,27 @@ Now provide your final response based on what you learned. Do NOT attempt to use
       // Check if this was an abort (user stopped generation)
       if (error.name === 'CanceledError' || error.name === 'AbortError' || signal.aborted) {
         // Save partial response to history if there's content
-        if (this.currentSessionId && (fullResponse || fullReasoning)) {
-          const cleanPartialResponse = stripDSML(fullResponse);
+        // Use accumulatedResponse for reasoner (accumulates across shell iterations), fallback to fullResponse
+        const partialContent = accumulatedResponse || fullResponse;
+        if (this.currentSessionId && (partialContent || fullReasoning)) {
+          const cleanPartialResponse = stripShellTags(stripDSML(partialContent));
           const partialTokenCount = this.deepSeekClient.estimateTokens(cleanPartialResponse + fullReasoning);
+          // For partial save, include any reasoning and content accumulated so far
+          const partialReasoningIterations = currentIterationReasoning
+            ? [...reasoningIterations, currentIterationReasoning]
+            : reasoningIterations;
+          const partialContentIterations = currentIterationContent
+            ? [...contentIterations, currentIterationContent]
+            : contentIterations;
           await this.chatHistoryManager.addMessageToCurrentSession({
             role: 'assistant',
             content: cleanPartialResponse + '\n\n*[Generation stopped]*',
             reasoning_content: fullReasoning || undefined,
+            reasoning_iterations: partialReasoningIterations.length > 0 ? partialReasoningIterations : undefined,
+            content_iterations: partialContentIterations.length > 0 ? partialContentIterations : undefined,
             toolCalls: toolCallsForHistory.length > 0 ? toolCallsForHistory : undefined,
             fileChanges: this.currentResponseFileChanges.length > 0 ? this.currentResponseFileChanges : undefined,
+            editMode: this.editMode,
             tokens: partialTokenCount
           });
           logger.info(`[ChatProvider] Saved partial response to history (${partialTokenCount} tokens)`);
@@ -2790,8 +2983,11 @@ Now provide your final response based on what you learned. Do NOT attempt to use
           role: msg.role,
           content: msg.content,
           reasoning_content: msg.reasoning_content,
+          reasoning_iterations: msg.reasoning_iterations,
+          content_iterations: msg.content_iterations,
           toolCalls: msg.toolCalls,
-          fileChanges: msg.fileChanges
+          fileChanges: msg.fileChanges,
+          editMode: msg.editMode
         }))
       });
     }
@@ -2804,18 +3000,8 @@ Now provide your final response based on what you learned. Do NOT attempt to use
       await this.chatHistoryManager.switchToSession(sessionId);
       logger.sessionSwitch(sessionId);
 
-      // Switch to the session's model
-      if (session.model) {
-        const config = vscode.workspace.getConfiguration('deepseek');
-        await config.update('model', session.model, vscode.ConfigurationTarget.Global);
-
-        // Send updated settings to webview
-        this._view.webview.postMessage({
-          type: 'settings',
-          model: session.model,
-          temperature: config.get<number>('temperature') ?? 0.7
-        });
-      }
+      // Don't switch to session's model - keep user's current model selection
+      // The model dropdown reflects user preference, not per-session setting
 
       // Load session messages via loadHistory (clears and loads)
       this._view.webview.postMessage({
@@ -2824,8 +3010,11 @@ Now provide your final response based on what you learned. Do NOT attempt to use
           role: msg.role,
           content: msg.content,
           reasoning_content: msg.reasoning_content,
+          reasoning_iterations: msg.reasoning_iterations,
+          content_iterations: msg.content_iterations,
           toolCalls: msg.toolCalls,
-          fileChanges: msg.fileChanges
+          fileChanges: msg.fileChanges,
+          editMode: msg.editMode
         }))
       });
     }

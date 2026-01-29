@@ -204,7 +204,9 @@ export class DeepSeekClient {
       const apiKey = this.getApiKey();
       const model = this.getModel();
       const temperature = options?.temperature ?? this.config.get<number>('temperature') ?? 0.7;
-      const maxTokens = options?.maxTokens ?? this.config.get<number>('maxTokens') ?? 2048;
+      // Reasoner model needs higher token limit for reasoning chain + code edits
+      const defaultMaxTokens = this.isReasonerModel() ? 8192 : 2048;
+      const maxTokens = options?.maxTokens ?? this.config.get<number>('maxTokens') ?? defaultMaxTokens;
 
       const requestMessages = [...messages].map(m => ({
         role: m.role,

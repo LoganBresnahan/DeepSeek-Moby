@@ -2,6 +2,9 @@
   const vscode = acquireVsCodeApi();
   let currentResponse = '';
   let currentReasoning = '';
+  let currentReasoningIterations = [];  // Per-iteration reasoning for R1 continuation
+  let currentContentIterations = [];    // Per-iteration content for interleaved display
+  let currentIterationIndex = 0;  // Current iteration number (1-indexed)
   let isStreaming = false;
   let isReasonerMode = false;
   let generationWasStopped = false; // Flag to ignore messages after manual stop
@@ -10,6 +13,8 @@
   let currentDiffedBlockId = null; // Track which block has active diff
   let currentToolCalls = []; // Track current tool calls for collapsible display
   let toolCallsContainerId = 0; // Counter for unique tool call container IDs
+  let shellCommandsContainerId = 0; // Counter for unique shell command container IDs
+  let shellSegments = []; // Track shell command segments for inline positioning: [{id, commands, results, complete}]
   let webSearchEnabled = false;
   let webSearchSettings = { searchesPerPrompt: 1, searchDepth: 'basic' };
 
@@ -871,12 +876,113 @@
       messageEl.appendChild(filesEl);
     }
 
-    // Add reasoning content if present (for deepseek-reasoner)
-    if (message.reasoning_content) {
+    // Add reasoning and content - support per-iteration interleaved display for R1 continuation
+    const hasReasoningIterations = message.reasoning_iterations && message.reasoning_iterations.length > 0;
+    const hasContentIterations = message.content_iterations && message.content_iterations.length > 0;
+    // Pass the actual edit mode to formatCodeBlocks for proper button/styling handling
+    const messageEditMode = message.editMode || 'manual';
+
+    // Prepare tool calls and file changes HTML (used later)
+    let toolCallsPrefix = '';
+    let fileChangesHtml = '';
+    if (message.role === 'assistant') {
+      if (message.toolCalls && message.toolCalls.length > 0) {
+        toolCallsPrefix = generateToolCallsHtml(message.toolCalls);
+      }
+      if (message.fileChanges && message.fileChanges.length > 0) {
+        fileChangesHtml = generateFileChangesHistoryHtml(message.fileChanges);
+      }
+    }
+
+    // Check if we should render interleaved (both reasoning AND content iterations exist)
+    const shouldInterleave = hasReasoningIterations && hasContentIterations &&
+      (message.reasoning_iterations.length > 1 || message.content_iterations.length > 1);
+
+    if (shouldInterleave) {
+      // INTERLEAVED RENDERING: reasoning[0], content[0], reasoning[1], content[1], etc.
+      const maxIterations = Math.max(message.reasoning_iterations.length, message.content_iterations.length);
+
+      for (let i = 0; i < maxIterations; i++) {
+        // Add reasoning for this iteration if exists
+        if (message.reasoning_iterations[i]) {
+          const reasoningEl = document.createElement('div');
+          reasoningEl.className = 'reasoning-content collapsed';  // Collapsed by default for history
+          const label = maxIterations > 1
+            ? `Thinking (Iteration ${i + 1})`
+            : 'Chain of Thought';
+          reasoningEl.innerHTML = `
+            <div class="reasoning-header" onclick="event.stopPropagation(); this.parentElement.classList.toggle('collapsed')">
+              <span class="reasoning-icon">💭</span>
+              <span>${label}</span>
+              <span class="reasoning-toggle">▼</span>
+            </div>
+            <div class="reasoning-body">${formatText(message.reasoning_iterations[i])}</div>
+          `;
+          messageEl.appendChild(reasoningEl);
+        }
+
+        // Add content for this iteration if exists
+        if (message.content_iterations[i]) {
+          const iterationContentEl = document.createElement('div');
+          iterationContentEl.className = 'iteration-content';
+          // Process iteration content: strip DSML, convert shell tags to markers, format, then inject shell dropdowns
+          let cleanIterationContent = cleanResponseContent(message.content_iterations[i]);
+          cleanIterationContent = replaceShellTagsWithHistoryMarkers(cleanIterationContent);
+          let formattedContent = formatCodeBlocks(cleanIterationContent, messageEditMode);
+          formattedContent = replaceHistoryShellMarkers(formattedContent);
+          iterationContentEl.innerHTML = formattedContent;
+          messageEl.appendChild(iterationContentEl);
+        }
+      }
+
+      // Add tool calls and file changes at the end
+      if (toolCallsPrefix || fileChangesHtml) {
+        const toolsEl = document.createElement('div');
+        toolsEl.className = 'content';
+        toolsEl.innerHTML = toolCallsPrefix + fileChangesHtml;
+        messageEl.appendChild(toolsEl);
+      }
+    } else if (hasReasoningIterations) {
+      // NON-INTERLEAVED: All reasoning at top (no content_iterations)
+      message.reasoning_iterations.forEach((reasoning, index) => {
+        if (reasoning) {
+          const reasoningEl = document.createElement('div');
+          reasoningEl.className = 'reasoning-content collapsed';
+          const label = message.reasoning_iterations.length > 1
+            ? `Thinking (Iteration ${index + 1})`
+            : 'Chain of Thought';
+          reasoningEl.innerHTML = `
+            <div class="reasoning-header" onclick="event.stopPropagation(); this.parentElement.classList.toggle('collapsed')">
+              <span class="reasoning-icon">💭</span>
+              <span>${label}</span>
+              <span class="reasoning-toggle">▼</span>
+            </div>
+            <div class="reasoning-body">${formatText(reasoning)}</div>
+          `;
+          messageEl.appendChild(reasoningEl);
+        }
+      });
+
+      // Add content
+      const contentEl = document.createElement('div');
+      contentEl.className = 'content';
+      if (message.role === 'assistant') {
+        // Process content: strip DSML, convert shell tags to markers, format, then inject shell dropdowns
+        let processedContent = cleanResponseContent(message.content);
+        processedContent = replaceShellTagsWithHistoryMarkers(processedContent);
+        let formattedContent = formatCodeBlocks(processedContent, messageEditMode);
+        formattedContent = replaceHistoryShellMarkers(formattedContent);
+        contentEl.innerHTML = toolCallsPrefix + fileChangesHtml + formattedContent;
+      } else {
+        contentEl.textContent = message.content;
+      }
+      messageEl.appendChild(contentEl);
+    } else if (message.reasoning_content) {
+      // Fallback: single reasoning content (backwards compat)
       const reasoningEl = document.createElement('div');
-      reasoningEl.className = 'reasoning-content';
+      reasoningEl.className = 'reasoning-content collapsed';
       reasoningEl.innerHTML = `
-        <div class="reasoning-header" onclick="this.parentElement.classList.toggle('collapsed')">
+        <div class="reasoning-header" onclick="event.stopPropagation(); this.parentElement.classList.toggle('collapsed')">
           <span class="reasoning-icon">💭</span>
           <span>Chain of Thought</span>
           <span class="reasoning-toggle">▼</span>
@@ -884,28 +990,37 @@
         <div class="reasoning-body">${formatText(message.reasoning_content)}</div>
       `;
       messageEl.appendChild(reasoningEl);
-    }
 
-    const contentEl = document.createElement('div');
-    contentEl.className = 'content';
-
-    if (message.role === 'assistant') {
-      // Reconstruct tool calls HTML from structured data if present
-      let toolCallsPrefix = '';
-      if (message.toolCalls && message.toolCalls.length > 0) {
-        toolCallsPrefix = generateToolCallsHtml(message.toolCalls);
+      // Add content
+      const contentEl = document.createElement('div');
+      contentEl.className = 'content';
+      if (message.role === 'assistant') {
+        // Process content: strip DSML, convert shell tags to markers, format, then inject shell dropdowns
+        let processedContent2 = cleanResponseContent(message.content);
+        processedContent2 = replaceShellTagsWithHistoryMarkers(processedContent2);
+        let formattedContent2 = formatCodeBlocks(processedContent2, messageEditMode);
+        formattedContent2 = replaceHistoryShellMarkers(formattedContent2);
+        contentEl.innerHTML = toolCallsPrefix + fileChangesHtml + formattedContent2;
+      } else {
+        contentEl.textContent = message.content;
       }
-      // Reconstruct file changes HTML from structured data if present
-      let fileChangesHtml = '';
-      if (message.fileChanges && message.fileChanges.length > 0) {
-        fileChangesHtml = generateFileChangesHistoryHtml(message.fileChanges);
-      }
-      contentEl.innerHTML = toolCallsPrefix + fileChangesHtml + formatCodeBlocks(message.content);
+      messageEl.appendChild(contentEl);
     } else {
-      contentEl.textContent = message.content;
+      // No reasoning - just add content
+      const contentEl = document.createElement('div');
+      contentEl.className = 'content';
+      if (message.role === 'assistant') {
+        // Process content: strip DSML, convert shell tags to markers, format, then inject shell dropdowns
+        let processedContent3 = cleanResponseContent(message.content);
+        processedContent3 = replaceShellTagsWithHistoryMarkers(processedContent3);
+        let formattedContent3 = formatCodeBlocks(processedContent3, messageEditMode);
+        formattedContent3 = replaceHistoryShellMarkers(formattedContent3);
+        contentEl.innerHTML = toolCallsPrefix + fileChangesHtml + formattedContent3;
+      } else {
+        contentEl.textContent = message.content;
+      }
+      messageEl.appendChild(contentEl);
     }
-
-    messageEl.appendChild(contentEl);
     chatMessages.appendChild(messageEl);
 
     // Scroll to bottom
@@ -945,37 +1060,80 @@
   /**
    * Generate tool calls HTML from structured data
    * Used when loading history to reconstruct the tool calls UI
+   * Separates shell commands from regular tools into different dropdowns
    */
   function generateToolCallsHtml(toolCalls) {
     if (!toolCalls || toolCalls.length === 0) return '';
 
-    const containerId = `tool-calls-history-${Date.now()}`;
-    const doneCount = toolCalls.filter(t => t.status === 'done').length;
-    const errorCount = toolCalls.filter(t => t.status === 'error').length;
+    // Separate shell commands from regular tools
+    const shellCommands = toolCalls.filter(t => t.name === 'shell');
+    const regularTools = toolCalls.filter(t => t.name !== 'shell');
 
-    const toolsHtml = toolCalls.map((tool, i) => {
-      const statusIcon = tool.status === 'done' ? '✓' : tool.status === 'error' ? '✗' : '⏳';
-      return `
-        <div class="tool-call-item" id="${containerId}-item-${i}" data-status="${tool.status}">
-          <span class="tool-call-status">${statusIcon}</span>
-          <span class="tool-call-detail">${escapeHtml(tool.detail)}</span>
+    let html = '';
+
+    // Generate shell commands dropdown if any
+    if (shellCommands.length > 0) {
+      const shellContainerId = `shell-history-${Date.now()}`;
+      const shellDoneCount = shellCommands.filter(t => t.status === 'done').length;
+      const shellErrorCount = shellCommands.filter(t => t.status === 'error').length;
+
+      const shellItemsHtml = shellCommands.map((cmd, i) => {
+        const statusIcon = cmd.status === 'done' ? '✓' : cmd.status === 'error' ? '✗' : '⏳';
+        return `
+          <div class="tool-call-item" id="${shellContainerId}-item-${i}" data-status="${cmd.status}">
+            <span class="tool-call-status">${statusIcon}</span>
+            <span class="tool-call-detail"><code>$ ${escapeHtml(cmd.detail)}</code></span>
+          </div>
+        `;
+      }).join('');
+
+      const shellTitle = `Ran ${shellDoneCount} command${shellDoneCount !== 1 ? 's' : ''}` +
+                        (shellErrorCount > 0 ? ` (${shellErrorCount} failed)` : '');
+
+      html += `
+        <div class="tool-calls-container shell-commands complete" id="${shellContainerId}">
+          <div class="tool-calls-header" onclick="event.stopPropagation(); this.parentElement.classList.toggle('expanded')">
+            <span class="tool-calls-icon">▶</span>
+            <span class="tool-calls-title">${shellTitle}</span>
+            <span class="tool-calls-summary"></span>
+          </div>
+          <div class="tool-calls-body">${shellItemsHtml}</div>
         </div>
       `;
-    }).join('');
+    }
 
-    const title = `Used ${doneCount} tool${doneCount !== 1 ? 's' : ''}` +
-                  (errorCount > 0 ? ` (${errorCount} failed)` : '');
+    // Generate regular tools dropdown if any
+    if (regularTools.length > 0) {
+      const toolsContainerId = `tool-calls-history-${Date.now()}`;
+      const toolsDoneCount = regularTools.filter(t => t.status === 'done').length;
+      const toolsErrorCount = regularTools.filter(t => t.status === 'error').length;
 
-    return `
-      <div class="tool-calls-container complete" id="${containerId}">
-        <div class="tool-calls-header" onclick="this.parentElement.classList.toggle('expanded')">
-          <span class="tool-calls-icon">▶</span>
-          <span class="tool-calls-title">${title}</span>
-          <span class="tool-calls-summary"></span>
+      const toolsHtml = regularTools.map((tool, i) => {
+        const statusIcon = tool.status === 'done' ? '✓' : tool.status === 'error' ? '✗' : '⏳';
+        return `
+          <div class="tool-call-item" id="${toolsContainerId}-item-${i}" data-status="${tool.status}">
+            <span class="tool-call-status">${statusIcon}</span>
+            <span class="tool-call-detail">${escapeHtml(tool.detail)}</span>
+          </div>
+        `;
+      }).join('');
+
+      const toolsTitle = `Used ${toolsDoneCount} tool${toolsDoneCount !== 1 ? 's' : ''}` +
+                        (toolsErrorCount > 0 ? ` (${toolsErrorCount} failed)` : '');
+
+      html += `
+        <div class="tool-calls-container complete" id="${toolsContainerId}">
+          <div class="tool-calls-header" onclick="event.stopPropagation(); this.parentElement.classList.toggle('expanded')">
+            <span class="tool-calls-icon">▶</span>
+            <span class="tool-calls-title">${toolsTitle}</span>
+            <span class="tool-calls-summary"></span>
+          </div>
+          <div class="tool-calls-body">${toolsHtml}</div>
         </div>
-        <div class="tool-calls-body">${toolsHtml}</div>
-      </div>
-    `;
+      `;
+    }
+
+    return html;
   }
 
   /**
@@ -1017,8 +1175,8 @@
     const title = 'File Changes';
 
     return `
-      <div class="pending-changes-container" id="${containerId}">
-        <div class="pending-changes-header" onclick="this.parentElement.classList.toggle('collapsed')">
+      <div class="pending-changes-container collapsed" id="${containerId}">
+        <div class="pending-changes-header" onclick="event.stopPropagation(); this.parentElement.classList.toggle('collapsed')">
           <span class="pending-changes-icon">▶</span>
           <span class="pending-changes-title">${title}</span>
           <span class="pending-changes-count">${fileChanges.length}</span>
@@ -1035,6 +1193,10 @@
    */
   function generatePendingChangesHtml(diffs, currentEditMode) {
     if (!diffs || diffs.length === 0) return '';
+
+    // In manual mode, don't show the pending changes dropdown
+    // User manually clicks "Diff" on code blocks to view changes
+    if (currentEditMode === 'manual') return '';
 
     const isAutoMode = currentEditMode === 'auto';
     const containerClass = isAutoMode ? 'pending-changes-container auto-mode' : 'pending-changes-container';
@@ -1089,8 +1251,8 @@
     }).join('');
 
     return `
-      <div class="${containerClass}" id="pending-changes-container">
-        <div class="pending-changes-header" onclick="this.parentElement.classList.toggle('collapsed')">
+      <div class="${containerClass} collapsed" id="pending-changes-container">
+        <div class="pending-changes-header" onclick="event.stopPropagation(); this.parentElement.classList.toggle('collapsed')">
           <span class="pending-changes-icon">▶</span>
           <span class="pending-changes-title">${title}</span>
           <span class="pending-changes-count">${diffs.length}</span>
@@ -1174,16 +1336,11 @@
       return;
     }
 
-    // If dropdown doesn't exist, create it fresh
+    // If dropdown doesn't exist, create it fresh - place at END of content for inline positioning
+    // This puts it after code blocks that triggered the changes, not at the top
     if (!existingDropdown) {
       const dropdownHtml = generatePendingChangesHtml(diffs, currentEditMode);
-      const toolCallsContainers = contentEl.querySelectorAll('.tool-calls-container');
-      if (toolCallsContainers.length > 0) {
-        const lastToolCalls = toolCallsContainers[toolCallsContainers.length - 1];
-        lastToolCalls.insertAdjacentHTML('afterend', dropdownHtml);
-      } else {
-        contentEl.insertAdjacentHTML('afterbegin', dropdownHtml);
-      }
+      contentEl.insertAdjacentHTML('beforeend', dropdownHtml);
       return;
     }
 
@@ -1289,6 +1446,241 @@
     return stripped.trim();
   }
 
+  /**
+   * Strip shell tags from content
+   * Shell tags are used by DeepSeek Reasoner (R1) for executing commands
+   */
+  function stripShellTagsFromContent(content) {
+    if (!content) return content;
+    return content.replace(/<shell>[\s\S]*?<\/shell>/gi, '').trim();
+  }
+
+  /**
+   * Clean response content by stripping DSML only (keep shell tags for marker processing)
+   * Shell tags will be processed separately via replaceShellTagsWithHistoryMarkers
+   */
+  function cleanResponseContent(content) {
+    return stripDSMLFromContent(content);
+  }
+
+  /**
+   * Replace shell tags with markers for inline positioning
+   * Each batch of shell tags becomes one marker (they're all executed together)
+   */
+  function replaceShellTagsWithMarkers(content) {
+    if (!content) return content;
+    // Replace all shell tags with a single marker at the first occurrence
+    // (they'll all be grouped into one dropdown)
+    let foundFirst = false;
+    return content.replace(/<shell>[\s\S]*?<\/shell>/gi, () => {
+      if (!foundFirst) {
+        foundFirst = true;
+        return `###SHELL_MARKER###`;
+      }
+      return ''; // Remove subsequent shell tags (they're grouped with the first)
+    });
+  }
+
+  /**
+   * Replace shell markers with actual shell container HTML
+   */
+  function replaceMarkersWithShellContainers(html) {
+    if (!html || shellSegments.length === 0) return html;
+
+    let result = html;
+    let segmentIndex = 0;
+
+    // Replace each marker with corresponding shell segment
+    while (result.includes('###SHELL_MARKER###') && segmentIndex < shellSegments.length) {
+      const segment = shellSegments[segmentIndex];
+      result = result.replace('###SHELL_MARKER###', renderShellContainerHtml(segment));
+      segmentIndex++;
+    }
+
+    // Remove any remaining markers (shouldn't happen, but safety)
+    result = result.replace(/###SHELL_MARKER###/g, '');
+
+    return result;
+  }
+
+  /**
+   * Render shell container HTML for a segment
+   */
+  function renderShellContainerHtml(segment) {
+    const { id, commands, results, complete } = segment;
+    const statusClass = complete ? 'complete' : '';
+    const titleText = complete
+      ? `Ran ${commands.length} command${commands.length !== 1 ? 's' : ''}`
+      : `Running ${commands.length} command${commands.length !== 1 ? 's' : ''}...`;
+
+    return `
+      <div class="tool-calls-container shell-commands ${statusClass}" id="shell-commands-${id}">
+        <div class="tool-calls-header" onclick="event.stopPropagation(); this.parentElement.classList.toggle('expanded')">
+          <span class="tool-calls-icon">▶</span>
+          <span class="tool-calls-title">${titleText}</span>
+          <span class="tool-calls-summary"></span>
+        </div>
+        <div class="tool-calls-body">
+          ${commands.map((cmd, i) => {
+            const cmdResult = results[i];
+            const status = cmdResult ? (cmdResult.success ? 'done' : 'error') : 'running';
+            const icon = cmdResult ? (cmdResult.success ? '✓' : '✗') : '⏳';
+            const spinning = !cmdResult ? 'spinning' : '';
+            return `
+              <div class="tool-call-item" id="shell-commands-${id}-item-${i}" data-status="${status}">
+                <span class="tool-call-status ${spinning}">${icon}</span>
+                <span class="tool-call-detail">
+                  <code>$ ${escapeHtml(cmd)}</code>
+                  ${cmdResult?.output ? `<pre class="shell-output">${escapeHtml(cmdResult.output)}</pre>` : ''}
+                </span>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      </div>
+    `;
+  }
+
+  // Temporary storage for shell commands parsed from history content
+  let historyShellCommands = [];
+
+  /**
+   * Replace shell tags with markers for history restoration
+   * Parses shell tags, extracts commands, stores them, and returns markers
+   * Use replaceHistoryShellMarkers after formatCodeBlocks to insert rendered dropdowns
+   * @param {string} content - Content with shell tags
+   * @returns {string} Content with shell tags replaced by markers
+   */
+  function replaceShellTagsWithHistoryMarkers(content) {
+    if (!content) return content;
+
+    historyShellCommands = []; // Reset storage
+    const shellTagRegex = /<shell>([\s\S]*?)<\/shell>/gi;
+    let markerIndex = 0;
+
+    return content.replace(shellTagRegex, (match, innerContent) => {
+      // Parse commands and their outputs from the shell tag content
+      // Format: command lines, followed by optional "Output:" or ">" prefixed output lines
+      const lines = innerContent.trim().split('\n').map(line => line.trim());
+      const parsedCommands = [];
+      let currentCommand = null;
+      let currentOutput = [];
+
+      for (const line of lines) {
+        if (!line) continue;
+
+        if (line.startsWith('Output:') || line.startsWith('>')) {
+          // This is output for the current command
+          const outputLine = line.startsWith('Output:') ? line.slice(7).trim() : line.slice(1).trim();
+          if (outputLine) currentOutput.push(outputLine);
+        } else {
+          // This is a new command - save previous one if exists
+          if (currentCommand) {
+            parsedCommands.push({
+              command: currentCommand,
+              output: currentOutput.join('\n'),
+              // Infer error status from output keywords
+              success: !currentOutput.some(o =>
+                o.toLowerCase().includes('error') ||
+                o.toLowerCase().includes('failed') ||
+                o.toLowerCase().includes('not found')
+              )
+            });
+          }
+          currentCommand = line;
+          currentOutput = [];
+        }
+      }
+
+      // Don't forget the last command
+      if (currentCommand) {
+        parsedCommands.push({
+          command: currentCommand,
+          output: currentOutput.join('\n'),
+          success: !currentOutput.some(o =>
+            o.toLowerCase().includes('error') ||
+            o.toLowerCase().includes('failed') ||
+            o.toLowerCase().includes('not found')
+          )
+        });
+      }
+
+      if (parsedCommands.length === 0) {
+        return ''; // Empty shell tag, remove it
+      }
+
+      historyShellCommands.push(parsedCommands);
+      return `###SHELL_HISTORY_${markerIndex++}###`;
+    });
+  }
+
+  /**
+   * Replace shell history markers with rendered dropdowns
+   * Call this AFTER formatCodeBlocks (which escapes HTML)
+   * @param {string} html - HTML content with markers
+   * @returns {string} HTML with markers replaced by shell dropdowns
+   */
+  function replaceHistoryShellMarkers(html) {
+    if (!html || historyShellCommands.length === 0) return html;
+
+    let result = html;
+    historyShellCommands.forEach((commands, idx) => {
+      const marker = `###SHELL_HISTORY_${idx}###`;
+      const titleText = `Ran ${commands.length} command${commands.length !== 1 ? 's' : ''}`;
+      // Check if any commands failed
+      const hasErrors = commands.some(cmd => !cmd.success);
+
+      const dropdownHtml = `
+        <div class="tool-calls-container shell-commands complete" id="shell-history-${idx}">
+          <div class="tool-calls-header" onclick="event.stopPropagation(); this.parentElement.classList.toggle('expanded')">
+            <span class="tool-calls-icon">▶</span>
+            <span class="tool-calls-title">${titleText}${hasErrors ? ' (with errors)' : ''}</span>
+            <span class="tool-calls-summary"></span>
+          </div>
+          <div class="tool-calls-body">
+            ${commands.map((cmd, i) => {
+              const status = cmd.success ? 'done' : 'error';
+              const icon = cmd.success ? '✓' : '✗';
+              const outputHtml = cmd.output
+                ? `<pre class="shell-output">${escapeHtml(cmd.output)}</pre>`
+                : '';
+              return `
+                <div class="tool-call-item" id="shell-history-${idx}-item-${i}" data-status="${status}">
+                  <span class="tool-call-status">${icon}</span>
+                  <span class="tool-call-detail">
+                    <code>$ ${escapeHtml(cmd.command)}</code>
+                    ${outputHtml}
+                  </span>
+                </div>
+              `;
+            }).join('')}
+          </div>
+        </div>
+      `;
+
+      result = result.replace(marker, dropdownHtml);
+    });
+
+    // Clean up any leftover markers
+    result = result.replace(/###SHELL_HISTORY_\d+###/g, '');
+    return result;
+  }
+
+  /**
+   * Strip applied code blocks from content (for auto mode)
+   * In auto mode, code blocks with # File: headers are automatically applied,
+   * so we don't need to show them in the response (matches chat model behavior)
+   */
+  function stripAppliedCodeBlocks(content) {
+    if (!content) return content;
+
+    // Match code blocks with # File: header (these were auto-applied)
+    // Pattern: ```language\n# File: ...\n...code...\n```
+    const codeBlockRegex = /```\w*\n#\s*File:[^\n]*\n[\s\S]*?\n```/g;
+
+    return content.replace(codeBlockRegex, '').trim();
+  }
+
   // Simple syntax highlighter for common languages
   function highlightCode(code) {
     // Escape HTML first
@@ -1383,8 +1775,13 @@
     return highlighted;
   }
 
-  function formatCodeBlocks(text) {
+  function formatCodeBlocks(text, currentEditMode = 'manual') {
     if (!text) return '';
+
+    // Normalize editMode parameter (can be boolean for backwards compat or string)
+    const effectiveEditMode = typeof currentEditMode === 'boolean'
+      ? (currentEditMode ? 'auto' : 'manual')
+      : (currentEditMode || 'manual');
 
     // First, extract and protect code blocks
     const codeBlocks = [];
@@ -1412,19 +1809,46 @@
       const isToolOutput = block.lang === 'tool-output';
       const displayLang = isToolOutput ? 'output' : block.lang;
 
-      // Tool output blocks don't get action buttons
-      const actionsHtml = isToolOutput ? '' : `
+      // Check if this is an applied code block (has # File: header)
+      const isAppliedBlock = /^#\s*File:/m.test(block.code);
+
+      // In ask/auto mode: collapse applied blocks, show "(APPLIED)" label, no green border
+      // In manual mode: expanded, show Diff/Apply buttons
+      const isAskOrAutoMode = effectiveEditMode === 'ask' || effectiveEditMode === 'auto';
+      const shouldCollapse = isAskOrAutoMode && isAppliedBlock;
+      const collapsedClass = shouldCollapse ? 'collapsed' : '';
+      const collapseIcon = shouldCollapse ? '▶' : '▼';
+      const collapseTitle = shouldCollapse ? 'Expand code' : 'Collapse code';
+
+      // Only show "(APPLIED)" text in ask/auto mode, no green border data attribute
+      const appliedLabel = (isAskOrAutoMode && isAppliedBlock) ? ' (APPLIED)' : '';
+
+      // Build action buttons based on mode
+      let actionsHtml = '';
+      if (!isToolOutput) {
+        if (isAskOrAutoMode && isAppliedBlock) {
+          // In ask/auto mode for applied blocks: only Copy and collapse toggle
+          actionsHtml = `
+            <div class="code-actions">
+              <button class="code-action-btn copy-btn" title="Copy code">Copy</button>
+              <button class="code-action-btn collapse-btn" title="${collapseTitle}">${collapseIcon}</button>
+            </div>`;
+        } else {
+          // Manual mode or non-applied blocks: full buttons
+          actionsHtml = `
             <div class="code-actions">
               <button class="code-action-btn copy-btn" title="Copy code">Copy</button>
               <button class="code-action-btn diff-btn" title="Show diff">Diff</button>
               <button class="code-action-btn apply-btn" title="Apply to editor">Apply</button>
-              <button class="code-action-btn collapse-btn" title="Collapse code">▼</button>
+              <button class="code-action-btn collapse-btn" title="${collapseTitle}">${collapseIcon}</button>
             </div>`;
+        }
+      }
 
       const codeBlockHtml = `
-        <div class="code-block ${isToolOutput ? 'tool-output' : ''}" id="${blockId}" data-language="${block.lang}">
+        <div class="code-block ${isToolOutput ? 'tool-output' : ''} ${collapsedClass}" id="${blockId}" data-language="${block.lang}">
           <div class="code-header">
-            <span class="code-lang">${displayLang}</span>${actionsHtml}
+            <span class="code-lang">${displayLang}${appliedLabel}</span>${actionsHtml}
           </div>
           <pre><code class="language-${block.lang}">${highlightedCode}</code></pre>
         </div>
@@ -1603,24 +2027,27 @@
     }, 10000);
   }
 
-  function clearStatus() {
-    // Clear timeouts
+  function clearStatus(clearWarningsAndErrors = false) {
+    // Always clear the left-side info messages
     if (statusMessageTimeout) {
       clearTimeout(statusMessageTimeout);
       statusMessageTimeout = null;
     }
-    if (statusWarningTimeout) {
-      clearTimeout(statusWarningTimeout);
-      statusWarningTimeout = null;
-    }
-
-    // Clear messages and classes
     statusPanelMessages.textContent = '';
     statusPanelMessages.title = '';
-    statusPanelWarnings.textContent = '';
-    statusPanelWarnings.title = '';
-    statusPanelWarnings.classList.remove('warning', 'error');
-    statusPanelRight.classList.remove('warning-bg', 'error-bg');
+
+    // Only clear right-side warnings/errors if explicitly requested
+    // This prevents warnings/errors from disappearing before their timeout
+    if (clearWarningsAndErrors) {
+      if (statusWarningTimeout) {
+        clearTimeout(statusWarningTimeout);
+        statusWarningTimeout = null;
+      }
+      statusPanelWarnings.textContent = '';
+      statusPanelWarnings.title = '';
+      statusPanelWarnings.classList.remove('warning', 'error');
+      statusPanelRight.classList.remove('warning-bg', 'error-bg');
+    }
   }
 
   // Resizable separator for status panel
@@ -2027,6 +2454,10 @@
         generationWasStopped = false; // Reset stop flag on new response
         currentResponse = '';
         currentReasoning = '';
+        currentReasoningIterations = [];  // Reset iteration tracking
+        currentContentIterations = [];    // Reset content iteration tracking
+        currentIterationIndex = 0;
+        shellSegments = [];  // Reset shell segments for new response
         isReasonerMode = message.isReasoner || false;
         showTypingIndicator(isReasonerMode);
         showStopButton();
@@ -2039,29 +2470,16 @@
 
         let streamHTML = '<div class="role">DeepSeek Moby</div>';
 
-        // Add reasoning container if in reasoner mode
+        // For reasoner mode, create an iterations container that will hold per-iteration sections
+        // Each section contains BOTH thinking dropdown AND content (interleaved)
         if (isReasonerMode) {
-          streamHTML += `
-            <div class="reasoning-content" id="streamingReasoning">
-              <div class="reasoning-header" onclick="this.parentElement.classList.toggle('collapsed')">
-                <span class="reasoning-icon">💭</span>
-                <span>Chain of Thought</span>
-                <span class="reasoning-toggle">▼</span>
-              </div>
-              <div class="reasoning-body" id="streamingReasoningContent"></div>
-            </div>
-          `;
+          streamHTML += `<div class="iterations-container" id="streamingIterationsContainer"></div>`;
         }
 
+        // For non-reasoner mode, just use a single content div
         streamHTML += '<div class="content" id="streamingContent"></div>';
         streamContainer.innerHTML = streamHTML;
         chatMessages.appendChild(streamContainer);
-
-        // Add scroll listener for reasoning content if present
-        const reasoningBody = document.getElementById('streamingReasoningContent');
-        if (reasoningBody) {
-          reasoningBody.addEventListener('scroll', handleReasoningScrollTracking);
-        }
 
         // Reset scroll tracking for new response and scroll to bottom
         userHasScrolledUp = false;
@@ -2069,11 +2487,54 @@
         chatMessages.scrollTop = chatMessages.scrollHeight;
         break;
 
+      case 'iterationStart':
+        // R1 shell iteration started - create new iteration section with BOTH thinking and content
+        currentIterationIndex = message.iteration;
+        currentReasoningIterations.push('');  // Start new empty iteration
+        currentContentIterations.push('');    // Start new empty content iteration
+
+        const iterationsContainer = document.getElementById('streamingIterationsContainer');
+        if (iterationsContainer) {
+          // Create iteration section with thinking dropdown AND content area (interleaved)
+          const iterationHtml = `
+            <div class="iteration-section" id="iteration-${message.iteration}">
+              <div class="reasoning-content collapsed" id="streamingReasoning-${message.iteration}">
+                <div class="reasoning-header" onclick="event.stopPropagation(); this.parentElement.classList.toggle('collapsed')">
+                  <span class="reasoning-icon">💭</span>
+                  <span>Thinking (Iteration ${message.iteration})</span>
+                  <span class="reasoning-toggle">▼</span>
+                </div>
+                <div class="reasoning-body" id="streamingReasoningContent-${message.iteration}"></div>
+              </div>
+              <div class="iteration-content" id="streamingIterationContent-${message.iteration}"></div>
+            </div>
+          `;
+          iterationsContainer.insertAdjacentHTML('beforeend', iterationHtml);
+
+          // Add scroll listener for the new iteration's reasoning
+          const newReasoningBody = document.getElementById(`streamingReasoningContent-${message.iteration}`);
+          if (newReasoningBody) {
+            newReasoningBody.addEventListener('scroll', handleReasoningScrollTracking);
+          }
+        }
+        scrollToBottomIfNeeded();
+        break;
+
       case 'streamReasoning':
         currentReasoning += message.token;
-        const reasoningContent = document.getElementById('streamingReasoningContent');
+        // Also track per-iteration reasoning
+        if (currentReasoningIterations.length > 0) {
+          currentReasoningIterations[currentReasoningIterations.length - 1] += message.token;
+        }
+
+        // Update the current iteration's content (or fallback to legacy single dropdown)
+        const reasoningContent = document.getElementById(`streamingReasoningContent-${currentIterationIndex}`)
+          || document.getElementById('streamingReasoningContent');
         if (reasoningContent) {
-          reasoningContent.innerHTML = formatText(currentReasoning);
+          const iterationContent = currentReasoningIterations.length > 0
+            ? currentReasoningIterations[currentReasoningIterations.length - 1]
+            : currentReasoning;
+          reasoningContent.innerHTML = formatText(iterationContent);
           // Smart scroll - only if user hasn't scrolled up in reasoning
           scrollReasoningToBottomIfNeeded();
         }
@@ -2082,43 +2543,64 @@
 
       case 'streamToken':
         currentResponse += message.token;
-        const streamingContent = document.getElementById('streamingContent');
-        if (streamingContent) {
-          // Preserve tool call containers and pending changes by saving and restoring them
-          const toolCallContainers = streamingContent.querySelectorAll('.tool-calls-container');
-          const savedToolContainers = Array.from(toolCallContainers).map(el => el.cloneNode(true));
-          const pendingChangesContainer = streamingContent.querySelector('.pending-changes-container');
+
+        // Track per-iteration content for reasoner mode
+        if (isReasonerMode && currentContentIterations.length > 0) {
+          currentContentIterations[currentContentIterations.length - 1] += message.token;
+        }
+
+        // Determine target content element
+        // For reasoner mode with iterations: use current iteration's content area
+        // For non-reasoner or first iteration: use main streamingContent
+        let targetContentEl = null;
+        if (isReasonerMode && currentIterationIndex > 0) {
+          targetContentEl = document.getElementById(`streamingIterationContent-${currentIterationIndex}`);
+        }
+        if (!targetContentEl) {
+          targetContentEl = document.getElementById('streamingContent');
+        }
+
+        if (targetContentEl) {
+          // Save non-shell tool call containers (for deepseek-chat tool calls)
+          const nonShellToolContainers = targetContentEl.querySelectorAll('.tool-calls-container:not(.shell-commands)');
+          const savedNonShellContainers = Array.from(nonShellToolContainers).map(el => el.cloneNode(true));
+
+          // Save pending changes container
+          const pendingChangesContainer = targetContentEl.querySelector('.pending-changes-container');
           const savedPendingChanges = pendingChangesContainer ? pendingChangesContainer.cloneNode(true) : null;
 
-          // Update content (strip any DSML markup before displaying)
-          const cleanResponse = stripDSMLFromContent(currentResponse);
-          streamingContent.innerHTML = formatCodeBlocks(cleanResponse);
+          // Get content for this target
+          // For iteration-specific, use iteration content; otherwise use full response
+          const contentToRender = (isReasonerMode && currentIterationIndex > 0 && currentContentIterations.length > 0)
+            ? currentContentIterations[currentContentIterations.length - 1]
+            : currentResponse;
 
-          // Re-append tool call containers at the beginning
-          if (savedToolContainers.length > 0) {
-            const firstChild = streamingContent.firstChild;
-            savedToolContainers.forEach(container => {
-              if (firstChild) {
-                streamingContent.insertBefore(container, firstChild);
-              } else {
-                streamingContent.appendChild(container);
-              }
+          // Process content:
+          // 1. Strip DSML markup
+          // 2. Replace shell tags with markers (for inline positioning)
+          // 3. Format as markdown/code blocks (pass editMode for proper button/styling)
+          // 4. Replace markers with shell container HTML
+          let cleanResponse = stripDSMLFromContent(contentToRender);
+          cleanResponse = replaceShellTagsWithMarkers(cleanResponse);
+          let rendered = formatCodeBlocks(cleanResponse, editMode);
+          rendered = replaceMarkersWithShellContainers(rendered);
+
+          targetContentEl.innerHTML = '';
+
+          // Re-insert non-shell tool call containers FIRST (before text content)
+          // Tools appear where they were triggered in the content stream (typically before response text)
+          if (savedNonShellContainers.length > 0) {
+            savedNonShellContainers.forEach(container => {
+              targetContentEl.appendChild(container);
             });
           }
 
-          // Re-append pending changes after tool calls (or at beginning if no tool calls)
+          // Add the rendered text content after tool containers
+          targetContentEl.insertAdjacentHTML('beforeend', rendered);
+
+          // Re-append pending changes at the very end
           if (savedPendingChanges) {
-            const lastToolCalls = streamingContent.querySelector('.tool-calls-container:last-of-type');
-            if (lastToolCalls) {
-              lastToolCalls.insertAdjacentElement('afterend', savedPendingChanges);
-            } else {
-              const firstChild = streamingContent.firstChild;
-              if (firstChild) {
-                streamingContent.insertBefore(savedPendingChanges, firstChild);
-              } else {
-                streamingContent.appendChild(savedPendingChanges);
-              }
-            }
+            targetContentEl.appendChild(savedPendingChanges);
           }
         }
         scrollToBottomIfNeeded();
@@ -2132,7 +2614,7 @@
 
         const toolCallsHtml = `
           <div class="tool-calls-container" id="${containerId}">
-            <div class="tool-calls-header" onclick="this.parentElement.classList.toggle('expanded')">
+            <div class="tool-calls-header" onclick="event.stopPropagation(); this.parentElement.classList.toggle('expanded')">
               <span class="tool-calls-icon">▶</span>
               <span class="tool-calls-title">Using ${message.tools.length} tool${message.tools.length > 1 ? 's' : ''}...</span>
               <span class="tool-calls-summary"></span>
@@ -2194,8 +2676,35 @@
         // (Used when tool loop has multiple iterations)
         currentToolCalls = message.tools;
         const existingContainer = document.getElementById(`tool-calls-${toolCallsContainerId}`);
-        if (existingContainer) {
-          // Update header title
+
+        // If existing container is marked complete, create a new container instead
+        // This handles the case where a new batch of tools starts after the previous batch ended
+        if (existingContainer && existingContainer.classList.contains('complete')) {
+          // Create new container for new batch
+          toolCallsContainerId++;
+          const newContainerId = `tool-calls-${toolCallsContainerId}`;
+          const newToolCallsHtml = `
+            <div class="tool-calls-container" id="${newContainerId}">
+              <div class="tool-calls-header" onclick="event.stopPropagation(); this.parentElement.classList.toggle('expanded')">
+                <span class="tool-calls-icon">▶</span>
+                <span class="tool-calls-title">Using ${message.tools.length} tool${message.tools.length > 1 ? 's' : ''}...</span>
+                <span class="tool-calls-summary"></span>
+              </div>
+              <div class="tool-calls-body">
+                ${message.tools.map((tool, i) => `
+                  <div class="tool-call-item" id="${newContainerId}-item-${i}" data-status="${tool.status}">
+                    <span class="tool-call-status">${tool.status === 'done' ? '✓' : tool.status === 'error' ? '✗' : '⏳'}</span>
+                    <span class="tool-call-detail">${escapeHtml(tool.detail)}</span>
+                  </div>
+                `).join('')}
+              </div>
+            </div>
+          `;
+
+          // Append new container after the completed one
+          existingContainer.insertAdjacentHTML('afterend', newToolCallsHtml);
+        } else if (existingContainer) {
+          // Update existing container
           const headerTitle = existingContainer.querySelector('.tool-calls-title');
           if (headerTitle) {
             headerTitle.textContent = `Using ${message.tools.length} tool${message.tools.length > 1 ? 's' : ''}...`;
@@ -2235,7 +2744,90 @@
         currentToolCalls = [];
         break;
 
+      case 'shellExecuting':
+        // Create shell segment - will be rendered inline via markers
+        shellCommandsContainerId++;
+        shellSegments.push({
+          id: shellCommandsContainerId,
+          commands: [...message.commands],
+          results: [],
+          complete: false
+        });
+
+        // Trigger re-render to show shell container inline
+        {
+          const shellTargetEl = isReasonerMode && currentIterationIndex > 0
+            ? document.getElementById(`streamingIterationContent-${currentIterationIndex}`)
+            : document.getElementById('streamingContent');
+
+          if (shellTargetEl) {
+            const contentToRender = (isReasonerMode && currentIterationIndex > 0 && currentContentIterations.length > 0)
+              ? currentContentIterations[currentContentIterations.length - 1]
+              : currentResponse;
+
+            let cleanResponse = stripDSMLFromContent(contentToRender);
+            cleanResponse = replaceShellTagsWithMarkers(cleanResponse);
+            let rendered = formatCodeBlocks(cleanResponse, editMode);
+            rendered = replaceMarkersWithShellContainers(rendered);
+
+            // Save and restore pending changes
+            const pendingEl = shellTargetEl.querySelector('.pending-changes-container');
+            const savedPending = pendingEl ? pendingEl.cloneNode(true) : null;
+
+            shellTargetEl.innerHTML = rendered;
+
+            if (savedPending) {
+              shellTargetEl.appendChild(savedPending);
+            }
+          }
+        }
+        scrollToBottomIfNeeded();
+        break;
+
+      case 'shellResults':
+        // Find segment waiting for results (first one without results)
+        {
+          const pendingSeg = shellSegments.find(s => s.results.length === 0);
+          if (pendingSeg && message.results) {
+            pendingSeg.results = message.results;
+            pendingSeg.complete = true;
+
+            // Trigger re-render to update shell container
+            const shellResultsTargetEl = isReasonerMode && currentIterationIndex > 0
+              ? document.getElementById(`streamingIterationContent-${currentIterationIndex}`)
+              : document.getElementById('streamingContent');
+
+            if (shellResultsTargetEl) {
+              const contentToRender = (isReasonerMode && currentIterationIndex > 0 && currentContentIterations.length > 0)
+                ? currentContentIterations[currentContentIterations.length - 1]
+                : currentResponse;
+
+              let cleanResponse = stripDSMLFromContent(contentToRender);
+              cleanResponse = replaceShellTagsWithMarkers(cleanResponse);
+              let rendered = formatCodeBlocks(cleanResponse, editMode);
+              rendered = replaceMarkersWithShellContainers(rendered);
+
+              // Save and restore pending changes
+              const pendingEl = shellResultsTargetEl.querySelector('.pending-changes-container');
+              const savedPending = pendingEl ? pendingEl.cloneNode(true) : null;
+
+              shellResultsTargetEl.innerHTML = rendered;
+
+              if (savedPending) {
+                shellResultsTargetEl.appendChild(savedPending);
+              }
+            }
+          }
+        }
+        scrollToBottomIfNeeded();
+        break;
+
       case 'endResponse':
+        // Mark all shell segments and DOM containers as complete
+        shellSegments.forEach(seg => seg.complete = true);
+        document.querySelectorAll('.shell-commands:not(.complete)').forEach(container => {
+          container.classList.add('complete');
+        });
         isStreaming = false;
         reasoningUserHasScrolledUp = false;
         hideTypingIndicator();
@@ -2254,8 +2846,14 @@
 
           streamingEl.remove();
 
-          // Strip DSML from final response before adding message
+          // For marker-based shell rendering, we need content with shell tags intact
+          // Use local currentResponse (has shell tags) for live rendering
+          // Backend's message.content is pre-cleaned for history storage
           const cleanContent = stripDSMLFromContent(currentResponse);
+
+          // Pass edit mode to formatCodeBlocks for proper button/styling handling
+          // In ask/auto mode: code blocks with # File: headers will be collapsed, no Diff/Apply buttons
+          const currentModeForResponse = editMode;
 
           // Create final message with tool calls HTML preserved (for current session display)
           // When loaded from history, toolCalls structured data will be used instead
@@ -2267,12 +2865,109 @@
           roleEl.textContent = 'DeepSeek Moby';
           messageEl.appendChild(roleEl);
 
-          // Add reasoning if present
-          if (currentReasoning) {
+          // Get iterations from message or accumulated arrays
+          const msgReasoningIterations = message.message?.reasoning_iterations;
+          const msgContentIterations = message.message?.content_iterations;
+
+          const reasoningToRender = msgReasoningIterations && msgReasoningIterations.length > 0
+            ? msgReasoningIterations
+            : (currentReasoningIterations.length > 0 ? currentReasoningIterations : null);
+
+          const contentToRenderIterations = msgContentIterations && msgContentIterations.length > 0
+            ? msgContentIterations
+            : (currentContentIterations.length > 0 ? currentContentIterations : null);
+
+          // Check if we should render interleaved (both reasoning AND content iterations exist)
+          const shouldInterleave = reasoningToRender && contentToRenderIterations &&
+            (reasoningToRender.length > 1 || contentToRenderIterations.length > 1);
+
+          if (shouldInterleave) {
+            // INTERLEAVED RENDERING: reasoning[0], content[0], reasoning[1], content[1], etc.
+            const maxIterations = Math.max(reasoningToRender.length, contentToRenderIterations.length);
+
+            for (let i = 0; i < maxIterations; i++) {
+              // Add reasoning for this iteration if exists
+              if (reasoningToRender[i]) {
+                const reasoningEl = document.createElement('div');
+                reasoningEl.className = 'reasoning-content collapsed';
+                const label = maxIterations > 1
+                  ? `Thinking (Iteration ${i + 1})`
+                  : 'Chain of Thought';
+                reasoningEl.innerHTML = `
+                  <div class="reasoning-header" onclick="event.stopPropagation(); this.parentElement.classList.toggle('collapsed')">
+                    <span class="reasoning-icon">💭</span>
+                    <span>${label}</span>
+                    <span class="reasoning-toggle">▼</span>
+                  </div>
+                  <div class="reasoning-body">${formatText(reasoningToRender[i])}</div>
+                `;
+                messageEl.appendChild(reasoningEl);
+              }
+
+              // Add content for this iteration if exists
+              if (contentToRenderIterations[i]) {
+                const iterationContentEl = document.createElement('div');
+                iterationContentEl.className = 'iteration-content';
+                // Process content with marker-based shell rendering for inline positioning
+                let cleanIterationContent = stripDSMLFromContent(contentToRenderIterations[i]);
+                cleanIterationContent = replaceShellTagsWithMarkers(cleanIterationContent);
+                let renderedContent = formatCodeBlocks(cleanIterationContent, currentModeForResponse);
+                renderedContent = replaceMarkersWithShellContainers(renderedContent);
+                iterationContentEl.innerHTML = renderedContent;
+                messageEl.appendChild(iterationContentEl);
+              }
+            }
+
+            // Add non-shell tool calls and pending changes at the end
+            const nonShellToolCallsHtml = Array.from(toolCallsContainers)
+              .filter(c => !c.classList.contains('shell-commands'))
+              .map(c => c.outerHTML).join('');
+            if (nonShellToolCallsHtml || pendingChangesHtml) {
+              const toolsEl = document.createElement('div');
+              toolsEl.className = 'content';
+              toolsEl.innerHTML = nonShellToolCallsHtml + pendingChangesHtml;
+              messageEl.appendChild(toolsEl);
+            }
+          } else if (reasoningToRender && reasoningToRender.length > 0) {
+            // NON-INTERLEAVED: All reasoning at top (no content_iterations)
+            reasoningToRender.forEach((reasoning, index) => {
+              if (reasoning) {
+                const reasoningEl = document.createElement('div');
+                reasoningEl.className = 'reasoning-content collapsed';
+                const label = reasoningToRender.length > 1
+                  ? `Thinking (Iteration ${index + 1})`
+                  : 'Chain of Thought';
+                reasoningEl.innerHTML = `
+                  <div class="reasoning-header" onclick="event.stopPropagation(); this.parentElement.classList.toggle('collapsed')">
+                    <span class="reasoning-icon">💭</span>
+                    <span>${label}</span>
+                    <span class="reasoning-toggle">▼</span>
+                  </div>
+                  <div class="reasoning-body">${formatText(reasoning)}</div>
+                `;
+                messageEl.appendChild(reasoningEl);
+              }
+            });
+
+            // Add content with inline shell containers via markers
+            const contentEl = document.createElement('div');
+            contentEl.className = 'content';
+            // Use marker-based rendering for inline shell positioning
+            let markedContent = replaceShellTagsWithMarkers(cleanContent);
+            let renderedFinalContent = formatCodeBlocks(markedContent, currentModeForResponse);
+            renderedFinalContent = replaceMarkersWithShellContainers(renderedFinalContent);
+            // Prepend non-shell tool calls
+            const nonShellHtml = Array.from(toolCallsContainers)
+              .filter(c => !c.classList.contains('shell-commands'))
+              .map(c => c.outerHTML).join('');
+            contentEl.innerHTML = nonShellHtml + renderedFinalContent + pendingChangesHtml;
+            messageEl.appendChild(contentEl);
+          } else if (currentReasoning) {
+            // Fallback: single reasoning content (backwards compat)
             const reasoningEl = document.createElement('div');
-            reasoningEl.className = 'reasoning-content';
+            reasoningEl.className = 'reasoning-content collapsed';
             reasoningEl.innerHTML = `
-              <div class="reasoning-header" onclick="this.parentElement.classList.toggle('collapsed')">
+              <div class="reasoning-header" onclick="event.stopPropagation(); this.parentElement.classList.toggle('collapsed')">
                 <span class="reasoning-icon">💭</span>
                 <span>Chain of Thought</span>
                 <span class="reasoning-toggle">▼</span>
@@ -2280,13 +2975,31 @@
               <div class="reasoning-body">${formatText(currentReasoning)}</div>
             `;
             messageEl.appendChild(reasoningEl);
-          }
 
-          // Add content with tool calls HTML prepended, then pending changes after tool calls
-          const contentEl = document.createElement('div');
-          contentEl.className = 'content';
-          contentEl.innerHTML = toolCallsHtml + pendingChangesHtml + formatCodeBlocks(cleanContent);
-          messageEl.appendChild(contentEl);
+            // Add content with inline shell containers via markers
+            const contentEl = document.createElement('div');
+            contentEl.className = 'content';
+            let markedContent = replaceShellTagsWithMarkers(cleanContent);
+            let renderedFinalContent = formatCodeBlocks(markedContent, currentModeForResponse);
+            renderedFinalContent = replaceMarkersWithShellContainers(renderedFinalContent);
+            const nonShellHtml = Array.from(toolCallsContainers)
+              .filter(c => !c.classList.contains('shell-commands'))
+              .map(c => c.outerHTML).join('');
+            contentEl.innerHTML = nonShellHtml + renderedFinalContent + pendingChangesHtml;
+            messageEl.appendChild(contentEl);
+          } else {
+            // No reasoning - just add content with inline shells
+            const contentEl = document.createElement('div');
+            contentEl.className = 'content';
+            let markedContent = replaceShellTagsWithMarkers(cleanContent);
+            let renderedFinalContent = formatCodeBlocks(markedContent, currentModeForResponse);
+            renderedFinalContent = replaceMarkersWithShellContainers(renderedFinalContent);
+            const nonShellHtml = Array.from(toolCallsContainers)
+              .filter(c => !c.classList.contains('shell-commands'))
+              .map(c => c.outerHTML).join('');
+            contentEl.innerHTML = nonShellHtml + renderedFinalContent + pendingChangesHtml;
+            messageEl.appendChild(contentEl);
+          }
 
           chatMessages.appendChild(messageEl);
           chatMessages.scrollTop = chatMessages.scrollHeight;
@@ -2471,8 +3184,12 @@
 
             stoppedStreamEl.remove();
 
-            // Strip DSML from partial response
+            // Strip DSML from partial response (keep shell tags for marker-based rendering)
             const cleanStoppedContent = stripDSMLFromContent(currentResponse);
+
+            // In auto mode, code blocks with # File: headers will be collapsed (not stripped)
+            // Pass edit mode for proper button/styling handling
+            const stoppedEditMode = editMode;
 
             // Create final message element (same structure as endResponse)
             const stoppedMessageEl = document.createElement('div');
@@ -2483,26 +3200,113 @@
             stoppedRoleEl.textContent = 'DeepSeek Moby';
             stoppedMessageEl.appendChild(stoppedRoleEl);
 
-            // Add reasoning if present
-            if (currentReasoning) {
-              const stoppedReasoningEl = document.createElement('div');
-              stoppedReasoningEl.className = 'reasoning-content';
-              stoppedReasoningEl.innerHTML = `
-                <div class="reasoning-header" onclick="this.parentElement.classList.toggle('collapsed')">
-                  <span class="reasoning-icon">💭</span>
-                  <span>Chain of Thought</span>
-                  <span class="reasoning-toggle">▼</span>
-                </div>
-                <div class="reasoning-body">${formatText(currentReasoning)}</div>
-              `;
-              stoppedMessageEl.appendChild(stoppedReasoningEl);
-            }
+            // Add reasoning if present - support per-iteration dropdowns with interleaved content
+            const stoppedReasoningToRender = currentReasoningIterations.length > 0
+              ? currentReasoningIterations
+              : (currentReasoning ? [currentReasoning] : null);
 
-            // Add content with tool calls and pending changes preserved
-            const stoppedContentEl = document.createElement('div');
-            stoppedContentEl.className = 'content';
-            stoppedContentEl.innerHTML = stoppedToolCallsHtml + stoppedPendingChangesHtml + formatCodeBlocks(cleanStoppedContent + '\n\n*[Generation stopped]*');
-            stoppedMessageEl.appendChild(stoppedContentEl);
+            const stoppedContentToRender = currentContentIterations.length > 0
+              ? currentContentIterations
+              : null;
+
+            // Check if we should render interleaved
+            const stoppedShouldInterleave = stoppedReasoningToRender && stoppedContentToRender &&
+              (stoppedReasoningToRender.length > 1 || stoppedContentToRender.length > 1);
+
+            if (stoppedShouldInterleave) {
+              // INTERLEAVED RENDERING for stopped generation
+              const maxIterations = Math.max(stoppedReasoningToRender.length, stoppedContentToRender.length);
+
+              for (let i = 0; i < maxIterations; i++) {
+                // Add reasoning for this iteration
+                if (stoppedReasoningToRender[i]) {
+                  const stoppedReasoningEl = document.createElement('div');
+                  stoppedReasoningEl.className = 'reasoning-content collapsed';
+                  const label = maxIterations > 1
+                    ? `Thinking (Iteration ${i + 1})`
+                    : 'Chain of Thought';
+                  stoppedReasoningEl.innerHTML = `
+                    <div class="reasoning-header" onclick="event.stopPropagation(); this.parentElement.classList.toggle('collapsed')">
+                      <span class="reasoning-icon">💭</span>
+                      <span>${label}</span>
+                      <span class="reasoning-toggle">▼</span>
+                    </div>
+                    <div class="reasoning-body">${formatText(stoppedReasoningToRender[i])}</div>
+                  `;
+                  stoppedMessageEl.appendChild(stoppedReasoningEl);
+                }
+
+                // Add content for this iteration with inline shell positioning
+                if (stoppedContentToRender[i]) {
+                  const iterationContentEl = document.createElement('div');
+                  iterationContentEl.className = 'iteration-content';
+                  // Use marker-based rendering for inline shell positioning
+                  let cleanIterationContent = stripDSMLFromContent(stoppedContentToRender[i]);
+                  cleanIterationContent = replaceShellTagsWithMarkers(cleanIterationContent);
+                  // Add stopped marker to last iteration
+                  const stoppedMarker = (i === maxIterations - 1) ? '\n\n*[Generation stopped]*' : '';
+                  let renderedContent = formatCodeBlocks(cleanIterationContent + stoppedMarker, stoppedEditMode);
+                  renderedContent = replaceMarkersWithShellContainers(renderedContent);
+                  iterationContentEl.innerHTML = renderedContent;
+                  stoppedMessageEl.appendChild(iterationContentEl);
+                }
+              }
+
+              // Add non-shell tool calls and pending changes at the end
+              const stoppedNonShellHtml = Array.from(stoppedToolCallsContainers)
+                .filter(c => !c.classList.contains('shell-commands'))
+                .map(c => c.outerHTML).join('');
+              if (stoppedNonShellHtml || stoppedPendingChangesHtml) {
+                const toolsEl = document.createElement('div');
+                toolsEl.className = 'content';
+                toolsEl.innerHTML = stoppedNonShellHtml + stoppedPendingChangesHtml;
+                stoppedMessageEl.appendChild(toolsEl);
+              }
+            } else if (stoppedReasoningToRender && stoppedReasoningToRender.length > 0) {
+              // Non-interleaved - all reasoning at top
+              stoppedReasoningToRender.forEach((reasoning, index) => {
+                if (reasoning) {
+                  const stoppedReasoningEl = document.createElement('div');
+                  stoppedReasoningEl.className = 'reasoning-content collapsed';
+                  const label = stoppedReasoningToRender.length > 1
+                    ? `Thinking (Iteration ${index + 1})`
+                    : 'Chain of Thought';
+                  stoppedReasoningEl.innerHTML = `
+                    <div class="reasoning-header" onclick="event.stopPropagation(); this.parentElement.classList.toggle('collapsed')">
+                      <span class="reasoning-icon">💭</span>
+                      <span>${label}</span>
+                      <span class="reasoning-toggle">▼</span>
+                    </div>
+                    <div class="reasoning-body">${formatText(reasoning)}</div>
+                  `;
+                  stoppedMessageEl.appendChild(stoppedReasoningEl);
+                }
+              });
+
+              // Add content with inline shell positioning
+              const stoppedContentEl = document.createElement('div');
+              stoppedContentEl.className = 'content';
+              let markedStoppedContent = replaceShellTagsWithMarkers(cleanStoppedContent);
+              let renderedStoppedContent = formatCodeBlocks(markedStoppedContent + '\n\n*[Generation stopped]*', stoppedEditMode);
+              renderedStoppedContent = replaceMarkersWithShellContainers(renderedStoppedContent);
+              const stoppedNonShellHtml2 = Array.from(stoppedToolCallsContainers)
+                .filter(c => !c.classList.contains('shell-commands'))
+                .map(c => c.outerHTML).join('');
+              stoppedContentEl.innerHTML = stoppedNonShellHtml2 + stoppedPendingChangesHtml + renderedStoppedContent;
+              stoppedMessageEl.appendChild(stoppedContentEl);
+            } else {
+              // No reasoning - just add content with inline shells
+              const stoppedContentEl = document.createElement('div');
+              stoppedContentEl.className = 'content';
+              let markedStoppedContent = replaceShellTagsWithMarkers(cleanStoppedContent);
+              let renderedStoppedContent = formatCodeBlocks(markedStoppedContent + '\n\n*[Generation stopped]*', stoppedEditMode);
+              renderedStoppedContent = replaceMarkersWithShellContainers(renderedStoppedContent);
+              const stoppedNonShellHtml3 = Array.from(stoppedToolCallsContainers)
+                .filter(c => !c.classList.contains('shell-commands'))
+                .map(c => c.outerHTML).join('');
+              stoppedContentEl.innerHTML = stoppedNonShellHtml3 + stoppedPendingChangesHtml + renderedStoppedContent;
+              stoppedMessageEl.appendChild(stoppedContentEl);
+            }
 
             chatMessages.appendChild(stoppedMessageEl);
             chatMessages.scrollTop = chatMessages.scrollHeight;

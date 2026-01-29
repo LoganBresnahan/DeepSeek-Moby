@@ -285,6 +285,13 @@ body {
   flex: 1;
   overflow-y: auto;
   padding: 12px 6px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Push messages to bottom when there are few */
+.chat-messages > .message:first-child {
+  margin-top: auto;
 }
 
 .message {
@@ -386,15 +393,22 @@ body {
   padding: 2px 6px;
 }
 
-/* Collapsed code block - show partial preview */
-.code-block.collapsed pre {
-  max-height: 50px;
+/* Base code block pre - smooth transitions */
+.code-block pre {
+  max-height: 2000px;
   overflow: hidden;
   position: relative;
+  transition: max-height 0.3s ease-out;
+}
+
+/* Collapsed code block - show partial preview with smooth transition */
+.code-block.collapsed pre {
+  max-height: 50px;
+  transition: max-height 0.2s ease-in;
 }
 
 /* Fade effect at bottom of collapsed code */
-.code-block.collapsed pre::after {
+.code-block pre::after {
   content: '';
   position: absolute;
   bottom: 0;
@@ -403,6 +417,12 @@ body {
   height: 30px;
   background: linear-gradient(transparent, var(--vscode-editor-background));
   pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.code-block.collapsed pre::after {
+  opacity: 1;
 }
 
 /* Tool output blocks - no action buttons, very subtle styling */
@@ -426,6 +446,24 @@ body {
   border-radius: 6px;
   background: var(--vscode-editor-background);
   overflow: hidden;
+}
+
+/* Entrance animation for new dropdowns */
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.tool-calls-container.entering,
+.pending-changes-container.entering,
+.code-block.entering {
+  animation: slideIn 0.2s ease-out;
 }
 
 .tool-calls-header {
@@ -458,13 +496,17 @@ body {
 }
 
 .tool-calls-body {
-  display: none;
-  padding: 8px 12px;
-  border-top: 1px solid var(--vscode-panel-border);
+  max-height: 0;
+  overflow: hidden;
+  padding: 0 12px;
+  border-top: 1px solid transparent;
+  transition: max-height 0.25s ease-out, padding 0.25s ease-out, border-color 0.15s;
 }
 
 .tool-calls-container.expanded .tool-calls-body {
-  display: block;
+  max-height: 500px;
+  padding: 8px 12px;
+  border-top-color: var(--vscode-panel-border);
 }
 
 .tool-call-item {
@@ -507,6 +549,34 @@ body {
 
 .tool-calls-container.complete .tool-calls-header {
   opacity: 0.7;
+}
+
+/* Shell command output styling */
+.shell-commands .tool-call-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.shell-commands .tool-call-detail code {
+  font-family: var(--vscode-editor-font-family);
+  color: var(--vscode-terminal-ansiYellow);
+  background: transparent;
+  padding: 0;
+}
+
+.shell-output {
+  font-family: var(--vscode-editor-font-family);
+  font-size: 11px;
+  background: var(--vscode-terminal-background, rgba(0, 0, 0, 0.2));
+  color: var(--vscode-terminal-foreground);
+  padding: 6px 8px;
+  border-radius: 4px;
+  margin: 4px 0 0 0;
+  max-height: 150px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 /* ============================================
@@ -561,12 +631,16 @@ body {
 }
 
 .pending-changes-body {
+  max-height: 500px;
+  overflow: hidden;
   padding: 8px 12px;
   border-top: 1px solid var(--vscode-panel-border);
+  transition: max-height 0.25s ease-out, padding 0.25s ease-out;
 }
 
 .pending-changes-container.collapsed .pending-changes-body {
-  display: none;
+  max-height: 0;
+  padding: 0 12px;
 }
 
 .pending-change-item {
@@ -1028,7 +1102,7 @@ code[class*="language-"] {
   background: rgba(79, 195, 247, 0.08); /* Light blue background */
   border: 1px solid rgba(79, 195, 247, 0.2);
   flex: 1; /* Allows flex-grow: 2 on textarea to work */
-  overflow: hidden; /* Prevent scrollbars when content overflows */
+  overflow: visible; /* Allow water spurt animation to show above panel */
   box-sizing: border-box;
 }
 
@@ -1642,6 +1716,26 @@ textarea::placeholder {
 .chat-messages::-webkit-scrollbar-thumb:hover,
 .reasoning-body::-webkit-scrollbar-thumb:hover {
   background: var(--vscode-scrollbarSlider-hoverBackground);
+}
+
+/* ============================================
+   PER-ITERATION SECTIONS (R1 INTERLEAVED)
+   ============================================ */
+
+.iterations-container {
+  /* Container for all iteration sections */
+  display: block;
+}
+
+.iteration-section {
+  /* Each section contains thinking + content for one iteration */
+  margin-bottom: 8px;
+}
+
+.iteration-content {
+  /* Content area within an iteration section */
+  /* Similar to .content but can be styled differently if needed */
+  word-wrap: break-word;
 }
 
 /* ============================================

@@ -108,7 +108,8 @@ export class DiffEngine {
 
     // Simple regex - just match the core pattern
     // <<<<<<< SEARCH ... ======= ... >>>>>>> REPLACE
-    const regex = /<{5,9}\s*SEARCH\s*\n([\s\S]*?)\n={5,9}\n([\s\S]*?)\n>{5,9}\s*REPLACE/g;
+    // Note: (?:\n)? makes the newline before ======= optional to support empty SEARCH sections
+    const regex = /<{5,9}\s*SEARCH\s*\n([\s\S]*?)(?:\n)?={5,9}\n([\s\S]*?)(?:\n)?>{5,9}\s*REPLACE/g;
 
     let match;
     while ((match = regex.exec(normalizedContent)) !== null) {
@@ -132,6 +133,26 @@ export class DiffEngine {
     let appliedCount = 0;
 
     for (const block of blocks) {
+      // Handle empty SEARCH - means "prepend to file" or "create new content"
+      if (block.search.trim() === '') {
+        logger.info(`[DiffEngine] Empty SEARCH block - treating as prepend/create`);
+
+        if (content.trim() === '') {
+          // File is empty - use REPLACE as full content
+          content = block.replace;
+          appliedCount++;
+          logger.info(`[DiffEngine] Applied empty SEARCH to empty file (full content)`);
+          continue;
+        } else {
+          // File has content - prepend REPLACE at top
+          const needsNewline = !block.replace.endsWith('\n');
+          content = block.replace + (needsNewline ? '\n' : '') + content;
+          appliedCount++;
+          logger.info(`[DiffEngine] Applied empty SEARCH by prepending to file`);
+          continue;
+        }
+      }
+
       // Strategy 1: Exact match
       if (content.includes(block.search)) {
         content = content.replace(block.search, block.replace);
@@ -253,6 +274,10 @@ export class DiffEngine {
       const result = Diff.applyPatch(content, patch, {
         fuzzFactor: this.options.fuzzFactor ?? 3,
         compareLine: (lineNumber, line, operation, patchContent) => {
+          // Guard against undefined values (can happen in edge cases)
+          if (line === undefined || patchContent === undefined) {
+            return false;
+          }
           // Allow whitespace differences in context lines
           return line.trim() === patchContent.trim();
         }
@@ -463,8 +488,17 @@ export class DiffEngine {
     logger.info(`[DiffEngine] applyChanges - code length: ${newCode.length}, has SEARCH: ${newCode.includes('SEARCH')}, has REPLACE: ${newCode.includes('REPLACE')}`);
 
     // Strategy 0: Try search/replace blocks first (most reliable)
-    const searchReplaceBlocks = this.parseSearchReplaceBlocks(newCode);
-    logger.info(`[DiffEngine] Parsed ${searchReplaceBlocks.length} search/replace blocks`);
+    const rawBlocks = this.parseSearchReplaceBlocks(newCode);
+
+    // Filter out invalid blocks (both search AND replace empty)
+    const searchReplaceBlocks = rawBlocks.filter(block => {
+      if (block.search.trim() === '' && block.replace.trim() === '') {
+        logger.warn(`[DiffEngine] Skipping block with empty search AND empty replace`);
+        return false;
+      }
+      return true;
+    });
+    logger.info(`[DiffEngine] Parsed ${searchReplaceBlocks.length} valid search/replace blocks (filtered from ${rawBlocks.length})`);
 
     if (searchReplaceBlocks.length > 0) {
       logger.info(`[DiffEngine] Block 0 search length: ${searchReplaceBlocks[0].search.length}, replace length: ${searchReplaceBlocks[0].replace.length}`);
