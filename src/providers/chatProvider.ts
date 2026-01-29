@@ -18,6 +18,8 @@ interface DiffMetadata {
   code: string;                   // Full code including "# File:" header
   language: string;               // Language identifier
   timestamp: number;              // When this diff was created
+  iteration: number;              // Edit iteration number (1, 2, 3, etc.)
+  diffId: string;                 // Unique ID for this specific diff
 }
 
 export class ChatProvider implements vscode.WebviewViewProvider {
@@ -31,8 +33,9 @@ export class ChatProvider implements vscode.WebviewViewProvider {
   private abortController: AbortController | null = null;
   private diffEngine: DiffEngine;
   private activeDiffs: Map<string, DiffMetadata> = new Map();
+  private resolvedDiffs: Array<{ filePath: string; timestamp: number; status: 'applied' | 'rejected'; iteration: number; diffId: string }> = [];
+  private autoAppliedFiles: Array<{ filePath: string; timestamp: number; description?: string }> = [];
   private diffTabGroupId: number | null = null;
-  private diffCleanupTimer: NodeJS.Timeout | null = null;
   private diffStatusBarItem: vscode.StatusBarItem;
   private disposables: vscode.Disposable[] = [];
   private tavilyClient: TavilyClient;
@@ -48,6 +51,15 @@ export class ChatProvider implements vscode.WebviewViewProvider {
 
   // Debouncing state for ask mode (reduces duplicate diffs when LLM iterates)
   private pendingDiffs = new Map<string, { code: string; language: string; timer: NodeJS.Timeout }>();
+
+  // Track edit iterations per file (for numbering multiple edits to same file)
+  private fileEditCounts = new Map<string, number>();
+
+  // Track file changes for current response (saved to history)
+  private currentResponseFileChanges: Array<{ filePath: string; status: 'applied' | 'rejected' | 'pending'; iteration: number }> = [];
+
+  // Flag to prevent onDidCloseTextDocument from removing diffs we're intentionally closing
+  private closingDiffIntentionally: string | null = null; // diffId being closed
 
   // File tracking state
   private selectedFiles = new Map<string, string>(); // path → content (user-selected files)
@@ -80,62 +92,31 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     // Load current session
     this.loadCurrentSession();
 
-    // Track when diff editors are closed
+    // Track when diff documents are actually closed (tab closed, not just hidden)
     this.disposables.push(
-      vscode.window.onDidChangeVisibleTextEditors((editors) => {
-        logger.info(`[OVERLAY-DEBUG] onDidChangeVisibleTextEditors fired with ${editors.length} editors`);
+      vscode.workspace.onDidCloseTextDocument((document) => {
+        if (document.uri.scheme !== 'deepseek-diff') return;
 
-        // Log all editor URIs for debugging
-        for (const editor of editors) {
-          logger.info(`[OVERLAY-DEBUG] Editor URI: ${editor.document.uri.toString()}, scheme: ${editor.document.uri.scheme}`);
-        }
+        logger.info(`[OVERLAY-DEBUG] Diff document closed: ${document.uri.toString()}`);
 
-        // Check which diffs are still open
-        const openDiffUris = new Set<string>();
-        for (const editor of editors) {
-          if (editor.document.uri.scheme === 'deepseek-diff') {
-            openDiffUris.add(editor.document.uri.toString());
-          }
-        }
-        logger.info(`[OVERLAY-DEBUG] Currently tracking ${this.activeDiffs.size} diffs`);
-        logger.info(`[OVERLAY-DEBUG] Found ${openDiffUris.size} visible diff editors`);
-
-        // Clear any pending cleanup timer
-        if (this.diffCleanupTimer) {
-          logger.info(`[OVERLAY-DEBUG] Cancelling previous cleanup timer`);
-          clearTimeout(this.diffCleanupTimer);
-          this.diffCleanupTimer = null;
-        }
-
-        // Find closed diffs
-        const closedDiffs: string[] = [];
+        // Find which diff this corresponds to
         for (const [uriKey, metadata] of this.activeDiffs.entries()) {
-          const proposedVisible = openDiffUris.has(metadata.proposedUri.toString());
-          const originalVisible = openDiffUris.has(metadata.originalUri.toString());
-
-          logger.info(`[OVERLAY-DEBUG] Checking ${metadata.targetFilePath}: proposed=${proposedVisible}, original=${originalVisible}`);
-
-          if (!proposedVisible && !originalVisible) {
-            closedDiffs.push(uriKey);
-            logger.info(`[OVERLAY-DEBUG] Marking ${metadata.targetFilePath} for potential removal`);
-          }
-        }
-
-        if (closedDiffs.length > 0) {
-          // Debounce the removal - wait 300ms before actually removing
-          // This handles race conditions when switching between diff tabs
-          logger.info(`[OVERLAY-DEBUG] Scheduling cleanup of ${closedDiffs.length} diffs in 300ms`);
-          this.diffCleanupTimer = setTimeout(() => {
-            logger.info(`[OVERLAY-DEBUG] Cleanup timer fired - removing ${closedDiffs.length} diffs`);
-            for (const uriKey of closedDiffs) {
-              this.activeDiffs.delete(uriKey);
+          if (metadata.proposedUri.toString() === document.uri.toString() ||
+              metadata.originalUri.toString() === document.uri.toString()) {
+            // If we're intentionally closing a diff, ignore ALL close events
+            // We handle removal manually in closeSingleDiff to avoid race conditions
+            // (VS Code fires close events for documents we're programmatically closing)
+            if (this.closingDiffIntentionally) {
+              logger.info(`[OVERLAY-DEBUG] Ignoring close for ${metadata.targetFilePath} - intentional close in progress (${this.closingDiffIntentionally})`);
+              return;
             }
+            // User manually closed the diff tab
+            logger.info(`[OVERLAY-DEBUG] Removing diff for ${metadata.targetFilePath} due to manual tab close`);
+            this.activeDiffs.delete(uriKey);
             this.updateDiffStatusBar();
             this.notifyDiffListChanged();
-            this.diffCleanupTimer = null;
-          }, 300);
-        } else {
-          logger.info(`[OVERLAY-DEBUG] No diffs to remove`);
+            break;
+          }
         }
       })
     );
@@ -201,17 +182,68 @@ export class ChatProvider implements vscode.WebviewViewProvider {
   private notifyDiffListChanged() {
     if (!this._view) return;
 
-    // Convert Map to array for frontend
-    const diffList = Array.from(this.activeDiffs.values()).map(meta => ({
+    // Combine pending diffs with resolved diffs
+    const pendingDiffs = Array.from(this.activeDiffs.values()).map(meta => ({
       filePath: meta.targetFilePath,
       timestamp: meta.timestamp,
-      proposedUri: meta.proposedUri.toString()
+      status: 'pending' as const,
+      proposedUri: meta.proposedUri.toString(),
+      iteration: meta.iteration,
+      diffId: meta.diffId
     }));
+
+    const resolvedDiffsList = this.resolvedDiffs.map(d => ({
+      filePath: d.filePath,
+      timestamp: d.timestamp,
+      status: d.status,
+      iteration: d.iteration,
+      diffId: d.diffId
+    }));
+
+    // Combine and sort by timestamp
+    const allDiffs = [...pendingDiffs, ...resolvedDiffsList]
+      .sort((a, b) => a.timestamp - b.timestamp);
 
     this._view.webview.postMessage({
       type: 'diffListChanged',
-      diffs: diffList
+      diffs: allDiffs,
+      editMode: this.editMode
     });
+  }
+
+  /**
+   * Get the list of files that have been successfully modified in this session.
+   * Used to inform the LLM about already-applied changes to prevent redundant edits.
+   */
+  private getModifiedFilesContext(): string {
+    // Combine resolved diffs (ask mode) and auto-applied files (auto mode)
+    const appliedFiles = new Set<string>();
+
+    for (const diff of this.resolvedDiffs) {
+      if (diff.status === 'applied') {
+        appliedFiles.add(diff.filePath);
+      }
+    }
+
+    for (const file of this.autoAppliedFiles) {
+      appliedFiles.add(file.filePath);
+    }
+
+    if (appliedFiles.size === 0) {
+      return '';
+    }
+
+    const fileList = Array.from(appliedFiles).map(f => `- ${f}`).join('\n');
+    return `
+--- ALREADY MODIFIED FILES (this session) ---
+The following files have already been successfully modified in this conversation:
+${fileList}
+
+Do NOT re-edit these files unless the user explicitly requests additional changes to them.
+If changes in other files might require updates to an already-modified file, mention this to the user
+rather than automatically re-editing. Example: "I notice my changes to X might require updating Y
+which I already edited - would you like me to update it?"
+`;
   }
 
   private async loadCurrentSession() {
@@ -289,10 +321,15 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         case 'rejectEdit':
           await this.rejectEdit(data.filePath);
           break;
-        // REMOVED: Modal overlay message handlers (replaced with toolbar buttons)
-        // case 'acceptDiff': ...
-        // case 'rejectDiff': ...
-        // case 'acceptAllDiffs': ...
+        case 'acceptSpecificDiff':
+          await this.acceptSpecificDiff(data.diffId);
+          break;
+        case 'rejectSpecificDiff':
+          await this.rejectSpecificDiff(data.diffId);
+          break;
+        case 'focusDiff':
+          await this.focusSpecificDiff(data.diffId);
+          break;
         // case 'rejectAllDiffs': ...
         // case 'focusDiff': ...
         case 'getOpenFiles':
@@ -336,6 +373,15 @@ export class ChatProvider implements vscode.WebviewViewProvider {
 
     // Clear search cache on new session
     this.searchCache.clear();
+
+    // Clear auto-applied files list for new conversation
+    this.autoAppliedFiles = [];
+
+    // Clear resolved diffs list for new conversation
+    this.resolvedDiffs = [];
+
+    // Clear file edit counts for new conversation
+    this.fileEditCounts.clear();
 
     // Create a new session for fresh conversation
     const editor = vscode.window.activeTextEditor;
@@ -741,6 +787,12 @@ CRITICAL RULES:
       systemPrompt += `\n${editorContext}`;
     }
 
+    // Add modified files context to prevent redundant edits
+    const modifiedFilesContext = this.getModifiedFilesContext();
+    if (modifiedFilesContext) {
+      systemPrompt += modifiedFilesContext;
+    }
+
     // Auto web search if enabled (search BEFORE DeepSeek, not via tool calls)
     let webSearchContext = '';
     if (this.webSearchEnabled && this.tavilyClient.isConfigured()) {
@@ -806,6 +858,9 @@ ${webSearchContext}
     let fullResponse = '';
     let fullReasoning = '';
 
+    // Clear file changes tracking for this response
+    this.currentResponseFileChanges = [];
+
     // Create abort controller for this request
     this.abortController = new AbortController();
     const signal = this.abortController.signal;
@@ -819,6 +874,9 @@ ${webSearchContext}
     const model = this.deepSeekClient.getModel();
     const hasAttachments = attachments && attachments.length > 0;
     const requestStartTime = Date.now();
+
+    // Declare outside try so it's accessible in catch for partial save
+    let toolCallsForHistory: Array<{ name: string; detail: string; status: string }> = [];
 
     try {
       // Get current session messages for context (user message already saved above)
@@ -879,7 +937,6 @@ ${webSearchContext}
 
       // Tool calling loop (only for non-reasoner models)
       let streamingSystemPrompt = systemPrompt;
-      let toolCallsForHistory: Array<{ name: string; detail: string; status: string }> = [];
       if (!isReasonerModel) {
         const { toolMessages, limitReached, allToolDetails: toolDetails } = await this.runToolLoop(historyMessages, systemPrompt, signal);
         toolCallsForHistory = toolDetails;
@@ -980,6 +1037,7 @@ Now provide your final response based on what you learned. Do NOT attempt to use
           content: cleanResponse,
           reasoning_content: fullReasoning || undefined,
           toolCalls: toolCallsForHistory.length > 0 ? toolCallsForHistory : undefined,
+          fileChanges: this.currentResponseFileChanges.length > 0 ? this.currentResponseFileChanges : undefined,
           tokens: tokenCount
         });
       }
@@ -992,6 +1050,20 @@ Now provide your final response based on what you learned. Do NOT attempt to use
     } catch (error: any) {
       // Check if this was an abort (user stopped generation)
       if (error.name === 'CanceledError' || error.name === 'AbortError' || signal.aborted) {
+        // Save partial response to history if there's content
+        if (this.currentSessionId && (fullResponse || fullReasoning)) {
+          const cleanPartialResponse = stripDSML(fullResponse);
+          const partialTokenCount = this.deepSeekClient.estimateTokens(cleanPartialResponse + fullReasoning);
+          await this.chatHistoryManager.addMessageToCurrentSession({
+            role: 'assistant',
+            content: cleanPartialResponse + '\n\n*[Generation stopped]*',
+            reasoning_content: fullReasoning || undefined,
+            toolCalls: toolCallsForHistory.length > 0 ? toolCallsForHistory : undefined,
+            fileChanges: this.currentResponseFileChanges.length > 0 ? this.currentResponseFileChanges : undefined,
+            tokens: partialTokenCount
+          });
+          logger.info(`[ChatProvider] Saved partial response to history (${partialTokenCount} tokens)`);
+        }
         // Don't show error for user-initiated stops - handled by stopGeneration
         return;
       }
@@ -1177,15 +1249,21 @@ Now provide your final response based on what you learned. Do NOT attempt to use
               this.readFilesInTurn.add(args.file);
               logger.info(`[ChatProvider] ✓ Tracked file from apply_code_edit: ${args.file} (total tracked: ${this.readFilesInTurn.size})`);
 
-              // If in ask mode, trigger auto-diff with the code from the tool call
-              if (this.editMode === 'ask' && args.code) {
-                logger.info(`[ChatProvider] Triggering auto-diff for apply_code_edit in ask mode`);
-                // Add # File: header to the code
-                const codeWithHeader = `# File: ${args.file}\n${args.code}`;
-                const language = args.language || 'plaintext';
+              // Handle based on edit mode
+              if (args.code) {
+                if (this.editMode === 'ask') {
+                  logger.info(`[ChatProvider] Triggering auto-diff for apply_code_edit in ask mode`);
+                  // Add # File: header to the code
+                  const codeWithHeader = `# File: ${args.file}\n${args.code}`;
+                  const language = args.language || 'plaintext';
 
-                // Trigger auto-diff (this will open diff and show accept/reject overlay)
-                await this.handleAutoShowDiff(codeWithHeader, language);
+                  // Trigger auto-diff (this will open diff and show accept/reject overlay)
+                  await this.handleAutoShowDiff(codeWithHeader, language);
+                } else if (this.editMode === 'auto') {
+                  logger.info(`[ChatProvider] Auto-applying code edit for: ${args.file}`);
+                  // In auto mode, apply code directly
+                  await this.applyCodeDirectlyForAutoMode(args.file, args.code, args.description);
+                }
               }
             } else {
               logger.warn(`[ChatProvider] ✗ apply_code_edit called but no file in args`);
@@ -1593,31 +1671,41 @@ Now provide your final response based on what you learned. Do NOT attempt to use
   }
 
   private async closeSingleDiff(metadata: DiffMetadata) {
-    // Find and close the tab for this specific diff
-    for (const tabGroup of vscode.window.tabGroups.all) {
-      for (const tab of tabGroup.tabs) {
-        const input = tab.input as any;
-        if (input?.original?.toString() === metadata.originalUri.toString() ||
-            input?.modified?.toString() === metadata.proposedUri.toString()) {
-          try {
-            await vscode.window.tabGroups.close(tab);
-          } catch (e) {
-            // Tab might already be closed
+    // Set flag to prevent onDidCloseTextDocument from removing OTHER diffs
+    this.closingDiffIntentionally = metadata.diffId;
+
+    try {
+      // Find and close the tab for this specific diff
+      for (const tabGroup of vscode.window.tabGroups.all) {
+        for (const tab of tabGroup.tabs) {
+          const input = tab.input as any;
+          if (input?.original?.toString() === metadata.originalUri.toString() ||
+              input?.modified?.toString() === metadata.proposedUri.toString()) {
+            try {
+              await vscode.window.tabGroups.close(tab);
+            } catch (e) {
+              // Tab might already be closed
+            }
+            break;
           }
-          break;
         }
       }
+
+      // Remove from tracking
+      this.activeDiffs.delete(metadata.proposedUri.toString());
+      logger.info(`Closed diff for: ${metadata.targetFilePath}`);
+
+      // Update status bar
+      this.updateDiffStatusBar();
+
+      // Notify frontend
+      this.notifyDiffListChanged();
+    } finally {
+      // Clear flag after a small delay to allow document close events to settle
+      setTimeout(() => {
+        this.closingDiffIntentionally = null;
+      }, 100);
     }
-
-    // Remove from tracking
-    this.activeDiffs.delete(metadata.proposedUri.toString());
-    logger.info(`Closed diff for: ${metadata.targetFilePath}`);
-
-    // Update status bar
-    this.updateDiffStatusBar();
-
-    // Notify frontend
-    this.notifyDiffListChanged();
   }
 
   private async closeDiffEditor() {
@@ -1657,28 +1745,167 @@ Now provide your final response based on what you learned. Do NOT attempt to use
     this.notifyDiffListChanged();
   }
 
-  private async acceptSpecificDiff(filePath: string) {
+  private async acceptSpecificDiff(diffId: string) {
     const metadata = Array.from(this.activeDiffs.values())
-      .find(m => m.targetFilePath === filePath);
+      .find(m => m.diffId === diffId);
 
     if (metadata) {
-      logger.info(`[ChatProvider] Accepting specific diff for: ${filePath}`);
+      logger.info(`[ChatProvider] Accepting specific diff: ${diffId} (${metadata.targetFilePath})`);
+      // Track as resolved BEFORE applying (which removes from activeDiffs)
+      this.resolvedDiffs.push({
+        filePath: metadata.targetFilePath,
+        timestamp: metadata.timestamp,
+        status: 'applied',
+        iteration: metadata.iteration,
+        diffId: metadata.diffId
+      });
+      // Update status in current response file changes for history
+      this.updateFileChangeStatus(metadata.targetFilePath, metadata.iteration, 'applied');
       await this.applyCode(metadata.code, metadata.language);
     } else {
-      logger.warn(`[ChatProvider] No diff found for: ${filePath}`);
+      logger.warn(`[ChatProvider] No diff found for diffId: ${diffId}`);
     }
   }
 
-  private async rejectSpecificDiff(filePath: string) {
+  private async rejectSpecificDiff(diffId: string) {
     const metadata = Array.from(this.activeDiffs.values())
-      .find(m => m.targetFilePath === filePath);
+      .find(m => m.diffId === diffId);
 
     if (metadata) {
-      logger.info(`[ChatProvider] Rejecting specific diff for: ${filePath}`);
+      logger.info(`[ChatProvider] Rejecting specific diff: ${diffId} (${metadata.targetFilePath})`);
+      // Track as resolved BEFORE closing (which removes from activeDiffs)
+      this.resolvedDiffs.push({
+        filePath: metadata.targetFilePath,
+        timestamp: metadata.timestamp,
+        status: 'rejected',
+        iteration: metadata.iteration,
+        diffId: metadata.diffId
+      });
+      // Update status in current response file changes for history
+      this.updateFileChangeStatus(metadata.targetFilePath, metadata.iteration, 'rejected');
       await this.closeSingleDiff(metadata);
     } else {
-      logger.warn(`[ChatProvider] No diff found for: ${filePath}`);
+      logger.warn(`[ChatProvider] No diff found for diffId: ${diffId}`);
     }
+  }
+
+  private updateFileChangeStatus(filePath: string, iteration: number, status: 'applied' | 'rejected') {
+    const index = this.currentResponseFileChanges.findIndex(
+      fc => fc.filePath === filePath && fc.iteration === iteration
+    );
+    if (index !== -1) {
+      this.currentResponseFileChanges[index].status = status;
+    }
+  }
+
+  /**
+   * Apply code changes directly to a file without showing a diff (for auto mode)
+   */
+  private async applyCodeDirectlyForAutoMode(filePath: string, code: string, description?: string) {
+    try {
+      // Find the file in the workspace
+      const workspaceFolders = vscode.workspace.workspaceFolders;
+      if (!workspaceFolders || workspaceFolders.length === 0) {
+        throw new Error('No workspace folder open');
+      }
+
+      // Try to find the file
+      let fileUri: vscode.Uri | undefined;
+      for (const folder of workspaceFolders) {
+        const possibleUri = vscode.Uri.joinPath(folder.uri, filePath);
+        try {
+          await vscode.workspace.fs.stat(possibleUri);
+          fileUri = possibleUri;
+          break;
+        } catch {
+          // File doesn't exist in this folder, continue
+        }
+      }
+
+      if (!fileUri) {
+        logger.warn(`[ChatProvider] Auto mode: File not found: ${filePath}`);
+        return;
+      }
+
+      // Read current content
+      const document = await vscode.workspace.openTextDocument(fileUri);
+      const currentContent = document.getText();
+
+      // Apply changes using DiffEngine
+      const result = this.diffEngine.applyChanges(currentContent, code);
+
+      if (!result.success) {
+        logger.warn(`[ChatProvider] Auto mode: Diff application had issues for ${filePath}: ${result.message}`);
+      }
+
+      // Apply the changes
+      const edit = new vscode.WorkspaceEdit();
+      const fullRange = new vscode.Range(
+        document.positionAt(0),
+        document.positionAt(currentContent.length)
+      );
+      edit.replace(fileUri, fullRange, result.content);
+      await vscode.workspace.applyEdit(edit);
+
+      // Save the document
+      await document.save();
+
+      // Track iteration for this file (same as showDiff)
+      const currentCount = this.fileEditCounts.get(filePath) || 0;
+      const iteration = currentCount + 1;
+      this.fileEditCounts.set(filePath, iteration);
+      const diffId = `${filePath}-${Date.now()}-${iteration}`;
+
+      logger.info(`[ChatProvider] Auto mode: Applied changes to ${filePath} (iteration ${iteration})`);
+
+      // Track this file as modified (for LLM feedback context)
+      this.autoAppliedFiles.push({
+        filePath,
+        timestamp: Date.now(),
+        description
+      });
+
+      // Also add to resolvedDiffs so it shows in the dropdown with iteration
+      this.resolvedDiffs.push({
+        filePath,
+        timestamp: Date.now(),
+        status: 'applied',
+        iteration,
+        diffId
+      });
+
+      // Track this file change for history (auto-applied = applied status)
+      this.currentResponseFileChanges.push({
+        filePath,
+        status: 'applied',
+        iteration
+      });
+
+      // Notify frontend
+      this.notifyAutoAppliedFilesChanged();
+      this.sendCodeAppliedStatus(true);
+
+    } catch (error: any) {
+      logger.error(`[ChatProvider] Auto mode: Failed to apply code to ${filePath}:`, error.message);
+      this.sendCodeAppliedStatus(false, error.message);
+    }
+  }
+
+  /**
+   * Notify frontend of auto-applied files list change
+   */
+  private notifyAutoAppliedFilesChanged() {
+    if (!this._view) return;
+
+    this._view.webview.postMessage({
+      type: 'diffListChanged',
+      diffs: this.autoAppliedFiles.map(f => ({
+        filePath: f.filePath,
+        timestamp: f.timestamp,
+        status: 'applied'
+      })),
+      editMode: this.editMode
+    });
   }
 
   private async acceptAllDiffs() {
@@ -1704,23 +1931,24 @@ Now provide your final response based on what you learned. Do NOT attempt to use
     }
   }
 
-  private async focusSpecificDiff(filePath: string) {
+  private async focusSpecificDiff(diffId: string) {
     const metadata = Array.from(this.activeDiffs.values())
-      .find(m => m.targetFilePath === filePath);
+      .find(m => m.diffId === diffId);
 
     if (!metadata) {
-      logger.warn(`[ChatProvider] No diff found for: ${filePath}`);
+      logger.warn(`[ChatProvider] No diff found for diffId: ${diffId}`);
       return;
     }
 
     // Re-open the diff to bring it to front
+    const iterationLabel = metadata.iteration > 1 ? ` (${metadata.iteration})` : '';
     await vscode.commands.executeCommand('vscode.diff',
       metadata.originalUri,
       metadata.proposedUri,
-      `${filePath} ↔ With Changes`
+      `${metadata.targetFilePath}${iterationLabel} ↔ With Changes`
     );
 
-    logger.info(`[ChatProvider] Focused diff for: ${filePath}`);
+    logger.info(`[ChatProvider] Focused diff: ${diffId} (${metadata.targetFilePath})`);
   }
 
   /**
@@ -1946,6 +2174,17 @@ Now provide your final response based on what you learned. Do NOT attempt to use
       }
     }
 
+    // Track iteration number for this file (for multiple edits to same file)
+    const targetPath = targetFilePath || vscode.workspace.asRelativePath(document.uri);
+    const currentCount = this.fileEditCounts.get(targetPath) || 0;
+    const iteration = currentCount + 1;
+    this.fileEditCounts.set(targetPath, iteration);
+
+    // Generate unique diffId
+    const diffId = `${targetPath}-${Date.now()}-${iteration}`;
+
+    logger.info(`[ChatProvider] Creating diff for ${targetPath} (iteration ${iteration})`);
+
     try {
       const originalContent = document.getText();
       const selection = editor?.selection;
@@ -1995,6 +2234,8 @@ Now provide your final response based on what you learned. Do NOT attempt to use
 
       // Show diff editor in dedicated tab group
       const fileName = document.fileName.split('/').pop() || 'file';
+      const iterationLabel = iteration > 1 ? ` (${iteration})` : '';
+      const diffTitle = `${fileName}${iterationLabel} ↔ With Changes`;
 
       // Find or create dedicated diff tab group
       let diffTabGroup: vscode.TabGroup | undefined;
@@ -2019,7 +2260,7 @@ Now provide your final response based on what you learned. Do NOT attempt to use
         await vscode.commands.executeCommand('vscode.diff',
           originalUri,
           proposedUri,
-          `${fileName} ↔ With Changes`,
+          diffTitle,
           {
             viewColumn: newViewColumn,
             preview: false,
@@ -2036,7 +2277,7 @@ Now provide your final response based on what you learned. Do NOT attempt to use
         await vscode.commands.executeCommand('vscode.diff',
           originalUri,
           proposedUri,
-          `${fileName} ↔ With Changes`,
+          diffTitle,
           {
             viewColumn: diffTabGroup.viewColumn,
             preview: false,
@@ -2050,14 +2291,23 @@ Now provide your final response based on what you learned. Do NOT attempt to use
       const metadata: DiffMetadata = {
         proposedUri,
         originalUri,
-        targetFilePath: targetFilePath || vscode.workspace.asRelativePath(document.uri),
+        targetFilePath: targetPath,
         code,
         language,
-        timestamp
+        timestamp,
+        iteration,
+        diffId
       };
 
       this.activeDiffs.set(proposedUri.toString(), metadata);
       logger.diffShown(fileName);
+
+      // Track this file change for history (initially pending)
+      this.currentResponseFileChanges.push({
+        filePath: targetPath,
+        status: 'pending',
+        iteration
+      });
 
       // Update status bar
       this.updateDiffStatusBar();
@@ -2384,7 +2634,8 @@ Now provide your final response based on what you learned. Do NOT attempt to use
           role: msg.role,
           content: msg.content,
           reasoning_content: msg.reasoning_content,
-          toolCalls: msg.toolCalls
+          toolCalls: msg.toolCalls,
+          fileChanges: msg.fileChanges
         }))
       });
     }
@@ -2417,7 +2668,8 @@ Now provide your final response based on what you learned. Do NOT attempt to use
           role: msg.role,
           content: msg.content,
           reasoning_content: msg.reasoning_content,
-          toolCalls: msg.toolCalls
+          toolCalls: msg.toolCalls,
+          fileChanges: msg.fileChanges
         }))
       });
     }
@@ -2467,6 +2719,7 @@ Now provide your final response based on what you learned. Do NOT attempt to use
                   <div class="temperature-control">
                     <label>Temperature: <span id="tempValue">0.7</span></label>
                     <input type="range" id="tempSlider" min="0" max="2" step="0.1" value="0.7">
+                    <span class="tool-limit-hint">Controls randomness in responses. 0 = deterministic, 2 = very creative</span>
                   </div>
                   <div id="toolLimitControl" class="temperature-control" style="display: block;">
                     <label>Tool Iterations: <span id="toolLimitValue">25</span></label>

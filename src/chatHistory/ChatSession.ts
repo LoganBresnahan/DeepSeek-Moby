@@ -7,6 +7,7 @@ export interface Message {
   tokens?: number;
   reasoning_content?: string;
   toolCalls?: Array<{ name: string; detail: string; status: string }>;
+  fileChanges?: Array<{ filePath: string; status: 'applied' | 'rejected' | 'pending'; iteration: number }>;
 }
 
 export interface ChatSession {

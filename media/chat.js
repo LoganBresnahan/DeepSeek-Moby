@@ -4,6 +4,7 @@
   let currentReasoning = '';
   let isStreaming = false;
   let isReasonerMode = false;
+  let generationWasStopped = false; // Flag to ignore messages after manual stop
   let codeBlockCounter = 0;
   let pendingAttachments = []; // Store {base64, mimeType, name}
   let currentDiffedBlockId = null; // Track which block has active diff
@@ -542,6 +543,9 @@
     // Handle code block button clicks via event delegation
     chatMessages.addEventListener('click', handleCodeBlockAction);
 
+    // Handle pending change actions (accept, reject, focus) via event delegation
+    chatMessages.addEventListener('click', handlePendingChangeAction);
+
     // Track scroll position to avoid forcing user down during streaming
     chatMessages.addEventListener('scroll', handleScrollTracking);
 
@@ -712,7 +716,7 @@
         updateSendButtonState();
       };
       reader.onerror = () => {
-        showToast(`Failed to read file: ${file.name}`, 'error');
+        showStatusError(`Failed to read file: ${file.name}`);
       };
       reader.readAsText(file);
     });
@@ -891,7 +895,12 @@
       if (message.toolCalls && message.toolCalls.length > 0) {
         toolCallsPrefix = generateToolCallsHtml(message.toolCalls);
       }
-      contentEl.innerHTML = toolCallsPrefix + formatCodeBlocks(message.content);
+      // Reconstruct file changes HTML from structured data if present
+      let fileChangesHtml = '';
+      if (message.fileChanges && message.fileChanges.length > 0) {
+        fileChangesHtml = generateFileChangesHistoryHtml(message.fileChanges);
+      }
+      contentEl.innerHTML = toolCallsPrefix + fileChangesHtml + formatCodeBlocks(message.content);
     } else {
       contentEl.textContent = message.content;
     }
@@ -967,6 +976,287 @@
         <div class="tool-calls-body">${toolsHtml}</div>
       </div>
     `;
+  }
+
+  /**
+   * Generate file changes HTML from history (read-only, no action buttons)
+   * Used when loading history to reconstruct the file changes UI
+   */
+  function generateFileChangesHistoryHtml(fileChanges) {
+    if (!fileChanges || fileChanges.length === 0) return '';
+
+    const containerId = `file-changes-history-${Date.now()}`;
+
+    const itemsHtml = fileChanges.map(fc => {
+      const baseFileName = fc.filePath.split('/').pop();
+      const iterationLabel = fc.iteration > 1 ? ` (${fc.iteration})` : '';
+      const fileName = baseFileName + iterationLabel;
+      const status = fc.status || 'pending';
+      const statusClass = status === 'applied' ? 'applied' : status === 'rejected' ? 'rejected' : 'pending';
+      const statusIcon = status === 'applied' ? '✓' : status === 'rejected' ? '✗' : '●';
+
+      // Status label for history (no buttons)
+      let labelHtml = '';
+      if (status === 'applied') {
+        labelHtml = `<span class="pending-change-auto-label">Applied</span>`;
+      } else if (status === 'rejected') {
+        labelHtml = `<span class="pending-change-rejected-label">Rejected</span>`;
+      } else {
+        labelHtml = `<span class="pending-change-rejected-label">Pending</span>`;
+      }
+
+      return `
+        <div class="pending-change-item" data-status="${status}">
+          <span class="pending-change-status ${statusClass}">${statusIcon}</span>
+          <span class="pending-change-file no-click" title="${escapeHtml(fc.filePath)}">${escapeHtml(fileName)}</span>
+          ${labelHtml}
+        </div>
+      `;
+    }).join('');
+
+    const title = 'File Changes';
+
+    return `
+      <div class="pending-changes-container" id="${containerId}">
+        <div class="pending-changes-header" onclick="this.parentElement.classList.toggle('collapsed')">
+          <span class="pending-changes-icon">▶</span>
+          <span class="pending-changes-title">${title}</span>
+          <span class="pending-changes-count">${fileChanges.length}</span>
+        </div>
+        <div class="pending-changes-body">${itemsHtml}</div>
+      </div>
+    `;
+  }
+
+  /**
+   * Generate pending changes dropdown HTML
+   * @param {Array} diffs - Array of {filePath, timestamp, status?}
+   * @param {string} currentEditMode - 'manual' | 'ask' | 'auto'
+   */
+  function generatePendingChangesHtml(diffs, currentEditMode) {
+    if (!diffs || diffs.length === 0) return '';
+
+    const isAutoMode = currentEditMode === 'auto';
+    const containerClass = isAutoMode ? 'pending-changes-container auto-mode' : 'pending-changes-container';
+    const title = isAutoMode ? 'Modified Files' : 'Pending Changes';
+
+    const itemsHtml = diffs.map(diff => {
+      const baseFileName = diff.filePath.split('/').pop();
+      // Add iteration number if > 1
+      const iterationLabel = diff.iteration > 1 ? ` (${diff.iteration})` : '';
+      const fileName = baseFileName + iterationLabel;
+      const status = diff.status || 'pending';
+      const statusClass = status === 'applied' ? 'applied' : status === 'rejected' ? 'rejected' : 'pending';
+      const statusIcon = status === 'applied' ? '✓' : status === 'rejected' ? '✗' : '●';
+      const diffId = diff.diffId || diff.filePath; // Fallback for old data
+
+      // Show action buttons/labels based on mode and status
+      let actionsHtml = '';
+      if (isAutoMode) {
+        // Auto mode: show "Auto Applied" label in green
+        actionsHtml = `<span class="pending-change-auto-label">Auto Applied</span>`;
+      } else if (status === 'applied') {
+        // Ask mode with applied status: show "Accepted" label in green
+        actionsHtml = `<span class="pending-change-auto-label">Accepted</span>`;
+      } else if (status === 'rejected') {
+        // Ask mode with rejected status: show "Rejected" label in red
+        actionsHtml = `<span class="pending-change-rejected-label">Rejected</span>`;
+      } else if (status === 'pending') {
+        // Ask mode with pending status: show accept/reject buttons
+        actionsHtml = `
+          <div class="pending-change-actions">
+            <button class="pending-change-btn accept-btn" data-action="accept" data-diffid="${escapeHtml(diffId)}" title="Accept changes">✓</button>
+            <button class="pending-change-btn reject-btn" data-action="reject" data-diffid="${escapeHtml(diffId)}" title="Reject changes">✕</button>
+          </div>
+        `;
+      }
+
+      // Only make clickable if it's a pending diff (has a diff to focus)
+      const fileClickable = status === 'pending' ? `data-action="focus" data-diffid="${escapeHtml(diffId)}"` : '';
+      const fileClass = status === 'pending' ? 'pending-change-file' : 'pending-change-file no-click';
+
+      return `
+        <div class="pending-change-item" data-diffid="${escapeHtml(diffId)}" data-status="${status}">
+          <span class="pending-change-status ${statusClass}">${statusIcon}</span>
+          <span class="${fileClass}" ${fileClickable} title="${escapeHtml(diff.filePath)}">${escapeHtml(fileName)}</span>
+          ${actionsHtml}
+        </div>
+      `;
+    }).join('');
+
+    return `
+      <div class="${containerClass}" id="pending-changes-container">
+        <div class="pending-changes-header" onclick="this.parentElement.classList.toggle('collapsed')">
+          <span class="pending-changes-icon">▶</span>
+          <span class="pending-changes-title">${title}</span>
+          <span class="pending-changes-count">${diffs.length}</span>
+        </div>
+        <div class="pending-changes-body">${itemsHtml}</div>
+      </div>
+    `;
+  }
+
+  /**
+   * Generate HTML for a single pending change item
+   */
+  function generatePendingChangeItemHtml(diff, isAutoMode) {
+    const baseFileName = diff.filePath.split('/').pop();
+    const iterationLabel = diff.iteration > 1 ? ` (${diff.iteration})` : '';
+    const fileName = baseFileName + iterationLabel;
+    const status = diff.status || 'pending';
+    const statusClass = status === 'applied' ? 'applied' : status === 'rejected' ? 'rejected' : 'pending';
+    const statusIcon = status === 'applied' ? '✓' : status === 'rejected' ? '✗' : '●';
+    const diffId = diff.diffId || diff.filePath;
+
+    let actionsHtml = '';
+    if (isAutoMode) {
+      actionsHtml = `<span class="pending-change-auto-label">Auto Applied</span>`;
+    } else if (status === 'applied') {
+      actionsHtml = `<span class="pending-change-auto-label">Accepted</span>`;
+    } else if (status === 'rejected') {
+      actionsHtml = `<span class="pending-change-rejected-label">Rejected</span>`;
+    } else if (status === 'pending') {
+      actionsHtml = `
+        <div class="pending-change-actions">
+          <button class="pending-change-btn accept-btn" data-action="accept" data-diffid="${escapeHtml(diffId)}" title="Accept changes">✓</button>
+          <button class="pending-change-btn reject-btn" data-action="reject" data-diffid="${escapeHtml(diffId)}" title="Reject changes">✕</button>
+        </div>
+      `;
+    }
+
+    const fileClickable = status === 'pending' ? `data-action="focus" data-diffid="${escapeHtml(diffId)}"` : '';
+    const fileClass = status === 'pending' ? 'pending-change-file' : 'pending-change-file no-click';
+
+    return `
+      <div class="pending-change-item" data-diffid="${escapeHtml(diffId)}" data-status="${status}">
+        <span class="pending-change-status ${statusClass}">${statusIcon}</span>
+        <span class="${fileClass}" ${fileClickable} title="${escapeHtml(diff.filePath)}">${escapeHtml(fileName)}</span>
+        ${actionsHtml}
+      </div>
+    `;
+  }
+
+  /**
+   * Update or insert pending changes dropdown in the streaming/current message
+   * Uses in-place updates to preserve item positions
+   * @param {Array} diffs - Current diffs
+   * @param {string} currentEditMode - Current edit mode
+   */
+  function updatePendingChangesDropdown(diffs, currentEditMode) {
+    // Find the streaming message or most recent assistant message
+    let messageEl = document.getElementById('streamingMessage');
+    if (!messageEl) {
+      const messages = document.querySelectorAll('.message.assistant');
+      if (messages.length > 0) {
+        messageEl = messages[messages.length - 1];
+      }
+    }
+    if (!messageEl) return;
+
+    const contentEl = messageEl.querySelector('.content');
+    if (!contentEl) return;
+
+    const isAutoMode = currentEditMode === 'auto';
+    const existingDropdown = contentEl.querySelector('.pending-changes-container');
+
+    // If no diffs or manual mode, remove dropdown if exists
+    if (!diffs || diffs.length === 0 || currentEditMode === 'manual') {
+      if (existingDropdown) existingDropdown.remove();
+      return;
+    }
+
+    // If dropdown doesn't exist, create it fresh
+    if (!existingDropdown) {
+      const dropdownHtml = generatePendingChangesHtml(diffs, currentEditMode);
+      const toolCallsContainers = contentEl.querySelectorAll('.tool-calls-container');
+      if (toolCallsContainers.length > 0) {
+        const lastToolCalls = toolCallsContainers[toolCallsContainers.length - 1];
+        lastToolCalls.insertAdjacentHTML('afterend', dropdownHtml);
+      } else {
+        contentEl.insertAdjacentHTML('afterbegin', dropdownHtml);
+      }
+      return;
+    }
+
+    // Dropdown exists - update items in place
+    const body = existingDropdown.querySelector('.pending-changes-body');
+    if (!body) return;
+
+    // Create a map of current items by diffId
+    const existingItems = new Map();
+    body.querySelectorAll('.pending-change-item').forEach(item => {
+      const diffId = item.dataset.diffid;
+      if (diffId) existingItems.set(diffId, item);
+    });
+
+    // Create a map of new diffs by diffId
+    const newDiffsMap = new Map();
+    diffs.forEach(diff => {
+      const diffId = diff.diffId || diff.filePath;
+      newDiffsMap.set(diffId, diff);
+    });
+
+    // Update existing items or mark for removal
+    existingItems.forEach((item, diffId) => {
+      const diff = newDiffsMap.get(diffId);
+      if (diff) {
+        // Item still exists - update it in place
+        const newStatus = diff.status || 'pending';
+        const oldStatus = item.dataset.status;
+
+        if (newStatus !== oldStatus) {
+          // Status changed - update the item
+          const newItemHtml = generatePendingChangeItemHtml(diff, isAutoMode);
+          item.outerHTML = newItemHtml;
+        }
+        // Remove from map since we processed it
+        newDiffsMap.delete(diffId);
+      }
+      // Items no longer in diff list stay (don't remove - preserve history)
+    });
+
+    // Add new items that weren't in the existing list
+    newDiffsMap.forEach(diff => {
+      const newItemHtml = generatePendingChangeItemHtml(diff, isAutoMode);
+      body.insertAdjacentHTML('beforeend', newItemHtml);
+    });
+
+    // Update the count badge
+    const countBadge = existingDropdown.querySelector('.pending-changes-count');
+    if (countBadge) {
+      countBadge.textContent = body.querySelectorAll('.pending-change-item').length;
+    }
+  }
+
+  /**
+   * Handle pending change actions (accept, reject, focus)
+   */
+  function handlePendingChangeAction(e) {
+    const target = e.target;
+
+    // Check if it's a pending change action button or file name
+    const actionEl = target.closest('[data-action]');
+    if (!actionEl || !target.closest('.pending-changes-container')) return;
+
+    const action = actionEl.dataset.action;
+    const diffId = actionEl.dataset.diffid;
+
+    if (!diffId) return;
+
+    // Reset the stop flag since user is taking an action
+    generationWasStopped = false;
+
+    switch (action) {
+      case 'accept':
+        vscode.postMessage({ type: 'acceptSpecificDiff', diffId });
+        break;
+      case 'reject':
+        vscode.postMessage({ type: 'rejectSpecificDiff', diffId });
+        break;
+      case 'focus':
+        vscode.postMessage({ type: 'focusDiff', diffId });
+        break;
+    }
   }
 
   /**
@@ -1198,10 +1488,9 @@
 
   function showStatus(text, isError = false) {
     if (isError) {
-      const hint = getErrorHint(text);
-      showToast(text, 'error', hint, true);
+      showStatusError(text);
     } else {
-      showToast(text, 'warning', null, true);
+      showStatusMessage(text);
     }
   }
 
@@ -1724,6 +2013,7 @@
 
       case 'startResponse':
         isStreaming = true;
+        generationWasStopped = false; // Reset stop flag on new response
         currentResponse = '';
         currentReasoning = '';
         isReasonerMode = message.isReasoner || false;
@@ -1783,24 +2073,41 @@
         currentResponse += message.token;
         const streamingContent = document.getElementById('streamingContent');
         if (streamingContent) {
-          // Preserve tool call containers by saving and restoring them
+          // Preserve tool call containers and pending changes by saving and restoring them
           const toolCallContainers = streamingContent.querySelectorAll('.tool-calls-container');
-          const savedContainers = Array.from(toolCallContainers).map(el => el.cloneNode(true));
+          const savedToolContainers = Array.from(toolCallContainers).map(el => el.cloneNode(true));
+          const pendingChangesContainer = streamingContent.querySelector('.pending-changes-container');
+          const savedPendingChanges = pendingChangesContainer ? pendingChangesContainer.cloneNode(true) : null;
 
           // Update content (strip any DSML markup before displaying)
           const cleanResponse = stripDSMLFromContent(currentResponse);
           streamingContent.innerHTML = formatCodeBlocks(cleanResponse);
 
           // Re-append tool call containers at the beginning
-          if (savedContainers.length > 0) {
+          if (savedToolContainers.length > 0) {
             const firstChild = streamingContent.firstChild;
-            savedContainers.forEach(container => {
+            savedToolContainers.forEach(container => {
               if (firstChild) {
                 streamingContent.insertBefore(container, firstChild);
               } else {
                 streamingContent.appendChild(container);
               }
             });
+          }
+
+          // Re-append pending changes after tool calls (or at beginning if no tool calls)
+          if (savedPendingChanges) {
+            const lastToolCalls = streamingContent.querySelector('.tool-calls-container:last-of-type');
+            if (lastToolCalls) {
+              lastToolCalls.insertAdjacentElement('afterend', savedPendingChanges);
+            } else {
+              const firstChild = streamingContent.firstChild;
+              if (firstChild) {
+                streamingContent.insertBefore(savedPendingChanges, firstChild);
+              } else {
+                streamingContent.appendChild(savedPendingChanges);
+              }
+            }
           }
         }
         scrollToBottomIfNeeded();
@@ -1830,15 +2137,24 @@
           </div>
         `;
 
-        // Append to streaming content
+        // Append to streaming content (before pending changes if present)
         const streamContent = document.getElementById('streamingContent');
         if (streamContent) {
-          streamContent.innerHTML += toolCallsHtml;
+          const existingPendingChanges = streamContent.querySelector('.pending-changes-container');
+          if (existingPendingChanges) {
+            // Insert before pending changes
+            existingPendingChanges.insertAdjacentHTML('beforebegin', toolCallsHtml);
+          } else {
+            // No pending changes, append at end
+            streamContent.insertAdjacentHTML('beforeend', toolCallsHtml);
+          }
         }
         scrollToBottomIfNeeded();
         break;
 
       case 'toolCallUpdate':
+        // Ignore if generation was manually stopped (stale message)
+        if (generationWasStopped) break;
         // Update individual tool call status
         const itemId = `tool-calls-${toolCallsContainerId}-item-${message.index}`;
         const toolItem = document.getElementById(itemId);
@@ -1861,6 +2177,8 @@
         break;
 
       case 'toolCallsUpdate':
+        // Ignore if generation was manually stopped (stale message)
+        if (generationWasStopped) break;
         // Update existing tool calls container with new/additional tools
         // (Used when tool loop has multiple iterations)
         currentToolCalls = message.tools;
@@ -1887,6 +2205,8 @@
         break;
 
       case 'toolCallsEnd':
+        // Ignore if generation was manually stopped (stale message)
+        if (generationWasStopped) break;
         // Mark tool calls as complete, update title
         const container = document.getElementById(`tool-calls-${toolCallsContainerId}`);
         if (container) {
@@ -1916,6 +2236,10 @@
           // Preserve ALL tool calls containers before removing streaming element
           const toolCallsContainers = streamingEl.querySelectorAll('.tool-calls-container');
           const toolCallsHtml = Array.from(toolCallsContainers).map(c => c.outerHTML).join('');
+
+          // Preserve pending changes dropdown if present
+          const pendingChangesContainer = streamingEl.querySelector('.pending-changes-container');
+          const pendingChangesHtml = pendingChangesContainer ? pendingChangesContainer.outerHTML : '';
 
           streamingEl.remove();
 
@@ -1947,10 +2271,10 @@
             messageEl.appendChild(reasoningEl);
           }
 
-          // Add content with tool calls HTML prepended
+          // Add content with tool calls HTML prepended, then pending changes after tool calls
           const contentEl = document.createElement('div');
           contentEl.className = 'content';
-          contentEl.innerHTML = toolCallsHtml + formatCodeBlocks(cleanContent);
+          contentEl.innerHTML = toolCallsHtml + pendingChangesHtml + formatCodeBlocks(cleanContent);
           messageEl.appendChild(contentEl);
 
           chatMessages.appendChild(messageEl);
@@ -2000,12 +2324,16 @@
 
       case 'editRejected':
         // Backend confirms edit was rejected
-        showToast('Edit rejected', 'warning', null, true);
+        showStatusWarning('Edit rejected');
         break;
 
-      // REMOVED: Modal overlay message handlers (replaced with toolbar buttons)
-      // case 'diffListChanged': ...
-      // case 'activeDiffChanged': ...
+      case 'diffListChanged':
+        // Always process diff list changes - this is a legitimate state update
+        // (unlike streaming messages which should be ignored after manual stop)
+        pendingDiffs = message.diffs || [];
+        const diffEditMode = message.editMode || editMode;
+        updatePendingChangesDropdown(pendingDiffs, diffEditMode);
+        break;
 
       case 'editModeSettings':
         // Sync edit mode from backend (on startup or settings change)
@@ -2097,23 +2425,24 @@
         break;
 
       case 'searchCacheCleared':
-        showToast('Search cache cleared', 'info', null, true);
+        showStatusMessage('Search cache cleared');
         break;
 
       case 'webSearching':
-        showToast('Searching the web...', 'info', null, false);
+        showStatusMessage('Searching the web...');
         break;
 
       case 'webSearchComplete':
-        clearToast();
+        // Status message will auto-clear
         break;
 
       case 'webSearchCached':
-        showToast('Using cached search results', 'info', null, true);
+        showStatusMessage('Using cached search results');
         break;
 
       case 'generationStopped':
         isStreaming = false;
+        generationWasStopped = true; // Ignore subsequent tool/diff messages
         reasoningUserHasScrolledUp = false;
         hideTypingIndicator();
         hideStopButton();
@@ -2121,25 +2450,85 @@
         if (stoppedStreamEl) {
           // Keep partial response if any
           if (currentResponse || currentReasoning) {
-            // Preserve tool calls container
-            const stoppedToolCalls = stoppedStreamEl.querySelector('.tool-calls-container');
-            const stoppedToolCallsHtml = stoppedToolCalls ? stoppedToolCalls.outerHTML : '';
+            // Preserve ALL tool calls containers (same as endResponse)
+            const stoppedToolCallsContainers = stoppedStreamEl.querySelectorAll('.tool-calls-container');
+            const stoppedToolCallsHtml = Array.from(stoppedToolCallsContainers).map(c => c.outerHTML).join('');
+
+            // Preserve pending changes dropdown if present
+            const stoppedPendingChanges = stoppedStreamEl.querySelector('.pending-changes-container');
+            const stoppedPendingChangesHtml = stoppedPendingChanges ? stoppedPendingChanges.outerHTML : '';
 
             stoppedStreamEl.remove();
 
             // Strip DSML from partial response
             const cleanStoppedContent = stripDSMLFromContent(currentResponse);
 
-            addMessage({
-              role: 'assistant',
-              content: cleanStoppedContent + '\n\n*[Generation stopped]*',
-              reasoning_content: currentReasoning || undefined,
-              toolCallsHtml: stoppedToolCallsHtml
-            });
+            // Create final message element (same structure as endResponse)
+            const stoppedMessageEl = document.createElement('div');
+            stoppedMessageEl.className = 'message assistant';
+
+            const stoppedRoleEl = document.createElement('div');
+            stoppedRoleEl.className = 'role';
+            stoppedRoleEl.textContent = 'DeepSeek Moby';
+            stoppedMessageEl.appendChild(stoppedRoleEl);
+
+            // Add reasoning if present
+            if (currentReasoning) {
+              const stoppedReasoningEl = document.createElement('div');
+              stoppedReasoningEl.className = 'reasoning-content';
+              stoppedReasoningEl.innerHTML = `
+                <div class="reasoning-header" onclick="this.parentElement.classList.toggle('collapsed')">
+                  <span class="reasoning-icon">💭</span>
+                  <span>Chain of Thought</span>
+                  <span class="reasoning-toggle">▼</span>
+                </div>
+                <div class="reasoning-body">${formatText(currentReasoning)}</div>
+              `;
+              stoppedMessageEl.appendChild(stoppedReasoningEl);
+            }
+
+            // Add content with tool calls and pending changes preserved
+            const stoppedContentEl = document.createElement('div');
+            stoppedContentEl.className = 'content';
+            stoppedContentEl.innerHTML = stoppedToolCallsHtml + stoppedPendingChangesHtml + formatCodeBlocks(cleanStoppedContent + '\n\n*[Generation stopped]*');
+            stoppedMessageEl.appendChild(stoppedContentEl);
+
+            chatMessages.appendChild(stoppedMessageEl);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
           } else {
-            stoppedStreamEl.remove();
+            // No text content, but may still have tool calls or pending changes
+            const stoppedToolCallsOnly = stoppedStreamEl.querySelectorAll('.tool-calls-container');
+            const stoppedPendingOnly = stoppedStreamEl.querySelector('.pending-changes-container');
+
+            if (stoppedToolCallsOnly.length > 0 || stoppedPendingOnly) {
+              // There are dropdowns to preserve - create a minimal message
+              const stoppedToolCallsOnlyHtml = Array.from(stoppedToolCallsOnly).map(c => c.outerHTML).join('');
+              const stoppedPendingOnlyHtml = stoppedPendingOnly ? stoppedPendingOnly.outerHTML : '';
+
+              stoppedStreamEl.remove();
+
+              const minimalMessageEl = document.createElement('div');
+              minimalMessageEl.className = 'message assistant';
+
+              const minimalRoleEl = document.createElement('div');
+              minimalRoleEl.className = 'role';
+              minimalRoleEl.textContent = 'DeepSeek Moby';
+              minimalMessageEl.appendChild(minimalRoleEl);
+
+              const minimalContentEl = document.createElement('div');
+              minimalContentEl.className = 'content';
+              minimalContentEl.innerHTML = stoppedToolCallsOnlyHtml + stoppedPendingOnlyHtml + '<p><em>[Generation stopped]</em></p>';
+              minimalMessageEl.appendChild(minimalContentEl);
+
+              chatMessages.appendChild(minimalMessageEl);
+              chatMessages.scrollTop = chatMessages.scrollHeight;
+            } else {
+              // Nothing to preserve
+              stoppedStreamEl.remove();
+            }
           }
         }
+        saveState();
         showStatus('Generation stopped', false);
         break;
     }

@@ -509,6 +509,183 @@ body {
   opacity: 0.7;
 }
 
+/* ============================================
+   PENDING CHANGES DROPDOWN
+   ============================================ */
+
+.pending-changes-container {
+  margin: 8px 0;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 6px;
+  background: var(--vscode-editor-background);
+  overflow: hidden;
+}
+
+.pending-changes-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--vscode-sideBar-background);
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.pending-changes-header:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.pending-changes-icon {
+  font-size: 10px;
+  transition: transform 0.2s;
+  transform: rotate(90deg); /* Default: expanded */
+}
+
+.pending-changes-container.collapsed .pending-changes-icon {
+  transform: rotate(0deg);
+}
+
+.pending-changes-title {
+  flex: 1;
+  font-weight: 500;
+}
+
+.pending-changes-count {
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+  padding: 2px 6px;
+  border-radius: 10px;
+  font-size: 10px;
+}
+
+.pending-changes-body {
+  padding: 8px 12px;
+  border-top: 1px solid var(--vscode-panel-border);
+}
+
+.pending-changes-container.collapsed .pending-changes-body {
+  display: none;
+}
+
+.pending-change-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 12px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+.pending-change-item:last-child {
+  border-bottom: none;
+}
+
+.pending-change-status {
+  width: 16px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.pending-change-status.pending {
+  color: var(--vscode-editorWarning-foreground, #cca700);
+}
+
+.pending-change-status.applied {
+  color: var(--vscode-terminal-ansiGreen);
+}
+
+.pending-change-status.rejected {
+  color: var(--vscode-errorForeground, #f48771);
+}
+
+.pending-change-file {
+  flex: 1;
+  font-family: var(--vscode-editor-font-family);
+  color: var(--vscode-textLink-foreground);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pending-change-file:hover {
+  text-decoration: underline;
+}
+
+.pending-change-file.no-click {
+  cursor: default;
+  color: var(--vscode-descriptionForeground);
+}
+
+.pending-change-file.no-click:hover {
+  text-decoration: none;
+}
+
+.pending-change-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.pending-change-btn {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.15s;
+}
+
+.pending-change-btn.accept-btn {
+  background: var(--vscode-terminal-ansiGreen, #4ec9b0);
+  color: var(--vscode-editor-background);
+}
+
+.pending-change-btn.accept-btn:hover {
+  background: var(--vscode-terminal-ansiBrightGreen, #5fd7af);
+}
+
+.pending-change-btn.reject-btn {
+  background: var(--vscode-errorForeground, #f48771);
+  color: var(--vscode-editor-background);
+}
+
+.pending-change-btn.reject-btn:hover {
+  filter: brightness(1.15);
+}
+
+/* Status labels for auto/accepted/rejected */
+.pending-change-auto-label {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--vscode-terminal-ansiGreen, #4ec9b0);
+  background: rgba(78, 201, 176, 0.15);
+  padding: 2px 8px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.pending-change-rejected-label {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--vscode-errorForeground, #f48771);
+  background: rgba(244, 135, 113, 0.15);
+  padding: 2px 8px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.pending-changes-container.auto-mode .pending-change-item {
+  padding: 4px 0;
+}
+
 .message pre {
   margin: 0;
   padding: 0;
@@ -826,11 +1003,15 @@ code[class*="language-"] {
   align-items: center;
   gap: 4px;
   height: 32px; /* 1 button height */
+  min-height: 32px; /* Prevent shrinking */
+  max-height: 32px; /* Prevent growing */
   padding: 0 2px;
   border-radius: 4px;
   background: rgba(79, 195, 247, 0.08); /* Light blue background */
   border: 1px solid rgba(79, 195, 247, 0.2);
   flex: 1; /* Allows flex-grow: 2 on textarea to work */
+  overflow: hidden; /* Prevent scrollbars when content overflows */
+  box-sizing: border-box;
 }
 
 .status-panel-moby {
@@ -855,6 +1036,7 @@ code[class*="language-"] {
   align-items: center;
   gap: 4px;
   min-width: 0; /* Allow text truncation */
+  overflow: hidden;
 }
 
 .status-panel-messages {
@@ -875,6 +1057,12 @@ code[class*="language-"] {
   gap: 4px;
   justify-content: flex-end;
   min-width: 0;
+  overflow: hidden;
+  /* Always have border to prevent layout shift when warning/error shows */
+  border: 1px solid transparent;
+  border-radius: 3px;
+  box-sizing: border-box;
+  padding: 2px;
 }
 
 .status-panel-separator {
@@ -926,17 +1114,13 @@ code[class*="language-"] {
 
 /* Background styling for warnings and errors */
 .status-panel-right.warning-bg {
-  background: rgba(249, 168, 37, 0.15); /* Translucent yellow, slightly more opaque */
-  border: 1px solid rgba(249, 168, 37, 0.5);
-  border-radius: 3px;
-  box-sizing: border-box; /* Include border in width calculation */
+  background: rgba(249, 168, 37, 0.15); /* Translucent yellow */
+  border-color: rgba(249, 168, 37, 0.5);
 }
 
 .status-panel-right.error-bg {
-  background: rgba(231, 72, 86, 0.15); /* Translucent red, slightly more opaque */
-  border: 1px solid rgba(231, 72, 86, 0.5);
-  border-radius: 3px;
-  box-sizing: border-box; /* Include border in width calculation */
+  background: rgba(231, 72, 86, 0.15); /* Translucent red */
+  border-color: rgba(231, 72, 86, 0.5);
 }
 
 .status-panel-logs-btn {
