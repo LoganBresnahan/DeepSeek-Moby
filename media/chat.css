@@ -289,8 +289,9 @@ body {
   flex-direction: column;
 }
 
-/* Push messages to bottom when there are few */
-.chat-messages > .message:first-child {
+/* Push content to bottom when there are few items */
+/* Apply to first child regardless of type (message, tools-batch, shell-segment, etc) */
+.chat-messages > *:first-child {
   margin-top: auto;
 }
 

@@ -1,0 +1,163 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`StreamingActor Snapshots > indicator states > renders active streaming indicator 1`] = `
+"<div class="streaming-indicator active">
+          <span class="streaming-dot"></span>
+          <span class="streaming-dot"></span>
+          <span class="streaming-dot"></span>
+        </div>"
+`;
+
+exports[`StreamingActor Snapshots > indicator states > renders cleared state after abort 1`] = `
+"<div class="streaming-indicator">
+          <span class="streaming-dot"></span>
+          <span class="streaming-dot"></span>
+          <span class="streaming-dot"></span>
+        </div>"
+`;
+
+exports[`StreamingActor Snapshots > indicator states > renders deactivated indicator after stream ends 1`] = `
+"<div class="streaming-indicator">
+          <span class="streaming-dot"></span>
+          <span class="streaming-dot"></span>
+          <span class="streaming-dot"></span>
+        </div>"
+`;
+
+exports[`StreamingActor Snapshots > indicator states > renders inactive state (no indicator) 1`] = `""`;
+
+exports[`StreamingActor Snapshots > injected styles > injects styles into document head 1`] = `
+"
+/**
+ * StreamingActor styles
+ * Streaming indicator animation
+ */
+
+.streaming-indicator {
+  display: none;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 12px;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.streaming-indicator.active {
+  display: flex;
+  opacity: 1;
+}
+
+.streaming-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: var(--vscode-progressBar-background, #0e70c0);
+  animation: streaming-pulse 1.4s ease-in-out infinite;
+}
+
+.streaming-dot:nth-child(1) {
+  animation-delay: 0s;
+}
+
+.streaming-dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.streaming-dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes streaming-pulse {
+  0%, 80%, 100% {
+    transform: scale(0.6);
+    opacity: 0.4;
+  }
+  40% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* Streaming state class for message elements */
+.message.streaming .message-content {
+  position: relative;
+}
+
+.message.streaming .message-content::after {
+  content: '▋';
+  display: inline;
+  animation: cursor-blink 1s step-end infinite;
+  color: var(--vscode-editor-foreground, #cccccc);
+  opacity: 0.7;
+}
+
+@keyframes cursor-blink {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+"
+`;
+
+exports[`StreamingActor State Snapshots > captures aborted stream state 1`] = `
+{
+  "active": false,
+  "content": "",
+  "messageId": null,
+  "model": "deepseek-chat",
+  "thinking": "",
+}
+`;
+
+exports[`StreamingActor State Snapshots > captures active streaming state 1`] = `
+{
+  "active": true,
+  "content": "",
+  "messageId": "msg-123",
+  "model": "deepseek-chat",
+  "thinking": "",
+}
+`;
+
+exports[`StreamingActor State Snapshots > captures completed stream state 1`] = `
+{
+  "active": false,
+  "content": "This is the complete response.",
+  "messageId": "msg-789",
+  "model": "deepseek-chat",
+  "thinking": "",
+}
+`;
+
+exports[`StreamingActor State Snapshots > captures initial state 1`] = `
+{
+  "active": false,
+  "content": "",
+  "messageId": null,
+  "model": "deepseek-chat",
+  "thinking": "",
+}
+`;
+
+exports[`StreamingActor State Snapshots > captures state with content 1`] = `
+{
+  "active": true,
+  "content": "Hello, I am an AI assistant.",
+  "messageId": "msg-123",
+  "model": "deepseek-chat",
+  "thinking": "",
+}
+`;
+
+exports[`StreamingActor State Snapshots > captures state with thinking (reasoner model) 1`] = `
+{
+  "active": true,
+  "content": "The answer is 42.",
+  "messageId": "msg-456",
+  "model": "deepseek-reasoner",
+  "thinking": "Let me analyze this problem step by step...",
+}
+`;

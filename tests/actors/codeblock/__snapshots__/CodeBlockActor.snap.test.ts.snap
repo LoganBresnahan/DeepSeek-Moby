@@ -1,0 +1,362 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`CodeBlockActor Snapshots > injected styles > injects styles into document head 1`] = `
+"
+/* Code Block Container */
+.codeblock-container {
+  border-radius: 6px;
+  overflow: hidden;
+  margin: 8px 0;
+  background: var(--vscode-textCodeBlock-background);
+}
+
+.codeblock-container.entering {
+  animation: codeblockSlideIn 0.2s ease-out;
+}
+
+@keyframes codeblockSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(-5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Code Header */
+.codeblock-header {
+  display: flex;
+  align-items: center;
+  padding: 6px 12px;
+  background: var(--vscode-editorWidget-background);
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+.codeblock-lang {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+  text-transform: uppercase;
+  flex: 1;
+}
+
+.codeblock-label {
+  font-size: 10px;
+  color: var(--vscode-terminal-ansiGreen);
+  margin-left: 8px;
+}
+
+/* Code Actions */
+.codeblock-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.codeblock-btn {
+  padding: 2px 8px;
+  border: none;
+  background: var(--vscode-button-secondaryBackground);
+  color: var(--vscode-button-secondaryForeground);
+  border-radius: 3px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.codeblock-btn:hover {
+  background: var(--vscode-button-secondaryHoverBackground);
+}
+
+.codeblock-btn.copy-btn.copied {
+  background: var(--vscode-terminal-ansiGreen);
+  color: var(--vscode-editor-background);
+}
+
+.codeblock-btn.diff-btn.active {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+
+.codeblock-btn.apply-btn {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.codeblock-container.diffed .codeblock-btn.apply-btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.codeblock-btn.collapse-btn {
+  padding: 2px 6px;
+  min-width: 20px;
+}
+
+/* Code Content */
+.codeblock-content {
+  position: relative;
+  max-height: 2000px;
+  overflow: hidden;
+  transition: max-height 0.3s ease-out;
+}
+
+.codeblock-container.collapsed .codeblock-content {
+  max-height: 50px;
+  transition: max-height 0.2s ease-in;
+}
+
+.codeblock-content pre {
+  margin: 0;
+  padding: 12px;
+  overflow-x: auto;
+}
+
+.codeblock-content code {
+  font-family: var(--vscode-editor-font-family);
+  font-size: var(--vscode-editor-font-size, 13px);
+  line-height: 1.5;
+  white-space: pre;
+}
+
+/* Fade overlay for collapsed state */
+.codeblock-content::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 30px;
+  background: linear-gradient(transparent, var(--vscode-textCodeBlock-background));
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+
+.codeblock-container.collapsed .codeblock-content::after {
+  opacity: 1;
+}
+
+/* Diffed state */
+.codeblock-container.diffed {
+  border: 1px solid var(--vscode-terminal-ansiGreen);
+}
+
+/* Tool output style */
+.codeblock-container.tool-output {
+  opacity: 0.6;
+}
+
+.codeblock-container.tool-output .codeblock-header {
+  background: transparent;
+}
+
+/* Syntax highlighting tokens */
+.token.comment { color: var(--vscode-editor-foreground); opacity: 0.5; font-style: italic; }
+.token.string { color: var(--vscode-terminal-ansiGreen); }
+.token.number { color: var(--vscode-terminal-ansiYellow); }
+.token.keyword { color: var(--vscode-terminal-ansiMagenta); }
+.token.builtin { color: var(--vscode-terminal-ansiCyan); }
+.token.function { color: var(--vscode-terminal-ansiBlue); }
+"
+`;
+
+exports[`CodeBlockActor Snapshots > renderBlock output > renders applied code block in ask mode 1`] = `
+"
+      <div class="codeblock-container" id="codeblock-X" data-language="typescript">
+        <div class="codeblock-header">
+          <span class="codeblock-lang">typescript (APPLIED)</span>
+          
+          <div class="codeblock-actions">
+            <button class="codeblock-btn copy-btn" data-action="copy">Copy</button>
+            <button class="codeblock-btn collapse-btn" data-action="collapse" title="Collapse">▼</button>
+          </div>
+        
+        </div>
+        <div class="codeblock-content">
+          <pre><code class="language-typescript"><span class="token comment"># File: src/main.ts</span>
+<span class="token keyword">const</span> x: number = <span class="token number">1</span>;</code></pre>
+        </div>
+      </div>
+    "
+`;
+
+exports[`CodeBlockActor Snapshots > renderBlock output > renders basic code block 1`] = `
+"
+      <div class="codeblock-container" id="codeblock-X" data-language="javascript">
+        <div class="codeblock-header">
+          <span class="codeblock-lang">javascript</span>
+          
+          <div class="codeblock-actions">
+            <button class="codeblock-btn copy-btn" data-action="copy">Copy</button>
+            <button class="codeblock-btn diff-btn" data-action="diff">Diff</button>
+            <button class="codeblock-btn apply-btn" data-action="apply">Apply</button>
+            <button class="codeblock-btn collapse-btn" data-action="collapse" title="Collapse">▼</button>
+          </div>
+        
+        </div>
+        <div class="codeblock-content">
+          <pre><code class="language-javascript"><span class="token keyword">const</span> x = <span class="token number">1</span>;
+<span class="token keyword">const</span> y = <span class="token number">2</span>;</code></pre>
+        </div>
+      </div>
+    "
+`;
+
+exports[`CodeBlockActor Snapshots > renderBlock output > renders collapsed code block 1`] = `
+"
+      <div class="codeblock-container collapsed" id="codeblock-X" data-language="javascript">
+        <div class="codeblock-header">
+          <span class="codeblock-lang">javascript</span>
+          
+          <div class="codeblock-actions">
+            <button class="codeblock-btn copy-btn" data-action="copy">Copy</button>
+            <button class="codeblock-btn diff-btn" data-action="diff">Diff</button>
+            <button class="codeblock-btn apply-btn" data-action="apply">Apply</button>
+            <button class="codeblock-btn collapse-btn" data-action="collapse" title="Expand">▶</button>
+          </div>
+        
+        </div>
+        <div class="codeblock-content">
+          <pre><code class="language-javascript"><span class="token keyword">const</span> x = <span class="token number">1</span>;</code></pre>
+        </div>
+      </div>
+    "
+`;
+
+exports[`CodeBlockActor Snapshots > renderBlock output > renders diffed code block 1`] = `
+"
+      <div class="codeblock-container diffed" id="codeblock-X" data-language="javascript">
+        <div class="codeblock-header">
+          <span class="codeblock-lang">javascript</span>
+          
+          <div class="codeblock-actions">
+            <button class="codeblock-btn copy-btn" data-action="copy">Copy</button>
+            <button class="codeblock-btn diff-btn" data-action="diff">Diff</button>
+            <button class="codeblock-btn apply-btn" data-action="apply">Apply</button>
+            <button class="codeblock-btn collapse-btn" data-action="collapse" title="Collapse">▼</button>
+          </div>
+        
+        </div>
+        <div class="codeblock-content">
+          <pre><code class="language-javascript"><span class="token keyword">const</span> x = <span class="token number">1</span>;</code></pre>
+        </div>
+      </div>
+    "
+`;
+
+exports[`CodeBlockActor Snapshots > renderBlock output > renders tool output block 1`] = `
+"
+      <div class="codeblock-container tool-output" id="codeblock-X" data-language="tool-output">
+        <div class="codeblock-header">
+          <span class="codeblock-lang">output</span>
+          
+        </div>
+        <div class="codeblock-content">
+          <pre><code class="language-tool-output">Command executed successfully</code></pre>
+        </div>
+      </div>
+    "
+`;
+
+exports[`CodeBlockActor Snapshots > syntax highlighting > highlights JavaScript code 1`] = `
+"
+      <div class="codeblock-container" id="codeblock-X" data-language="javascript">
+        <div class="codeblock-header">
+          <span class="codeblock-lang">javascript</span>
+          
+          <div class="codeblock-actions">
+            <button class="codeblock-btn copy-btn" data-action="copy">Copy</button>
+            <button class="codeblock-btn diff-btn" data-action="diff">Diff</button>
+            <button class="codeblock-btn apply-btn" data-action="apply">Apply</button>
+            <button class="codeblock-btn collapse-btn" data-action="collapse" title="Collapse">▼</button>
+          </div>
+        
+        </div>
+        <div class="codeblock-content">
+          <pre><code class="language-javascript"><span class="token keyword">const</span> greeting = <span class="token string">"Hello World"</span>;
+<span class="token keyword">let</span> count = <span class="token number">42</span>;
+<span class="token comment">// This is a comment</span>
+<span class="token keyword">function</span> sayHello() {
+  <span class="token keyword">return</span> greeting;
+}</code></pre>
+        </div>
+      </div>
+    "
+`;
+
+exports[`CodeBlockActor Snapshots > syntax highlighting > highlights Python code 1`] = `
+"
+      <div class="codeblock-container" id="codeblock-X" data-language="python">
+        <div class="codeblock-header">
+          <span class="codeblock-lang">python</span>
+          
+          <div class="codeblock-actions">
+            <button class="codeblock-btn copy-btn" data-action="copy">Copy</button>
+            <button class="codeblock-btn diff-btn" data-action="diff">Diff</button>
+            <button class="codeblock-btn apply-btn" data-action="apply">Apply</button>
+            <button class="codeblock-btn collapse-btn" data-action="collapse" title="Collapse">▼</button>
+          </div>
+        
+        </div>
+        <div class="codeblock-content">
+          <pre><code class="language-python"><span class="token keyword">def</span> hello():
+    <span class="token comment"># Comment</span>
+    message = <span class="token string">"Hello"</span>
+    <span class="token keyword">return</span> message</code></pre>
+        </div>
+      </div>
+    "
+`;
+
+exports[`CodeBlockActor State Snapshots > captures initial state 1`] = `
+{
+  "blocks": [],
+  "collapsedIds": [],
+  "diffedId": null,
+}
+`;
+
+exports[`CodeBlockActor State Snapshots > captures state with blocks 1`] = `
+{
+  "blocks": [
+    {
+      "code": "const x = 1;",
+      "collapsed": false,
+      "id": "codeblock-X",
+      "isApplied": false,
+      "isToolOutput": false,
+      "language": "javascript",
+    },
+    {
+      "code": "x = 1",
+      "collapsed": false,
+      "id": "codeblock-X",
+      "isApplied": false,
+      "isToolOutput": false,
+      "language": "python",
+    },
+  ],
+  "collapsedIds": [],
+  "diffedId": null,
+}
+`;
+
+exports[`CodeBlockActor State Snapshots > captures state with collapsed block 1`] = `
+{
+  "blocks": [
+    {
+      "code": "code",
+      "collapsed": true,
+      "id": "codeblock-X",
+      "isApplied": false,
+      "isToolOutput": false,
+      "language": "javascript",
+    },
+  ],
+  "collapsedIds": [
+    "codeblock-X",
+  ],
+  "diffedId": null,
+}
+`;

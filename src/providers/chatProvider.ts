@@ -307,6 +307,18 @@ which I already edited - would you like me to update it?"
         case 'updateSettings':
           await this.updateSettings(data.settings);
           break;
+        case 'selectModel':
+          // Handle model selection from dropdown
+          await this.updateSettings({ model: data.model });
+          break;
+        case 'setTemperature':
+          // Handle temperature slider
+          await this.updateSettings({ temperature: data.temperature });
+          break;
+        case 'setToolLimit':
+          // Handle tool limit slider
+          await this.updateSettings({ maxToolCalls: data.toolLimit });
+          break;
         case 'getSettings':
           this.sendCurrentSettings();
           break;
@@ -428,6 +440,10 @@ which I already edited - would you like me to update it?"
       this.deepSeekClient.setModel(settings.model);
       await config.update('model', settings.model, vscode.ConfigurationTarget.Global);
       logger.modelChanged(settings.model);
+      // Notify webview to update UI
+      if (this._view) {
+        this._view.webview.postMessage({ type: 'modelChanged', model: settings.model });
+      }
     }
 
     if (settings.temperature !== undefined) {

@@ -1,0 +1,907 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`DiffActor Snapshots > code samples > renders TypeScript code diff 1`] = `
+"
+      <div class="diff-container">
+        <div class="diff-header">
+          <div class="diff-header-title">
+            <span class="diff-header-icon">📄</span>
+            <span class="diff-header-filename">types.ts</span>
+          </div>
+          <div class="diff-header-actions">
+            <button class="diff-action-btn diff-apply-btn" data-action="apply">
+              ✓ Apply
+            </button>
+            <button class="diff-action-btn diff-reject-btn" data-action="reject">
+              ✗ Reject
+            </button>
+            <button class="diff-action-btn diff-close-btn" data-action="close">
+              ×
+            </button>
+          </div>
+        </div>
+        <div class="diff-content">
+          <table class="diff-table">
+            <tbody>
+              
+      <tr class="diff-line diff-line-unchanged">
+        <td class="diff-line-num diff-line-num-old">1</td>
+        <td class="diff-line-num diff-line-num-new">1</td>
+        <td class="diff-line-content">  interface User {</td>
+      </tr>
+    
+      <tr class="diff-line diff-line-added">
+        <td class="diff-line-num diff-line-num-old"></td>
+        <td class="diff-line-num diff-line-num-new">2</td>
+        <td class="diff-line-content">+   id: number;</td>
+      </tr>
+    
+      <tr class="diff-line diff-line-unchanged">
+        <td class="diff-line-num diff-line-num-old">2</td>
+        <td class="diff-line-num diff-line-num-new">3</td>
+        <td class="diff-line-content">    name: string;</td>
+      </tr>
+    
+      <tr class="diff-line diff-line-unchanged">
+        <td class="diff-line-num diff-line-num-old">3</td>
+        <td class="diff-line-num diff-line-num-new">4</td>
+        <td class="diff-line-content">    email: string;</td>
+      </tr>
+    
+      <tr class="diff-line diff-line-added">
+        <td class="diff-line-num diff-line-num-old"></td>
+        <td class="diff-line-num diff-line-num-new">5</td>
+        <td class="diff-line-content">+   createdAt: Date;</td>
+      </tr>
+    
+      <tr class="diff-line diff-line-unchanged">
+        <td class="diff-line-num diff-line-num-old">4</td>
+        <td class="diff-line-num diff-line-num-new">6</td>
+        <td class="diff-line-content">  }</td>
+      </tr>
+    
+            </tbody>
+          </table>
+        </div>
+        <div class="diff-stats">
+          <span class="diff-stat-added">+2 added</span>
+          <span class="diff-stat-removed">-0 removed</span>
+        </div>
+      </div>
+    "
+`;
+
+exports[`DiffActor Snapshots > code samples > renders function modification diff 1`] = `
+"
+      <div class="diff-container">
+        <div class="diff-header">
+          <div class="diff-header-title">
+            <span class="diff-header-icon">📄</span>
+            <span class="diff-header-filename">api.ts</span>
+          </div>
+          <div class="diff-header-actions">
+            <button class="diff-action-btn diff-apply-btn" data-action="apply">
+              ✓ Apply
+            </button>
+            <button class="diff-action-btn diff-reject-btn" data-action="reject">
+              ✗ Reject
+            </button>
+            <button class="diff-action-btn diff-close-btn" data-action="close">
+              ×
+            </button>
+          </div>
+        </div>
+        <div class="diff-content">
+          <table class="diff-table">
+            <tbody>
+              
+      <tr class="diff-line diff-line-removed">
+        <td class="diff-line-num diff-line-num-old">1</td>
+        <td class="diff-line-num diff-line-num-new"></td>
+        <td class="diff-line-content">- async function fetchData(url: string) {</td>
+      </tr>
+    
+      <tr class="diff-line diff-line-added">
+        <td class="diff-line-num diff-line-num-old"></td>
+        <td class="diff-line-num diff-line-num-new">1</td>
+        <td class="diff-line-content">+ async function fetchData(url: string, options?: RequestInit) {</td>
+      </tr>
+    
+      <tr class="diff-line diff-line-removed">
+        <td class="diff-line-num diff-line-num-old">2</td>
+        <td class="diff-line-num diff-line-num-new"></td>
+        <td class="diff-line-content">-   const response = await fetch(url);</td>
+      </tr>
+    
+      <tr class="diff-line diff-line-added">
+        <td class="diff-line-num diff-line-num-old"></td>
+        <td class="diff-line-num diff-line-num-new">2</td>
+        <td class="diff-line-content">+   const response = await fetch(url, options);</td>
+      </tr>
+    
+      <tr class="diff-line diff-line-added">
+        <td class="diff-line-num diff-line-num-old"></td>
+        <td class="diff-line-num diff-line-num-new">3</td>
+        <td class="diff-line-content">+   if (!response.ok) {</td>
+      </tr>
+    
+      <tr class="diff-line diff-line-added">
+        <td class="diff-line-num diff-line-num-old"></td>
+        <td class="diff-line-num diff-line-num-new">4</td>
+        <td class="diff-line-content">+     throw new Error('Request failed');</td>
+      </tr>
+    
+      <tr class="diff-line diff-line-added">
+        <td class="diff-line-num diff-line-num-old"></td>
+        <td class="diff-line-num diff-line-num-new">5</td>
+        <td class="diff-line-content">+   }</td>
+      </tr>
+    
+      <tr class="diff-line diff-line-unchanged">
+        <td class="diff-line-num diff-line-num-old">3</td>
+        <td class="diff-line-num diff-line-num-new">6</td>
+        <td class="diff-line-content">    return response.json();</td>
+      </tr>
+    
+      <tr class="diff-line diff-line-unchanged">
+        <td class="diff-line-num diff-line-num-old">4</td>
+        <td class="diff-line-num diff-line-num-new">7</td>
+        <td class="diff-line-content">  }</td>
+      </tr>
+    
+            </tbody>
+          </table>
+        </div>
+        <div class="diff-stats">
+          <span class="diff-stat-added">+5 added</span>
+          <span class="diff-stat-removed">-2 removed</span>
+        </div>
+      </div>
+    "
+`;
+
+exports[`DiffActor Snapshots > diff rendering > renders empty new content (file deletion) 1`] = `
+"
+      <div class="diff-container">
+        <div class="diff-header">
+          <div class="diff-header-title">
+            <span class="diff-header-icon">📄</span>
+            <span class="diff-header-filename">old-file.ts</span>
+          </div>
+          <div class="diff-header-actions">
+            <button class="diff-action-btn diff-apply-btn" data-action="apply">
+              ✓ Apply
+            </button>
+            <button class="diff-action-btn diff-reject-btn" data-action="reject">
+              ✗ Reject
+            </button>
+            <button class="diff-action-btn diff-close-btn" data-action="close">
+              ×
+            </button>
+          </div>
+        </div>
+        <div class="diff-content">
+          <table class="diff-table">
+            <tbody>
+              
+      <tr class="diff-line diff-line-removed">
+        <td class="diff-line-num diff-line-num-old">1</td>
+        <td class="diff-line-num diff-line-num-new"></td>
+        <td class="diff-line-content">- export const DEPRECATED = true;</td>
+      </tr>
+    
+      <tr class="diff-line diff-line-added">
+        <td class="diff-line-num diff-line-num-old"></td>
+        <td class="diff-line-num diff-line-num-new">1</td>
+        <td class="diff-line-content">+ </td>
+      </tr>
+    
+            </tbody>
+          </table>
+        </div>
+        <div class="diff-stats">
+          <span class="diff-stat-added">+1 added</span>
+          <span class="diff-stat-removed">-1 removed</span>
+        </div>
+      </div>
+    "
+`;
+
+exports[`DiffActor Snapshots > diff rendering > renders empty old content (new file) 1`] = `
+"
+      <div class="diff-container">
+        <div class="diff-header">
+          <div class="diff-header-title">
+            <span class="diff-header-icon">📄</span>
+            <span class="diff-header-filename">new-file.ts</span>
+          </div>
+          <div class="diff-header-actions">
+            <button class="diff-action-btn diff-apply-btn" data-action="apply">
+              ✓ Apply
+            </button>
+            <button class="diff-action-btn diff-reject-btn" data-action="reject">
+              ✗ Reject
+            </button>
+            <button class="diff-action-btn diff-close-btn" data-action="close">
+              ×
+            </button>
+          </div>
+        </div>
+        <div class="diff-content">
+          <table class="diff-table">
+            <tbody>
+              
+      <tr class="diff-line diff-line-removed">
+        <td class="diff-line-num diff-line-num-old">1</td>
+        <td class="diff-line-num diff-line-num-new"></td>
+        <td class="diff-line-content">- </td>
+      </tr>
+    
+      <tr class="diff-line diff-line-added">
+        <td class="diff-line-num diff-line-num-old"></td>
+        <td class="diff-line-num diff-line-num-new">1</td>
+        <td class="diff-line-content">+ export const VERSION = "1.0.0";</td>
+      </tr>
+    
+            </tbody>
+          </table>
+        </div>
+        <div class="diff-stats">
+          <span class="diff-stat-added">+1 added</span>
+          <span class="diff-stat-removed">-1 removed</span>
+        </div>
+      </div>
+    "
+`;
+
+exports[`DiffActor Snapshots > diff rendering > renders modification diff 1`] = `
+"
+      <div class="diff-container">
+        <div class="diff-header">
+          <div class="diff-header-title">
+            <span class="diff-header-icon">📄</span>
+            <span class="diff-header-filename">test.ts</span>
+          </div>
+          <div class="diff-header-actions">
+            <button class="diff-action-btn diff-apply-btn" data-action="apply">
+              ✓ Apply
+            </button>
+            <button class="diff-action-btn diff-reject-btn" data-action="reject">
+              ✗ Reject
+            </button>
+            <button class="diff-action-btn diff-close-btn" data-action="close">
+              ×
+            </button>
+          </div>
+        </div>
+        <div class="diff-content">
+          <table class="diff-table">
+            <tbody>
+              
+      <tr class="diff-line diff-line-unchanged">
+        <td class="diff-line-num diff-line-num-old">1</td>
+        <td class="diff-line-num diff-line-num-new">1</td>
+        <td class="diff-line-content">  const x = 1;</td>
+      </tr>
+    
+      <tr class="diff-line diff-line-removed">
+        <td class="diff-line-num diff-line-num-old">2</td>
+        <td class="diff-line-num diff-line-num-new"></td>
+        <td class="diff-line-content">- const y = 2;</td>
+      </tr>
+    
+      <tr class="diff-line diff-line-added">
+        <td class="diff-line-num diff-line-num-old"></td>
+        <td class="diff-line-num diff-line-num-new">2</td>
+        <td class="diff-line-content">+ const y = 20;</td>
+      </tr>
+    
+      <tr class="diff-line diff-line-unchanged">
+        <td class="diff-line-num diff-line-num-old">3</td>
+        <td class="diff-line-num diff-line-num-new">3</td>
+        <td class="diff-line-content">  const z = 3;</td>
+      </tr>
+    
+            </tbody>
+          </table>
+        </div>
+        <div class="diff-stats">
+          <span class="diff-stat-added">+1 added</span>
+          <span class="diff-stat-removed">-1 removed</span>
+        </div>
+      </div>
+    "
+`;
+
+exports[`DiffActor Snapshots > diff rendering > renders multi-line diff with context 1`] = `
+"
+      <div class="diff-container">
+        <div class="diff-header">
+          <div class="diff-header-title">
+            <span class="diff-header-icon">📄</span>
+            <span class="diff-header-filename">helper.ts</span>
+          </div>
+          <div class="diff-header-actions">
+            <button class="diff-action-btn diff-apply-btn" data-action="apply">
+              ✓ Apply
+            </button>
+            <button class="diff-action-btn diff-reject-btn" data-action="reject">
+              ✗ Reject
+            </button>
+            <button class="diff-action-btn diff-close-btn" data-action="close">
+              ×
+            </button>
+          </div>
+        </div>
+        <div class="diff-content">
+          <table class="diff-table">
+            <tbody>
+              
+      <tr class="diff-line diff-line-unchanged">
+        <td class="diff-line-num diff-line-num-old">1</td>
+        <td class="diff-line-num diff-line-num-new">1</td>
+        <td class="diff-line-content">  function add(a, b) {</td>
+      </tr>
+    
+      <tr class="diff-line diff-line-added">
+        <td class="diff-line-num diff-line-num-old"></td>
+        <td class="diff-line-num diff-line-num-new">2</td>
+        <td class="diff-line-content">+   // Add two numbers</td>
+      </tr>
+    
+      <tr class="diff-line diff-line-unchanged">
+        <td class="diff-line-num diff-line-num-old">2</td>
+        <td class="diff-line-num diff-line-num-new">3</td>
+        <td class="diff-line-content">    return a + b;</td>
+      </tr>
+    
+      <tr class="diff-line diff-line-unchanged">
+        <td class="diff-line-num diff-line-num-old">3</td>
+        <td class="diff-line-num diff-line-num-new">4</td>
+        <td class="diff-line-content">  }</td>
+      </tr>
+    
+      <tr class="diff-line diff-line-unchanged">
+        <td class="diff-line-num diff-line-num-old">4</td>
+        <td class="diff-line-num diff-line-num-new">5</td>
+        <td class="diff-line-content">  </td>
+      </tr>
+    
+      <tr class="diff-line diff-line-unchanged">
+        <td class="diff-line-num diff-line-num-old">5</td>
+        <td class="diff-line-num diff-line-num-new">6</td>
+        <td class="diff-line-content">  function subtract(a, b) {</td>
+      </tr>
+    
+      <tr class="diff-line diff-line-added">
+        <td class="diff-line-num diff-line-num-old"></td>
+        <td class="diff-line-num diff-line-num-new">7</td>
+        <td class="diff-line-content">+   // Subtract two numbers</td>
+      </tr>
+    
+      <tr class="diff-line diff-line-unchanged">
+        <td class="diff-line-num diff-line-num-old">6</td>
+        <td class="diff-line-num diff-line-num-new">8</td>
+        <td class="diff-line-content">    return a - b;</td>
+      </tr>
+    
+      <tr class="diff-line diff-line-unchanged">
+        <td class="diff-line-num diff-line-num-old">7</td>
+        <td class="diff-line-num diff-line-num-new">9</td>
+        <td class="diff-line-content">  }</td>
+      </tr>
+    
+      <tr class="diff-line diff-line-added">
+        <td class="diff-line-num diff-line-num-old"></td>
+        <td class="diff-line-num diff-line-num-new">10</td>
+        <td class="diff-line-content">+ </td>
+      </tr>
+    
+      <tr class="diff-line diff-line-added">
+        <td class="diff-line-num diff-line-num-old"></td>
+        <td class="diff-line-num diff-line-num-new">11</td>
+        <td class="diff-line-content">+ function multiply(a, b) {</td>
+      </tr>
+    
+      <tr class="diff-line diff-line-added">
+        <td class="diff-line-num diff-line-num-old"></td>
+        <td class="diff-line-num diff-line-num-new">12</td>
+        <td class="diff-line-content">+   return a * b;</td>
+      </tr>
+    
+      <tr class="diff-line diff-line-added">
+        <td class="diff-line-num diff-line-num-old"></td>
+        <td class="diff-line-num diff-line-num-new">13</td>
+        <td class="diff-line-content">+ }</td>
+      </tr>
+    
+            </tbody>
+          </table>
+        </div>
+        <div class="diff-stats">
+          <span class="diff-stat-added">+6 added</span>
+          <span class="diff-stat-removed">-0 removed</span>
+        </div>
+      </div>
+    "
+`;
+
+exports[`DiffActor Snapshots > diff rendering > renders simple addition diff 1`] = `
+"
+      <div class="diff-container">
+        <div class="diff-header">
+          <div class="diff-header-title">
+            <span class="diff-header-icon">📄</span>
+            <span class="diff-header-filename">test.ts</span>
+          </div>
+          <div class="diff-header-actions">
+            <button class="diff-action-btn diff-apply-btn" data-action="apply">
+              ✓ Apply
+            </button>
+            <button class="diff-action-btn diff-reject-btn" data-action="reject">
+              ✗ Reject
+            </button>
+            <button class="diff-action-btn diff-close-btn" data-action="close">
+              ×
+            </button>
+          </div>
+        </div>
+        <div class="diff-content">
+          <table class="diff-table">
+            <tbody>
+              
+      <tr class="diff-line diff-line-unchanged">
+        <td class="diff-line-num diff-line-num-old">1</td>
+        <td class="diff-line-num diff-line-num-new">1</td>
+        <td class="diff-line-content">  const x = 1;</td>
+      </tr>
+    
+      <tr class="diff-line diff-line-added">
+        <td class="diff-line-num diff-line-num-old"></td>
+        <td class="diff-line-num diff-line-num-new">2</td>
+        <td class="diff-line-content">+ const y = 2;</td>
+      </tr>
+    
+            </tbody>
+          </table>
+        </div>
+        <div class="diff-stats">
+          <span class="diff-stat-added">+1 added</span>
+          <span class="diff-stat-removed">-0 removed</span>
+        </div>
+      </div>
+    "
+`;
+
+exports[`DiffActor Snapshots > diff rendering > renders simple removal diff 1`] = `
+"
+      <div class="diff-container">
+        <div class="diff-header">
+          <div class="diff-header-title">
+            <span class="diff-header-icon">📄</span>
+            <span class="diff-header-filename">test.ts</span>
+          </div>
+          <div class="diff-header-actions">
+            <button class="diff-action-btn diff-apply-btn" data-action="apply">
+              ✓ Apply
+            </button>
+            <button class="diff-action-btn diff-reject-btn" data-action="reject">
+              ✗ Reject
+            </button>
+            <button class="diff-action-btn diff-close-btn" data-action="close">
+              ×
+            </button>
+          </div>
+        </div>
+        <div class="diff-content">
+          <table class="diff-table">
+            <tbody>
+              
+      <tr class="diff-line diff-line-unchanged">
+        <td class="diff-line-num diff-line-num-old">1</td>
+        <td class="diff-line-num diff-line-num-new">1</td>
+        <td class="diff-line-content">  const x = 1;</td>
+      </tr>
+    
+      <tr class="diff-line diff-line-removed">
+        <td class="diff-line-num diff-line-num-old">2</td>
+        <td class="diff-line-num diff-line-num-new"></td>
+        <td class="diff-line-content">- const y = 2;</td>
+      </tr>
+    
+            </tbody>
+          </table>
+        </div>
+        <div class="diff-stats">
+          <span class="diff-stat-added">+0 added</span>
+          <span class="diff-stat-removed">-1 removed</span>
+        </div>
+      </div>
+    "
+`;
+
+exports[`DiffActor Snapshots > empty state > renders empty after close 1`] = `""`;
+
+exports[`DiffActor Snapshots > empty state > renders empty when inactive 1`] = `""`;
+
+exports[`DiffActor Snapshots > injected styles > injects styles into document head 1`] = `
+"
+/* Diff container */
+.diff-container {
+  background: var(--vscode-editor-background);
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 4px;
+  margin: 8px 0;
+  overflow: hidden;
+  font-family: var(--vscode-editor-font-family, 'Consolas', 'Courier New', monospace);
+  font-size: var(--vscode-editor-font-size, 13px);
+}
+
+/* Diff header */
+.diff-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: var(--vscode-editorGroupHeader-tabsBackground);
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+.diff-header-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+  color: var(--vscode-foreground);
+}
+
+.diff-header-icon {
+  opacity: 0.8;
+}
+
+.diff-header-filename {
+  font-family: var(--vscode-editor-font-family);
+}
+
+.diff-header-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.diff-action-btn {
+  padding: 4px 12px;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  transition: background 0.15s, opacity 0.15s;
+}
+
+.diff-action-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.diff-apply-btn {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+
+.diff-apply-btn:hover:not(:disabled) {
+  background: var(--vscode-button-hoverBackground);
+}
+
+.diff-reject-btn {
+  background: var(--vscode-button-secondaryBackground);
+  color: var(--vscode-button-secondaryForeground);
+}
+
+.diff-reject-btn:hover:not(:disabled) {
+  background: var(--vscode-button-secondaryHoverBackground);
+}
+
+.diff-close-btn {
+  background: transparent;
+  color: var(--vscode-foreground);
+  padding: 4px 8px;
+}
+
+.diff-close-btn:hover {
+  background: var(--vscode-toolbar-hoverBackground);
+}
+
+/* Diff content area */
+.diff-content {
+  overflow-x: auto;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+/* Diff table layout */
+.diff-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+/* Line number columns */
+.diff-line-num {
+  width: 48px;
+  min-width: 48px;
+  padding: 0 8px;
+  text-align: right;
+  color: var(--vscode-editorLineNumber-foreground);
+  background: var(--vscode-editorGutter-background);
+  user-select: none;
+  vertical-align: top;
+  border-right: 1px solid var(--vscode-panel-border);
+}
+
+.diff-line-num-old {
+  border-right: none;
+}
+
+.diff-line-num-new {
+  border-right: 1px solid var(--vscode-panel-border);
+}
+
+/* Line content */
+.diff-line-content {
+  padding: 0 8px;
+  white-space: pre;
+  vertical-align: top;
+}
+
+/* Line types */
+.diff-line {
+  line-height: 1.5;
+}
+
+.diff-line-added {
+  background: var(--vscode-diffEditor-insertedLineBackground, rgba(155, 185, 85, 0.2));
+}
+
+.diff-line-added .diff-line-content {
+  background: var(--vscode-diffEditor-insertedTextBackground, rgba(155, 185, 85, 0.3));
+}
+
+.diff-line-added .diff-line-num {
+  background: var(--vscode-diffEditorGutter-insertedLineBackground, rgba(155, 185, 85, 0.2));
+  color: var(--vscode-diffEditor-insertedTextForeground, inherit);
+}
+
+.diff-line-removed {
+  background: var(--vscode-diffEditor-removedLineBackground, rgba(255, 0, 0, 0.2));
+}
+
+.diff-line-removed .diff-line-content {
+  background: var(--vscode-diffEditor-removedTextBackground, rgba(255, 0, 0, 0.3));
+}
+
+.diff-line-removed .diff-line-num {
+  background: var(--vscode-diffEditorGutter-removedLineBackground, rgba(255, 0, 0, 0.2));
+  color: var(--vscode-diffEditor-removedTextForeground, inherit);
+}
+
+.diff-line-unchanged {
+  background: var(--vscode-editor-background);
+}
+
+/* Hunk separator */
+.diff-hunk-separator {
+  padding: 4px 8px;
+  background: var(--vscode-editorGutter-background);
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+  text-align: center;
+  border-top: 1px solid var(--vscode-panel-border);
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+/* Stats summary */
+.diff-stats {
+  display: flex;
+  gap: 12px;
+  padding: 8px 12px;
+  background: var(--vscode-editorGutter-background);
+  border-top: 1px solid var(--vscode-panel-border);
+  font-size: 12px;
+}
+
+.diff-stat-added {
+  color: var(--vscode-gitDecoration-addedResourceForeground, #73c991);
+}
+
+.diff-stat-removed {
+  color: var(--vscode-gitDecoration-deletedResourceForeground, #f14c4c);
+}
+
+/* Empty state */
+.diff-empty {
+  padding: 24px;
+  text-align: center;
+  color: var(--vscode-descriptionForeground);
+}
+
+/* Side by side mode */
+.diff-container.side-by-side .diff-table {
+  display: flex;
+}
+
+.diff-container.side-by-side .diff-side {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.diff-container.side-by-side .diff-side-old {
+  border-right: 1px solid var(--vscode-panel-border);
+}
+
+/* Inline word diff highlighting */
+.diff-word-added {
+  background: var(--vscode-diffEditor-insertedTextBackground, rgba(155, 185, 85, 0.5));
+  padding: 1px 0;
+}
+
+.diff-word-removed {
+  background: var(--vscode-diffEditor-removedTextBackground, rgba(255, 0, 0, 0.5));
+  padding: 1px 0;
+  text-decoration: line-through;
+}
+
+/* Loading state */
+.diff-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  gap: 8px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.diff-loading-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid transparent;
+  border-top-color: var(--vscode-progressBar-background);
+  border-radius: 50%;
+  animation: diff-spin 0.8s linear infinite;
+}
+
+@keyframes diff-spin {
+  to { transform: rotate(360deg); }
+}
+"
+`;
+
+exports[`DiffActor Snapshots > special characters > renders HTML entities safely 1`] = `
+"
+      <div class="diff-container">
+        <div class="diff-header">
+          <div class="diff-header-title">
+            <span class="diff-header-icon">📄</span>
+            <span class="diff-header-filename">template.html</span>
+          </div>
+          <div class="diff-header-actions">
+            <button class="diff-action-btn diff-apply-btn" data-action="apply">
+              ✓ Apply
+            </button>
+            <button class="diff-action-btn diff-reject-btn" data-action="reject">
+              ✗ Reject
+            </button>
+            <button class="diff-action-btn diff-close-btn" data-action="close">
+              ×
+            </button>
+          </div>
+        </div>
+        <div class="diff-content">
+          <table class="diff-table">
+            <tbody>
+              
+      <tr class="diff-line diff-line-removed">
+        <td class="diff-line-num diff-line-num-old">1</td>
+        <td class="diff-line-num diff-line-num-new"></td>
+        <td class="diff-line-content">- &lt;div class="old"&gt;</td>
+      </tr>
+    
+      <tr class="diff-line diff-line-added">
+        <td class="diff-line-num diff-line-num-old"></td>
+        <td class="diff-line-num diff-line-num-new">1</td>
+        <td class="diff-line-content">+ &lt;div class="new"&gt;</td>
+      </tr>
+    
+            </tbody>
+          </table>
+        </div>
+        <div class="diff-stats">
+          <span class="diff-stat-added">+1 added</span>
+          <span class="diff-stat-removed">-1 removed</span>
+        </div>
+      </div>
+    "
+`;
+
+exports[`DiffActor Snapshots > special characters > renders code with special characters 1`] = `
+"
+      <div class="diff-container">
+        <div class="diff-header">
+          <div class="diff-header-title">
+            <span class="diff-header-icon">📄</span>
+            <span class="diff-header-filename">regex.ts</span>
+          </div>
+          <div class="diff-header-actions">
+            <button class="diff-action-btn diff-apply-btn" data-action="apply">
+              ✓ Apply
+            </button>
+            <button class="diff-action-btn diff-reject-btn" data-action="reject">
+              ✗ Reject
+            </button>
+            <button class="diff-action-btn diff-close-btn" data-action="close">
+              ×
+            </button>
+          </div>
+        </div>
+        <div class="diff-content">
+          <table class="diff-table">
+            <tbody>
+              
+      <tr class="diff-line diff-line-removed">
+        <td class="diff-line-num diff-line-num-old">1</td>
+        <td class="diff-line-num diff-line-num-new"></td>
+        <td class="diff-line-content">- const pattern = /\\d+/;</td>
+      </tr>
+    
+      <tr class="diff-line diff-line-added">
+        <td class="diff-line-num diff-line-num-old"></td>
+        <td class="diff-line-num diff-line-num-new">1</td>
+        <td class="diff-line-content">+ const pattern = /\\d+\\.\\d+/;</td>
+      </tr>
+    
+            </tbody>
+          </table>
+        </div>
+        <div class="diff-stats">
+          <span class="diff-stat-added">+1 added</span>
+          <span class="diff-stat-removed">-1 removed</span>
+        </div>
+      </div>
+    "
+`;
+
+exports[`DiffActor State Snapshots > captures active state 1`] = `
+{
+  "active": true,
+  "codeBlockId": "block-1",
+  "file": "test.ts",
+  "stats": {
+    "added": 1,
+    "removed": 1,
+  },
+}
+`;
+
+exports[`DiffActor State Snapshots > captures initial state 1`] = `
+{
+  "active": false,
+  "codeBlockId": null,
+  "file": null,
+  "stats": {
+    "added": 0,
+    "removed": 0,
+  },
+}
+`;
+
+exports[`DiffActor State Snapshots > captures state after close 1`] = `
+{
+  "active": false,
+  "codeBlockId": null,
+  "file": null,
+  "stats": {
+    "added": 0,
+    "removed": 0,
+  },
+}
+`;
