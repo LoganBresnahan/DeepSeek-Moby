@@ -80,7 +80,7 @@
           "default": 25,
           "minimum": 5,
           "maximum": 100,
-          "description": "Maximum tool calls per request (100=no limit, only applies to Chat model)"
+          "description": "Maximum tool calling iterations per request. Each iteration can have multiple tool calls. (100=no limit, only applies to Chat model)"
         },
         "deepseek.maxTokens": {
           "type": "number",
@@ -141,6 +141,21 @@
             "Advanced search with deeper content extraction (2 credits per search)"
           ],
           "description": "Tavily search depth mode"
+        },
+        "deepseek.editMode": {
+          "type": "string",
+          "default": "manual",
+          "enum": [
+            "manual",
+            "ask",
+            "auto"
+          ],
+          "enumDescriptions": [
+            "Manual: Click Diff then Apply (current behavior)",
+            "Ask: Auto-show diff and prompt for confirmation",
+            "Auto: Automatically apply changes without asking (coming soon)"
+          ],
+          "description": "How to handle code edits from AI responses"
         }
       }
     },
@@ -239,6 +254,12 @@
         "command": "deepseek.showLogs",
         "title": "Show Log",
         "category": "DeepSeek Moby"
+      },
+      {
+        "command": "deepseek.showDiffQuickPick",
+        "title": "Show Pending Diffs",
+        "category": "DeepSeek",
+        "icon": "$(list-unordered)"
       }
     ],
     "menus": {
@@ -288,6 +309,14 @@
         }
       ]
     },
+    "keybindings": [
+      {
+        "command": "deepseek.showDiffQuickPick",
+        "key": "ctrl+shift+d",
+        "mac": "cmd+shift+d",
+        "when": "!editorTextFocus"
+      }
+    ],
     "viewsContainers": {
       "activitybar": [
         {
@@ -337,7 +366,6 @@
     "test": "node ./out/test/runTest.js"
   },
   "devDependencies": {
-    "@types/diff-match-patch": "^1.0.36",
     "@types/node": "^18.x",
     "@types/vscode": "^1.85.0",
     "@typescript-eslint/eslint-plugin": "^6.13.1",
@@ -352,7 +380,7 @@
   },
   "dependencies": {
     "axios": "^1.6.2",
-    "diff-match-patch": "^1.0.5",
+    "diff": "^8.0.3",
     "events": "^3.3.0",
     "highlight.js": "^11.11.1"
   },

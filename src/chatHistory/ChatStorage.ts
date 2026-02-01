@@ -6,6 +6,7 @@ export class ChatStorage {
   private context: vscode.ExtensionContext;
   private sessions: Map<string, ChatSession> = new Map();
   private currentSessionId: string | null = null;
+  private saveInProgress: Promise<void> | null = null;
 
   private constructor(context: vscode.ExtensionContext) {
     this.context = context;
@@ -30,24 +31,43 @@ export class ChatStorage {
       });
       this.sessions.set(session.id, session);
     });
-    
+
     this.currentSessionId = this.context.globalState.get<string>('currentSessionId') || null;
   }
 
-  private saveSessions(): void {
-    const sessions = Array.from(this.sessions.values());
-    this.context.globalState.update('chatSessions', sessions);
-    if (this.currentSessionId) {
-      this.context.globalState.update('currentSessionId', this.currentSessionId);
+  /**
+   * Save sessions to persistent storage with proper sequencing.
+   * Uses a queue to prevent race conditions when multiple saves happen rapidly.
+   */
+  private async saveSessions(): Promise<void> {
+    // Wait for any in-progress save to complete first
+    if (this.saveInProgress) {
+      await this.saveInProgress;
     }
+
+    // Create new save operation
+    this.saveInProgress = (async () => {
+      try {
+        const sessions = Array.from(this.sessions.values());
+        await this.context.globalState.update('chatSessions', sessions);
+        if (this.currentSessionId) {
+          await this.context.globalState.update('currentSessionId', this.currentSessionId);
+        }
+      } catch (error) {
+        console.error('[ChatStorage] Failed to save sessions:', error);
+      }
+    })();
+
+    await this.saveInProgress;
+    this.saveInProgress = null;
   }
 
   // Session management
-  createSession(title?: string, model?: string, language?: string, filePath?: string): ChatSession {
+  async createSession(title?: string, model?: string, language?: string, filePath?: string): Promise<ChatSession> {
     const session = createChatSession(title, model, language, filePath);
     this.sessions.set(session.id, session);
     this.currentSessionId = session.id;
-    this.saveSessions();
+    await this.saveSessions();
     return session;
   }
 
@@ -65,15 +85,15 @@ export class ChatStorage {
       .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
   }
 
-  updateSession(sessionId: string, updates: Partial<ChatSession>): void {
+  async updateSession(sessionId: string, updates: Partial<ChatSession>): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (session) {
       Object.assign(session, updates, { updatedAt: new Date() });
-      this.saveSessions();
+      await this.saveSessions();
     }
   }
 
-  addMessage(sessionId: string, message: Omit<Message, 'timestamp'>): void {
+  async addMessage(sessionId: string, message: Omit<Message, 'timestamp'>): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (session) {
       const msgWithTimestamp = {
@@ -82,39 +102,39 @@ export class ChatStorage {
       };
       session.messages.push(msgWithTimestamp);
       session.updatedAt = new Date();
-      
+
       // Auto-generate title from first user message if not set
       if (session.messages.length === 1 && message.role === 'user') {
-        session.title = message.content.substring(0, 50) + 
+        session.title = message.content.substring(0, 50) +
           (message.content.length > 50 ? '...' : '');
       }
-      
-      this.saveSessions();
+
+      await this.saveSessions();
     }
   }
 
-  deleteSession(sessionId: string): void {
+  async deleteSession(sessionId: string): Promise<void> {
     this.sessions.delete(sessionId);
     if (this.currentSessionId === sessionId) {
       this.currentSessionId = null;
     }
-    this.saveSessions();
+    await this.saveSessions();
   }
 
-  clearAllSessions(): void {
+  async clearAllSessions(): Promise<void> {
     this.sessions.clear();
     this.currentSessionId = null;
-    this.saveSessions();
+    await this.saveSessions();
   }
 
   searchSessions(query: string): ChatSession[] {
     const lowerQuery = query.toLowerCase();
-    return this.getAllSessions().filter(session => 
+    return this.getAllSessions().filter(session =>
       session.title.toLowerCase().includes(lowerQuery) ||
-      session.messages.some(msg => 
+      session.messages.some(msg =>
         msg.content.toLowerCase().includes(lowerQuery)
       ) ||
-      session.tags.some(tag => 
+      session.tags.some(tag =>
         tag.toLowerCase().includes(lowerQuery)
       )
     );
@@ -123,7 +143,7 @@ export class ChatStorage {
   exportSession(sessionId: string): string {
     const session = this.getSession(sessionId);
     if (!session) return '';
-    
+
     const exportData = {
       metadata: {
         title: session.title,
@@ -136,11 +156,11 @@ export class ChatStorage {
       },
       messages: session.messages
     };
-    
+
     return JSON.stringify(exportData, null, 2);
   }
 
-  importSession(data: string): ChatSession | null {
+  async importSession(data: string): Promise<ChatSession | null> {
     try {
       const importData = JSON.parse(data);
       const session: ChatSession = {
@@ -157,9 +177,9 @@ export class ChatStorage {
         filePath: importData.metadata.filePath,
         tags: importData.metadata.tags || []
       };
-      
+
       this.sessions.set(session.id, session);
-      this.saveSessions();
+      await this.saveSessions();
       return session;
     } catch (error) {
       console.error('Failed to import session:', error);
@@ -167,10 +187,10 @@ export class ChatStorage {
     }
   }
 
-  setCurrentSession(sessionId: string): void {
+  async setCurrentSession(sessionId: string): Promise<void> {
     if (this.sessions.has(sessionId)) {
       this.currentSessionId = sessionId;
-      this.saveSessions();
+      await this.saveSessions();
     }
   }
 }

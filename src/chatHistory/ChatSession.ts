@@ -6,6 +6,11 @@ export interface Message {
   timestamp: Date;
   tokens?: number;
   reasoning_content?: string;
+  reasoning_iterations?: string[];  // Per-iteration reasoning for R1 continuation
+  content_iterations?: string[];    // Per-iteration content for interleaved display
+  toolCalls?: Array<{ name: string; detail: string; status: string }>;
+  fileChanges?: Array<{ filePath: string; status: 'applied' | 'rejected' | 'pending'; iteration: number }>;
+  editMode?: 'manual' | 'ask' | 'auto';  // Track which edit mode was used
 }
 
 export interface ChatSession {
