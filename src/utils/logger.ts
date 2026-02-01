@@ -1,13 +1,61 @@
 import * as vscode from 'vscode';
 
-export type LogLevel = 'INFO' | 'WARN' | 'ERROR' | 'DEBUG';
+export type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR' | 'OFF';
+
+// Log level priority (lower = more verbose)
+const LOG_LEVEL_PRIORITY: Record<LogLevel, number> = {
+  'DEBUG': 0,
+  'INFO': 1,
+  'WARN': 2,
+  'ERROR': 3,
+  'OFF': 4
+};
+
+// ANSI color codes for terminal/output channel
+const COLORS = {
+  reset: '\x1b[0m',
+  dim: '\x1b[2m',
+  // Level colors
+  debug: '\x1b[36m',    // Cyan
+  info: '\x1b[32m',     // Green
+  warn: '\x1b[33m',     // Yellow
+  error: '\x1b[31m',    // Red
+  // Component colors
+  timestamp: '\x1b[90m', // Gray
+  shell: '\x1b[35m',     // Magenta
+  tool: '\x1b[34m',      // Blue
+  api: '\x1b[36m',       // Cyan
+  session: '\x1b[33m',   // Yellow
+  code: '\x1b[32m',      // Green
+  web: '\x1b[96m'        // Bright Cyan
+};
 
 class Logger {
   private static instance: Logger;
-  private outputChannel: vscode.OutputChannel;
+  private outputChannel: vscode.LogOutputChannel;
+  private _minLevel: LogLevel = 'INFO';
+  // Note: VS Code Output channels do NOT support ANSI colors
+  // Colors are disabled by default - the setting is kept for potential future terminal output
+  private _useColors: boolean = false;
 
   private constructor() {
-    this.outputChannel = vscode.window.createOutputChannel('DeepSeek Moby');
+    this.outputChannel = vscode.window.createOutputChannel('DeepSeek Moby', { log: true });
+    this.loadSettings();
+
+    // Listen for config changes
+    vscode.workspace.onDidChangeConfiguration(e => {
+      if (e.affectsConfiguration('deepseek.logLevel') || e.affectsConfiguration('deepseek.logColors')) {
+        this.loadSettings();
+      }
+    });
+  }
+
+  private loadSettings(): void {
+    const config = vscode.workspace.getConfiguration('deepseek');
+    this._minLevel = config.get<LogLevel>('logLevel') || 'INFO';
+    // VS Code Output channels don't support ANSI colors, so we always disable them
+    // The setting is kept in package.json for potential future terminal/debug console output
+    this._useColors = false;
   }
 
   public static getInstance(): Logger {
@@ -17,22 +65,68 @@ class Logger {
     return Logger.instance;
   }
 
+  public get minLevel(): LogLevel {
+    return this._minLevel;
+  }
+
+  public set minLevel(level: LogLevel) {
+    this._minLevel = level;
+  }
+
+  private shouldLog(level: LogLevel): boolean {
+    return LOG_LEVEL_PRIORITY[level] >= LOG_LEVEL_PRIORITY[this._minLevel];
+  }
+
   private formatTimestamp(): string {
     const now = new Date();
     const pad = (n: number) => n.toString().padStart(2, '0');
-    return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+    return `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
   }
 
-  private log(level: LogLevel, message: string, details?: string) {
-    const timestamp = this.formatTimestamp();
-    const levelPadded = level.padEnd(5);
-    let logLine = `[${timestamp}] ${levelPadded} ${message}`;
+  private colorize(text: string, color: keyof typeof COLORS): string {
+    if (!this._useColors) return text;
+    return `${COLORS[color]}${text}${COLORS.reset}`;
+  }
+
+  private getLevelColor(level: LogLevel): keyof typeof COLORS {
+    switch (level) {
+      case 'DEBUG': return 'debug';
+      case 'INFO': return 'info';
+      case 'WARN': return 'warn';
+      case 'ERROR': return 'error';
+      default: return 'reset';
+    }
+  }
+
+  private log(level: LogLevel, message: string, details?: string, component?: keyof typeof COLORS) {
+    if (!this.shouldLog(level)) return;
+
+    const timestamp = this.colorize(this.formatTimestamp(), 'timestamp');
+    const levelStr = this.colorize(level.padEnd(5), this.getLevelColor(level));
+    const msg = component ? this.colorize(message, component) : message;
+
+    let logLine = `${timestamp} ${levelStr} ${msg}`;
 
     if (details) {
-      logLine += `\n         ${details.replace(/\n/g, '\n         ')}`;
+      const detailLines = details.replace(/\n/g, '\n         ');
+      logLine += `\n         ${this.colorize(detailLines, 'dim')}`;
     }
 
-    this.outputChannel.appendLine(logLine);
+    // Use the appropriate log method based on level
+    switch (level) {
+      case 'DEBUG':
+        this.outputChannel.debug(logLine);
+        break;
+      case 'INFO':
+        this.outputChannel.info(logLine);
+        break;
+      case 'WARN':
+        this.outputChannel.warn(logLine);
+        break;
+      case 'ERROR':
+        this.outputChannel.error(logLine);
+        break;
+    }
   }
 
   public info(message: string, details?: string) {
@@ -53,91 +147,104 @@ class Logger {
 
   // Session events
   public sessionStart(sessionId: string, title: string) {
-    this.info(`Session started: ${sessionId}`, `Title: ${title}`);
+    this.log('INFO', `Session started: ${sessionId}`, `Title: ${title}`, 'session');
   }
 
   public sessionSwitch(sessionId: string) {
-    this.info(`Session switched: ${sessionId}`);
+    this.log('INFO', `Session switched: ${sessionId}`, undefined, 'session');
   }
 
   public sessionClear() {
-    this.info('Session cleared');
+    this.log('INFO', 'Session cleared', undefined, 'session');
   }
 
   // API events
   public apiRequest(model: string, messageCount: number, hasImages: boolean = false) {
     const imageInfo = hasImages ? ' (with images)' : '';
-    this.info(`→ Request: ${messageCount} messages${imageInfo}`, `Model: ${model}`);
+    this.log('INFO', `→ Request: ${messageCount} messages${imageInfo}`, `Model: ${model}`, 'api');
   }
 
   public apiResponse(tokenCount: number, durationMs: number) {
     const duration = (durationMs / 1000).toFixed(2);
-    this.info(`← Response: ${tokenCount.toLocaleString()} tokens in ${duration}s`);
+    this.log('INFO', `← Response: ${tokenCount.toLocaleString()} tokens in ${duration}s`, undefined, 'api');
   }
 
   public apiError(error: string, details?: string) {
-    this.error(`API error: ${error}`, details);
+    this.log('ERROR', `API error: ${error}`, details, 'api');
   }
 
   public apiAborted() {
-    this.info('Request aborted by user');
+    this.log('INFO', 'Request aborted by user', undefined, 'api');
   }
 
   // Settings events
   public settingsChanged(setting: string, value: any) {
-    this.info(`Setting changed: ${setting} = ${value}`);
+    this.log('DEBUG', `Setting changed: ${setting} = ${value}`);
   }
 
   public modelChanged(model: string) {
-    this.info(`Model changed: ${model}`);
+    this.log('INFO', `Model changed: ${model}`);
   }
 
   // Tool events
   public toolCall(toolName: string) {
-    this.info(`Tool call: ${toolName}`);
+    this.log('INFO', `Tool call: ${toolName}`, undefined, 'tool');
   }
 
   public toolResult(toolName: string, success: boolean) {
     if (success) {
-      this.info(`Tool result: ${toolName} succeeded`);
+      this.log('INFO', `Tool result: ${toolName} succeeded`, undefined, 'tool');
     } else {
-      this.warn(`Tool result: ${toolName} failed`);
+      this.log('WARN', `Tool result: ${toolName} failed`, undefined, 'tool');
+    }
+  }
+
+  // Shell events (R1 reasoner)
+  public shellExecuting(command: string) {
+    this.log('INFO', `Shell executing: ${command}`, undefined, 'shell');
+  }
+
+  public shellResult(command: string, success: boolean, output?: string) {
+    if (success) {
+      this.log('INFO', `Shell completed: ${command}`, output?.substring(0, 200), 'shell');
+    } else {
+      this.log('WARN', `Shell failed: ${command}`, output?.substring(0, 200), 'shell');
     }
   }
 
   // Code actions
   public codeApplied(success: boolean, file?: string) {
     if (success) {
-      this.info(`Code applied${file ? `: ${file}` : ''}`);
+      this.log('INFO', `Code applied${file ? `: ${file}` : ''}`, undefined, 'code');
     } else {
-      this.warn(`Code apply failed${file ? `: ${file}` : ''}`);
+      this.log('WARN', `Code apply failed${file ? `: ${file}` : ''}`, undefined, 'code');
     }
   }
 
   public diffShown(file: string) {
-    this.info(`Diff shown: ${file}`);
+    this.log('INFO', `Diff shown: ${file}`, undefined, 'code');
   }
 
   // Web search events (Tavily)
   public webSearchRequest(query: string, searchDepth: string) {
-    this.info(`🌐 Web search: "${query}"`, `Depth: ${searchDepth}`);
+    this.log('INFO', `🌐 Web search: "${query}"`, `Depth: ${searchDepth}`, 'web');
   }
 
   public webSearchResult(resultCount: number, durationMs: number) {
     const duration = (durationMs / 1000).toFixed(2);
-    this.info(`🌐 Web search complete: ${resultCount} results in ${duration}s`);
+    this.log('INFO', `🌐 Web search complete: ${resultCount} results in ${duration}s`, undefined, 'web');
   }
 
   public webSearchCached(query: string) {
-    this.info(`🌐 Web search (cached): "${query}"`);
+    this.log('DEBUG', `🌐 Web search (cached): "${query}"`, undefined, 'web');
   }
 
   public webSearchError(error: string) {
-    this.error(`🌐 Web search failed: ${error}`);
+    this.log('ERROR', `🌐 Web search failed: ${error}`, undefined, 'web');
   }
 
   public webSearchCacheCleared() {
-    this.info('🌐 Web search cache cleared');
+    this.log('INFO', '🌐 Web search cache cleared', undefined, 'web');
   }
 
   // Show the output channel

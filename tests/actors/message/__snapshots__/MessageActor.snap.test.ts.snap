@@ -1,0 +1,160 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`MessageActor Edit Mode and Code Block Collapse > code block collapse in different modes > renders code block collapsed in ask mode 1`] = `"<div class="message assistant anim-message-in" data-message-id="msg-assistant-X"><div class="role">DEEPSEEK MOBY</div><div class="content">Here is code:<br><div class="code-block collapsed"><br>          <div class="code-header"><br>            <span class="code-lang">typescript</span><br>            <div class="code-actions"><br>              <button class="code-action-btn copy-btn" onclick="navigator.clipboard.writeText(this.closest('.code-block').querySelector('code').textContent)">Copy</button><br>              <button class="code-action-btn collapse-toggle-btn" title="Expand">▶</button><br>            </div><br>          </div><br>          <pre><code class="language-typescript">const x = 1;<br>const y = 2;</code></pre><br>        </div></div></div>"`;
+
+exports[`MessageActor Edit Mode and Code Block Collapse > code block collapse in different modes > renders code block collapsed in auto mode 1`] = `"<div class="message assistant anim-message-in" data-message-id="msg-assistant-X"><div class="role">DEEPSEEK MOBY</div><div class="content">Here is code:<br><div class="code-block collapsed"><br>          <div class="code-header"><br>            <span class="code-lang">typescript</span><br>            <div class="code-actions"><br>              <button class="code-action-btn copy-btn" onclick="navigator.clipboard.writeText(this.closest('.code-block').querySelector('code').textContent)">Copy</button><br>              <button class="code-action-btn collapse-toggle-btn" title="Expand">▶</button><br>            </div><br>          </div><br>          <pre><code class="language-typescript">const x = 1;<br>const y = 2;</code></pre><br>        </div></div></div>"`;
+
+exports[`MessageActor Edit Mode and Code Block Collapse > code block collapse in different modes > renders code block expanded in manual mode 1`] = `
+"<div class="message assistant anim-message-in" data-message-id="msg-assistant-X"><div class="role">DEEPSEEK MOBY</div><div class="content">Here is code:<br><div class="code-block">
+          <div class="code-header">
+            <span class="code-lang">typescript</span>
+            <div class="code-actions">
+              <button class="code-action-btn copy-btn" onclick="navigator.clipboard.writeText(this.closest('.code-block').querySelector('code').textContent)">Copy</button>
+              <button class="code-action-btn collapse-toggle-btn" title="Collapse">▼</button>
+            </div><br>          </div><br>          <pre><code class="language-typescript">const x = 1;<br>const y = 2;</code></pre><br>        </div></div></div>"
+`;
+
+exports[`MessageActor Snapshots > assistant messages > renders assistant message with multiline content 1`] = `"<div class="message assistant anim-message-in" data-message-id="msg-assistant-X"><div class="role">DEEPSEEK MOBY</div><div class="content">Here are the steps:<br>1. First step<br>2. Second step<br>3. Third step</div></div>"`;
+
+exports[`MessageActor Snapshots > assistant messages > renders assistant message with thinking 1`] = `
+"<div class="message assistant anim-message-in" data-message-id="msg-assistant-X"><div class="role">DEEPSEEK MOBY</div>
+        <div class="thinking-content">
+          <div class="thinking-label">💭 Thinking</div>
+          <div class="thinking-body">Let me analyze this problem...
+Step 1: Consider the input.
+Step 2: Apply logic.</div>
+        </div>
+      <div class="content">The answer is 42.</div></div>"
+`;
+
+exports[`MessageActor Snapshots > assistant messages > renders simple assistant message 1`] = `"<div class="message assistant anim-message-in" data-message-id="msg-assistant-X"><div class="role">DEEPSEEK MOBY</div><div class="content">I can help you with that!</div></div>"`;
+
+exports[`MessageActor Snapshots > conversation flow > renders multiple messages in sequence 1`] = `"<div class="message user anim-message-in" data-message-id="msg-user-X"><div class="role">YOU</div><div class="content">What is TypeScript?</div></div><div class="message assistant anim-message-in" data-message-id="msg-assistant-X"><div class="role">DEEPSEEK MOBY</div><div class="content">TypeScript is a typed superset of JavaScript.</div></div><div class="message user anim-message-in" data-message-id="msg-user-X"><div class="role">YOU</div><div class="content">Can you show an example?</div></div><div class="message assistant anim-message-in" data-message-id="msg-assistant-X"><div class="role">DEEPSEEK MOBY</div><div class="content">Here is a simple example:<br><br>const x: number = 42;</div></div>"`;
+
+exports[`MessageActor Snapshots > injected styles > injects styles into document head 1`] = `
+"
+/**
+ * Message styles
+ * User and assistant message bubbles
+ */
+
+.message {
+  margin-bottom: 20px;
+  position: relative;
+}
+
+.message .role {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--vscode-descriptionForeground, #8b8b8b);
+  margin-bottom: 4px;
+  letter-spacing: 0.5px;
+}
+
+.message .content {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--vscode-editor-foreground, #cccccc);
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+.message .content p {
+  margin: 0 0 8px 0;
+}
+
+.message .content p:last-child {
+  margin-bottom: 0;
+}
+
+/* Message files (attachments) */
+.message-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.message-file-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  background: var(--vscode-badge-background, #4d4d4d);
+  color: var(--vscode-badge-foreground, #ffffff);
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+/* Streaming message state */
+.message.streaming .content::after {
+  content: '▋';
+  display: inline;
+  animation: cursor-blink 1s step-end infinite;
+  color: var(--vscode-editor-foreground, #cccccc);
+  opacity: 0.7;
+}
+
+@keyframes cursor-blink {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+/* Empty state */
+.messages-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--vscode-descriptionForeground, #8b8b8b);
+}
+
+.messages-empty-icon {
+  font-size: 48px;
+  margin-bottom: 16px;
+  opacity: 0.5;
+}
+
+.messages-empty-text {
+  font-size: 14px;
+  line-height: 1.5;
+}
+"
+`;
+
+exports[`MessageActor Snapshots > user messages > renders simple user message 1`] = `"<div class="message user anim-message-in" data-message-id="msg-user-X"><div class="role">YOU</div><div class="content">Hello, can you help me?</div></div>"`;
+
+exports[`MessageActor Snapshots > user messages > renders user message with files 1`] = `"<div class="message user anim-message-in" data-message-id="msg-user-X"><div class="role">YOU</div><div class="message-files"><span class="message-file-tag">📄 main.ts</span><span class="message-file-tag">📄 utils.ts</span></div><div class="content">Please review this code</div></div>"`;
+
+exports[`MessageActor Snapshots > user messages > renders user message with special characters 1`] = `"<div class="message user anim-message-in" data-message-id="msg-user-X"><div class="role">YOU</div><div class="content">Test &lt;b&gt;bold&lt;/b&gt; and &amp; entities</div></div>"`;
+
+exports[`MessageActor State Snapshots > captures initial state 1`] = `
+{
+  "count": 0,
+  "lastId": null,
+  "streaming": false,
+}
+`;
+
+exports[`MessageActor State Snapshots > captures state after adding messages 1`] = `
+{
+  "count": 2,
+  "lastId": "msg-assistant-X",
+  "streaming": false,
+}
+`;
+
+exports[`MessageActor State Snapshots > captures state after clear 1`] = `
+{
+  "count": 0,
+  "lastId": null,
+  "streaming": false,
+}
+`;

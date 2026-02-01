@@ -1,0 +1,78 @@
+/**
+ * StreamingActor CSS styles
+ * Exported as a string for reliable importing across environments
+ */
+
+export const streamingStyles = `
+/**
+ * StreamingActor styles
+ * Streaming indicator animation
+ */
+
+.streaming-indicator {
+  display: none;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 12px;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.streaming-indicator.active {
+  display: flex;
+  opacity: 1;
+}
+
+.streaming-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: var(--vscode-progressBar-background, #0e70c0);
+  animation: streaming-pulse 1.4s ease-in-out infinite;
+}
+
+.streaming-dot:nth-child(1) {
+  animation-delay: 0s;
+}
+
+.streaming-dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.streaming-dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes streaming-pulse {
+  0%, 80%, 100% {
+    transform: scale(0.6);
+    opacity: 0.4;
+  }
+  40% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* Streaming state class for message elements */
+.message.streaming .message-content {
+  position: relative;
+}
+
+.message.streaming .message-content::after {
+  content: '▋';
+  display: inline;
+  animation: cursor-blink 1s step-end infinite;
+  color: var(--vscode-editor-foreground, #cccccc);
+  opacity: 0.7;
+}
+
+@keyframes cursor-blink {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+`;
