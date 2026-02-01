@@ -346,7 +346,8 @@ export class PendingChangesActor extends InterleavedContentActor {
    * Render a single file item
    */
   private renderFile(file: PendingFile): string {
-    const statusIcon = this.getStatusIcon(file.status);
+    // Show superseded icon if superseded, otherwise show status icon
+    const statusIcon = file.superseded ? this.getStatusIcon('superseded') : this.getStatusIcon(file.status);
     const statusClass = file.superseded ? 'superseded' : file.status;
     const isClickable = file.status === 'pending' && !file.superseded;
     const fileClass = isClickable ? 'pending-file' : 'pending-file no-click';
@@ -359,7 +360,7 @@ export class PendingChangesActor extends InterleavedContentActor {
     } else if (file.status === 'rejected') {
       actionsHtml = `<span class="pending-label rejected">Rejected</span>`;
     } else if (file.superseded) {
-      actionsHtml = `<span class="pending-label superseded">Newer Version ↓</span>`;
+      actionsHtml = `<span class="pending-label superseded">Superseded</span>`;
     } else if (file.status === 'pending') {
       actionsHtml = `
         <div class="pending-actions">
@@ -390,7 +391,7 @@ export class PendingChangesActor extends InterleavedContentActor {
       case 'rejected':
         return '✗';
       case 'superseded':
-        return '→';
+        return '⊘';  // Void/cancel symbol
     }
   }
 

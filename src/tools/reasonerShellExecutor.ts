@@ -84,10 +84,31 @@ export function stripShellTags(content: string): string {
 }
 
 /**
+ * Check if content contains code edit patterns (SEARCH/REPLACE blocks)
+ * Used to detect if R1 has actually produced code changes vs just exploration
+ */
+export function containsCodeEdits(content: string): boolean {
+  // Match SEARCH/REPLACE blocks (inside code fences or unfenced)
+  const searchReplacePattern = /<<<<<<< SEARCH[\s\S]*?=======[\s\S]*?>>>>>>> REPLACE/i;
+  // Match # File: headers (indicates code edit intent)
+  const fileHeaderPattern = /^#\s*File:\s*.+$/m;
+
+  return searchReplacePattern.test(content) || fileHeaderPattern.test(content);
+}
+
+/**
  * Validate a command against security rules
  * Minimal validation - only block truly catastrophic operations
+ *
+ * @param command - The shell command to validate
+ * @param allowAll - If true, skip validation ("Walk on the Wild Side" mode)
  */
-export function validateCommand(command: string): { valid: boolean; reason?: string } {
+export function validateCommand(command: string, allowAll: boolean = false): { valid: boolean; reason?: string } {
+  // "Walk on the Wild Side" - allow all commands if setting is enabled
+  if (allowAll) {
+    return { valid: true };
+  }
+
   // Check for blocked patterns (catastrophic operations only)
   for (const pattern of BLOCKED_PATTERNS) {
     if (pattern.test(command)) {
@@ -110,14 +131,16 @@ export async function executeShellCommand(
   options: {
     timeout?: number;
     maxOutputSize?: number;
+    allowAllCommands?: boolean;  // "Walk on the Wild Side" mode
   } = {}
 ): Promise<ShellResult> {
   const startTime = Date.now();
   const timeout = options.timeout ?? 10000;  // 10 second default
   const maxOutputSize = options.maxOutputSize ?? 100 * 1024;  // 100KB default
+  const allowAllCommands = options.allowAllCommands ?? false;
 
   // Validate command first
-  const validation = validateCommand(command);
+  const validation = validateCommand(command, allowAllCommands);
   if (!validation.valid) {
     logger.warn(`[ReasonerShell] Command blocked: ${command} - ${validation.reason}`);
     return {
@@ -197,12 +220,17 @@ export async function executeShellCommand(
  */
 export async function executeShellCommands(
   commands: ShellCommand[],
-  workspacePath: string
+  workspacePath: string,
+  options: {
+    allowAllCommands?: boolean;  // "Walk on the Wild Side" mode
+  } = {}
 ): Promise<ShellResult[]> {
   const results: ShellResult[] = [];
 
   for (const cmd of commands) {
-    const result = await executeShellCommand(cmd.command, workspacePath);
+    const result = await executeShellCommand(cmd.command, workspacePath, {
+      allowAllCommands: options.allowAllCommands
+    });
     results.push(result);
   }
 
@@ -254,12 +282,19 @@ Commands are executed in the workspace directory.
 
 After running commands, analyze the output and continue. You can run multiple commands if needed.
 
-**CRITICAL: Code Edit Requirements**
-When providing code edits, you MUST include a file path comment as the FIRST LINE of EVERY code block using this EXACT format:
+**CRITICAL: Code Edit Format (MANDATORY)**
+Every code edit MUST use this EXACT structure or it will NOT be applied:
 
+\`\`\`<language>
 # File: path/to/file.ext
+<<<<<<< SEARCH
+exact code to find (copy verbatim from file)
+=======
+replacement code
+>>>>>>> REPLACE
+\`\`\`
 
-Example code block format:
+**Example:**
 \`\`\`typescript
 # File: src/utils/helper.ts
 <<<<<<< SEARCH
@@ -273,8 +308,14 @@ export function newFunction() {
 >>>>>>> REPLACE
 \`\`\`
 
-The "# File:" header is REQUIRED for the system to identify which file to edit.
-Without this header, code blocks will be displayed but NOT applied automatically.
+**REQUIREMENTS (all mandatory - edits FAIL without these):**
+1. ✓ Use triple backticks to create a code block
+2. ✓ First line inside MUST be "# File: <path>"
+3. ✓ SEARCH section = EXACT code from file (copy verbatim including whitespace)
+4. ✓ All markers must be INSIDE the code block
+5. ✓ ONE code block per file - NOT separate "before" and "after" blocks
+
+**WARNING:** Code shown without this format will NOT be applied. The system parses the format automatically.
 
 **Workflow for Code Tasks:**
 1. Use shell commands to explore and understand the codebase

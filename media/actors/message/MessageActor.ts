@@ -50,6 +50,10 @@ export class MessageActor extends EventStateActor {
   private _segmentCounter = 0;
   private _currentSegmentContent = '';
   private _segmentsPaused = false; // True when waiting for new segment after tools/shell
+  private _useDirectContentUpdates = false; // True when content is managed by chat.ts directly
+
+  // Edit mode for code block collapse behavior
+  private _editMode: 'manual' | 'ask' | 'auto' = 'manual';
 
   constructor(manager: EventStateManager, element: HTMLElement) {
     const config: ActorConfig = {
@@ -74,6 +78,28 @@ export class MessageActor extends EventStateActor {
 
     super(config);
     this.injectStyles();
+    this.setupCodeBlockHandlers();
+  }
+
+  /**
+   * Setup event delegation for code block interactions
+   */
+  private setupCodeBlockHandlers(): void {
+    const container = this.getElement();
+    if (!container) return;
+
+    // Event delegation for collapse toggle
+    container.addEventListener('click', (e) => {
+      const target = e.target as HTMLElement;
+      if (target.classList.contains('collapse-toggle-btn')) {
+        const codeBlock = target.closest('.code-block');
+        if (codeBlock) {
+          const isCollapsed = codeBlock.classList.toggle('collapsed');
+          target.textContent = isCollapsed ? '▶' : '▼';
+          target.title = isCollapsed ? 'Expand' : 'Collapse';
+        }
+      }
+    });
   }
 
   /**
@@ -100,6 +126,9 @@ export class MessageActor extends EventStateActor {
       this._streamingElement.classList.remove('streaming');
       this._streamingElement = null;
 
+      // Reset direct content management mode
+      this._useDirectContentUpdates = false;
+
       this.publish({
         'message.streaming': false
       });
@@ -108,6 +137,12 @@ export class MessageActor extends EventStateActor {
 
   private handleStreamingContent(content: string): void {
     if (!this._streamingElement) return;
+
+    // Skip pub/sub content updates when direct content management is active.
+    // This happens in reasoner mode where chat.ts calls updateCurrentSegmentContent()
+    // with shell-tag-stripped content. Without this check, pub/sub would overwrite
+    // the stripped content with full content including shell tags.
+    if (this._useDirectContentUpdates) return;
 
     const contentEl = this._streamingElement.querySelector('.content');
     if (contentEl) {
@@ -153,6 +188,7 @@ export class MessageActor extends EventStateActor {
       this._segmentCounter = 0;
       this._currentSegmentContent = '';
       this._segmentsPaused = false;
+      this._useDirectContentUpdates = false;
 
       this.createStreamingMessage(messageId);
 
@@ -164,6 +200,7 @@ export class MessageActor extends EventStateActor {
     } else if (!messageId) {
       this._streamingMessageId = null;
       this._segmentsPaused = false;
+      this._useDirectContentUpdates = false;
     }
   }
 
@@ -298,9 +335,13 @@ export class MessageActor extends EventStateActor {
   /**
    * Update the current segment with new content.
    * This is the incremental content for the current segment only.
+   * When called, enables direct content management mode which disables pub/sub content updates.
    */
   updateCurrentSegmentContent(segmentContent: string): void {
     if (!this._streamingElement) return;
+
+    // Enable direct content management - skips handleStreamingContent pub/sub updates
+    this._useDirectContentUpdates = true;
 
     const contentEl = this._streamingElement.querySelector('.content');
     if (contentEl) {
@@ -322,6 +363,21 @@ export class MessageActor extends EventStateActor {
    */
   isStreaming(): boolean {
     return this._streamingMessageId !== null;
+  }
+
+  /**
+   * Set edit mode (affects code block collapse behavior)
+   * In ask/auto modes, code blocks start collapsed
+   */
+  setEditMode(mode: 'manual' | 'ask' | 'auto'): void {
+    this._editMode = mode;
+  }
+
+  /**
+   * Get current edit mode
+   */
+  getEditMode(): 'manual' | 'ask' | 'auto' {
+    return this._editMode;
   }
 
   /**
@@ -408,7 +464,8 @@ export class MessageActor extends EventStateActor {
    */
   private renderMessage(message: Message): void {
     const el = document.createElement('div');
-    el.className = `message ${message.role}`;
+    // Add animation class for smooth appearance
+    el.className = `message ${message.role} anim-message-in`;
     el.setAttribute('data-message-id', message.id);
 
     const roleLabel = message.role === 'user' ? 'YOU' : 'DEEPSEEK MOBY';
@@ -447,17 +504,24 @@ export class MessageActor extends EventStateActor {
   private formatContent(content: string): string {
     if (!content) return '';
 
+    // In ask/auto modes, code blocks start collapsed
+    const shouldCollapse = this._editMode === 'ask' || this._editMode === 'auto';
+
     // Process fenced code blocks first (```language\ncode\n```)
     let result = content.replace(
       /```(\w*)\n([\s\S]*?)```/g,
       (_, lang, code) => {
         const language = lang || 'text';
         const escapedCode = this.escapeHtml(code.trimEnd());
-        return `<div class="code-block">
+        const collapsedClass = shouldCollapse ? ' collapsed' : '';
+        const collapseIcon = shouldCollapse ? '▶' : '▼';
+        const collapseTitle = shouldCollapse ? 'Expand' : 'Collapse';
+        return `<div class="code-block${collapsedClass}">
           <div class="code-header">
             <span class="code-lang">${language}</span>
             <div class="code-actions">
               <button class="code-action-btn copy-btn" onclick="navigator.clipboard.writeText(this.closest('.code-block').querySelector('code').textContent)">Copy</button>
+              <button class="code-action-btn collapse-toggle-btn" title="${collapseTitle}">${collapseIcon}</button>
             </div>
           </div>
           <pre><code class="language-${language}">${escapedCode}</code></pre>

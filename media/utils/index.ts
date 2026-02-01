@@ -6,3 +6,4 @@ export { deepClone } from './deepClone';
 export { wildcardMatch } from './wildcardMatch';
 export { pick } from './pick';
 export { uniqueId, resetUniqueIdCounter } from './uniqueId';
+export { AnimationHelper, animationStyles, DURATIONS, EASINGS } from './animations';

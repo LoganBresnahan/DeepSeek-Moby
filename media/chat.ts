@@ -1,9 +1,8 @@
 /**
- * Chat Entry Point - Hybrid Actor Integration
+ * Chat Entry Point - Full Actor Integration
  *
  * This file integrates the actor system with the existing HTML structure.
- * Actors handle rendering (messages, shell commands, thinking, etc.)
- * Legacy code handles input and UI controls (model dropdown, sliders, file modal)
+ * All UI is now managed by actors that wrap existing DOM elements.
  */
 
 import { EventStateManager } from './state/EventStateManager';
@@ -14,8 +13,12 @@ import {
   ShellActor,
   ToolCallsActor,
   ThinkingActor,
-  PendingChangesActor
+  PendingChangesActor,
+  InputAreaActor,
+  StatusPanelActor,
+  ToolbarActor
 } from './actors';
+import { AnimationHelper } from './utils';
 
 // ============================================
 // VS Code API Types
@@ -38,36 +41,12 @@ let isReasonerMode = false;
 let currentModel = 'deepseek-chat';
 let editMode: 'manual' | 'ask' | 'auto' = 'manual';
 let currentShellSegmentId: string | null = null;
+
+// Edit mode options
 const editModes = ['manual', 'ask', 'auto'];
-const editModeLabels: Record<string, string> = {
-  manual: 'Manual',
-  ask: 'Ask before applying',
-  auto: 'Auto-apply'
-};
 
-// File selection state
+// File selection state (still needed for file modal)
 const selectedFiles = new Map<string, string>();
-let pendingAttachments: Array<{ content: string; name: string; size: number }> = [];
-
-// Web search state
-let webSearchEnabled = false;
-const webSearchSettings = {
-  searchesPerPrompt: 3,
-  searchDepth: 'basic' as 'basic' | 'advanced'
-};
-
-// Commands for help modal
-const commands = [
-  { section: 'Chat' },
-  { id: 'newChat', name: 'New Chat', desc: 'Start a new conversation', icon: '✨' },
-  { section: 'History' },
-  { id: 'showChatHistory', name: 'Show History', desc: 'View chat history', icon: '📚' },
-  { id: 'exportChatHistory', name: 'Export History', desc: 'Export all chats', icon: '📤' },
-  { id: 'searchChatHistory', name: 'Search History', desc: 'Search past chats', icon: '🔍' },
-  { section: 'Other' },
-  { id: 'showStats', name: 'Show Stats', desc: 'View usage statistics', icon: '📊' },
-  { id: 'showLogs', name: 'Show Logs', desc: 'View extension logs', icon: '📋' }
-] as const;
 
 // Content segmentation state for interleaved rendering
 // This tracks content per segment to support text->tools->text ordering
@@ -95,11 +74,11 @@ function getElementOrNull<T extends HTMLElement>(id: string): T | null {
 function initializeActorSystem(): void {
   const vscode = acquireVsCodeApi();
 
+  // Inject global animation styles
+  AnimationHelper.injectStyles();
+
   // Get required DOM elements
   const chatMessages = getElement<HTMLDivElement>('chatMessages');
-  const messageInput = getElement<HTMLTextAreaElement>('messageInput');
-  const sendBtn = getElement<HTMLButtonElement>('sendBtn');
-  const stopBtn = getElement<HTMLButtonElement>('stopBtn');
 
   // Create the event state manager
   const manager = new EventStateManager();
@@ -128,64 +107,80 @@ function initializeActorSystem(): void {
   // PendingChangesActor - uses chatMessages directly, creates elements dynamically
   const pending = new PendingChangesActor(manager, chatMessages);
 
-  // Set up pending files action handler
-  pending.onAction((fileId, action) => {
-    vscode.postMessage({
-      type: 'pendingFileAction',
-      fileId,
-      action
-    });
-  });
+  // InputAreaActor - wraps existing input area DOM elements
+  // Uses a hidden root since it finds elements by ID
+  const inputAreaRoot = document.createElement('div');
+  inputAreaRoot.id = 'inputAreaRoot';
+  inputAreaRoot.style.display = 'none';
+  document.body.appendChild(inputAreaRoot);
+  const inputArea = new InputAreaActor(manager, inputAreaRoot, vscode);
 
-  // Sync initial edit mode
-  pending.setEditMode(editMode);
+  // StatusPanelActor - wraps existing status panel DOM elements
+  const statusPanelRoot = document.createElement('div');
+  statusPanelRoot.id = 'statusPanelRoot';
+  statusPanelRoot.style.display = 'none';
+  document.body.appendChild(statusPanelRoot);
+  const statusPanel = new StatusPanelActor(manager, statusPanelRoot, vscode);
 
-  // ============================================
-  // Input Handling (Direct DOM - not using InputActor)
-  // ============================================
+  // ToolbarActor - wraps existing toolbar DOM elements
+  const toolbarRoot = document.createElement('div');
+  toolbarRoot.id = 'toolbarRoot';
+  toolbarRoot.style.display = 'none';
+  document.body.appendChild(toolbarRoot);
+  const toolbar = new ToolbarActor(manager, toolbarRoot, vscode);
 
-  function sendMessage(): void {
-    const content = messageInput.value.trim();
-    if ((!content && pendingAttachments.length === 0) || isStreaming) return;
-
+  // Set up InputAreaActor handlers
+  inputArea.onSend((content, attachments) => {
     // Add user message to UI immediately
-    const fileNames = pendingAttachments.map(a => a.name);
+    const fileNames = attachments?.map(a => a.name) || [];
     if (selectedFiles.size > 0) {
       fileNames.push(...Array.from(selectedFiles.keys()));
     }
     message.addUserMessage(content, fileNames.length > 0 ? fileNames : undefined);
 
-    // Clear input
-    messageInput.value = '';
-    messageInput.style.height = 'auto';
-
     // Send to backend
     vscode.postMessage({
       type: 'sendMessage',
       message: content,
-      attachments: pendingAttachments.length > 0 ? pendingAttachments : undefined
+      attachments: attachments && attachments.length > 0 ? attachments : undefined
     });
+  });
 
-    // Clear attachments after sending
-    pendingAttachments = [];
-    const attachmentsContainer = getElementOrNull<HTMLDivElement>('attachments');
-    if (attachmentsContainer) attachmentsContainer.innerHTML = '';
-  }
-
-  function stopGeneration(): void {
+  inputArea.onStop(() => {
     vscode.postMessage({ type: 'stopGeneration' });
-  }
+  });
 
-  // Input event handlers
-  messageInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      sendMessage();
+  // Set up ToolbarActor handlers
+  toolbar.onEditModeChange((mode) => {
+    editMode = mode;
+    pending.setEditMode(mode);
+    message.setEditMode(mode);
+  });
+
+  toolbar.onFilesOpen(() => {
+    openFileModal();
+  });
+
+  // Set up pending files action handler
+  // Map internal file ID to diffId and send the correct message type to backend
+  pending.onAction((fileId, action) => {
+    const file = pending.getFiles().find(f => f.id === fileId);
+    if (!file) return;
+
+    // For accept/reject, we need the diffId to match backend's acceptSpecificDiff/rejectSpecificDiff
+    if (action === 'accept' && file.diffId) {
+      vscode.postMessage({ type: 'acceptSpecificDiff', diffId: file.diffId });
+    } else if (action === 'reject' && file.diffId) {
+      vscode.postMessage({ type: 'rejectSpecificDiff', diffId: file.diffId });
+    } else if (action === 'focus' && file.diffId) {
+      vscode.postMessage({ type: 'focusDiff', diffId: file.diffId });
     }
   });
 
-  sendBtn.addEventListener('click', sendMessage);
-  stopBtn.addEventListener('click', stopGeneration);
+  // Sync initial edit mode
+  pending.setEditMode(editMode);
+  toolbar.setEditMode(editMode);
+  message.setEditMode(editMode);
 
   // ============================================
   // VS Code Message Handlers
@@ -205,11 +200,12 @@ function initializeActorSystem(): void {
         currentSegmentContent = '';
         hasInterleavedContent = false;
 
-        streaming.startStream(msg.messageId || `msg-${Date.now()}`, currentModel);
+        // Enable printing surface effect during streaming
+        AnimationHelper.enablePrintingSurface(chatMessages);
 
-        // Toggle buttons
-        sendBtn.style.display = 'none';
-        stopBtn.style.display = 'flex';
+        // Start stream - this publishes streaming.active: true
+        // InputAreaActor subscribes to this and handles button visibility
+        streaming.startStream(msg.messageId || `msg-${Date.now()}`, currentModel);
 
         // NOTE: Don't call thinking.startIteration() here - let it be created
         // when actual thinking content arrives (via streaming.thinking or iterationStart).
@@ -256,11 +252,13 @@ function initializeActorSystem(): void {
 
       case 'endResponse':
         isStreaming = false;
-        streaming.endStream();
 
-        // Toggle buttons
-        sendBtn.style.display = 'flex';
-        stopBtn.style.display = 'none';
+        // Disable printing surface effect
+        AnimationHelper.disablePrintingSurface(chatMessages);
+
+        // End stream - this publishes streaming.active: false
+        // InputAreaActor subscribes to this and handles button visibility
+        streaming.endStream();
 
         // Finalize the streaming message
         // IMPORTANT: Only update content if we didn't have interleaved content.
@@ -392,6 +390,51 @@ function initializeActorSystem(): void {
         }
         break;
 
+      case 'diffListChanged':
+        // Extension sends diffListChanged with full list of diffs
+        // Sync with pending changes actor - track by diffId to support multiple versions of same file
+        if (msg.diffs && Array.isArray(msg.diffs)) {
+          // Finalize current text segment before showing pending files
+          if (message.isStreaming() && msg.diffs.length > 0) {
+            message.finalizeCurrentSegment();
+            hasInterleavedContent = true;
+          }
+
+          // Get current pending files and build a map by diffId
+          const currentFiles = pending.getFiles();
+          const currentDiffIds = new Map(currentFiles.map(f => [f.diffId, f]));
+
+          // Process each diff from backend
+          for (const diff of msg.diffs as Array<{ filePath: string; status: string; diffId?: string; iteration?: number; superseded?: boolean }>) {
+            const existingFile = diff.diffId ? currentDiffIds.get(diff.diffId) : undefined;
+
+            if (!existingFile) {
+              // New diff - add it (PendingChangesActor.addFile will auto-supersede pending files for same path)
+              pending.addFile(diff.filePath, diff.diffId, diff.iteration);
+            } else {
+              // Existing diff - update status and superseded state
+              const updates: Partial<{ status: 'pending' | 'applied' | 'rejected'; superseded: boolean }> = {};
+
+              if (existingFile.status !== diff.status) {
+                updates.status = diff.status as 'pending' | 'applied' | 'rejected';
+              }
+              if (diff.superseded !== undefined && existingFile.superseded !== diff.superseded) {
+                updates.superseded = diff.superseded;
+              }
+
+              if (Object.keys(updates).length > 0) {
+                pending.updateFile(existingFile.id, updates);
+              }
+            }
+          }
+
+          // Update edit mode if provided
+          if (msg.editMode && ['manual', 'ask', 'auto'].includes(msg.editMode)) {
+            pending.setEditMode(msg.editMode);
+          }
+        }
+        break;
+
       // ---- History Messages ----
       case 'addMessage':
         if (msg.message?.role === 'user') {
@@ -439,8 +482,9 @@ function initializeActorSystem(): void {
       case 'editModeSettings':
         if (msg.mode && editModes.includes(msg.mode)) {
           editMode = msg.mode;
-          updateEditModeDisplay(editMode);
+          toolbar.setEditMode(msg.mode);
           pending.setEditMode(msg.mode);
+          message.setEditMode(msg.mode);
         }
         break;
 
@@ -452,14 +496,74 @@ function initializeActorSystem(): void {
         if (msg.temperature !== undefined) {
           updateTemperatureDisplay(msg.temperature);
         }
-        if (msg.toolLimit !== undefined) {
-          updateToolLimitDisplay(msg.toolLimit);
+        if (msg.maxToolCalls !== undefined) {
+          updateToolLimitDisplay(msg.maxToolCalls);
+        }
+        if (msg.maxTokens !== undefined) {
+          updateTokenLimitDisplay(msg.maxTokens);
+        }
+        if (msg.logLevel !== undefined && msg.logColors !== undefined) {
+          const logLevelSelect = getElementOrNull<HTMLSelectElement>('logLevelSelect');
+          const logLevelValue = getElementOrNull<HTMLSpanElement>('logLevelValue');
+          const logColorsCheck = getElementOrNull<HTMLInputElement>('logColorsCheck');
+          if (logLevelSelect) logLevelSelect.value = msg.logLevel;
+          if (logLevelValue) logLevelValue.textContent = msg.logLevel;
+          if (logColorsCheck) logColorsCheck.checked = msg.logColors;
+        }
+        if (msg.systemPrompt !== undefined) {
+          const systemPromptInput = getElementOrNull<HTMLTextAreaElement>('systemPromptInput');
+          if (systemPromptInput) systemPromptInput.value = msg.systemPrompt;
+        }
+        // Web search settings
+        if (msg.webSearch) {
+          const searchDepthSelect = getElementOrNull<HTMLSelectElement>('searchDepthSelect');
+          const searchesPerPromptSlider = getElementOrNull<HTMLInputElement>('searchesPerPromptSlider');
+          const searchesPerPromptValue = getElementOrNull<HTMLSpanElement>('searchesPerPromptValue');
+          const cacheDurationSlider = getElementOrNull<HTMLInputElement>('cacheDurationSlider');
+          const cacheDurationValue = getElementOrNull<HTMLSpanElement>('cacheDurationValue');
+          if (searchDepthSelect) searchDepthSelect.value = msg.webSearch.searchDepth || 'basic';
+          if (searchesPerPromptSlider) searchesPerPromptSlider.value = String(msg.webSearch.searchesPerPrompt || 1);
+          if (searchesPerPromptValue) searchesPerPromptValue.textContent = String(msg.webSearch.searchesPerPrompt || 1);
+          if (cacheDurationSlider) cacheDurationSlider.value = String(msg.webSearch.cacheDuration || 15);
+          if (cacheDurationValue) cacheDurationValue.textContent = String(msg.webSearch.cacheDuration || 15);
+        }
+        // History settings
+        if (msg.autoSaveHistory !== undefined) {
+          const autoSaveHistoryCheck = getElementOrNull<HTMLInputElement>('autoSaveHistoryCheck');
+          if (autoSaveHistoryCheck) autoSaveHistoryCheck.checked = msg.autoSaveHistory;
+        }
+        if (msg.maxSessions !== undefined) {
+          const maxSessionsSlider = getElementOrNull<HTMLInputElement>('maxSessionsSlider');
+          const maxSessionsValue = getElementOrNull<HTMLSpanElement>('maxSessionsValue');
+          if (maxSessionsSlider) maxSessionsSlider.value = String(msg.maxSessions);
+          if (maxSessionsValue) maxSessionsValue.textContent = String(msg.maxSessions);
+        }
+        // Reasoner settings
+        if (msg.allowAllCommands !== undefined) {
+          const allowAllCommandsCheck = getElementOrNull<HTMLInputElement>('allowAllCommandsCheck');
+          if (allowAllCommandsCheck) allowAllCommandsCheck.checked = msg.allowAllCommands;
         }
         break;
 
+      case 'defaultSystemPrompt': {
+        const defaultPromptPreview = getElementOrNull<HTMLDivElement>('defaultPromptPreview');
+        const defaultPromptModel = getElementOrNull<HTMLElement>('defaultPromptModel');
+        const defaultPromptContent = getElementOrNull<HTMLPreElement>('defaultPromptContent');
+        if (defaultPromptPreview && defaultPromptModel && defaultPromptContent) {
+          defaultPromptModel.textContent = msg.model || 'current model';
+          defaultPromptContent.textContent = msg.prompt || '(no default prompt)';
+          defaultPromptPreview.style.display = 'block';
+        }
+        break;
+      }
+
+      case 'settingsReset':
+        // Request fresh settings after reset
+        vscode.postMessage({ type: 'getSettings' });
+        break;
+
       case 'webSearchToggled':
-        webSearchEnabled = msg.enabled;
-        updateWebSearchDisplay(msg.enabled);
+        toolbar.setWebSearchEnabled(msg.enabled);
         break;
 
       // ---- File Messages ----
@@ -477,17 +581,32 @@ function initializeActorSystem(): void {
 
       // ---- Status Messages ----
       case 'error':
-        showToast(msg.message, 'error');
+        statusPanel.showError(msg.message);
         break;
 
       case 'warning':
-        showToast(msg.message, 'warning');
+        statusPanel.showWarning(msg.message);
+        break;
+
+      case 'statusMessage':
+        statusPanel.showMessage(msg.message);
         break;
 
       case 'generationStopped':
         isStreaming = false;
-        sendBtn.style.display = 'flex';
-        stopBtn.style.display = 'none';
+
+        // Disable printing surface effect
+        AnimationHelper.disablePrintingSurface(chatMessages);
+
+        // End the stream - this publishes streaming.active: false
+        // InputAreaActor subscribes to this and handles:
+        // - Button visibility (send/stop)
+        // - Pending interrupt messages
+        streaming.endStream();
+
+        // Reset segment state
+        currentSegmentContent = '';
+        hasInterleavedContent = false;
         break;
 
       default:
@@ -525,212 +644,14 @@ function initializeActorSystem(): void {
     if (toolLimitSlider) toolLimitSlider.value = limit.toString();
   }
 
-  function updateEditModeDisplay(mode: string): void {
-    const editModeBtn = getElementOrNull<HTMLButtonElement>('editModeBtn');
-    if (editModeBtn) {
-      editModeBtn.classList.remove('state-manual', 'state-ask', 'state-auto');
-      if (mode === 'ask') editModeBtn.classList.add('state-ask');
-      else if (mode === 'auto') editModeBtn.classList.add('state-auto');
-      editModeBtn.title = `Edit mode: ${editModeLabels[mode] || mode}`;
-      updateEditModeIcon(mode);
+  function updateTokenLimitDisplay(limit: number): void {
+    const tokenLimitValue = getElementOrNull<HTMLSpanElement>('tokenLimitValue');
+    const tokenLimitSlider = getElementOrNull<HTMLInputElement>('tokenLimitSlider');
+    // Format with K suffix for readability
+    if (tokenLimitValue) {
+      tokenLimitValue.textContent = limit >= 1000 ? `${(limit / 1024).toFixed(1)}K` : limit.toString();
     }
-  }
-
-  function updateEditModeIcon(mode: string): void {
-    const editModeIcon = getElementOrNull<SVGElement>('editModeIcon');
-    if (!editModeIcon) return;
-
-    const letters: Record<string, string> = { manual: 'M', ask: 'Q', auto: 'A' };
-    editModeIcon.innerHTML = `
-      <text x="8" y="11" font-size="10" font-weight="bold" text-anchor="middle" fill="currentColor">${letters[mode] || 'M'}</text>
-    `;
-  }
-
-  function updateWebSearchDisplay(enabled: boolean): void {
-    const searchBtn = getElementOrNull<HTMLButtonElement>('searchBtn');
-    if (searchBtn) {
-      searchBtn.classList.toggle('active', enabled);
-    }
-  }
-
-  function showToast(message: string, type: 'error' | 'warning' | 'info' = 'info'): void {
-    const toastContainer = getElementOrNull<HTMLDivElement>('toastContainer');
-    if (!toastContainer) return;
-
-    const toast = document.createElement('div');
-    toast.className = `toast toast-${type}`;
-    toast.textContent = message;
-    toastContainer.appendChild(toast);
-
-    setTimeout(() => {
-      toast.classList.add('fade-out');
-      setTimeout(() => toast.remove(), 300);
-    }, 3000);
-  }
-
-  // ============================================
-  // Commands Modal (Help Button)
-  // ============================================
-
-  function showCommandsModal(btn: HTMLElement): void {
-    closeCommandsModal();
-    closeWebSearchModal();
-
-    const modal = document.createElement('div');
-    modal.className = 'commands-modal';
-    modal.innerHTML = `
-      <div class="commands-modal-title">
-        <span>Commands</span>
-        <button class="commands-modal-close">×</button>
-      </div>
-      <div class="commands-list">
-        ${commands.map(cmd => {
-          if ('section' in cmd) {
-            return `<div class="commands-section-title">${cmd.section}</div>`;
-          }
-          return `
-            <div class="command-item" data-command="${cmd.id}">
-              <span class="command-icon">${cmd.icon}</span>
-              <div class="command-info">
-                <div class="command-name">${cmd.name}</div>
-                <div class="command-desc">${cmd.desc}</div>
-              </div>
-            </div>
-          `;
-        }).join('')}
-      </div>
-    `;
-
-    // Position above the button
-    const rect = btn.getBoundingClientRect();
-    modal.style.bottom = `${window.innerHeight - rect.top + 5}px`;
-    modal.style.left = `${rect.left}px`;
-
-    // Close button handler
-    modal.querySelector('.commands-modal-close')?.addEventListener('click', closeCommandsModal);
-
-    // Command click handlers
-    modal.querySelectorAll('.command-item').forEach(item => {
-      item.addEventListener('click', () => {
-        const commandId = (item as HTMLElement).dataset.command;
-        if (commandId) {
-          vscode.postMessage({ type: 'executeCommand', command: `deepseek.${commandId}` });
-          closeCommandsModal();
-        }
-      });
-    });
-
-    document.body.appendChild(modal);
-
-    // Close when clicking outside
-    setTimeout(() => {
-      document.addEventListener('click', handleCommandsModalOutsideClick);
-    }, 0);
-  }
-
-  function handleCommandsModalOutsideClick(e: MouseEvent): void {
-    if (!(e.target as Element).closest('.commands-modal') && !(e.target as Element).closest('.help-btn')) {
-      closeCommandsModal();
-    }
-  }
-
-  function closeCommandsModal(): void {
-    const modal = document.querySelector('.commands-modal');
-    if (modal) modal.remove();
-    document.removeEventListener('click', handleCommandsModalOutsideClick);
-  }
-
-  // ============================================
-  // Web Search Modal
-  // ============================================
-
-  function showWebSearchModal(btn: HTMLElement): void {
-    closeWebSearchModal();
-    closeCommandsModal();
-
-    const modal = document.createElement('div');
-    modal.className = 'web-search-modal';
-    modal.innerHTML = `
-      <div class="web-search-modal-title">
-        <span>Web Search Settings</span>
-        <button class="web-search-modal-close">&times;</button>
-      </div>
-      <div class="web-search-modal-content">
-        <div class="web-search-option">
-          <label>Searches per prompt: <span id="searchCountValue">${webSearchSettings.searchesPerPrompt}</span></label>
-          <input type="range" id="searchCountSlider" min="1" max="20" step="1" value="${webSearchSettings.searchesPerPrompt}">
-        </div>
-        <div class="web-search-option">
-          <label>Search depth:</label>
-          <div class="search-depth-options">
-            <button class="depth-btn ${webSearchSettings.searchDepth === 'basic' ? 'active' : ''}" data-depth="basic">
-              <span class="depth-name">Basic</span>
-              <span class="depth-credits">1 credit</span>
-            </button>
-            <button class="depth-btn ${webSearchSettings.searchDepth === 'advanced' ? 'active' : ''}" data-depth="advanced">
-              <span class="depth-name">Advanced</span>
-              <span class="depth-credits">2 credits</span>
-            </button>
-          </div>
-        </div>
-        <button class="web-search-enable-btn">Enable Web Search</button>
-        <button class="web-search-clear-cache-btn">Clear Cache</button>
-      </div>
-    `;
-
-    // Position above button
-    const rect = btn.getBoundingClientRect();
-    modal.style.bottom = (window.innerHeight - rect.top + 5) + 'px';
-    modal.style.left = rect.left + 'px';
-
-    // Event handlers
-    modal.querySelector('.web-search-modal-close')?.addEventListener('click', closeWebSearchModal);
-
-    modal.querySelector('#searchCountSlider')?.addEventListener('input', (e) => {
-      const value = (e.target as HTMLInputElement).value;
-      const valueEl = modal.querySelector('#searchCountValue');
-      if (valueEl) valueEl.textContent = value;
-      webSearchSettings.searchesPerPrompt = parseInt(value, 10);
-    });
-
-    modal.querySelectorAll('.depth-btn').forEach(depthBtn => {
-      depthBtn.addEventListener('click', () => {
-        modal.querySelectorAll('.depth-btn').forEach(b => b.classList.remove('active'));
-        depthBtn.classList.add('active');
-        webSearchSettings.searchDepth = (depthBtn as HTMLElement).dataset.depth as 'basic' | 'advanced';
-      });
-    });
-
-    modal.querySelector('.web-search-enable-btn')?.addEventListener('click', () => {
-      webSearchEnabled = true;
-      btn.classList.add('active');
-      vscode.postMessage({ type: 'toggleWebSearch', enabled: true });
-      vscode.postMessage({ type: 'updateWebSearchSettings', settings: webSearchSettings });
-      closeWebSearchModal();
-    });
-
-    modal.querySelector('.web-search-clear-cache-btn')?.addEventListener('click', () => {
-      vscode.postMessage({ type: 'clearSearchCache' });
-      closeWebSearchModal();
-    });
-
-    document.body.appendChild(modal);
-
-    setTimeout(() => {
-      document.addEventListener('click', handleWebSearchModalOutsideClick);
-    }, 0);
-  }
-
-  function closeWebSearchModal(): void {
-    const modal = document.querySelector('.web-search-modal');
-    if (modal) modal.remove();
-    document.removeEventListener('click', handleWebSearchModalOutsideClick);
-  }
-
-  function handleWebSearchModalOutsideClick(e: MouseEvent): void {
-    if (!(e.target as Element).closest('.web-search-modal') && !(e.target as Element).closest('.search-btn')) {
-      closeWebSearchModal();
-    }
+    if (tokenLimitSlider) tokenLimitSlider.value = limit.toString();
   }
 
   // ============================================
@@ -800,100 +721,282 @@ function initializeActorSystem(): void {
     });
   }
 
-  // ============================================
-  // Edit Mode Button Handler
-  // ============================================
-
-  const editModeBtn = getElementOrNull<HTMLButtonElement>('editModeBtn');
-  if (editModeBtn) {
-    editModeBtn.addEventListener('click', () => {
-      const currentIndex = editModes.indexOf(editMode);
-      const nextIndex = (currentIndex + 1) % editModes.length;
-      const newMode = editModes[nextIndex];
-      editMode = newMode as typeof editMode;
-      vscode.postMessage({ type: 'setEditMode', mode: newMode });
-      updateEditModeDisplay(newMode);
-      pending.setEditMode(newMode as 'manual' | 'ask' | 'auto');
+  const tokenLimitSlider = getElementOrNull<HTMLInputElement>('tokenLimitSlider');
+  const tokenLimitValue = getElementOrNull<HTMLSpanElement>('tokenLimitValue');
+  if (tokenLimitSlider && tokenLimitValue) {
+    tokenLimitSlider.addEventListener('input', (e) => {
+      e.stopPropagation();
+      const limit = parseInt(tokenLimitSlider.value, 10);
+      // Format with K suffix for readability
+      tokenLimitValue.textContent = limit >= 1000 ? `${(limit / 1024).toFixed(1)}K` : limit.toString();
+      vscode.postMessage({ type: 'setMaxTokens', maxTokens: limit });
     });
   }
 
   // ============================================
-  // Help Button Handler
+  // Settings Dropdown Handlers
   // ============================================
 
-  const helpBtn = getElementOrNull<HTMLButtonElement>('helpBtn');
-  if (helpBtn) {
-    helpBtn.addEventListener('click', (e) => {
+  const settingsBtn = getElementOrNull<HTMLButtonElement>('settingsBtn');
+  const settingsDropdown = getElementOrNull<HTMLDivElement>('settingsDropdown');
+
+  if (settingsBtn && settingsDropdown) {
+    settingsBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      showCommandsModal(helpBtn);
+      const isVisible = settingsDropdown.style.display === 'block';
+      settingsDropdown.style.display = isVisible ? 'none' : 'block';
+      // Close model dropdown if open
+      if (modelDropdown) modelDropdown.style.display = 'none';
+    });
+
+    // Close when clicking outside
+    document.addEventListener('click', (e) => {
+      if (!settingsDropdown.contains(e.target as Node) && e.target !== settingsBtn) {
+        settingsDropdown.style.display = 'none';
+      }
+    });
+  }
+
+  // Log Level Select
+  const logLevelSelect = getElementOrNull<HTMLSelectElement>('logLevelSelect');
+  const logLevelValue = getElementOrNull<HTMLSpanElement>('logLevelValue');
+  if (logLevelSelect && logLevelValue) {
+    logLevelSelect.addEventListener('change', (e) => {
+      e.stopPropagation();
+      const level = logLevelSelect.value;
+      logLevelValue.textContent = level;
+      vscode.postMessage({ type: 'setLogLevel', logLevel: level });
+    });
+  }
+
+  // Log Colors Checkbox
+  const logColorsCheck = getElementOrNull<HTMLInputElement>('logColorsCheck');
+  if (logColorsCheck) {
+    logColorsCheck.addEventListener('change', (e) => {
+      e.stopPropagation();
+      vscode.postMessage({ type: 'setLogColors', enabled: logColorsCheck.checked });
+    });
+  }
+
+  // Open Logs Button
+  const openLogsBtn = getElementOrNull<HTMLButtonElement>('openLogsBtn');
+  if (openLogsBtn) {
+    openLogsBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      vscode.postMessage({ type: 'openLogs' });
+    });
+  }
+
+  // Walk on the Wild Side Checkbox
+  const allowAllCommandsCheck = getElementOrNull<HTMLInputElement>('allowAllCommandsCheck');
+  if (allowAllCommandsCheck) {
+    allowAllCommandsCheck.addEventListener('change', (e) => {
+      e.stopPropagation();
+      vscode.postMessage({ type: 'setAllowAllCommands', enabled: allowAllCommandsCheck.checked });
+    });
+  }
+
+  // System Prompt
+  const systemPromptInput = getElementOrNull<HTMLTextAreaElement>('systemPromptInput');
+  const saveSystemPromptBtn = getElementOrNull<HTMLButtonElement>('saveSystemPromptBtn');
+  const resetSystemPromptBtn = getElementOrNull<HTMLButtonElement>('resetSystemPromptBtn');
+  const showDefaultPromptBtn = getElementOrNull<HTMLButtonElement>('showDefaultPromptBtn');
+  const defaultPromptPreview = getElementOrNull<HTMLDivElement>('defaultPromptPreview');
+  const defaultPromptModel = getElementOrNull<HTMLElement>('defaultPromptModel');
+  const defaultPromptContent = getElementOrNull<HTMLPreElement>('defaultPromptContent');
+  const closeDefaultPromptBtn = getElementOrNull<HTMLButtonElement>('closeDefaultPromptBtn');
+
+  if (systemPromptInput && saveSystemPromptBtn) {
+    saveSystemPromptBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const prompt = systemPromptInput.value;
+      vscode.postMessage({ type: 'setSystemPrompt', systemPrompt: prompt });
+      // Show feedback
+      const originalText = saveSystemPromptBtn.textContent;
+      saveSystemPromptBtn.textContent = 'Saved!';
+      setTimeout(() => {
+        saveSystemPromptBtn.textContent = originalText;
+      }, 1500);
+    });
+  }
+
+  if (resetSystemPromptBtn && systemPromptInput) {
+    resetSystemPromptBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      systemPromptInput.value = '';
+      vscode.postMessage({ type: 'setSystemPrompt', systemPrompt: '' });
+      // Show feedback
+      const originalText = resetSystemPromptBtn.textContent;
+      resetSystemPromptBtn.textContent = 'Reset!';
+      setTimeout(() => {
+        resetSystemPromptBtn.textContent = originalText;
+      }, 1500);
+    });
+  }
+
+  if (showDefaultPromptBtn) {
+    showDefaultPromptBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      vscode.postMessage({ type: 'getDefaultSystemPrompt' });
+    });
+  }
+
+  if (closeDefaultPromptBtn && defaultPromptPreview) {
+    closeDefaultPromptBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      defaultPromptPreview.style.display = 'none';
     });
   }
 
   // ============================================
-  // Web Search Button Handler
+  // Web Search Settings
   // ============================================
 
-  const searchBtn = getElementOrNull<HTMLButtonElement>('searchBtn');
-  if (searchBtn) {
-    searchBtn.addEventListener('click', (e) => {
+  const searchDepthSelect = getElementOrNull<HTMLSelectElement>('searchDepthSelect');
+  const searchDepthValue = getElementOrNull<HTMLSpanElement>('searchDepthValue');
+  if (searchDepthSelect && searchDepthValue) {
+    searchDepthSelect.addEventListener('change', (e) => {
       e.stopPropagation();
-      if (webSearchEnabled) {
-        // Toggle off
-        webSearchEnabled = false;
-        searchBtn.classList.remove('active');
-        vscode.postMessage({ type: 'toggleWebSearch', enabled: false });
-      } else {
-        // Show settings modal
-        showWebSearchModal(searchBtn);
+      const depth = searchDepthSelect.value;
+      searchDepthValue.textContent = depth;
+      vscode.postMessage({ type: 'setSearchDepth', searchDepth: depth });
+    });
+  }
+
+  const searchesPerPromptSlider = getElementOrNull<HTMLInputElement>('searchesPerPromptSlider');
+  const searchesPerPromptValue = getElementOrNull<HTMLSpanElement>('searchesPerPromptValue');
+  if (searchesPerPromptSlider && searchesPerPromptValue) {
+    searchesPerPromptSlider.addEventListener('input', (e) => {
+      e.stopPropagation();
+      const value = parseInt(searchesPerPromptSlider.value, 10);
+      searchesPerPromptValue.textContent = value.toString();
+    });
+    searchesPerPromptSlider.addEventListener('change', (e) => {
+      e.stopPropagation();
+      const value = parseInt(searchesPerPromptSlider.value, 10);
+      vscode.postMessage({ type: 'setSearchesPerPrompt', searchesPerPrompt: value });
+    });
+  }
+
+  const cacheDurationSlider = getElementOrNull<HTMLInputElement>('cacheDurationSlider');
+  const cacheDurationValue = getElementOrNull<HTMLSpanElement>('cacheDurationValue');
+  if (cacheDurationSlider && cacheDurationValue) {
+    cacheDurationSlider.addEventListener('input', (e) => {
+      e.stopPropagation();
+      const value = parseInt(cacheDurationSlider.value, 10);
+      cacheDurationValue.textContent = value.toString();
+    });
+    cacheDurationSlider.addEventListener('change', (e) => {
+      e.stopPropagation();
+      const value = parseInt(cacheDurationSlider.value, 10);
+      vscode.postMessage({ type: 'setCacheDuration', cacheDuration: value });
+    });
+  }
+
+  const clearSearchCacheBtn = getElementOrNull<HTMLButtonElement>('clearSearchCacheBtn');
+  if (clearSearchCacheBtn) {
+    clearSearchCacheBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      vscode.postMessage({ type: 'clearSearchCache' });
+      // Show feedback
+      const originalText = clearSearchCacheBtn.textContent;
+      clearSearchCacheBtn.textContent = 'Cleared!';
+      setTimeout(() => {
+        clearSearchCacheBtn.textContent = originalText;
+      }, 1500);
+    });
+  }
+
+  // ============================================
+  // History Settings
+  // ============================================
+
+  const autoSaveHistoryCheck = getElementOrNull<HTMLInputElement>('autoSaveHistoryCheck');
+  if (autoSaveHistoryCheck) {
+    autoSaveHistoryCheck.addEventListener('change', (e) => {
+      e.stopPropagation();
+      vscode.postMessage({ type: 'setAutoSaveHistory', enabled: autoSaveHistoryCheck.checked });
+    });
+  }
+
+  const maxSessionsSlider = getElementOrNull<HTMLInputElement>('maxSessionsSlider');
+  const maxSessionsValue = getElementOrNull<HTMLSpanElement>('maxSessionsValue');
+  if (maxSessionsSlider && maxSessionsValue) {
+    maxSessionsSlider.addEventListener('input', (e) => {
+      e.stopPropagation();
+      const value = parseInt(maxSessionsSlider.value, 10);
+      maxSessionsValue.textContent = value.toString();
+    });
+    maxSessionsSlider.addEventListener('change', (e) => {
+      e.stopPropagation();
+      const value = parseInt(maxSessionsSlider.value, 10);
+      vscode.postMessage({ type: 'setMaxSessions', maxSessions: value });
+    });
+  }
+
+  const clearHistoryBtn = getElementOrNull<HTMLButtonElement>('clearHistoryBtn');
+  if (clearHistoryBtn) {
+    clearHistoryBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      // Confirm before clearing
+      if (confirm('Are you sure you want to clear all chat history? This cannot be undone.')) {
+        vscode.postMessage({ type: 'clearAllHistory' });
+        // Show feedback
+        const originalText = clearHistoryBtn.textContent;
+        clearHistoryBtn.textContent = 'Cleared!';
+        setTimeout(() => {
+          clearHistoryBtn.textContent = originalText;
+        }, 1500);
       }
     });
   }
 
   // ============================================
-  // File Attachment Handler
+  // Debug Test Buttons
   // ============================================
 
-  const attachBtn = getElementOrNull<HTMLButtonElement>('attachBtn');
-  const fileInput = getElementOrNull<HTMLInputElement>('fileInput');
-  const attachmentsContainer = getElementOrNull<HTMLDivElement>('attachments');
-
-  if (attachBtn && fileInput) {
-    attachBtn.addEventListener('click', () => fileInput.click());
-
-    fileInput.addEventListener('change', (e) => {
-      const files = Array.from((e.target as HTMLInputElement).files || []);
-      files.forEach(file => {
-        const reader = new FileReader();
-        reader.onload = (event) => {
-          const content = event.target?.result as string;
-          const attachment = { content, name: file.name, size: file.size };
-          pendingAttachments.push(attachment);
-          renderAttachmentPreview(attachment);
-        };
-        reader.readAsText(file);
-      });
-      fileInput.value = '';
+  const testStatusBtn = getElementOrNull<HTMLButtonElement>('testStatusBtn');
+  if (testStatusBtn) {
+    testStatusBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      statusPanel.showMessage('This is a test status message');
     });
   }
 
-  function renderAttachmentPreview(attachment: { content: string; name: string; size: number }): void {
-    if (!attachmentsContainer) return;
-
-    const preview = document.createElement('div');
-    preview.className = 'attachment-preview file-attachment';
-    const sizeKB = (attachment.size / 1024).toFixed(1);
-    preview.innerHTML = `
-      <span class="file-icon">📄</span>
-      <span class="file-name" title="${escapeHtml(attachment.name)}">${escapeHtml(attachment.name)}</span>
-      <span class="file-size">${sizeKB}KB</span>
-      <button class="attachment-remove" title="Remove">×</button>
-    `;
-    preview.querySelector('.attachment-remove')?.addEventListener('click', () => {
-      const idx = pendingAttachments.indexOf(attachment);
-      if (idx > -1) pendingAttachments.splice(idx, 1);
-      preview.remove();
+  const testWarningBtn = getElementOrNull<HTMLButtonElement>('testWarningBtn');
+  if (testWarningBtn) {
+    testWarningBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      statusPanel.showWarning('This is a test warning message');
     });
-    attachmentsContainer.appendChild(preview);
+  }
+
+  const testErrorBtn = getElementOrNull<HTMLButtonElement>('testErrorBtn');
+  if (testErrorBtn) {
+    testErrorBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      statusPanel.showError('This is a test error message');
+    });
+  }
+
+  // ============================================
+  // Reset to Defaults
+  // ============================================
+
+  const resetDefaultsBtn = getElementOrNull<HTMLButtonElement>('resetDefaultsBtn');
+  if (resetDefaultsBtn) {
+    resetDefaultsBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (confirm('Reset all settings to their default values?')) {
+        vscode.postMessage({ type: 'resetToDefaults' });
+        // Show feedback
+        const originalText = resetDefaultsBtn.textContent;
+        resetDefaultsBtn.textContent = 'Reset!';
+        setTimeout(() => {
+          resetDefaultsBtn.textContent = originalText;
+        }, 1500);
+      }
+    });
   }
 
   // ============================================
@@ -1147,25 +1250,11 @@ function initializeActorSystem(): void {
   }
 
   // ============================================
-  // Status Panel Handler
+  // Request Initial Settings
   // ============================================
 
-  const statusPanelLogsBtn = getElementOrNull<HTMLButtonElement>('statusPanelLogsBtn');
-  if (statusPanelLogsBtn) {
-    statusPanelLogsBtn.addEventListener('click', () => {
-      vscode.postMessage({ type: 'showLogs' });
-    });
-  }
-
-  // ============================================
-  // Utility Functions
-  // ============================================
-
-  function escapeHtml(text: string): string {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-  }
+  // Request settings from backend to restore persisted state (edit mode, etc.)
+  vscode.postMessage({ type: 'getSettings' });
 
   // ============================================
   // Expose for Debugging
@@ -1179,10 +1268,13 @@ function initializeActorSystem(): void {
     shell,
     toolCalls,
     thinking,
-    pending
+    pending,
+    inputArea,
+    statusPanel,
+    toolbar
   };
 
-  console.log('[ActorSystem] Initialized with 7 actors (hybrid mode)');
+  console.log('[ActorSystem] Initialized with 10 actors (full actor mode)');
 }
 
 // Initialize when DOM is ready

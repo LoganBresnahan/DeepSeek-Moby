@@ -3,6 +3,12 @@
  * CSS for modified files dropdown display
  */
 export const pendingStyles = `
+/* Pending Changes Wrapper (outer container from InterleavedContentActor) */
+.pending-changes-wrapper {
+  position: relative;
+  z-index: 1;  /* Ensure pending files appears above animation effects like printing-surface */
+}
+
 /* Pending Changes Container */
 .pending-container {
   margin: 8px 0;
@@ -215,6 +221,15 @@ export const pendingStyles = `
 
 /* Superseded items */
 .pending-item[data-superseded="true"] {
-  opacity: 0.8;
+  opacity: 0.6;
+}
+
+.pending-item[data-superseded="true"] .pending-file {
+  text-decoration: line-through;
+  color: var(--vscode-descriptionForeground);
+}
+
+.pending-item[data-superseded="true"] .pending-status {
+  color: var(--vscode-descriptionForeground);
 }
 `;

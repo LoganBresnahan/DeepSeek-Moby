@@ -1,7 +1,7 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
 exports[`ThinkingActor Snapshots > content formatting > renders with code blocks 1`] = `
-"<div id="thinking-iteration-X" class="thinking-iteration-wrapper" data-actor="thinking" data-iteration="1">
+"<div id="thinking-iteration-X" class="thinking-iteration-wrapper anim-bubble-in" data-actor="thinking" data-iteration="1">
         <div class="thinking-container collapsed" id="thinking-1">
           <div class="thinking-header">
             <span class="thinking-icon">💭</span>
@@ -16,7 +16,7 @@ This sets x to 42.</div>
 `;
 
 exports[`ThinkingActor Snapshots > content formatting > renders with inline code 1`] = `
-"<div id="thinking-iteration-X" class="thinking-iteration-wrapper" data-actor="thinking" data-iteration="1">
+"<div id="thinking-iteration-X" class="thinking-iteration-wrapper anim-bubble-in" data-actor="thinking" data-iteration="1">
         <div class="thinking-container collapsed" id="thinking-1">
           <div class="thinking-header">
             <span class="thinking-icon">💭</span>
@@ -31,7 +31,7 @@ exports[`ThinkingActor Snapshots > content formatting > renders with inline code
 exports[`ThinkingActor Snapshots > empty state > renders empty when no iterations 1`] = `""`;
 
 exports[`ThinkingActor Snapshots > expanded/collapsed > renders collapsed iteration 1`] = `
-"<div id="thinking-iteration-X" class="thinking-iteration-wrapper" data-actor="thinking" data-iteration="1">
+"<div id="thinking-iteration-X" class="thinking-iteration-wrapper anim-bubble-in" data-actor="thinking" data-iteration="1">
         <div class="thinking-container collapsed" id="thinking-1">
           <div class="thinking-header">
             <span class="thinking-icon">💭</span>
@@ -44,7 +44,7 @@ exports[`ThinkingActor Snapshots > expanded/collapsed > renders collapsed iterat
 `;
 
 exports[`ThinkingActor Snapshots > expanded/collapsed > renders expanded iteration 1`] = `
-"<div id="thinking-iteration-X" class="thinking-iteration-wrapper" data-actor="thinking" data-iteration="1">
+"<div id="thinking-iteration-X" class="thinking-iteration-wrapper anim-bubble-in" data-actor="thinking" data-iteration="1">
         <div class="thinking-container" id="thinking-1">
           <div class="thinking-header">
             <span class="thinking-icon">💭</span>
@@ -58,6 +58,12 @@ exports[`ThinkingActor Snapshots > expanded/collapsed > renders expanded iterati
 
 exports[`ThinkingActor Snapshots > injected styles > injects styles into document head 1`] = `
 "
+/* Thinking iteration wrapper (outer container from InterleavedContentActor) */
+.thinking-iteration-wrapper {
+  position: relative;
+  z-index: 1;  /* Ensure thinking appears above animation effects like printing-surface */
+}
+
 /* Thinking Container */
 .thinking-container {
   background: transparent;
@@ -170,7 +176,7 @@ exports[`ThinkingActor Snapshots > injected styles > injects styles into documen
 `;
 
 exports[`ThinkingActor Snapshots > multiple iterations > renders multiple iterations 1`] = `
-"<div id="thinking-iteration-X" class="thinking-iteration-wrapper" data-actor="thinking" data-iteration="1">
+"<div id="thinking-iteration-X" class="thinking-iteration-wrapper anim-bubble-in" data-actor="thinking" data-iteration="1">
         <div class="thinking-container collapsed" id="thinking-1">
           <div class="thinking-header">
             <span class="thinking-icon">💭</span>
@@ -179,7 +185,7 @@ exports[`ThinkingActor Snapshots > multiple iterations > renders multiple iterat
           </div>
           <div class="thinking-body">First approach: trying method A</div>
         </div>
-      </div><div id="thinking-iteration-X" class="thinking-iteration-wrapper" data-actor="thinking" data-iteration="2">
+      </div><div id="thinking-iteration-X" class="thinking-iteration-wrapper anim-bubble-in" data-actor="thinking" data-iteration="2">
         <div class="thinking-container collapsed" id="thinking-2">
           <div class="thinking-header">
             <span class="thinking-icon">💭</span>
@@ -192,7 +198,7 @@ exports[`ThinkingActor Snapshots > multiple iterations > renders multiple iterat
 `;
 
 exports[`ThinkingActor Snapshots > single iteration > renders completed iteration 1`] = `
-"<div id="thinking-iteration-X" class="thinking-iteration-wrapper" data-actor="thinking" data-iteration="1">
+"<div id="thinking-iteration-X" class="thinking-iteration-wrapper anim-bubble-in" data-actor="thinking" data-iteration="1">
         <div class="thinking-container collapsed" id="thinking-1">
           <div class="thinking-header">
             <span class="thinking-icon">💭</span>
@@ -205,7 +211,7 @@ exports[`ThinkingActor Snapshots > single iteration > renders completed iteratio
 `;
 
 exports[`ThinkingActor Snapshots > single iteration > renders single thinking iteration 1`] = `
-"<div id="thinking-iteration-X" class="thinking-iteration-wrapper" data-actor="thinking" data-iteration="1">
+"<div id="thinking-iteration-X" class="thinking-iteration-wrapper anim-bubble-in" data-actor="thinking" data-iteration="1">
         <div class="thinking-container collapsed" id="thinking-1">
           <div class="thinking-header">
             <span class="thinking-icon">💭</span>

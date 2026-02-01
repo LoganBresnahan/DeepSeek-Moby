@@ -84,6 +84,7 @@ export abstract class InterleavedContentActor extends EventStateActor {
   /**
    * Create a new container element and append it to the parent.
    * The container will appear at the current position in the chat flow.
+   * Automatically applies bubble-in animation for smooth appearance.
    *
    * @param idPrefix - Prefix for the container ID (e.g., 'shell', 'tools', 'thinking')
    * @param additionalClasses - Additional CSS classes to add
@@ -100,7 +101,12 @@ export abstract class InterleavedContentActor extends EventStateActor {
 
     const element = document.createElement('div');
     element.id = id;
-    element.className = [this.containerClassName, ...(additionalClasses || [])].filter(Boolean).join(' ');
+    // Add bubble animation class for smooth entry
+    element.className = [
+      this.containerClassName,
+      'anim-bubble-in',
+      ...(additionalClasses || [])
+    ].filter(Boolean).join(' ');
     element.setAttribute('data-actor', this.actorName);
 
     // Set additional data attributes
@@ -112,6 +118,11 @@ export abstract class InterleavedContentActor extends EventStateActor {
 
     // Append to parent - this positions it at the current location in the chat flow
     this.element.appendChild(element);
+
+    // Remove animation class after animation completes
+    setTimeout(() => {
+      element.classList.remove('anim-bubble-in');
+    }, 300); // Match DURATIONS.bubble
 
     const container: InterleavedContainer = {
       id,

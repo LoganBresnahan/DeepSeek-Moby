@@ -46,6 +46,10 @@ export interface TestActorSystem {
   elements: TestDOMElements;
   cleanup: () => void;
   dispatchMessage: (msg: Record<string, unknown>) => void;
+  // Mid-stream interrupt support
+  sendMessage: (content: string) => void;
+  isStreaming: () => boolean;
+  getPendingInterruptMessage: () => { content: string; attachments?: unknown[] } | null;
 }
 
 export interface TestDOMElements {
@@ -384,8 +388,68 @@ export async function createTestActorSystem(): Promise<TestActorSystem> {
         isStreaming = false;
         elements.sendBtn.style.display = 'flex';
         elements.stopBtn.style.display = 'none';
+        elements.sendBtn.classList.remove('interrupting');
+
+        // Check if there's a pending message from mid-stream interrupt
+        if (pendingInterruptMessage) {
+          const { content } = pendingInterruptMessage;
+          pendingInterruptMessage = null;
+
+          // Send the queued message (simulates the setTimeout delay in chat.ts)
+          setTimeout(() => {
+            doSendMessage(content);
+          }, 10);
+        }
         break;
     }
+  };
+
+  // Mid-stream interrupt state
+  let pendingInterruptMessage: { content: string; attachments?: unknown[] } | null = null;
+
+  /**
+   * Actually send a message (used by both normal flow and interrupt flow)
+   */
+  const doSendMessage = (content: string) => {
+    // Add user message to UI
+    message.addUserMessage(content);
+
+    // Clear input
+    elements.messageInput.value = '';
+
+    // Notify backend (mock)
+    vscode.postMessage({
+      type: 'sendMessage',
+      message: content
+    });
+  };
+
+  /**
+   * Send a message - mirrors chat.ts sendMessage logic with interrupt support
+   */
+  const sendMessage = (content: string) => {
+    if (!content.trim()) return;
+
+    // If currently streaming, interrupt and queue the message
+    if (isStreaming) {
+      const alreadyInterrupting = pendingInterruptMessage !== null;
+
+      // Store message to send after generation stops
+      pendingInterruptMessage = { content };
+
+      // Clear input immediately
+      elements.messageInput.value = '';
+
+      // Only send stop request if we haven't already
+      if (!alreadyInterrupting) {
+        vscode.postMessage({ type: 'stopGeneration' });
+        elements.sendBtn.classList.add('interrupting');
+      }
+      return;
+    }
+
+    // Normal flow - not streaming
+    doSendMessage(content);
   };
 
   const cleanup = () => {
@@ -414,7 +478,11 @@ export async function createTestActorSystem(): Promise<TestActorSystem> {
     vscode,
     elements,
     cleanup,
-    dispatchMessage
+    dispatchMessage,
+    // Mid-stream interrupt support
+    sendMessage,
+    isStreaming: () => isStreaming,
+    getPendingInterruptMessage: () => pendingInterruptMessage
   };
 }
 

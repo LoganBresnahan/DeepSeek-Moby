@@ -243,7 +243,7 @@ describe('PendingChangesActor', () => {
       actor.supersede(id);
 
       const label = element.querySelector('.pending-label');
-      expect(label?.textContent).toContain('Newer Version');
+      expect(label?.textContent).toContain('Superseded');
     });
   });
 

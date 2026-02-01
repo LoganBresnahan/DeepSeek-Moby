@@ -84,10 +84,10 @@
         },
         "deepseek.maxTokens": {
           "type": "number",
-          "default": 4096,
-          "minimum": 100,
+          "default": 8192,
+          "minimum": 256,
           "maximum": 65536,
-          "description": "Maximum tokens per response (reasoner model supports up to 64K)"
+          "description": "Maximum output tokens per response. Chat: up to 8K, Reasoner: up to 64K"
         },
         "deepseek.autoFormat": {
           "type": "boolean",
@@ -115,6 +115,30 @@
           "type": "boolean",
           "default": true,
           "description": "Automatically save chat history"
+        },
+        "deepseek.logLevel": {
+          "type": "string",
+          "default": "INFO",
+          "enum": ["DEBUG", "INFO", "WARN", "ERROR", "OFF"],
+          "enumDescriptions": [
+            "Show all messages including debug info",
+            "Show info, warnings and errors (default)",
+            "Show warnings and errors only",
+            "Show errors only",
+            "Disable logging"
+          ],
+          "description": "Minimum log level to display in Output channel"
+        },
+        "deepseek.logColors": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable color-coded log output"
+        },
+        "deepseek.systemPrompt": {
+          "type": "string",
+          "default": "",
+          "description": "Custom system prompt to prepend to all requests (leave empty for default)",
+          "editPresentation": "multilineText"
         },
         "deepseek.tavilyApiKey": {
           "type": "string",
@@ -156,6 +180,12 @@
             "Auto: Automatically apply changes without asking (coming soon)"
           ],
           "description": "How to handle code edits from AI responses"
+        },
+        "deepseek.allowAllShellCommands": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "**Walk on the Wild Side**: Allow ALL shell commands for the Reasoner model (R1). Disables the safety blocklist that prevents catastrophic operations like `rm -rf /`. Only enable if you trust R1 completely.",
+          "scope": "application"
         }
       }
     },

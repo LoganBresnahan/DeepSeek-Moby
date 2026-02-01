@@ -13,6 +13,7 @@ import { TavilyClient, TavilySearchResponse } from '../clients/tavilyClient';
 import {
   parseShellCommands,
   containsShellCommands,
+  containsCodeEdits,
   executeShellCommands,
   formatShellResultsForContext,
   getReasonerShellPrompt,
@@ -50,9 +51,16 @@ export class ChatProvider implements vscode.WebviewViewProvider {
   private disposables: vscode.Disposable[] = [];
   private tavilyClient: TavilyClient;
   private webSearchEnabled: boolean = false;
-  private webSearchSettings: { searchesPerPrompt: number; searchDepth: 'basic' | 'advanced' } = {
+  private webSearchSettings: {
+    searchesPerPrompt: number;
+    searchDepth: 'basic' | 'advanced';
+    cacheDuration: number;
+    maxSearchesPerPrompt: number;
+  } = {
     searchesPerPrompt: 1,
-    searchDepth: 'basic'
+    searchDepth: 'basic',
+    cacheDuration: 15,
+    maxSearchesPerPrompt: 1
   };
   private searchCache: Map<string, { results: string; timestamp: number }> = new Map();
   // Edit mode state
@@ -319,6 +327,33 @@ which I already edited - would you like me to update it?"
           // Handle tool limit slider
           await this.updateSettings({ maxToolCalls: data.toolLimit });
           break;
+        case 'setMaxTokens':
+          // Handle token limit slider
+          await this.updateSettings({ maxTokens: data.maxTokens });
+          break;
+        case 'setLogLevel':
+          // Handle log level change
+          await this.updateLogSettings({ logLevel: data.logLevel });
+          break;
+        case 'setLogColors':
+          // Handle log colors toggle
+          await this.updateLogSettings({ logColors: data.enabled });
+          break;
+        case 'openLogs':
+          // Show the DeepSeek output channel
+          logger.show();
+          break;
+        case 'setAllowAllCommands':
+          // Handle "Walk on the Wild Side" toggle
+          await this.updateReasonerSettings({ allowAllCommands: data.enabled });
+          break;
+        case 'setSystemPrompt':
+          // Handle system prompt change
+          await this.updateSystemPrompt(data.systemPrompt);
+          break;
+        case 'getDefaultSystemPrompt':
+          this.sendDefaultSystemPrompt();
+          break;
         case 'getSettings':
           this.sendCurrentSettings();
           break;
@@ -378,6 +413,27 @@ which I already edited - would you like me to update it?"
         case 'setSelectedFiles':
           await this.setSelectedFiles(data.files);
           break;
+        case 'setSearchDepth':
+          await this.updateWebSearchSettings({ searchDepth: data.searchDepth });
+          break;
+        case 'setSearchesPerPrompt':
+          await this.updateWebSearchSettings({ maxSearchesPerPrompt: data.searchesPerPrompt });
+          break;
+        case 'setCacheDuration':
+          await this.updateWebSearchSettings({ cacheDuration: data.cacheDuration });
+          break;
+        case 'setAutoSaveHistory':
+          await this.updateSettings({ autoSaveHistory: data.enabled });
+          break;
+        case 'setMaxSessions':
+          await this.updateSettings({ maxSessions: data.maxSessions });
+          break;
+        case 'clearAllHistory':
+          await this.clearAllHistory();
+          break;
+        case 'resetToDefaults':
+          await this.resetToDefaults();
+          break;
       }
     });
 
@@ -432,7 +488,14 @@ which I already edited - would you like me to update it?"
     }
   }
 
-  private async updateSettings(settings: { model?: string; temperature?: number; maxToolCalls?: number }) {
+  private async updateSettings(settings: {
+    model?: string;
+    temperature?: number;
+    maxToolCalls?: number;
+    maxTokens?: number;
+    autoSaveHistory?: boolean;
+    maxSessions?: number;
+  }) {
     const config = vscode.workspace.getConfiguration('deepseek');
 
     if (settings.model !== undefined) {
@@ -455,6 +518,106 @@ which I already edited - would you like me to update it?"
       await config.update('maxToolCalls', settings.maxToolCalls, vscode.ConfigurationTarget.Global);
       logger.settingsChanged('maxToolCalls', settings.maxToolCalls);
     }
+
+    if (settings.maxTokens !== undefined) {
+      await config.update('maxTokens', settings.maxTokens, vscode.ConfigurationTarget.Global);
+      logger.settingsChanged('maxTokens', settings.maxTokens);
+    }
+
+    if (settings.autoSaveHistory !== undefined) {
+      await config.update('autoSaveHistory', settings.autoSaveHistory, vscode.ConfigurationTarget.Global);
+      logger.settingsChanged('autoSaveHistory', settings.autoSaveHistory);
+    }
+
+    if (settings.maxSessions !== undefined) {
+      await config.update('maxSessions', settings.maxSessions, vscode.ConfigurationTarget.Global);
+      logger.settingsChanged('maxSessions', settings.maxSessions);
+    }
+  }
+
+  private async updateLogSettings(settings: { logLevel?: string; logColors?: boolean }) {
+    const config = vscode.workspace.getConfiguration('deepseek');
+
+    if (settings.logLevel !== undefined) {
+      await config.update('logLevel', settings.logLevel, vscode.ConfigurationTarget.Global);
+      logger.settingsChanged('logLevel', settings.logLevel);
+    }
+
+    if (settings.logColors !== undefined) {
+      await config.update('logColors', settings.logColors, vscode.ConfigurationTarget.Global);
+      logger.settingsChanged('logColors', settings.logColors);
+    }
+  }
+
+  private async updateReasonerSettings(settings: { allowAllCommands?: boolean }) {
+    const config = vscode.workspace.getConfiguration('deepseek');
+
+    if (settings.allowAllCommands !== undefined) {
+      await config.update('allowAllShellCommands', settings.allowAllCommands, vscode.ConfigurationTarget.Global);
+      logger.settingsChanged('allowAllShellCommands', settings.allowAllCommands ? 'enabled (Wild Side)' : 'disabled');
+    }
+  }
+
+  private async updateSystemPrompt(prompt: string) {
+    const config = vscode.workspace.getConfiguration('deepseek');
+    await config.update('systemPrompt', prompt, vscode.ConfigurationTarget.Global);
+    logger.settingsChanged('systemPrompt', prompt ? `${prompt.substring(0, 50)}...` : '(default)');
+  }
+
+  private sendDefaultSystemPrompt() {
+    const config = vscode.workspace.getConfiguration('deepseek');
+    const model = config.get<string>('model') || 'deepseek-chat';
+    const isReasoner = model.includes('reasoner');
+
+    // Get the appropriate default prompt based on model type
+    const prompt = isReasoner
+      ? this.getReasonerDefaultPrompt()
+      : this.getChatDefaultPrompt();
+
+    this._view?.webview.postMessage({
+      type: 'defaultSystemPrompt',
+      model: isReasoner ? 'DeepSeek Reasoner (R1)' : 'DeepSeek Chat',
+      prompt
+    });
+  }
+
+  private getChatDefaultPrompt(): string {
+    return `You are a highly capable AI programming assistant integrated into VS Code. Your role is to help developers write, understand, and improve code.
+
+Key capabilities:
+- Analyze code and explain its functionality
+- Help debug issues and suggest fixes
+- Write new code following best practices
+- Refactor and optimize existing code
+- Answer programming questions
+
+When providing code changes, use the SEARCH/REPLACE format for precise edits.
+
+Always be concise, accurate, and helpful.`;
+  }
+
+  private getReasonerDefaultPrompt(): string {
+    return `You are a highly capable AI programming assistant with shell access for exploring codebases.
+
+You can run shell commands using <shell> tags to explore and understand code:
+<shell>cat src/file.ts</shell>
+<shell>grep -rn "function" src/</shell>
+
+For code changes, use the SEARCH/REPLACE format:
+\`\`\`typescript
+# File: path/to/file.ts
+<<<<<<< SEARCH
+exact code to find
+=======
+replacement code
+>>>>>>> REPLACE
+\`\`\`
+
+Always:
+1. Explore the codebase first using shell commands
+2. Understand the existing code structure
+3. Make precise, targeted changes
+4. Complete tasks in a single response`;
   }
 
   private sendCurrentSettings() {
@@ -462,7 +625,14 @@ which I already edited - would you like me to update it?"
     const model = config.get<string>('model') || 'deepseek-chat';
     const temperature = config.get<number>('temperature') ?? 0.7;
     const maxToolCalls = config.get<number>('maxToolCalls') ?? 25;
+    const maxTokens = config.get<number>('maxTokens') ?? 8192;
     const editMode = config.get<string>('editMode') || 'manual';
+    const logLevel = config.get<string>('logLevel') || 'INFO';
+    const logColors = config.get<boolean>('logColors') ?? true;
+    const systemPrompt = config.get<string>('systemPrompt') || '';
+    const autoSaveHistory = config.get<boolean>('autoSaveHistory') ?? true;
+    const maxSessions = config.get<number>('maxSessions') ?? 50;
+    const allowAllCommands = config.get<boolean>('allowAllShellCommands') ?? false;
 
     // Sync internal state with config
     this.editMode = editMode as 'manual' | 'ask' | 'auto';
@@ -472,7 +642,20 @@ which I already edited - would you like me to update it?"
         type: 'settings',
         model,
         temperature,
-        maxToolCalls
+        maxToolCalls,
+        maxTokens,
+        logLevel,
+        logColors,
+        systemPrompt,
+        autoSaveHistory,
+        maxSessions,
+        allowAllCommands,
+        // Web search settings
+        webSearch: {
+          searchDepth: this.webSearchSettings.searchDepth,
+          searchesPerPrompt: this.webSearchSettings.maxSearchesPerPrompt,
+          cacheDuration: this.webSearchSettings.cacheDuration
+        }
       });
       // Send edit mode separately
       this._view.webview.postMessage({
@@ -496,12 +679,23 @@ which I already edited - would you like me to update it?"
     this._view?.webview.postMessage({ type: 'webSearchToggled', enabled });
   }
 
-  private updateWebSearchSettings(settings: { searchesPerPrompt?: number; searchDepth?: 'basic' | 'advanced' }) {
+  private updateWebSearchSettings(settings: {
+    searchesPerPrompt?: number;
+    searchDepth?: 'basic' | 'advanced';
+    cacheDuration?: number;
+    maxSearchesPerPrompt?: number;
+  }) {
     if (settings.searchesPerPrompt !== undefined) {
       this.webSearchSettings.searchesPerPrompt = settings.searchesPerPrompt;
     }
     if (settings.searchDepth !== undefined) {
       this.webSearchSettings.searchDepth = settings.searchDepth;
+    }
+    if (settings.cacheDuration !== undefined) {
+      this.webSearchSettings.cacheDuration = settings.cacheDuration;
+    }
+    if (settings.maxSearchesPerPrompt !== undefined) {
+      this.webSearchSettings.maxSearchesPerPrompt = settings.maxSearchesPerPrompt;
     }
   }
 
@@ -520,6 +714,61 @@ which I already edited - would you like me to update it?"
     this._view?.webview.postMessage({
       type: 'searchCacheCleared'
     });
+  }
+
+  private async clearAllHistory() {
+    try {
+      // Clear history using the manager
+      await this.chatHistoryManager.clearAllHistory();
+
+      // Reset current session
+      this.currentSessionId = null;
+
+      logger.info('[ChatProvider] All chat history cleared');
+
+      // Notify webview
+      this._view?.webview.postMessage({ type: 'historyCleared' });
+      this._view?.webview.postMessage({ type: 'clearChat' });
+    } catch (error) {
+      logger.error(`[ChatProvider] Failed to clear history: ${error}`);
+    }
+  }
+
+  private async resetToDefaults() {
+    try {
+      const config = vscode.workspace.getConfiguration('deepseek');
+
+      // Reset all settings to defaults
+      await config.update('logLevel', undefined, vscode.ConfigurationTarget.Global);
+      await config.update('logColors', undefined, vscode.ConfigurationTarget.Global);
+      await config.update('systemPrompt', undefined, vscode.ConfigurationTarget.Global);
+      await config.update('maxTokens', undefined, vscode.ConfigurationTarget.Global);
+      await config.update('maxToolCalls', undefined, vscode.ConfigurationTarget.Global);
+      await config.update('editMode', undefined, vscode.ConfigurationTarget.Global);
+      await config.update('autoSaveHistory', undefined, vscode.ConfigurationTarget.Global);
+      await config.update('maxSessions', undefined, vscode.ConfigurationTarget.Global);
+
+      // Reset in-memory settings
+      this.webSearchSettings = {
+        searchesPerPrompt: 1,
+        searchDepth: 'basic',
+        cacheDuration: 15,
+        maxSearchesPerPrompt: 1
+      };
+
+      // Reset logger
+      logger.minLevel = 'INFO';
+
+      logger.info('[ChatProvider] Settings reset to defaults');
+
+      // Send fresh settings to webview
+      this.sendCurrentSettings();
+
+      // Notify webview
+      this._view?.webview.postMessage({ type: 'settingsReset' });
+    } catch (error) {
+      logger.error(`[ChatProvider] Failed to reset settings: ${error}`);
+    }
   }
 
   private setEditMode(mode: 'manual' | 'ask' | 'auto') {
@@ -734,8 +983,17 @@ which I already edited - would you like me to update it?"
     const editorContext = await this.getEditorContext();
     const isReasonerModel = this.deepSeekClient.isReasonerModel();
 
+    // Get custom system prompt from settings (if set)
+    const config = vscode.workspace.getConfiguration('deepseek');
+    const customSystemPrompt = config.get<string>('systemPrompt') || '';
+
     let systemPrompt = `You are DeepSeek Moby, an expert programming assistant integrated into VS Code.
 `;
+
+    // Prepend custom system prompt if set
+    if (customSystemPrompt.trim()) {
+      systemPrompt = `${customSystemPrompt.trim()}\n\n---\n\n${systemPrompt}`;
+    }
 
     // Add exploration capabilities based on model type
     if (isReasonerModel) {
@@ -758,63 +1016,87 @@ USE THESE TOOLS to understand the codebase before making suggestions. When the u
 `;
     }
 
+    // Add edit mode context to system prompt
+    const editModeDescriptions = {
+      manual: 'Code blocks will be displayed for reference. The user will manually copy and apply changes.',
+      ask: 'Code blocks will trigger a diff view where the user can review and accept/reject changes.',
+      auto: 'Code blocks will be automatically applied to files without user confirmation.'
+    };
+
     systemPrompt += `
-IMPORTANT - When writing code changes:
+IMPORTANT - Code Edit Format Requirements
 
-**CRITICAL: File Path Requirement**
-You MUST include a file path comment as the FIRST LINE of EVERY code block using this EXACT format:
+**Current Edit Mode: ${this.editMode.toUpperCase()}**
+${editModeDescriptions[this.editMode]}
 
+**CRITICAL FORMAT: Every code edit MUST use this exact structure:**
+
+\`\`\`<language>
 # File: path/to/file.ext
-
-Examples:
-\`\`\`markdown
-# File: CHANGELOG.md
-## Version 2.0.0
-- New features
-\`\`\`
-
-\`\`\`typescript
-# File: src/providers/chatProvider.ts
-export function helper() {
-  return "updated";
-}
-\`\`\`
-
-This is MANDATORY. Code blocks without file paths at the first line cannot be applied correctly.
-
-**For EDITING existing code**, output a SINGLE code block with SEARCH/REPLACE format:
-
-\`\`\`
 <<<<<<< SEARCH
-def example(x)
-  return x + 1
-end
+exact code to find (copy from file verbatim)
 =======
-def example(x)
-  return x * 2
-end
+replacement code
 >>>>>>> REPLACE
 \`\`\`
 
-CRITICAL RULES:
-1. The <<<<<<< SEARCH, =======, and >>>>>>> REPLACE markers MUST be INSIDE the code block
-2. Output ONE code block containing the entire search/replace - NOT separate "before" and "after" blocks
-3. Copy the EXACT code from the file for the SEARCH section (including whitespace and comments)
-4. Do NOT explain the change outside the code block - put everything in ONE code block
-5. The user clicks "Apply" on the code block and it automatically replaces the matching code
-
-**For ADDING new code** (new functions, methods), include surrounding context:
+**EXAMPLE - Editing a TypeScript function:**
+\`\`\`typescript
+# File: src/utils/helper.ts
+<<<<<<< SEARCH
+export function calculate(x: number): number {
+  return x + 1;
+}
+=======
+export function calculate(x: number): number {
+  return x * 2;  // Changed from addition to multiplication
+}
+>>>>>>> REPLACE
 \`\`\`
-  def existing_method
-    # existing code
-  end
 
-  def new_method_i_am_adding
-    # new code here
-  end
+**REQUIREMENTS (MANDATORY - edits will fail without these):**
+1. ✓ Code block must start with triple backticks and optional language
+2. ✓ First line INSIDE the code block must be "# File: <path>"
+3. ✓ SEARCH section contains EXACT code from the file (including whitespace)
+4. ✓ All markers (<<<<<<< SEARCH, =======, >>>>>>> REPLACE) must be INSIDE the code block
+5. ✓ ONE code block per file edit - do NOT split into separate "before" and "after" blocks
 
-  def another_existing_method
+**For ADDING new code** (inserting new functions/methods):
+\`\`\`typescript
+# File: src/services/api.ts
+<<<<<<< SEARCH
+  async fetchUser(id: string): Promise<User> {
+    // existing method
+  }
+=======
+  async fetchUser(id: string): Promise<User> {
+    // existing method
+  }
+
+  async createUser(data: UserData): Promise<User> {
+    // new method I'm adding
+    return this.post('/users', data);
+  }
+>>>>>>> REPLACE
 \`\`\`
+
+**For CREATING new files** (empty SEARCH section):
+\`\`\`typescript
+# File: src/utils/newFile.ts
+<<<<<<< SEARCH
+=======
+// This is a brand new file
+export function newHelper(): string {
+  return "hello";
+}
+>>>>>>> REPLACE
+\`\`\`
+
+**COMMON MISTAKES TO AVOID:**
+✗ Forgetting the "# File:" header (edit won't be detected)
+✗ Putting SEARCH/REPLACE outside code fences (won't be parsed)
+✗ Using separate code blocks for "before" and "after" (use ONE block)
+✗ Showing code without the edit format (won't be applied)
 
 `;
     if (editorContext) {
@@ -1010,7 +1292,24 @@ Now provide your final response based on what you learned. Do NOT attempt to use
       // This ensures R1 doesn't "forget" the task after shell exploration
       const originalUserMessage = message;
 
+      // Auto-continuation tracking for R1
+      // When R1 explores with shell commands but doesn't produce code edits,
+      // we auto-continue to prompt it to complete the task
+      const maxAutoContinuations = 2;  // Limit to prevent infinite loops
+      let autoContinuationCount = 0;
+      let lastIterationHadShellCommands = false;
+
+      // Total iteration safeguard (shell iterations + auto-continuations)
+      const maxTotalIterations = 10;
+      let totalIterations = 0;
+
       do {
+        totalIterations++;
+        if (totalIterations > maxTotalIterations) {
+          logger.warn(`[R1-Shell] Total iteration limit reached (${maxTotalIterations}), breaking loop`);
+          break;
+        }
+
         // Track iteration-specific response (accumulated response is declared outside try block)
         let iterationResponse = '';
 
@@ -1110,13 +1409,18 @@ Now provide your final response based on what you learned. Do NOT attempt to use
           }
         }
 
-        // Check for shell commands in THIS iteration's response (not accumulated)
-        if (isReasonerModel && containsShellCommands(iterationResponse)) {
+        // Check for shell commands in THIS iteration's response AND reasoning
+        // R1 can output <shell> tags in either the content or reasoning stream
+        const combinedForShellCheck = iterationResponse + (currentIterationReasoning || '');
+        if (isReasonerModel && containsShellCommands(combinedForShellCheck)) {
           shellIteration++;
-          logger.info(`[R1-Shell] Iteration ${shellIteration}: found shell commands`);
+          lastIterationHadShellCommands = true;  // Track for auto-continuation
+          const inReasoning = containsShellCommands(currentIterationReasoning || '');
+          const inContent = containsShellCommands(iterationResponse);
+          logger.info(`[R1-Shell] Iteration ${shellIteration}: found shell commands (inContent=${inContent}, inReasoning=${inReasoning})`);
 
-          // Parse and execute shell commands from this iteration
-          const commands = parseShellCommands(iterationResponse);
+          // Parse and execute shell commands from both streams
+          const commands = parseShellCommands(combinedForShellCheck);
           const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
           if (commands.length > 0 && workspacePath) {
@@ -1126,8 +1430,14 @@ Now provide your final response based on what you learned. Do NOT attempt to use
               commands: commands.map(c => c.command)
             });
 
+            // Check "Walk on the Wild Side" setting
+            const config = vscode.workspace.getConfiguration('deepseek');
+            const allowAllCommands = config.get<boolean>('allowAllShellCommands') ?? false;
+
             // Execute commands
-            const results = await executeShellCommands(commands, workspacePath);
+            const results = await executeShellCommands(commands, workspacePath, {
+              allowAllCommands
+            });
             shellResultsForHistory.push(...results);
 
             // Notify frontend of results
@@ -1182,9 +1492,72 @@ You MUST now complete this task:
             logger.info(`[R1-Shell] Injected ${results.length} shell results for task: "${originalUserMessage.substring(0, 50)}...", continuing...`);
           }
         } else {
-          // No shell commands or not reasoner - break the loop
+          // No shell commands in this iteration
           if (isReasonerModel) {
-            logger.info(`[R1-Shell] Loop exiting: iteration=${shellIteration}, hasShellCommands=false, responseLength=${iterationResponse.length}`);
+            logger.info(`[R1-Shell] No shell commands in iteration, checking for auto-continuation...`);
+            logger.info(`[R1-Shell] shellIteration=${shellIteration}, autoContinuationCount=${autoContinuationCount}, lastIterationHadShellCommands=${lastIterationHadShellCommands}`);
+
+            // Check if we should auto-continue:
+            // 1. Shell commands were executed in previous iterations (model was exploring)
+            // 2. Response doesn't contain code edits (task not complete)
+            // 3. Under max auto-continuation limit
+            const hasCodeEdits = containsCodeEdits(accumulatedResponse);
+            logger.info(`[R1-Shell] Response has code edits: ${hasCodeEdits}`);
+
+            if (shellIteration > 0 && !hasCodeEdits && autoContinuationCount < maxAutoContinuations) {
+              autoContinuationCount++;
+              logger.info(`[R1-Shell] Auto-continuing (${autoContinuationCount}/${maxAutoContinuations}): shell commands were executed but no code edits produced`);
+
+              // Notify frontend
+              this._view?.webview.postMessage({
+                type: 'autoContinuation',
+                count: autoContinuationCount,
+                max: maxAutoContinuations,
+                reason: 'No code edits after shell exploration'
+              });
+
+              // Add current response to context
+              currentHistoryMessages.push({
+                role: 'assistant',
+                content: iterationResponse
+              });
+
+              // Add continuation prompt as user message
+              currentHistoryMessages.push({
+                role: 'user',
+                content: `You explored the codebase but didn't complete the task.
+
+ORIGINAL TASK: "${originalUserMessage}"
+
+You MUST now produce the code edits. Use the SEARCH/REPLACE format with "# File:" headers:
+
+\`\`\`<language>
+# File: path/to/file.ext
+<<<<<<< SEARCH
+exact code to find
+=======
+replacement code
+>>>>>>> REPLACE
+\`\`\`
+
+Do NOT describe what to do - actually produce the code changes now.`
+              });
+
+              // Update system prompt to be more insistent
+              currentSystemPrompt = streamingSystemPrompt + `
+
+CRITICAL: The user's original task was: "${originalUserMessage}"
+You have already explored the codebase. NOW YOU MUST produce the actual code edits.
+Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain code changes.`;
+
+              lastIterationHadShellCommands = false;  // Reset for next iteration
+              continue;  // Continue the loop instead of breaking
+            }
+
+            // Log exit reason
+            logger.info(`[R1-Shell] Loop exiting: iteration=${shellIteration}, hasCodeEdits=${hasCodeEdits}, autoContinuations=${autoContinuationCount}/${maxAutoContinuations}`);
+            const lastChars = combinedForShellCheck.slice(-200);
+            logger.info(`[R1-Shell] Last 200 chars: ${lastChars.replace(/\n/g, '\\n')}`);
           }
           break;
         }
@@ -1205,6 +1578,15 @@ You MUST now complete this task:
       // Use accumulatedResponse to include all content from all shell iterations
       let cleanResponse = stripDSML(accumulatedResponse);
       cleanResponse = stripShellTags(cleanResponse);
+
+      // ============================================
+      // Unfenced SEARCH/REPLACE Detection (Fallback)
+      // ============================================
+      // Check for SEARCH/REPLACE markers that might be OUTSIDE code fences.
+      // This handles cases where the LLM outputs the format without proper markdown.
+      if (this.editMode !== 'manual') {
+        await this.detectAndProcessUnfencedEdits(cleanResponse);
+      }
 
       // Finalize response
       this._view.webview.postMessage({
@@ -2170,6 +2552,10 @@ You MUST now complete this task:
 
       if (!fileUri) {
         logger.warn(`[ChatProvider] Auto mode: File not found: ${filePath}`);
+        this._view?.webview.postMessage({
+          type: 'warning',
+          message: `Could not find file: ${filePath}. The file may have been moved or deleted.`
+        });
         return;
       }
 
@@ -2182,6 +2568,10 @@ You MUST now complete this task:
 
       if (!result.success) {
         logger.warn(`[ChatProvider] Auto mode: Diff application had issues for ${filePath}: ${result.message}`);
+        this._view?.webview.postMessage({
+          type: 'warning',
+          message: `Code edit may not have been applied correctly to ${filePath}: ${result.message || 'No matching code found'}`
+        });
       }
 
       // Apply the changes
@@ -2239,16 +2629,22 @@ You MUST now complete this task:
 
   /**
    * Notify frontend of auto-applied files list change
+   * Uses resolvedDiffs instead of autoAppliedFiles because it has proper diffId/iteration
    */
   private notifyAutoAppliedFilesChanged() {
     if (!this._view) return;
 
+    // Use resolvedDiffs which has the proper structure (diffId, iteration)
+    // Auto-applied files are added to resolvedDiffs with status 'applied'
     this._view.webview.postMessage({
       type: 'diffListChanged',
-      diffs: this.autoAppliedFiles.map(f => ({
-        filePath: f.filePath,
-        timestamp: f.timestamp,
-        status: 'applied'
+      diffs: this.resolvedDiffs.map(d => ({
+        filePath: d.filePath,
+        timestamp: d.timestamp,
+        status: d.status,
+        iteration: d.iteration,
+        diffId: d.diffId,
+        superseded: false
       })),
       editMode: this.editMode
     });
@@ -2732,6 +3128,87 @@ You MUST now complete this task:
     this.pendingDiffs.set(filePath, { code, language, timer });
   }
 
+  /**
+   * Detect and process SEARCH/REPLACE blocks that appear OUTSIDE of code fences.
+   * This is a fallback for when the LLM doesn't format output correctly.
+   *
+   * The DiffEngine already has robust parsing for SEARCH/REPLACE format.
+   * This method just needs to detect when to invoke it outside of fenced code blocks.
+   */
+  private async detectAndProcessUnfencedEdits(content: string): Promise<void> {
+    // Quick check: does the content even have SEARCH/REPLACE markers?
+    const hasSearchMarker = /<<<{3,}\s*SEARCH/i.test(content);
+    const hasReplaceMarker = />>>{3,}\s*REPLACE/i.test(content);
+
+    if (!hasSearchMarker || !hasReplaceMarker) {
+      return; // No unfenced markers to process
+    }
+
+    logger.info(`[ChatProvider] Detected potential unfenced SEARCH/REPLACE markers`);
+
+    // Check if all SEARCH/REPLACE blocks are inside code fences
+    // If they're inside fences, they were already processed during streaming
+    const fencedBlockRegex = /```[\w]*\n[\s\S]*?```/g;
+    let contentWithoutFencedBlocks = content;
+    let match;
+    while ((match = fencedBlockRegex.exec(content)) !== null) {
+      // Replace fenced blocks with placeholder to check what's left
+      contentWithoutFencedBlocks = contentWithoutFencedBlocks.replace(match[0], '<<<FENCED_BLOCK>>>');
+    }
+
+    // Check if SEARCH/REPLACE markers exist OUTSIDE of fenced blocks
+    const unfencedHasSearch = /<<<{3,}\s*SEARCH/i.test(contentWithoutFencedBlocks);
+    const unfencedHasReplace = />>>{3,}\s*REPLACE/i.test(contentWithoutFencedBlocks);
+
+    if (!unfencedHasSearch || !unfencedHasReplace) {
+      logger.info(`[ChatProvider] All SEARCH/REPLACE blocks are inside code fences (already processed)`);
+      return;
+    }
+
+    logger.info(`[ChatProvider] Found UNFENCED SEARCH/REPLACE blocks - attempting fallback processing`);
+
+    // Extract just the unfenced portion for parsing
+    // Look for # File: header followed by SEARCH/REPLACE block
+    const unfencedEditRegex = /#\s*File:\s*(.+?)(?:\n|\r\n)([\s\S]*?<<<{3,}\s*SEARCH[\s\S]*?>>>{3,}\s*REPLACE)/gi;
+    const unfencedMatches = [...contentWithoutFencedBlocks.matchAll(unfencedEditRegex)];
+
+    if (unfencedMatches.length > 0) {
+      // Found unfenced edits with file headers - process them
+      for (const editMatch of unfencedMatches) {
+        const filePath = editMatch[1].trim();
+        const codeBlock = editMatch[2];
+
+        logger.info(`[ChatProvider] Processing unfenced edit for: ${filePath}`);
+
+        // Create a code block with the header for processing
+        const codeWithHeader = `# File: ${filePath}\n${codeBlock}`;
+
+        // Create a unique ID to avoid reprocessing
+        const blockId = `unfenced-${filePath}-${codeBlock.length}`;
+        if (this.processedCodeBlocks.has(blockId)) {
+          logger.info(`[ChatProvider] Skipping already processed unfenced block: ${blockId}`);
+          continue;
+        }
+        this.processedCodeBlocks.add(blockId);
+
+        if (this.editMode === 'ask') {
+          this.handleDebouncedDiff(codeWithHeader, 'plaintext');
+        } else if (this.editMode === 'auto') {
+          await this.applyCodeDirectlyForAutoMode(filePath, codeBlock, 'Auto-applied from unfenced code block');
+        }
+      }
+    } else {
+      // SEARCH/REPLACE markers found but no # File: header
+      // Send a warning to help the user understand why the edit wasn't applied
+      logger.warn(`[ChatProvider] Found SEARCH/REPLACE markers but no # File: header - cannot auto-process`);
+
+      this._view?.webview.postMessage({
+        type: 'warning',
+        message: 'Code edit detected but missing file path. The response contains SEARCH/REPLACE format but no "# File:" header to identify which file to edit.'
+      });
+    }
+  }
+
   private async handleAutoShowDiff(code: string, language: string) {
     try {
       logger.info(`[ChatProvider] Starting auto-show diff (language: ${language}, editMode: ${this.editMode})`);
@@ -3086,6 +3563,118 @@ You MUST now complete this task:
                     <label>Tool Iterations: <span id="toolLimitValue">25</span></label>
                     <input type="range" id="toolLimitSlider" min="5" max="100" step="5" value="25">
                     <span class="tool-limit-hint">Limits tool calling loops (each loop can have multiple tools). 100 = No limit</span>
+                  </div>
+                  <div class="model-dropdown-divider"></div>
+                  <div class="temperature-control">
+                    <label>Max Output Tokens: <span id="tokenLimitValue">8192</span></label>
+                    <input type="range" id="tokenLimitSlider" min="256" max="65536" step="256" value="8192">
+                    <span class="tool-limit-hint" id="tokenLimitHint">Maximum tokens in response. Chat: 8K, Reasoner: 64K</span>
+                  </div>
+                </div>
+              </div>
+              <div class="settings-selector">
+                <button id="settingsBtn" class="settings-btn" title="Settings">
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M9.1 4.4L8.6 2H7.4l-.5 2.4-.7.3-2-1.3-.9.8 1.3 2-.2.7-2.4.5v1.2l2.4.5.3.8-1.3 2 .8.8 2-1.3.8.3.4 2.3h1.2l.5-2.4.8-.3 2 1.3.8-.8-1.3-2 .3-.8 2.3-.4V7.4l-2.4-.5-.3-.8 1.3-2-.8-.8-2 1.3-.7-.2zM9.4 1l.5 2.4L12 2.1l2 2-1.4 2.1 2.4.4v2.8l-2.4.5L14 12l-2 2-2.1-1.4-.5 2.4H6.6l-.5-2.4L4 13.9l-2-2 1.4-2.1L1 9.4V6.6l2.4-.5L2.1 4l2-2 2.1 1.4.4-2.4h2.8zm.6 7a2 2 0 1 1-4 0 2 2 0 0 1 4 0z"/>
+                  </svg>
+                </button>
+                <div id="settingsDropdown" class="settings-dropdown" style="display: none;">
+                  <div class="settings-section">
+                    <div class="settings-section-title">Logging</div>
+                    <div class="settings-control">
+                      <label>Log Level: <span id="logLevelValue">INFO</span></label>
+                      <select id="logLevelSelect" class="settings-select">
+                        <option value="DEBUG">Debug (verbose)</option>
+                        <option value="INFO" selected>Info (default)</option>
+                        <option value="WARN">Warnings only</option>
+                        <option value="ERROR">Errors only</option>
+                        <option value="OFF">Off</option>
+                      </select>
+                    </div>
+                    <div class="settings-control">
+                      <label>
+                        <input type="checkbox" id="logColorsCheck" checked>
+                        Color-coded logs
+                      </label>
+                    </div>
+                    <button id="openLogsBtn" class="settings-action-btn">Open Logs</button>
+                  </div>
+                  <div class="settings-divider"></div>
+                  <div class="settings-section">
+                    <div class="settings-section-title">Reasoner (R1)</div>
+                    <div class="settings-control">
+                      <label class="settings-wild-label">
+                        <input type="checkbox" id="allowAllCommandsCheck">
+                        <span class="settings-wild-icon">🐾</span> Walk on the Wild Side
+                      </label>
+                      <div class="settings-hint" style="margin-top: 4px;">Allow ALL shell commands. Disables safety blocklist.</div>
+                    </div>
+                  </div>
+                  <div class="settings-divider"></div>
+                  <div class="settings-section">
+                    <div class="settings-section-title">System Prompt</div>
+                    <div class="settings-hint">Custom prompt prepended to all requests. Leave empty for model default.</div>
+                    <textarea id="systemPromptInput" class="settings-textarea" placeholder="Enter custom system prompt..." rows="4"></textarea>
+                    <div class="settings-btn-row">
+                      <button id="saveSystemPromptBtn" class="settings-action-btn">Save</button>
+                      <button id="resetSystemPromptBtn" class="settings-action-btn">Reset to Default</button>
+                      <button id="showDefaultPromptBtn" class="settings-action-btn">Show Default</button>
+                    </div>
+                    <div id="defaultPromptPreview" class="settings-preview" style="display: none;">
+                      <div class="settings-preview-header">
+                        <span>Default prompt for <strong id="defaultPromptModel">current model</strong>:</span>
+                        <button id="closeDefaultPromptBtn" class="settings-close-btn">&times;</button>
+                      </div>
+                      <pre id="defaultPromptContent" class="settings-preview-content"></pre>
+                    </div>
+                  </div>
+                  <div class="settings-divider"></div>
+                  <div class="settings-section">
+                    <div class="settings-section-title">Web Search</div>
+                    <div class="settings-control">
+                      <label>Search Depth</label>
+                      <select id="searchDepthSelect" class="settings-select">
+                        <option value="basic" selected>Basic (faster)</option>
+                        <option value="advanced">Advanced (thorough)</option>
+                      </select>
+                    </div>
+                    <div class="settings-control">
+                      <label>Searches per prompt: <span id="searchesPerPromptValue">1</span></label>
+                      <input type="range" id="searchesPerPromptSlider" class="settings-slider" min="1" max="10" step="1" value="1">
+                    </div>
+                    <div class="settings-control">
+                      <label>Cache duration: <span id="cacheDurationValue">15</span> min</label>
+                      <input type="range" id="cacheDurationSlider" class="settings-slider" min="0" max="60" step="5" value="15">
+                    </div>
+                    <button id="clearSearchCacheBtn" class="settings-action-btn">Clear Search Cache</button>
+                  </div>
+                  <div class="settings-divider"></div>
+                  <div class="settings-section">
+                    <div class="settings-section-title">History</div>
+                    <div class="settings-control">
+                      <label>
+                        <input type="checkbox" id="autoSaveHistoryCheck" checked>
+                        Auto-save history
+                      </label>
+                    </div>
+                    <div class="settings-control">
+                      <label>Max sessions: <span id="maxSessionsValue">100</span></label>
+                      <input type="range" id="maxSessionsSlider" class="settings-slider" min="10" max="500" step="10" value="100">
+                    </div>
+                    <button id="clearHistoryBtn" class="settings-action-btn settings-danger-btn">Clear All History</button>
+                  </div>
+                  <div class="settings-divider"></div>
+                  <div class="settings-section">
+                    <div class="settings-section-title">Debug</div>
+                    <div class="settings-btn-row">
+                      <button id="testStatusBtn" class="settings-action-btn">Test Status</button>
+                      <button id="testWarningBtn" class="settings-action-btn">Test Warning</button>
+                      <button id="testErrorBtn" class="settings-action-btn">Test Error</button>
+                    </div>
+                  </div>
+                  <div class="settings-divider"></div>
+                  <div class="settings-section">
+                    <button id="resetDefaultsBtn" class="settings-action-btn settings-danger-btn">Reset All to Defaults</button>
                   </div>
                 </div>
               </div>

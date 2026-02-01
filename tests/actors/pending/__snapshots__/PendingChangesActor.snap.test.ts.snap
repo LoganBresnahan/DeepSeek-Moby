@@ -1,7 +1,7 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
 exports[`PendingChangesActor Snapshots > ask mode > renders accepted file 1`] = `
-"<div id="pending-X" class="pending-changes-wrapper" data-actor="pending">
+"<div id="pending-X" class="pending-changes-wrapper anim-bubble-in" data-actor="pending">
       <div class="pending-container expanded">
         <div class="pending-header">
           <span class="pending-icon">▶</span>
@@ -22,7 +22,7 @@ exports[`PendingChangesActor Snapshots > ask mode > renders accepted file 1`] = 
 `;
 
 exports[`PendingChangesActor Snapshots > ask mode > renders multiple pending files 1`] = `
-"<div id="pending-X" class="pending-changes-wrapper" data-actor="pending">
+"<div id="pending-X" class="pending-changes-wrapper anim-bubble-in" data-actor="pending">
       <div class="pending-container expanded">
         <div class="pending-header">
           <span class="pending-icon">▶</span>
@@ -70,7 +70,7 @@ exports[`PendingChangesActor Snapshots > ask mode > renders multiple pending fil
 `;
 
 exports[`PendingChangesActor Snapshots > ask mode > renders rejected file 1`] = `
-"<div id="pending-X" class="pending-changes-wrapper" data-actor="pending">
+"<div id="pending-X" class="pending-changes-wrapper anim-bubble-in" data-actor="pending">
       <div class="pending-container expanded">
         <div class="pending-header">
           <span class="pending-icon">▶</span>
@@ -91,7 +91,7 @@ exports[`PendingChangesActor Snapshots > ask mode > renders rejected file 1`] = 
 `;
 
 exports[`PendingChangesActor Snapshots > ask mode > renders single pending file 1`] = `
-"<div id="pending-X" class="pending-changes-wrapper" data-actor="pending">
+"<div id="pending-X" class="pending-changes-wrapper anim-bubble-in" data-actor="pending">
       <div class="pending-container expanded">
         <div class="pending-header">
           <span class="pending-icon">▶</span>
@@ -117,7 +117,7 @@ exports[`PendingChangesActor Snapshots > ask mode > renders single pending file 
 `;
 
 exports[`PendingChangesActor Snapshots > ask mode > renders superseded file 1`] = `
-"<div id="pending-X" class="pending-changes-wrapper" data-actor="pending">
+"<div id="pending-X" class="pending-changes-wrapper anim-bubble-in" data-actor="pending">
       <div class="pending-container expanded">
         <div class="pending-header">
           <span class="pending-icon">▶</span>
@@ -127,9 +127,9 @@ exports[`PendingChangesActor Snapshots > ask mode > renders superseded file 1`] 
         <div class="pending-body">
           
       <div class="pending-item" id="pending-X" data-status="pending" data-superseded="true">
-        <span class="pending-status superseded">●</span>
+        <span class="pending-status superseded">⊘</span>
         <span class="pending-file no-click" title="/src/file.ts">file.ts</span>
-        <span class="pending-label superseded">Newer Version ↓</span>
+        <span class="pending-label superseded">Superseded</span>
       </div>
     
       <div class="pending-item" id="pending-X" data-status="pending" data-superseded="false">
@@ -149,7 +149,7 @@ exports[`PendingChangesActor Snapshots > ask mode > renders superseded file 1`] 
 `;
 
 exports[`PendingChangesActor Snapshots > auto mode > renders auto-applied files 1`] = `
-"<div id="pending-X" class="pending-changes-wrapper" data-actor="pending">
+"<div id="pending-X" class="pending-changes-wrapper anim-bubble-in" data-actor="pending">
       <div class="pending-container expanded auto-mode">
         <div class="pending-header">
           <span class="pending-icon">▶</span>
@@ -176,7 +176,7 @@ exports[`PendingChangesActor Snapshots > auto mode > renders auto-applied files 
 `;
 
 exports[`PendingChangesActor Snapshots > collapsed state > renders collapsed dropdown 1`] = `
-"<div id="pending-X" class="pending-changes-wrapper" data-actor="pending">
+"<div id="pending-X" class="pending-changes-wrapper anim-bubble-in" data-actor="pending">
       <div class="pending-container">
         <div class="pending-header">
           <span class="pending-icon">▶</span>
@@ -205,6 +205,12 @@ exports[`PendingChangesActor Snapshots > empty state > renders empty when no fil
 
 exports[`PendingChangesActor Snapshots > injected styles > injects styles into document head 1`] = `
 "
+/* Pending Changes Wrapper (outer container from InterleavedContentActor) */
+.pending-changes-wrapper {
+  position: relative;
+  z-index: 1;  /* Ensure pending files appears above animation effects like printing-surface */
+}
+
 /* Pending Changes Container */
 .pending-container {
   margin: 8px 0;
@@ -417,7 +423,16 @@ exports[`PendingChangesActor Snapshots > injected styles > injects styles into d
 
 /* Superseded items */
 .pending-item[data-superseded="true"] {
-  opacity: 0.8;
+  opacity: 0.6;
+}
+
+.pending-item[data-superseded="true"] .pending-file {
+  text-decoration: line-through;
+  color: var(--vscode-descriptionForeground);
+}
+
+.pending-item[data-superseded="true"] .pending-status {
+  color: var(--vscode-descriptionForeground);
 }
 "
 `;

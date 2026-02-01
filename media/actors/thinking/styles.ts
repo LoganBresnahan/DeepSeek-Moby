@@ -3,6 +3,12 @@
  * CSS for reasoning/thinking content display (DeepSeek Reasoner R1)
  */
 export const thinkingStyles = `
+/* Thinking iteration wrapper (outer container from InterleavedContentActor) */
+.thinking-iteration-wrapper {
+  position: relative;
+  z-index: 1;  /* Ensure thinking appears above animation effects like printing-surface */
+}
+
 /* Thinking Container */
 .thinking-container {
   background: transparent;

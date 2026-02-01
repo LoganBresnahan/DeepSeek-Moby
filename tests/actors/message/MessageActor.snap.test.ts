@@ -130,3 +130,99 @@ describe('MessageActor State Snapshots', () => {
     expect(actor.getState()).toMatchSnapshot();
   });
 });
+
+describe('MessageActor Edit Mode and Code Block Collapse', () => {
+  let manager: EventStateManager;
+  let element: HTMLElement;
+  let actor: MessageActor;
+
+  beforeEach(() => {
+    MessageActor.resetStylesInjected();
+    manager = new EventStateManager();
+    element = document.createElement('div');
+    element.id = 'chat-messages';
+    document.body.appendChild(element);
+    actor = new MessageActor(manager, element);
+  });
+
+  afterEach(() => {
+    actor.destroy();
+    document.body.innerHTML = '';
+  });
+
+  describe('setEditMode', () => {
+    it('defaults to manual mode', () => {
+      expect(actor.getEditMode()).toBe('manual');
+    });
+
+    it('sets edit mode to ask', () => {
+      actor.setEditMode('ask');
+      expect(actor.getEditMode()).toBe('ask');
+    });
+
+    it('sets edit mode to auto', () => {
+      actor.setEditMode('auto');
+      expect(actor.getEditMode()).toBe('auto');
+    });
+  });
+
+  describe('code block collapse in different modes', () => {
+    const codeBlockContent = 'Here is code:\n```typescript\nconst x = 1;\nconst y = 2;\n```';
+
+    it('renders code block expanded in manual mode', () => {
+      actor.setEditMode('manual');
+      actor.addAssistantMessage(codeBlockContent);
+
+      const codeBlock = element.querySelector('.code-block');
+      expect(codeBlock?.classList.contains('collapsed')).toBe(false);
+      expect(normalizeIds(element.innerHTML)).toMatchSnapshot();
+    });
+
+    it('renders code block collapsed in ask mode', () => {
+      actor.setEditMode('ask');
+      actor.addAssistantMessage(codeBlockContent);
+
+      const codeBlock = element.querySelector('.code-block');
+      expect(codeBlock?.classList.contains('collapsed')).toBe(true);
+      expect(normalizeIds(element.innerHTML)).toMatchSnapshot();
+    });
+
+    it('renders code block collapsed in auto mode', () => {
+      actor.setEditMode('auto');
+      actor.addAssistantMessage(codeBlockContent);
+
+      const codeBlock = element.querySelector('.code-block');
+      expect(codeBlock?.classList.contains('collapsed')).toBe(true);
+      expect(normalizeIds(element.innerHTML)).toMatchSnapshot();
+    });
+
+    it('includes collapse toggle button', () => {
+      actor.addAssistantMessage(codeBlockContent);
+
+      const toggleBtn = element.querySelector('.collapse-toggle-btn');
+      expect(toggleBtn).toBeTruthy();
+    });
+
+    it('toggles collapse state on button click', () => {
+      actor.setEditMode('auto');
+      actor.addAssistantMessage(codeBlockContent);
+
+      const codeBlock = element.querySelector('.code-block');
+      const toggleBtn = element.querySelector('.collapse-toggle-btn') as HTMLButtonElement;
+
+      // Initially collapsed in auto mode
+      expect(codeBlock?.classList.contains('collapsed')).toBe(true);
+      expect(toggleBtn?.textContent).toBe('▶');
+
+      // Click to expand
+      toggleBtn?.click();
+      expect(codeBlock?.classList.contains('collapsed')).toBe(false);
+      expect(toggleBtn?.textContent).toBe('▼');
+
+      // Click to collapse again
+      toggleBtn?.click();
+      expect(codeBlock?.classList.contains('collapsed')).toBe(true);
+      expect(toggleBtn?.textContent).toBe('▶');
+    });
+  });
+});

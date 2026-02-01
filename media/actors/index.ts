@@ -54,5 +54,18 @@ export type { ScrollState } from './scroll';
 export { DiffActor } from './diff';
 export type { DiffLine, DiffData, DiffState } from './diff';
 
+// Input Area (wraps existing DOM)
+export { InputAreaActor } from './input-area';
+export type { Attachment, InputAreaState, SendHandler, StopHandler, InterruptHandler } from './input-area';
+
+// Status Panel (wraps existing DOM)
+export { StatusPanelActor } from './status-panel';
+export type { StatusPanelState, LogsHandler } from './status-panel';
+
+// Toolbar (wraps existing DOM)
+export { ToolbarActor } from './toolbar';
+export type { ToolbarState, EditModeHandler, WebSearchHandler, FilesHandler, CommandHandler, WebSearchSettings } from './toolbar';
+// Note: EditMode is also exported from ./pending, so toolbar's version is accessed via ToolbarActor.EditMode if needed
+
 // Future actors will be exported here as they're implemented:
 // export { MarkdownActor } from './markdown';

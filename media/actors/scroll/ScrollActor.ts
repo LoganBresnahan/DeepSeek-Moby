@@ -43,6 +43,18 @@ export class ScrollActor extends EventStateActor {
   // Event handlers
   private _scrollHandler: (() => void) | null = null;
 
+  // ResizeObserver for trailing scroll during content growth
+  private _resizeObserver: ResizeObserver | null = null;
+
+  // Track last scroll height to detect growth
+  private _lastScrollHeight = 0;
+
+  // Debounce timer for scroll trailing
+  private _trailTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Scroll-to-bottom button element
+  private _scrollButton: HTMLButtonElement | null = null;
+
   constructor(manager: EventStateManager, element: HTMLElement) {
     const config: ActorConfig = {
       manager,
@@ -83,12 +95,111 @@ export class ScrollActor extends EventStateActor {
    */
   private setupScrollTracking(): void {
     this._scrollContainer = this.element;
+    this._lastScrollHeight = this._scrollContainer.scrollHeight;
 
     this._scrollHandler = () => {
       this.handleScroll();
     };
 
     this._scrollContainer.addEventListener('scroll', this._scrollHandler);
+
+    // Setup ResizeObserver to detect content height changes
+    // This enables smooth trailing during streaming
+    this._resizeObserver = new ResizeObserver(() => {
+      this.handleContentResize();
+    });
+
+    // Observe the container's children for size changes
+    this._resizeObserver.observe(this._scrollContainer);
+
+    // Create scroll-to-bottom button
+    this.createScrollButton();
+  }
+
+  /**
+   * Create the scroll-to-bottom button
+   */
+  private createScrollButton(): void {
+    if (!this._scrollContainer) return;
+
+    this._scrollButton = document.createElement('button');
+    this._scrollButton.className = 'scroll-to-bottom';
+    this._scrollButton.setAttribute('aria-label', 'Scroll to bottom');
+    this._scrollButton.setAttribute('title', 'Scroll to bottom');
+
+    this._scrollButton.addEventListener('click', () => {
+      this.scrollToBottom(true);
+    });
+
+    // Insert button near the scroll container
+    // Find parent that can hold absolute positioned element
+    const parent = this._scrollContainer.parentElement;
+    if (parent) {
+      // Ensure parent is positioned for absolute child
+      const parentPosition = getComputedStyle(parent).position;
+      if (parentPosition === 'static') {
+        parent.style.position = 'relative';
+      }
+      parent.appendChild(this._scrollButton);
+    }
+  }
+
+  /**
+   * Update scroll button visibility
+   */
+  private updateScrollButtonVisibility(): void {
+    if (!this._scrollButton) return;
+
+    // Show button when:
+    // 1. Streaming is active
+    // 2. User has scrolled up (not near bottom)
+    const shouldShow = this._isStreaming && this._userScrolled && !this._nearBottom;
+
+    if (shouldShow) {
+      this._scrollButton.classList.add('visible');
+    } else {
+      this._scrollButton.classList.remove('visible');
+    }
+  }
+
+  /**
+   * Handle content resize - trail scroll if at bottom
+   */
+  private handleContentResize(): void {
+    if (!this._scrollContainer) return;
+
+    const newScrollHeight = this._scrollContainer.scrollHeight;
+    const heightGrew = newScrollHeight > this._lastScrollHeight;
+    this._lastScrollHeight = newScrollHeight;
+
+    // Only trail if:
+    // 1. Content actually grew (not shrunk)
+    // 2. We're streaming OR we just added content
+    // 3. Auto-scroll is enabled (user hasn't scrolled up)
+    // 4. We're near the bottom
+    if (heightGrew && this._autoScroll && !this._userScrolled && this._nearBottom) {
+      // Debounce to batch rapid updates during streaming
+      if (this._trailTimer) {
+        clearTimeout(this._trailTimer);
+      }
+
+      // Use requestAnimationFrame for smooth trailing
+      this._trailTimer = setTimeout(() => {
+        this.trailScroll();
+      }, 16); // ~60fps
+    }
+  }
+
+  /**
+   * Smoothly trail the scroll to follow growing content
+   */
+  private trailScroll(): void {
+    if (!this._scrollContainer) return;
+
+    // Use instant scroll during streaming for responsiveness
+    // Smooth scroll can lag behind fast content
+    this._scrollContainer.scrollTop = this._scrollContainer.scrollHeight;
+    this._nearBottom = true;
   }
 
   // ============================================
@@ -102,15 +213,35 @@ export class ScrollActor extends EventStateActor {
       // Reset scroll state when streaming starts
       this._userScrolled = false;
       this._autoScroll = true;
+      this._nearBottom = true;
+
+      // Update lastScrollHeight to current state
+      if (this._scrollContainer) {
+        this._lastScrollHeight = this._scrollContainer.scrollHeight;
+      }
+
       this.publish({
         'scroll.userScrolled': false,
-        'scroll.autoScroll': true
+        'scroll.autoScroll': true,
+        'scroll.nearBottom': true
       });
+
+      // Initial scroll to bottom when streaming starts
+      this.scrollToBottom();
     } else {
+      // Clear any pending trail timer
+      if (this._trailTimer) {
+        clearTimeout(this._trailTimer);
+        this._trailTimer = null;
+      }
+
       // Reset user scrolled flag when streaming ends
       this._userScrolled = false;
       this.publish({ 'scroll.userScrolled': false });
     }
+
+    // Update button visibility
+    this.updateScrollButtonVisibility();
   }
 
   private handleMessageCount(): void {
@@ -140,6 +271,7 @@ export class ScrollActor extends EventStateActor {
           'scroll.userScrolled': true,
           'scroll.autoScroll': false
         });
+        this.updateScrollButtonVisibility();
       }
       // If user scrolled back to bottom, re-enable auto-scroll
       else if (nearBottom && this._userScrolled) {
@@ -149,6 +281,7 @@ export class ScrollActor extends EventStateActor {
           'scroll.userScrolled': false,
           'scroll.autoScroll': true
         });
+        this.updateScrollButtonVisibility();
       }
     }
 
@@ -196,6 +329,9 @@ export class ScrollActor extends EventStateActor {
       'scroll.userScrolled': false,
       'scroll.autoScroll': true
     });
+
+    // Hide the scroll button
+    this.updateScrollButtonVisibility();
   }
 
   /**
@@ -263,9 +399,29 @@ export class ScrollActor extends EventStateActor {
    * Destroy and cleanup
    */
   destroy(): void {
+    // Clean up scroll handler
     if (this._scrollHandler && this._scrollContainer) {
       this._scrollContainer.removeEventListener('scroll', this._scrollHandler);
     }
+
+    // Clean up ResizeObserver
+    if (this._resizeObserver) {
+      this._resizeObserver.disconnect();
+      this._resizeObserver = null;
+    }
+
+    // Clear any pending timers
+    if (this._trailTimer) {
+      clearTimeout(this._trailTimer);
+      this._trailTimer = null;
+    }
+
+    // Remove scroll button
+    if (this._scrollButton) {
+      this._scrollButton.remove();
+      this._scrollButton = null;
+    }
+
     this._scrollHandler = null;
     this._scrollContainer = null;
     super.destroy();

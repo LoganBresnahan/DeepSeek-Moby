@@ -1,7 +1,7 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
 exports[`ShellActor Snapshots > completed commands > renders failed command 1`] = `
-"<div id="shell-X-TIMESTAMP" class="shell-segment" data-actor="shell">
+"<div id="shell-X-TIMESTAMP" class="shell-segment anim-bubble-in" data-actor="shell">
       <div class="shell-container complete has-errors" data-segment-id="shell-X-TIMESTAMP">
         <div class="shell-header">
           <span class="shell-icon">▶</span>
@@ -24,7 +24,7 @@ exports[`ShellActor Snapshots > completed commands > renders failed command 1`] 
 `;
 
 exports[`ShellActor Snapshots > completed commands > renders mixed success/failure 1`] = `
-"<div id="shell-X-TIMESTAMP" class="shell-segment" data-actor="shell">
+"<div id="shell-X-TIMESTAMP" class="shell-segment anim-bubble-in" data-actor="shell">
       <div class="shell-container complete has-errors" data-segment-id="shell-X-TIMESTAMP">
         <div class="shell-header">
           <span class="shell-icon">▶</span>
@@ -55,7 +55,7 @@ exports[`ShellActor Snapshots > completed commands > renders mixed success/failu
 `;
 
 exports[`ShellActor Snapshots > completed commands > renders successful command 1`] = `
-"<div id="shell-X-TIMESTAMP" class="shell-segment" data-actor="shell">
+"<div id="shell-X-TIMESTAMP" class="shell-segment anim-bubble-in" data-actor="shell">
       <div class="shell-container complete" data-segment-id="shell-X-TIMESTAMP">
         <div class="shell-header">
           <span class="shell-icon">▶</span>
@@ -80,7 +80,7 @@ exports[`ShellActor Snapshots > completed commands > renders successful command 
 exports[`ShellActor Snapshots > empty state > renders empty when no segments 1`] = `""`;
 
 exports[`ShellActor Snapshots > expanded state > renders expanded segment 1`] = `
-"<div id="shell-X-TIMESTAMP" class="shell-segment" data-actor="shell">
+"<div id="shell-X-TIMESTAMP" class="shell-segment anim-bubble-in" data-actor="shell">
       <div class="shell-container expanded" data-segment-id="shell-X-TIMESTAMP">
         <div class="shell-header">
           <span class="shell-icon">▶</span>
@@ -104,6 +104,12 @@ exports[`ShellActor Snapshots > expanded state > renders expanded segment 1`] = 
 
 exports[`ShellActor Snapshots > injected styles > injects styles into document head 1`] = `
 "
+/* Shell Segment Wrapper (outer container from InterleavedContentActor) */
+.shell-segment {
+  position: relative;
+  z-index: 1;  /* Ensure shell appears above animation effects like printing-surface */
+}
+
 /* Shell Commands Container - extends tool-calls-container */
 .shell-container {
   margin: 8px 0;
@@ -275,7 +281,7 @@ exports[`ShellActor Snapshots > injected styles > injects styles into document h
 `;
 
 exports[`ShellActor Snapshots > multiple segments > renders multiple segments 1`] = `
-"<div id="shell-X-TIMESTAMP" class="shell-segment" data-actor="shell">
+"<div id="shell-X-TIMESTAMP" class="shell-segment anim-bubble-in" data-actor="shell">
       <div class="shell-container complete" data-segment-id="shell-X-TIMESTAMP">
         <div class="shell-header">
           <span class="shell-icon">▶</span>
@@ -294,7 +300,7 @@ exports[`ShellActor Snapshots > multiple segments > renders multiple segments 1`
     
         </div>
       </div>
-    </div><div id="shell-X-TIMESTAMP" class="shell-segment" data-actor="shell">
+    </div><div id="shell-X-TIMESTAMP" class="shell-segment anim-bubble-in" data-actor="shell">
       <div class="shell-container" data-segment-id="shell-X-TIMESTAMP">
         <div class="shell-header">
           <span class="shell-icon">▶</span>
@@ -325,7 +331,7 @@ exports[`ShellActor Snapshots > multiple segments > renders multiple segments 1`
 `;
 
 exports[`ShellActor Snapshots > pending commands > renders multiple pending commands 1`] = `
-"<div id="shell-X-TIMESTAMP" class="shell-segment" data-actor="shell">
+"<div id="shell-X-TIMESTAMP" class="shell-segment anim-bubble-in" data-actor="shell">
       <div class="shell-container" data-segment-id="shell-X-TIMESTAMP">
         <div class="shell-header">
           <span class="shell-icon">▶</span>
@@ -364,7 +370,7 @@ exports[`ShellActor Snapshots > pending commands > renders multiple pending comm
 `;
 
 exports[`ShellActor Snapshots > pending commands > renders single pending command 1`] = `
-"<div id="shell-X-TIMESTAMP" class="shell-segment" data-actor="shell">
+"<div id="shell-X-TIMESTAMP" class="shell-segment anim-bubble-in" data-actor="shell">
       <div class="shell-container" data-segment-id="shell-X-TIMESTAMP">
         <div class="shell-header">
           <span class="shell-icon">▶</span>
@@ -387,7 +393,7 @@ exports[`ShellActor Snapshots > pending commands > renders single pending comman
 `;
 
 exports[`ShellActor Snapshots > running commands > renders running command with spinner 1`] = `
-"<div id="shell-X-TIMESTAMP" class="shell-segment" data-actor="shell">
+"<div id="shell-X-TIMESTAMP" class="shell-segment anim-bubble-in" data-actor="shell">
       <div class="shell-container" data-segment-id="shell-X-TIMESTAMP">
         <div class="shell-header">
           <span class="shell-icon">▶</span>

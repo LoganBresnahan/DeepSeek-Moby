@@ -3,6 +3,12 @@
  * CSS for shell command dropdowns and output display
  */
 export const shellStyles = `
+/* Shell Segment Wrapper (outer container from InterleavedContentActor) */
+.shell-segment {
+  position: relative;
+  z-index: 1;  /* Ensure shell appears above animation effects like printing-surface */
+}
+
 /* Shell Commands Container - extends tool-calls-container */
 .shell-container {
   margin: 8px 0;
