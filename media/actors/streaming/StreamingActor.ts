@@ -110,10 +110,14 @@ export class StreamingActor extends EventStateActor {
    * Handle incoming thinking chunk (for reasoner model)
    */
   handleThinkingChunk(chunk: string): void {
-    if (!this._active) return;
+    if (!this._active) {
+      console.warn('[StreamingActor] handleThinkingChunk called but stream not active');
+      return;
+    }
 
     this._thinking += chunk;
 
+    console.log('[StreamingActor] Publishing streaming.thinking, length:', this._thinking.length);
     this.publish({
       'streaming.thinking': this._thinking
     });

@@ -106,12 +106,6 @@ exports[`ToolCallsActor Snapshots > expanded state > renders expanded dropdown 1
 
 exports[`ToolCallsActor Snapshots > injected styles > injects styles into document head 1`] = `
 "
-/* Tools Batch Wrapper (outer container from InterleavedContentActor) */
-.tools-batch {
-  position: relative;
-  z-index: 1;  /* Ensure tools appears above animation effects like printing-surface */
-}
-
 /* Tool Calls Container */
 .tools-container {
   margin: 8px 0;

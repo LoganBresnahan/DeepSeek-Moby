@@ -58,12 +58,6 @@ exports[`ThinkingActor Snapshots > expanded/collapsed > renders expanded iterati
 
 exports[`ThinkingActor Snapshots > injected styles > injects styles into document head 1`] = `
 "
-/* Thinking iteration wrapper (outer container from InterleavedContentActor) */
-.thinking-iteration-wrapper {
-  position: relative;
-  z-index: 1;  /* Ensure thinking appears above animation effects like printing-surface */
-}
-
 /* Thinking Container */
 .thinking-container {
   background: transparent;

@@ -104,13 +104,7 @@ exports[`ShellActor Snapshots > expanded state > renders expanded segment 1`] = 
 
 exports[`ShellActor Snapshots > injected styles > injects styles into document head 1`] = `
 "
-/* Shell Segment Wrapper (outer container from InterleavedContentActor) */
-.shell-segment {
-  position: relative;
-  z-index: 1;  /* Ensure shell appears above animation effects like printing-surface */
-}
-
-/* Shell Commands Container - extends tool-calls-container */
+/* Shell Commands Container */
 .shell-container {
   margin: 8px 0;
   border: 1px solid var(--vscode-panel-border);

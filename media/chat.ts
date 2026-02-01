@@ -1,22 +1,23 @@
 /**
- * Chat Entry Point - Full Actor Integration
+ * Chat Entry Point - Full Shadow DOM Actor Integration
  *
- * This file integrates the actor system with the existing HTML structure.
- * All UI is now managed by actors that wrap existing DOM elements.
+ * All UI is managed by Shadow DOM actors that own their DOM elements.
+ * This provides complete style isolation and cleaner architecture.
  */
 
 import { EventStateManager } from './state/EventStateManager';
 import {
   StreamingActor,
-  MessageActor,
   ScrollActor,
-  ShellActor,
-  ToolCallsActor,
-  ThinkingActor,
-  PendingChangesActor,
-  InputAreaActor,
-  StatusPanelActor,
-  ToolbarActor
+  // Shadow DOM actors - own their DOM
+  MessageShadowActor,
+  ShellShadowActor,
+  ToolCallsShadowActor,
+  ThinkingShadowActor,
+  PendingChangesShadowActor,
+  InputAreaShadowActor,
+  StatusPanelShadowActor,
+  ToolbarShadowActor
 } from './actors';
 import { AnimationHelper } from './utils';
 
@@ -83,51 +84,60 @@ function initializeActorSystem(): void {
   // Create the event state manager
   const manager = new EventStateManager();
 
-  // Create a hidden streaming root (StreamingActor needs an element but doesn't render visible content)
+  // Get container elements for Shadow actors
+  const inputAreaContainer = getElement<HTMLDivElement>('inputAreaContainer');
+  const statusPanelContainer = getElement<HTMLDivElement>('statusPanelContainer');
+  const toolbarContainer = getElement<HTMLDivElement>('toolbarContainer');
+
+  // Get moby icon URL from data attribute
+  const mobyIconUrl = document.body.dataset.mobyIcon || '';
+
+  // Create a hidden streaming root (StreamingActor manages state, not visible content)
   const streamingRoot = document.createElement('div');
   streamingRoot.id = 'streamingRoot';
   streamingRoot.style.display = 'none';
   document.body.appendChild(streamingRoot);
 
-  // Initialize actors
+  // Initialize state-only actors
   const streaming = new StreamingActor(manager, streamingRoot);
-  const message = new MessageActor(manager, chatMessages);
   const scroll = new ScrollActor(manager, chatMessages);
 
-  // ShellActor - uses chatMessages directly, creates segment elements dynamically
-  const shell = new ShellActor(manager, chatMessages);
+  // All actors now use InterleavedShadowActor pattern - each creates its own
+  // shadow-encapsulated containers as siblings in chatMessages.
+  // This allows proper interleaving: DOM order = visual order.
+  //
+  // Example DOM structure during streaming:
+  //   <div id="chatMessages">
+  //     <div data-actor="message">user message 1</div>
+  //     <div data-actor="message">assistant segment 1</div>
+  //     <div data-actor="thinking">thinking iteration 1</div>
+  //     <div data-actor="message">assistant continuation</div>
+  //     <div data-actor="shell">shell commands</div>
+  //     <div data-actor="message">user message 2</div>
+  //     <div data-actor="thinking">thinking iteration 2</div>
+  //   </div>
 
-  // ToolCallsActor - uses chatMessages directly, creates batch elements dynamically
-  const toolCalls = new ToolCallsActor(manager, chatMessages);
+  // MessageShadowActor - creates shadow containers for each message/segment
+  const message = new MessageShadowActor(manager, chatMessages);
 
-  // ThinkingActor - uses chatMessages directly, creates iteration elements dynamically
-  // This allows thinking to appear inline with the response flow
-  const thinking = new ThinkingActor(manager, chatMessages);
+  // Interleaved Shadow actors - create shadow containers within chatMessages
+  const shell = new ShellShadowActor(manager, chatMessages);
+  const toolCalls = new ToolCallsShadowActor(manager, chatMessages);
+  const thinking = new ThinkingShadowActor(manager, chatMessages);
+  const pending = new PendingChangesShadowActor(manager, chatMessages);
 
-  // PendingChangesActor - uses chatMessages directly, creates elements dynamically
-  const pending = new PendingChangesActor(manager, chatMessages);
+  // Debug: Verify chatMessages is NOT a shadow host (critical for interleaving)
+  console.log('[ActorSystem] Initialized. chatMessages.shadowRoot:', chatMessages.shadowRoot,
+    'children:', chatMessages.children.length);
 
-  // InputAreaActor - wraps existing input area DOM elements
-  // Uses a hidden root since it finds elements by ID
-  const inputAreaRoot = document.createElement('div');
-  inputAreaRoot.id = 'inputAreaRoot';
-  inputAreaRoot.style.display = 'none';
-  document.body.appendChild(inputAreaRoot);
-  const inputArea = new InputAreaActor(manager, inputAreaRoot, vscode);
+  // InputAreaShadowActor - owns its DOM, renders into inputAreaContainer
+  const inputArea = new InputAreaShadowActor(manager, inputAreaContainer, vscode);
 
-  // StatusPanelActor - wraps existing status panel DOM elements
-  const statusPanelRoot = document.createElement('div');
-  statusPanelRoot.id = 'statusPanelRoot';
-  statusPanelRoot.style.display = 'none';
-  document.body.appendChild(statusPanelRoot);
-  const statusPanel = new StatusPanelActor(manager, statusPanelRoot, vscode);
+  // StatusPanelShadowActor - owns its DOM, renders into statusPanelContainer
+  const statusPanel = new StatusPanelShadowActor(manager, statusPanelContainer, mobyIconUrl, vscode);
 
-  // ToolbarActor - wraps existing toolbar DOM elements
-  const toolbarRoot = document.createElement('div');
-  toolbarRoot.id = 'toolbarRoot';
-  toolbarRoot.style.display = 'none';
-  document.body.appendChild(toolbarRoot);
-  const toolbar = new ToolbarActor(manager, toolbarRoot, vscode);
+  // ToolbarShadowActor - owns its DOM, renders into toolbarContainer
+  const toolbar = new ToolbarShadowActor(manager, toolbarContainer, vscode);
 
   // Set up InputAreaActor handlers
   inputArea.onSend((content, attachments) => {
@@ -159,6 +169,19 @@ function initializeActorSystem(): void {
 
   toolbar.onFilesOpen(() => {
     openFileModal();
+  });
+
+  // Wire toolbar buttons to input area
+  toolbar.onSend(() => {
+    inputArea.submit();
+  });
+
+  toolbar.onStop(() => {
+    vscode.postMessage({ type: 'stopGeneration' });
+  });
+
+  toolbar.onAttach(() => {
+    inputArea.triggerAttach();
   });
 
   // Set up pending files action handler

@@ -1113,6 +1113,42 @@ code[class*="language-"] {
   word-break: break-word;
 }
 
+/* Shadow Actor Containers */
+.shadow-actors-container {
+  display: flex;
+  flex-direction: column;
+  padding: 8px;
+  background: var(--vscode-sideBar-background);
+}
+
+.shadow-actors-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start; /* Align buttons to TOP of input area */
+}
+
+.toolbar-container {
+  flex-shrink: 0;
+}
+
+/* Wrapper for input area + status panel (matches old .input-textarea-wrapper) */
+.input-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.input-area-container {
+  flex: 1;
+  min-width: 0;
+}
+
+.status-panel-container {
+  /* Status panel sits below textarea, only spanning input width (not toolbar) */
+}
+
 .input-area {
   padding: 8px;
   border-top: none;

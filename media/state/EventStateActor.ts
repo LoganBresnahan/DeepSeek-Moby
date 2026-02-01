@@ -101,7 +101,7 @@ export abstract class EventStateActor {
   }
 
   // ============================================
-  // Scoping Helpers (like Within3)
+  // Scoping Helpers
   // ============================================
 
   /**

@@ -3533,7 +3533,7 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
         <title>DeepSeek Moby</title>
         <link href="${styleUri}" rel="stylesheet">
       </head>
-      <body>
+      <body data-moby-icon="${iconUri}">
         <div class="chat-container">
           <div class="header">
             <img src="${iconUri}" alt="DeepSeek Moby" class="header-icon">
@@ -3683,7 +3683,19 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
 
           <div id="chatMessages" class="chat-messages"></div>
 
-          <div class="input-area">
+          <!-- Shadow Actor containers - actors render their own DOM into these -->
+          <div class="shadow-actors-container">
+            <div class="shadow-actors-row">
+              <div id="toolbarContainer" class="toolbar-container"></div>
+              <div class="input-wrapper">
+                <div id="inputAreaContainer" class="input-area-container"></div>
+                <div id="statusPanelContainer" class="status-panel-container"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Legacy input area - hidden when Shadow actors are active -->
+          <div class="input-area" style="display: none;">
             <div class="input-row">
               <div class="input-buttons-grid">
                 <!-- Row 1: Files + Edit Mode -->

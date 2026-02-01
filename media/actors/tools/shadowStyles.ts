@@ -1,10 +1,10 @@
 /**
- * Shell actor styles
- * CSS for shell command dropdowns and output display
+ * Tool Calls Shadow Actor styles
+ * Simplified CSS for Shadow DOM encapsulation - no prefixes needed
  */
-export const shellStyles = `
-/* Shell Commands Container */
-.shell-container {
+export const toolsShadowStyles = `
+/* Container - applied to shadow content root */
+.container {
   margin: 8px 0;
   border: 1px solid var(--vscode-panel-border);
   border-radius: 6px;
@@ -12,7 +12,7 @@ export const shellStyles = `
   background: var(--vscode-editor-background);
 }
 
-.shell-container.entering {
+.container.entering {
   animation: slideDown 0.2s ease-out forwards;
 }
 
@@ -27,8 +27,8 @@ export const shellStyles = `
   }
 }
 
-/* Shell Header */
-.shell-header {
+/* Header */
+.header {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -39,70 +39,64 @@ export const shellStyles = `
   transition: background 0.15s ease;
 }
 
-.shell-header:hover {
+.header:hover {
   background: var(--vscode-list-hoverBackground);
 }
 
-.shell-icon {
+.icon {
   font-size: 10px;
   color: var(--vscode-foreground);
   transition: transform 0.2s ease;
 }
 
-.shell-container.expanded .shell-icon {
+.container.expanded .icon {
   transform: rotate(90deg);
 }
 
-.shell-title {
+.title {
   flex: 1;
   font-size: 12px;
   color: var(--vscode-foreground);
 }
 
-.shell-summary {
+.summary {
   font-size: 11px;
   color: var(--vscode-descriptionForeground);
 }
 
-/* Shell Body */
-.shell-body {
+/* Body */
+.body {
   max-height: 0;
   overflow: hidden;
   transition: max-height 0.3s ease, padding 0.3s ease;
 }
 
-.shell-container.expanded .shell-body {
+.container.expanded .body {
   max-height: 500px;
   padding: 8px 12px;
   overflow-y: auto;
 }
 
-/* Shell Command Item */
-.shell-item {
+/* Tool Item */
+.item {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  align-items: center;
+  gap: 8px;
   padding: 6px 0;
   border-bottom: 1px solid var(--vscode-panel-border);
 }
 
-.shell-item:last-child {
+.item:last-child {
   border-bottom: none;
 }
 
-.shell-item-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.shell-status {
+.status {
   width: 16px;
   text-align: center;
   flex-shrink: 0;
 }
 
-.shell-status.spinning {
+.status.spinning {
   animation: spin 1s linear infinite;
 }
 
@@ -111,63 +105,45 @@ export const shellStyles = `
   to { transform: rotate(360deg); }
 }
 
-.shell-item[data-status="pending"] .shell-status {
+.item[data-status="pending"] .status {
   color: var(--vscode-descriptionForeground);
 }
 
-.shell-item[data-status="running"] .shell-status {
+.item[data-status="running"] .status {
   color: var(--vscode-terminal-ansiYellow);
 }
 
-.shell-item[data-status="done"] .shell-status {
+.item[data-status="done"] .status {
   color: var(--vscode-terminal-ansiGreen);
 }
 
-.shell-item[data-status="error"] .shell-status {
+.item[data-status="error"] .status {
   color: var(--vscode-errorForeground);
 }
 
-.shell-command {
-  font-family: var(--vscode-editor-font-family);
-  font-size: 12px;
-  color: var(--vscode-terminal-ansiYellow);
+.name {
+  font-weight: 500;
+  color: var(--vscode-textLink-foreground);
 }
 
-.shell-command::before {
-  content: '$ ';
+.detail {
+  flex: 1;
   color: var(--vscode-descriptionForeground);
-}
-
-/* Shell Output */
-.shell-output {
-  font-family: var(--vscode-editor-font-family);
+  word-break: break-all;
   font-size: 11px;
-  color: var(--vscode-terminal-foreground);
-  background: var(--vscode-terminal-background);
-  padding: 8px;
-  border-radius: 4px;
-  margin-top: 4px;
-  white-space: pre-wrap;
-  word-break: break-word;
-  max-height: 200px;
-  overflow-y: auto;
-}
-
-.shell-output:empty {
-  display: none;
 }
 
 /* Complete state */
-.shell-container.complete .shell-header {
+.container.complete .header {
   opacity: 0.7;
 }
 
-.shell-container.complete .shell-header:hover {
+.container.complete .header:hover {
   opacity: 1;
 }
 
 /* Error state */
-.shell-container.has-errors .shell-title {
+.container.has-errors .title {
   color: var(--vscode-errorForeground);
 }
 `;

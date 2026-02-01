@@ -1,10 +1,10 @@
 /**
- * Pending changes actor styles
- * CSS for modified files dropdown display
+ * Pending Changes Shadow Actor styles
+ * Simplified CSS for Shadow DOM encapsulation - no prefixes needed
  */
-export const pendingStyles = `
-/* Pending Changes Container */
-.pending-container {
+export const pendingShadowStyles = `
+/* Container - applied to shadow content root */
+.container {
   margin: 8px 0;
   border: 1px solid var(--vscode-panel-border);
   border-radius: 6px;
@@ -12,11 +12,11 @@ export const pendingStyles = `
   background: var(--vscode-editor-background);
 }
 
-.pending-container.entering {
-  animation: pendingSlideIn 0.2s ease-out;
+.container.entering {
+  animation: slideIn 0.2s ease-out;
 }
 
-@keyframes pendingSlideIn {
+@keyframes slideIn {
   from {
     opacity: 0;
     transform: translateY(-10px);
@@ -27,8 +27,8 @@ export const pendingStyles = `
   }
 }
 
-/* Pending Header */
-.pending-header {
+/* Header */
+.header {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -39,28 +39,28 @@ export const pendingStyles = `
   transition: background 0.15s ease;
 }
 
-.pending-header:hover {
+.header:hover {
   background: var(--vscode-list-hoverBackground);
 }
 
-.pending-icon {
+.icon {
   font-size: 10px;
   color: var(--vscode-foreground);
   transition: transform 0.2s ease;
 }
 
-.pending-container.expanded .pending-icon {
+.container.expanded .icon {
   transform: rotate(90deg);
 }
 
-.pending-title {
+.title {
   flex: 1;
   font-size: 12px;
   font-weight: 500;
   color: var(--vscode-foreground);
 }
 
-.pending-count {
+.count {
   background: var(--vscode-badge-background);
   color: var(--vscode-badge-foreground);
   padding: 2px 6px;
@@ -69,21 +69,21 @@ export const pendingStyles = `
   font-weight: 500;
 }
 
-/* Pending Body */
-.pending-body {
+/* Body */
+.body {
   max-height: 0;
   overflow: hidden;
   transition: max-height 0.3s ease, padding 0.3s ease;
 }
 
-.pending-container.expanded .pending-body {
+.container.expanded .body {
   max-height: 500px;
   padding: 8px 12px;
   overflow-y: auto;
 }
 
-/* Pending Item */
-.pending-item {
+/* Item */
+.item {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -91,34 +91,34 @@ export const pendingStyles = `
   border-bottom: 1px solid var(--vscode-panel-border);
 }
 
-.pending-item:last-child {
+.item:last-child {
   border-bottom: none;
 }
 
-.pending-status {
+.status {
   width: 16px;
   text-align: center;
   flex-shrink: 0;
 }
 
-.pending-status.pending {
+.status.pending {
   color: var(--vscode-editorWarning-foreground, #cca700);
 }
 
-.pending-status.applied {
+.status.applied {
   color: var(--vscode-terminal-ansiGreen);
 }
 
-.pending-status.rejected {
+.status.rejected {
   color: var(--vscode-errorForeground, #f48771);
 }
 
-.pending-status.superseded {
+.status.superseded {
   color: var(--vscode-textLink-foreground, #3794ff);
 }
 
 /* File name */
-.pending-file {
+.file {
   flex: 1;
   font-family: var(--vscode-editor-font-family);
   font-size: 12px;
@@ -129,27 +129,27 @@ export const pendingStyles = `
   white-space: nowrap;
 }
 
-.pending-file:hover {
+.file:hover {
   text-decoration: underline;
 }
 
-.pending-file.no-click {
+.file.no-click {
   cursor: default;
   color: var(--vscode-descriptionForeground);
 }
 
-.pending-file.no-click:hover {
+.file.no-click:hover {
   text-decoration: none;
 }
 
 /* Actions */
-.pending-actions {
+.actions {
   display: flex;
   gap: 4px;
   flex-shrink: 0;
 }
 
-.pending-btn {
+.btn {
   width: 24px;
   height: 24px;
   border: none;
@@ -162,68 +162,68 @@ export const pendingStyles = `
   transition: filter 0.15s ease;
 }
 
-.pending-btn.accept-btn {
+.btn.accept-btn {
   background: var(--vscode-terminal-ansiGreen, #4ec9b0);
   color: var(--vscode-editor-background);
 }
 
-.pending-btn.accept-btn:hover {
+.btn.accept-btn:hover {
   background: var(--vscode-terminal-ansiBrightGreen, #5fd7af);
 }
 
-.pending-btn.reject-btn {
+.btn.reject-btn {
   background: var(--vscode-errorForeground, #f48771);
   color: var(--vscode-editor-background);
 }
 
-.pending-btn.reject-btn:hover {
+.btn.reject-btn:hover {
   filter: brightness(1.15);
 }
 
 /* Status labels */
-.pending-label {
+.label {
   font-size: 10px;
   font-weight: 500;
   padding: 2px 6px;
   border-radius: 4px;
 }
 
-.pending-label.applied {
+.label.applied {
   background: var(--vscode-terminal-ansiGreen);
   color: var(--vscode-editor-background);
 }
 
-.pending-label.rejected {
+.label.rejected {
   background: var(--vscode-errorForeground, #f48771);
   color: var(--vscode-editor-background);
 }
 
-.pending-label.superseded {
+.label.superseded {
   background: var(--vscode-textLink-foreground, #3794ff);
   color: var(--vscode-editor-background);
 }
 
-.pending-label.auto {
+.label.auto {
   background: var(--vscode-terminal-ansiGreen);
   color: var(--vscode-editor-background);
 }
 
 /* Auto mode styling */
-.pending-container.auto-mode .pending-item {
+.container.auto-mode .item {
   padding: 4px 0;
 }
 
 /* Superseded items */
-.pending-item[data-superseded="true"] {
+.item[data-superseded="true"] {
   opacity: 0.6;
 }
 
-.pending-item[data-superseded="true"] .pending-file {
+.item[data-superseded="true"] .file {
   text-decoration: line-through;
   color: var(--vscode-descriptionForeground);
 }
 
-.pending-item[data-superseded="true"] .pending-status {
+.item[data-superseded="true"] .status {
   color: var(--vscode-descriptionForeground);
 }
 `;
