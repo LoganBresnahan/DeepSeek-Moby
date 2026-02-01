@@ -133,6 +133,9 @@ export class ThinkingShadowActor extends InterleavedShadowActor {
       dataAttributes: { iteration: this._currentIteration.toString() }
     });
 
+    // Add entering animation and expanded state (iterations start expanded)
+    container.content.classList.add('entering', 'expanded');
+
     // Debug: Log container position and visibility
     const childIndex = Array.from(this.element.children).indexOf(container.host);
     const rect = container.host.getBoundingClientRect();
@@ -357,8 +360,8 @@ export class ThinkingShadowActor extends InterleavedShadowActor {
     console.log('[ThinkingShadowActor] renderIteration', index, 'expanded:', isExpanded, 'streaming:', isStreaming, 'contentLen:', iteration.content.length);
 
     // container.content already has class="container" from InterleavedShadowActor
-    // Apply state classes directly to it
-    container.content.classList.toggle('collapsed', !isExpanded);
+    // Apply state classes directly to it (expanded = arrow rotates, body shows)
+    container.content.classList.toggle('expanded', isExpanded);
     container.content.classList.toggle('streaming', isStreaming);
 
     // Check if structure already exists (header element)
@@ -391,9 +394,9 @@ export class ThinkingShadowActor extends InterleavedShadowActor {
 
       container.content.innerHTML = `
         <div class="header">
-          <span class="icon">💭</span>
+          <span class="icon">▶</span>
+          <span class="emoji">💭</span>
           <span class="label">${label}</span>
-          <span class="toggle">▼</span>
         </div>
         <div class="body">${this.formatContent(iteration.content)}</div>
       `;

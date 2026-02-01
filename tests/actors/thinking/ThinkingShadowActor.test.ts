@@ -218,16 +218,17 @@ describe('ThinkingShadowActor', () => {
       expect(actor.getState().expandedIndices).toHaveLength(0);
     });
 
-    it('expanded by default, collapsed class applied after collapse', () => {
+    it('expanded by default, expanded class removed after collapse', () => {
       const iterationHost = parentElement.querySelector('[data-actor="thinking"]');
       const container = iterationHost?.shadowRoot?.querySelector('.container');
 
-      // Starts expanded (no collapsed class)
-      expect(container?.classList.contains('collapsed')).toBe(false);
+      // Starts expanded (has expanded class)
+      expect(container?.classList.contains('expanded')).toBe(true);
 
       actor.collapse(1);
 
-      expect(container?.classList.contains('collapsed')).toBe(true);
+      // Collapsed = no expanded class
+      expect(container?.classList.contains('expanded')).toBe(false);
     });
   });
 
@@ -236,15 +237,17 @@ describe('ThinkingShadowActor', () => {
       actor = new ThinkingShadowActor(manager, parentElement);
     });
 
-    it('renders header with icon, label, and toggle', () => {
+    it('renders header with arrow icon, emoji, and label', () => {
       actor.startIteration();
 
       const iterationHost = parentElement.querySelector('[data-actor="thinking"]');
       const header = iterationHost?.shadowRoot?.querySelector('.header');
 
-      expect(header?.querySelector('.icon')?.textContent).toBe('💭');
+      // Arrow icon on left (matches shell dropdown pattern)
+      expect(header?.querySelector('.icon')?.textContent).toBe('▶');
+      // Emoji after arrow
+      expect(header?.querySelector('.emoji')?.textContent).toBe('💭');
       expect(header?.querySelector('.label')).toBeTruthy();
-      expect(header?.querySelector('.toggle')).toBeTruthy();
     });
 
     it('renders "Chain of Thought" label for single iteration', () => {

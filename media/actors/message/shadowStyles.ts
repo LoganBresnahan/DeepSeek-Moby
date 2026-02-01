@@ -21,11 +21,35 @@ export const messageShadowStyles = `
   margin-top: 8px;
 }
 
+.message.continuation .message-divider,
 .message.continuation .role {
   display: none;
 }
 
-/* Role label */
+/* Divider with centered label */
+.message-divider {
+  display: flex;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.message-divider::before,
+.message-divider::after {
+  content: '';
+  flex: 1;
+  border-bottom: 1px dashed var(--vscode-panel-border, #3c3c3c);
+}
+
+.message-divider-label {
+  padding: 0 12px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--vscode-descriptionForeground, #8b8b8b);
+}
+
+/* Legacy role label - kept for compatibility */
 .role {
   font-size: 11px;
   font-weight: 600;
@@ -112,32 +136,87 @@ export const messageShadowStyles = `
   }
 }
 
-/* Code blocks */
+/* Code blocks - dropdown style matching shell/thinking */
 .code-block {
-  margin: 12px 0;
+  margin: 0 0 12px 0;
+  border: 1px solid var(--vscode-panel-border);
   border-radius: 6px;
   overflow: hidden;
   background: var(--vscode-textCodeBlock-background, #1e1e1e);
 }
 
+.code-block.entering {
+  animation: slideDown 0.2s ease-out forwards;
+}
+
+@keyframes codeSlideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Header - clickable row */
 .code-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 6px 12px;
+  gap: 8px;
+  padding: 8px 12px;
   background: var(--vscode-editorWidget-background);
   border-bottom: 1px solid var(--vscode-panel-border);
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s ease;
+}
+
+.code-header:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+/* Arrow icon on left - rotates when expanded */
+.code-toggle {
+  font-size: 10px;
+  color: var(--vscode-foreground);
+  transition: transform 0.2s ease;
+  flex-shrink: 0;
+}
+
+.code-block.expanded .code-toggle {
+  transform: rotate(90deg);
 }
 
 .code-lang {
   font-size: 11px;
   color: var(--vscode-descriptionForeground);
   text-transform: uppercase;
+  flex-shrink: 0;
 }
 
+/* Code preview shown when collapsed */
+.code-preview {
+  flex: 1;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.7;
+}
+
+.code-block.expanded .code-preview {
+  display: none;
+}
+
+/* Actions - always visible */
 .code-actions {
   display: flex;
   gap: 4px;
+  flex-shrink: 0;
 }
 
 .code-action-btn {
@@ -148,42 +227,69 @@ export const messageShadowStyles = `
   border-radius: 3px;
   font-size: 11px;
   cursor: pointer;
-  transition: background 0.15s ease;
+  transition: background 0.15s ease, opacity 0.15s ease;
 }
 
 .code-action-btn:hover {
   background: var(--vscode-button-secondaryHoverBackground);
 }
 
-.code-block pre {
+/* Copy button success state */
+.code-action-btn.copy-btn.copied {
+  background: var(--vscode-terminal-ansiGreen);
+  color: var(--vscode-editor-background);
+}
+
+/* Diff button active state */
+.code-action-btn.diff-btn.active {
+  background: var(--vscode-terminal-ansiBlue);
+  color: var(--vscode-editor-background);
+}
+
+/* Apply button - enabled when diffed */
+.code-action-btn.apply-btn {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+.code-block.diffed .code-action-btn.apply-btn {
+  opacity: 1;
+  pointer-events: auto;
+  background: var(--vscode-terminal-ansiGreen);
+  color: var(--vscode-editor-background);
+}
+
+/* Hide diff/apply buttons when not in manual mode */
+.code-block[data-edit-mode="ask"] .diff-btn,
+.code-block[data-edit-mode="ask"] .apply-btn,
+.code-block[data-edit-mode="auto"] .diff-btn,
+.code-block[data-edit-mode="auto"] .apply-btn {
+  display: none;
+}
+
+/* Code body - smooth expand/collapse */
+.code-body {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.3s ease;
+}
+
+.code-block.expanded .code-body {
+  max-height: 500px;
+  overflow-y: auto;
+}
+
+.code-body pre {
   margin: 0;
   padding: 12px;
   overflow-x: auto;
 }
 
-.code-block code {
+.code-body code {
   font-family: var(--vscode-editor-font-family);
   font-size: var(--vscode-editor-font-size, 13px);
   line-height: 1.5;
   white-space: pre;
-}
-
-/* Collapsed code block */
-.code-block.collapsed pre {
-  max-height: 50px;
-  overflow: hidden;
-  position: relative;
-}
-
-.code-block.collapsed pre::after {
-  content: '';
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  height: 30px;
-  background: linear-gradient(transparent, var(--vscode-textCodeBlock-background));
-  pointer-events: none;
 }
 
 /* Inline code */

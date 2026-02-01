@@ -296,10 +296,29 @@ export class MessageShadowActor extends InterleavedShadowActor {
   }
 
   /**
-   * Set edit mode
+   * Set edit mode and update all existing code blocks
    */
   setEditMode(mode: 'manual' | 'ask' | 'auto'): void {
+    const oldMode = this._editMode;
     this._editMode = mode;
+
+    // Update all existing code blocks across all containers
+    if (oldMode !== mode) {
+      this.updateCodeBlocksEditMode(mode);
+    }
+  }
+
+  /**
+   * Update all existing code blocks with the new edit mode
+   */
+  private updateCodeBlocksEditMode(mode: 'manual' | 'ask' | 'auto'): void {
+    // Iterate through all containers and update code block data-edit-mode
+    this.containers.forEach((container) => {
+      const codeBlocks = container.content.querySelectorAll('.code-block');
+      codeBlocks.forEach(block => {
+        block.setAttribute('data-edit-mode', mode);
+      });
+    });
   }
 
   /**
@@ -408,10 +427,12 @@ export class MessageShadowActor extends InterleavedShadowActor {
 
     this._messages.push(message);
 
-    // Render initial streaming structure
+    // Render initial streaming structure with dotted line divider
     container.content.innerHTML = `
       <div class="message assistant streaming">
-        <div class="role">DEEPSEEK MOBY</div>
+        <div class="message-divider">
+          <span class="message-divider-label">DEEPSEEK MOBY</span>
+        </div>
         <div class="content"></div>
       </div>
     `;
@@ -430,7 +451,11 @@ export class MessageShadowActor extends InterleavedShadowActor {
     const roleClass = message.role;
 
     let html = `<div class="message ${roleClass}">`;
-    html += `<div class="role">${roleLabel}</div>`;
+
+    // Dotted line divider with centered role label
+    html += `<div class="message-divider">`;
+    html += `<span class="message-divider-label">${roleLabel}</span>`;
+    html += `</div>`;
 
     // Files
     if (message.files && message.files.length > 0) {
@@ -452,28 +477,95 @@ export class MessageShadowActor extends InterleavedShadowActor {
    * Setup code block handlers for a specific container
    */
   private setupCodeBlockHandlersForContainer(containerId: string): void {
-    // Collapse toggle
-    this.delegateInContainer(containerId, 'click', '.collapse-toggle-btn', (e, btn) => {
-      const codeBlock = btn.closest('.code-block');
+    // Header click toggles expand/collapse
+    this.delegateInContainer(containerId, 'click', '.code-header', (e, header) => {
+      // Don't toggle if clicking on action buttons
+      const target = e.target as HTMLElement;
+      if (target.closest('.code-actions')) return;
+
+      const codeBlock = header.closest('.code-block');
       if (codeBlock) {
-        const isCollapsed = codeBlock.classList.toggle('collapsed');
-        btn.textContent = isCollapsed ? '▶' : '▼';
-        btn.title = isCollapsed ? 'Expand' : 'Collapse';
+        codeBlock.classList.toggle('expanded');
       }
     });
 
     // Copy button
     this.delegateInContainer(containerId, 'click', '.copy-btn', (e, btn) => {
+      e.stopPropagation();
       const codeBlock = btn.closest('.code-block');
       const code = codeBlock?.querySelector('code')?.textContent;
       if (code) {
         navigator.clipboard.writeText(code);
         btn.textContent = 'Copied!';
+        btn.classList.add('copied');
         setTimeout(() => {
           btn.textContent = 'Copy';
+          btn.classList.remove('copied');
         }, 1500);
       }
     });
+
+    // Diff button - sends message to extension
+    this.delegateInContainer(containerId, 'click', '.diff-btn', (e, btn) => {
+      e.stopPropagation();
+      const codeBlock = btn.closest('.code-block');
+      const code = codeBlock?.querySelector('code')?.textContent;
+      const lang = codeBlock?.getAttribute('data-lang') || 'text';
+
+      if (code) {
+        // Toggle active state
+        const isActive = btn.classList.toggle('active');
+        codeBlock?.classList.toggle('diffed', isActive);
+
+        // Post message to extension for diff
+        if (isActive) {
+          this.postVSCodeMessage({
+            type: 'showDiff',
+            code,
+            language: lang
+          });
+        }
+      }
+    });
+
+    // Apply button - sends message to extension
+    this.delegateInContainer(containerId, 'click', '.apply-btn', (e, btn) => {
+      e.stopPropagation();
+      const codeBlock = btn.closest('.code-block');
+      if (!codeBlock?.classList.contains('diffed')) return;
+
+      const code = codeBlock?.querySelector('code')?.textContent;
+      const lang = codeBlock?.getAttribute('data-lang') || 'text';
+
+      if (code) {
+        this.postVSCodeMessage({
+          type: 'applyCode',
+          code,
+          language: lang
+        });
+
+        // Visual feedback
+        btn.textContent = 'Applied!';
+        setTimeout(() => {
+          btn.textContent = 'Apply';
+          codeBlock?.classList.remove('diffed');
+          const diffBtn = codeBlock?.querySelector('.diff-btn');
+          diffBtn?.classList.remove('active');
+        }, 1500);
+      }
+    });
+  }
+
+  /**
+   * Post message to VS Code extension
+   */
+  private postVSCodeMessage(message: Record<string, unknown>): void {
+    // @ts-ignore - vscode API available in webview
+    if (typeof acquireVsCodeApi !== 'undefined') {
+      // @ts-ignore
+      const vscode = acquireVsCodeApi();
+      vscode.postMessage(message);
+    }
   }
 
   /**
@@ -482,7 +574,8 @@ export class MessageShadowActor extends InterleavedShadowActor {
   private formatContent(content: string): string {
     if (!content) return '';
 
-    const shouldCollapse = this._editMode === 'ask' || this._editMode === 'auto';
+    const isManualMode = this._editMode === 'manual';
+    const startExpanded = isManualMode; // In manual mode, start expanded
 
     // Process fenced code blocks
     let result = content.replace(
@@ -490,19 +583,15 @@ export class MessageShadowActor extends InterleavedShadowActor {
       (_, lang, code) => {
         const language = lang || 'text';
         const escapedCode = this.escapeHtml(code.trimEnd());
-        const collapsedClass = shouldCollapse ? ' collapsed' : '';
-        const collapseIcon = shouldCollapse ? '▶' : '▼';
-        const collapseTitle = shouldCollapse ? 'Expand' : 'Collapse';
-        return `<div class="code-block${collapsedClass}">
-          <div class="code-header">
-            <span class="code-lang">${language}</span>
-            <div class="code-actions">
-              <button class="code-action-btn copy-btn">Copy</button>
-              <button class="code-action-btn collapse-toggle-btn" title="${collapseTitle}">${collapseIcon}</button>
-            </div>
-          </div>
-          <pre><code class="language-${language}">${escapedCode}</code></pre>
-        </div>`;
+        const expandedClass = startExpanded ? ' expanded' : '';
+
+        // Generate code preview (first line, truncated)
+        const firstLine = code.trim().split('\n')[0] || '';
+        const preview = firstLine.length > 60 ? firstLine.substring(0, 60) + '...' : firstLine;
+        const escapedPreview = this.escapeHtml(preview);
+
+        // Single-line template to avoid newlines being converted to <br> tags
+        return `<div class="code-block entering${expandedClass}" data-lang="${language}" data-edit-mode="${this._editMode}"><div class="code-header"><span class="code-toggle">▶</span><span class="code-lang">${language}</span><span class="code-preview">${escapedPreview}</span><div class="code-actions"><button class="code-action-btn diff-btn">Diff</button><button class="code-action-btn apply-btn">Apply</button><button class="code-action-btn copy-btn">Copy</button></div></div><div class="code-body"><pre><code class="language-${language}">${escapedCode}</code></pre></div></div>`;
       }
     );
 

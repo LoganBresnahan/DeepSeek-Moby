@@ -15,6 +15,21 @@ export const thinkingShadowStyles = `
   overflow: hidden;
 }
 
+.container.entering {
+  animation: slideDown 0.2s ease-out forwards;
+}
+
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 /* Header - clickable row with icon, label, toggle */
 .header {
   display: flex;
@@ -34,7 +49,18 @@ export const thinkingShadowStyles = `
   background: var(--vscode-list-hoverBackground);
 }
 
+/* Arrow icon on left - rotates when expanded */
 .icon {
+  font-size: 10px;
+  color: var(--vscode-foreground);
+  transition: transform 0.2s ease;
+}
+
+.container.expanded .icon {
+  transform: rotate(90deg);
+}
+
+.emoji {
   font-size: 14px;
 }
 
@@ -42,29 +68,26 @@ export const thinkingShadowStyles = `
   flex: 1;
 }
 
-.toggle {
-  transition: transform 0.2s ease;
-}
-
-/* Collapsed state */
-.container.collapsed .toggle {
-  transform: rotate(-90deg);
-}
-
-.container.collapsed .body {
-  display: none;
-}
-
-/* Body - content area */
+/* Body - smooth max-height transition */
 .body {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.3s ease, padding 0.3s ease;
+}
+
+.container.expanded .body {
+  max-height: 300px;
   padding: 0 10px 8px 10px;
+  overflow-y: auto;
+}
+
+/* Body text styling */
+.body-content {
   font-size: 12px;
   color: var(--vscode-descriptionForeground);
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 300px;
-  overflow-y: auto;
   background: transparent;
 }
 
@@ -82,8 +105,8 @@ export const thinkingShadowStyles = `
   font-size: 11px;
 }
 
-/* Streaming state - subtle pulsing animation on icon */
-.container.streaming .icon {
+/* Streaming state - subtle pulsing animation on emoji */
+.container.streaming .emoji {
   animation: pulse 1.5s ease-in-out infinite;
 }
 

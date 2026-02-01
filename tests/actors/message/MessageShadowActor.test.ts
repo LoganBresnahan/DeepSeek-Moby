@@ -341,21 +341,70 @@ describe('MessageShadowActor', () => {
       expect(copyBtn).toBeTruthy();
     });
 
-    it('includes collapse toggle', () => {
+    it('includes toggle arrow and clickable header', () => {
       actor.addAssistantMessage('```rust\nfn main() {}\n```');
 
       const container = findMessageContainer('assistant');
-      const toggleBtn = container?.shadowRoot?.querySelector('.collapse-toggle-btn');
-      expect(toggleBtn).toBeTruthy();
+      const toggle = container?.shadowRoot?.querySelector('.code-toggle');
+      const header = container?.shadowRoot?.querySelector('.code-header');
+      expect(toggle).toBeTruthy();
+      expect(header).toBeTruthy();
     });
 
-    it('collapses code blocks when edit mode is ask/auto', () => {
+    it('starts collapsed in ask/auto mode (no expanded class)', () => {
       actor.setEditMode('ask');
       actor.addAssistantMessage('```typescript\nconst x = 1;\n```');
 
       const container = findMessageContainer('assistant');
       const codeBlock = container?.shadowRoot?.querySelector('.code-block');
-      expect(codeBlock?.classList.contains('collapsed')).toBe(true);
+      // In ask/auto mode, code blocks start collapsed (no expanded class)
+      expect(codeBlock?.classList.contains('expanded')).toBe(false);
+    });
+
+    it('starts expanded in manual mode', () => {
+      actor.setEditMode('manual');
+      actor.addAssistantMessage('```typescript\nconst x = 1;\n```');
+
+      const container = findMessageContainer('assistant');
+      const codeBlock = container?.shadowRoot?.querySelector('.code-block');
+      // In manual mode, code blocks start expanded
+      expect(codeBlock?.classList.contains('expanded')).toBe(true);
+    });
+
+    it('shows diff and apply buttons only in manual mode', () => {
+      actor.setEditMode('manual');
+      actor.addAssistantMessage('```typescript\nconst x = 1;\n```');
+
+      const container = findMessageContainer('assistant');
+      const diffBtn = container?.shadowRoot?.querySelector('.diff-btn');
+      const applyBtn = container?.shadowRoot?.querySelector('.apply-btn');
+      expect(diffBtn).toBeTruthy();
+      expect(applyBtn).toBeTruthy();
+    });
+
+    it('hides diff and apply buttons in ask mode via CSS', () => {
+      actor.setEditMode('ask');
+      actor.addAssistantMessage('```typescript\nconst x = 1;\n```');
+
+      const container = findMessageContainer('assistant');
+      const codeBlock = container?.shadowRoot?.querySelector('.code-block');
+      // Buttons exist in DOM but are hidden via CSS based on data-edit-mode
+      expect(codeBlock?.getAttribute('data-edit-mode')).toBe('ask');
+      // CSS rule `.code-block[data-edit-mode="ask"] .diff-btn { display: none; }` hides them
+      const diffBtn = container?.shadowRoot?.querySelector('.diff-btn');
+      const applyBtn = container?.shadowRoot?.querySelector('.apply-btn');
+      expect(diffBtn).toBeTruthy();  // Present in DOM
+      expect(applyBtn).toBeTruthy(); // Present in DOM
+    });
+
+    it('shows code preview when collapsed', () => {
+      actor.setEditMode('ask');
+      actor.addAssistantMessage('```typescript\nconst x = 1;\n```');
+
+      const container = findMessageContainer('assistant');
+      const preview = container?.shadowRoot?.querySelector('.code-preview');
+      expect(preview).toBeTruthy();
+      expect(preview?.textContent).toContain('const x = 1');
     });
   });
 
@@ -371,6 +420,27 @@ describe('MessageShadowActor', () => {
     it('can change edit mode', () => {
       actor.setEditMode('auto');
       expect(actor.getEditMode()).toBe('auto');
+    });
+
+    it('updates existing code blocks when mode changes', () => {
+      // Start in manual mode and add a message with code
+      actor.addAssistantMessage('```typescript\nconst x = 1;\n```');
+
+      const container = findMessageContainer('assistant');
+      const codeBlock = container?.shadowRoot?.querySelector('.code-block');
+
+      // Should start with manual mode
+      expect(codeBlock?.getAttribute('data-edit-mode')).toBe('manual');
+
+      // Switch to ask mode
+      actor.setEditMode('ask');
+
+      // Existing code block should be updated
+      expect(codeBlock?.getAttribute('data-edit-mode')).toBe('ask');
+
+      // Switch back to manual
+      actor.setEditMode('manual');
+      expect(codeBlock?.getAttribute('data-edit-mode')).toBe('manual');
     });
   });
 
