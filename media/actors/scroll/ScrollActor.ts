@@ -25,9 +25,17 @@ export interface ScrollState {
   nearBottom: boolean;
 }
 
-export class ScrollActor extends EventStateActor {
-  private static stylesInjected = false;
+/**
+ * Scroll request payload for pub/sub scroll control
+ */
+export interface ScrollRequest {
+  /** Target position: 'bottom' for scroll to bottom, or a number for specific scrollTop */
+  position: 'bottom' | number;
+  /** Whether to use smooth scrolling */
+  smooth?: boolean;
+}
 
+export class ScrollActor extends EventStateActor {
   // Internal state
   private _autoScroll = true;
   private _userScrolled = false;
@@ -42,9 +50,13 @@ export class ScrollActor extends EventStateActor {
 
   // Event handlers
   private _scrollHandler: (() => void) | null = null;
+  private _mouseMoveHandler: (() => void) | null = null;
 
   // ResizeObserver for trailing scroll during content growth
   private _resizeObserver: ResizeObserver | null = null;
+
+  // MutationObserver to watch for new children (shadow DOM hosts)
+  private _mutationObserver: MutationObserver | null = null;
 
   // Track last scroll height to detect growth
   private _lastScrollHeight = 0;
@@ -66,28 +78,15 @@ export class ScrollActor extends EventStateActor {
       },
       subscriptions: {
         'streaming.active': (value: unknown) => this.handleStreamingActive(value as boolean),
-        'message.count': () => this.handleMessageCount()
+        'message.count': () => this.handleMessageCount(),
+        'scroll.request': (value: unknown) => this.handleScrollRequest(value as ScrollRequest | null)
       },
       enableDOMChangeDetection: false
     };
 
     super(config);
-    this.injectStyles();
+    manager.injectStyles('scroll', styles);
     this.setupScrollTracking();
-  }
-
-  /**
-   * Inject CSS styles (once per class)
-   */
-  private injectStyles(): void {
-    if (ScrollActor.stylesInjected) return;
-    if (typeof document === 'undefined') return;
-
-    const style = document.createElement('style');
-    style.setAttribute('data-actor', 'scroll');
-    style.textContent = styles;
-    document.head.appendChild(style);
-    ScrollActor.stylesInjected = true;
   }
 
   /**
@@ -103,17 +102,70 @@ export class ScrollActor extends EventStateActor {
 
     this._scrollContainer.addEventListener('scroll', this._scrollHandler);
 
+    // Mouse movement handler - disables auto-scroll when user moves mouse during streaming
+    this._mouseMoveHandler = () => {
+      this.handleMouseMove();
+    };
+
+    this._scrollContainer.addEventListener('mousemove', this._mouseMoveHandler);
+
     // Setup ResizeObserver to detect content height changes
     // This enables smooth trailing during streaming
     this._resizeObserver = new ResizeObserver(() => {
       this.handleContentResize();
     });
 
-    // Observe the container's children for size changes
+    // Observe the container itself
     this._resizeObserver.observe(this._scrollContainer);
+
+    // Also observe existing children (shadow DOM hosts)
+    this.observeChildren();
+
+    // Setup MutationObserver to watch for new children being added
+    // This catches shadow DOM containers that are added dynamically
+    this._mutationObserver = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        if (mutation.type === 'childList') {
+          // Observe any newly added elements
+          mutation.addedNodes.forEach((node) => {
+            if (node instanceof HTMLElement) {
+              this._resizeObserver?.observe(node);
+            }
+          });
+          // Stop observing removed elements
+          mutation.removedNodes.forEach((node) => {
+            if (node instanceof HTMLElement) {
+              this._resizeObserver?.unobserve(node);
+            }
+          });
+        }
+      }
+      // Also check scroll height on any DOM change
+      this.handleContentResize();
+    });
+
+    this._mutationObserver.observe(this._scrollContainer, {
+      childList: true,
+      subtree: true,
+      characterData: true
+    });
 
     // Create scroll-to-bottom button
     this.createScrollButton();
+  }
+
+  /**
+   * Observe existing children for resize events
+   */
+  private observeChildren(): void {
+    if (!this._scrollContainer || !this._resizeObserver) return;
+
+    // Observe all direct children (these are shadow DOM hosts)
+    Array.from(this._scrollContainer.children).forEach((child) => {
+      if (child instanceof HTMLElement) {
+        this._resizeObserver!.observe(child);
+      }
+    });
   }
 
   /**
@@ -163,20 +215,50 @@ export class ScrollActor extends EventStateActor {
   }
 
   /**
-   * Handle content resize - trail scroll if at bottom
+   * Handle content resize - trail scroll if at bottom, smooth scroll on shrink
    */
   private handleContentResize(): void {
     if (!this._scrollContainer) return;
 
     const newScrollHeight = this._scrollContainer.scrollHeight;
-    const heightGrew = newScrollHeight > this._lastScrollHeight;
+    const heightDelta = newScrollHeight - this._lastScrollHeight;
+    const heightGrew = heightDelta > 0;
+    const heightShrunk = heightDelta < -20; // Significant shrink (more than 20px)
     this._lastScrollHeight = newScrollHeight;
+
+    // Check current position (content may have pushed us away from bottom)
+    const currentlyNearBottom = this.isNearBottom();
+    const atAbsoluteBottom = this.isAtAbsoluteBottom();
+
+    // Re-engage auto-scroll if user is currently near/at bottom but was marked as scrolled away
+    // This handles the case where user scrolled to bottom but content grew before we detected it
+    if (this._isStreaming && this._userScrolled && (currentlyNearBottom || atAbsoluteBottom)) {
+      this._userScrolled = false;
+      this._autoScroll = true;
+      this._nearBottom = true;
+      this.publish({
+        'scroll.userScrolled': false,
+        'scroll.autoScroll': true
+      });
+      this.updateScrollButtonVisibility();
+    }
+
+    // Handle content shrinking (jarring collapse)
+    // When content shrinks significantly and we're at/near bottom, smooth scroll to new bottom
+    if (heightShrunk && (this._nearBottom || currentlyNearBottom)) {
+      // Use smooth scroll to ease the visual jump
+      this._scrollContainer.scrollTo({
+        top: this._scrollContainer.scrollHeight,
+        behavior: 'smooth'
+      });
+      this._nearBottom = true;
+      return;
+    }
 
     // Only trail if:
     // 1. Content actually grew (not shrunk)
-    // 2. We're streaming OR we just added content
-    // 3. Auto-scroll is enabled (user hasn't scrolled up)
-    // 4. We're near the bottom
+    // 2. Auto-scroll is enabled (user hasn't scrolled up)
+    // 3. We were near the bottom (use cached value as content growth would push us away)
     if (heightGrew && this._autoScroll && !this._userScrolled && this._nearBottom) {
       // Debounce to batch rapid updates during streaming
       if (this._trailTimer) {
@@ -251,43 +333,85 @@ export class ScrollActor extends EventStateActor {
     }
   }
 
+  private handleScrollRequest(request: ScrollRequest | null): void {
+    if (!request || !this._scrollContainer) return;
+
+    if (request.position === 'bottom') {
+      this.scrollToBottom(request.smooth);
+    } else if (typeof request.position === 'number') {
+      if (request.smooth) {
+        this._scrollContainer.scrollTo({
+          top: request.position,
+          behavior: 'smooth'
+        });
+      } else {
+        this._scrollContainer.scrollTop = request.position;
+      }
+    }
+  }
+
   // ============================================
   // Scroll Handling
   // ============================================
 
+  /**
+   * Handle mouse movement in chat container.
+   * During streaming, mouse movement disables auto-scroll to let user read content.
+   */
+  private handleMouseMove(): void {
+    // Only disable auto-scroll during streaming
+    if (!this._isStreaming) return;
+
+    // If already disabled, don't spam publishes
+    if (this._userScrolled) return;
+
+    // Disable auto-scroll when user moves mouse during streaming
+    this._userScrolled = true;
+    this._autoScroll = false;
+    this.publish({
+      'scroll.userScrolled': true,
+      'scroll.autoScroll': false
+    });
+    this.updateScrollButtonVisibility();
+  }
+
   private handleScroll(): void {
     const nearBottom = this.isNearBottom();
+    const atAbsoluteBottom = this.isAtAbsoluteBottom();
     const wasNearBottom = this._nearBottom;
 
     this._nearBottom = nearBottom;
 
     // Only track user scroll during streaming
     if (this._isStreaming) {
-      // If user scrolled away from bottom, disable auto-scroll
-      if (!nearBottom && wasNearBottom) {
-        this._userScrolled = true;
-        this._autoScroll = false;
-        this.publish({
-          'scroll.userScrolled': true,
-          'scroll.autoScroll': false
-        });
-        this.updateScrollButtonVisibility();
-      }
       // If user scrolled back to bottom, re-enable auto-scroll
-      else if (nearBottom && this._userScrolled) {
+      // Use atAbsoluteBottom OR nearBottom to be more forgiving during rapid content growth
+      if ((nearBottom || atAbsoluteBottom) && this._userScrolled) {
         this._userScrolled = false;
         this._autoScroll = true;
+        this._nearBottom = true; // Force near-bottom state
         this.publish({
           'scroll.userScrolled': false,
-          'scroll.autoScroll': true
+          'scroll.autoScroll': true,
+          'scroll.nearBottom': true
         });
         this.updateScrollButtonVisibility();
       }
     }
 
-    if (wasNearBottom !== nearBottom) {
+    if (wasNearBottom !== nearBottom && !this._userScrolled) {
       this.publish({ 'scroll.nearBottom': nearBottom });
     }
+  }
+
+  /**
+   * Check if at absolute bottom (within 5px tolerance for rounding)
+   */
+  private isAtAbsoluteBottom(): boolean {
+    if (!this._scrollContainer) return true;
+
+    const { scrollTop, scrollHeight, clientHeight } = this._scrollContainer;
+    return scrollHeight - scrollTop - clientHeight < 5;
   }
 
   /**
@@ -404,10 +528,21 @@ export class ScrollActor extends EventStateActor {
       this._scrollContainer.removeEventListener('scroll', this._scrollHandler);
     }
 
+    // Clean up mouse move handler
+    if (this._mouseMoveHandler && this._scrollContainer) {
+      this._scrollContainer.removeEventListener('mousemove', this._mouseMoveHandler);
+    }
+
     // Clean up ResizeObserver
     if (this._resizeObserver) {
       this._resizeObserver.disconnect();
       this._resizeObserver = null;
+    }
+
+    // Clean up MutationObserver
+    if (this._mutationObserver) {
+      this._mutationObserver.disconnect();
+      this._mutationObserver = null;
     }
 
     // Clear any pending timers
@@ -423,6 +558,7 @@ export class ScrollActor extends EventStateActor {
     }
 
     this._scrollHandler = null;
+    this._mouseMoveHandler = null;
     this._scrollContainer = null;
     super.destroy();
   }

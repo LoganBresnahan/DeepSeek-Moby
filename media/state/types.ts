@@ -139,3 +139,71 @@ declare global {
     testManager?: EventStateManager;
   }
 }
+
+// ============================================
+// Dropdown Event Types (for DropdownFocusActor)
+// ============================================
+
+/**
+ * Types of dropdowns that can emit hover/click events
+ */
+export type DropdownType = 'thinking' | 'shell' | 'code';
+
+/**
+ * Event published when a dropdown header is hovered
+ */
+export interface DropdownHoverEvent {
+  /** Type of dropdown */
+  type: DropdownType;
+  /** Unique identifier for this dropdown instance */
+  dropdownId: string;
+  /** Container/segment ID from the originating actor */
+  containerId: string;
+  /** ID of the shadow host element (use document.getElementById to resolve) */
+  hostElementId: string;
+  /** Current content of the dropdown body */
+  bodyContent: string;
+  /** Label text shown in the header */
+  headerLabel: string;
+  /** Mouse event that triggered the hover */
+  mouseEvent: {
+    clientX: number;
+    clientY: number;
+  };
+  /** Whether the dropdown is currently expanded */
+  isExpanded: boolean;
+}
+
+/**
+ * Event published when a dropdown header is clicked
+ */
+export interface DropdownClickEvent {
+  /** Type of dropdown */
+  type: DropdownType;
+  /** Unique identifier for this dropdown instance */
+  dropdownId: string;
+  /** Container/segment ID from the originating actor */
+  containerId: string;
+  /** ID of the shadow host element (use document.getElementById to resolve) */
+  hostElementId: string;
+  /** Current content of the dropdown body */
+  bodyContent: string;
+  /** Label text shown in the header */
+  headerLabel: string;
+  /** Current scroll position of the chat container */
+  scrollTop: number;
+}
+
+/**
+ * Event published when dropdown content updates (during streaming)
+ */
+export interface DropdownContentUpdate {
+  /** Type of dropdown */
+  type: DropdownType;
+  /** Unique identifier for this dropdown instance */
+  dropdownId: string;
+  /** Container/segment ID from the originating actor */
+  containerId: string;
+  /** Updated body content */
+  bodyContent: string;
+}

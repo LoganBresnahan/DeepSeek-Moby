@@ -3,12 +3,6 @@
  * CSS for modified files dropdown display
  */
 export const pendingStyles = `
-/* Pending Changes Wrapper (outer container from InterleavedContentActor) */
-.pending-changes-wrapper {
-  position: relative;
-  z-index: 1;  /* Ensure pending files appears above animation effects like printing-surface */
-}
-
 /* Pending Changes Container */
 .pending-container {
   margin: 8px 0;

@@ -13,9 +13,6 @@ describe('StreamingActor Snapshots', () => {
   let actor: StreamingActor;
 
   beforeEach(() => {
-    // Reset styles injection
-    StreamingActor.resetStylesInjected();
-
     manager = new EventStateManager();
     element = document.createElement('div');
     element.id = 'streaming-root';
@@ -27,6 +24,7 @@ describe('StreamingActor Snapshots', () => {
 
   afterEach(() => {
     actor.destroy();
+    manager.resetStyles();
     document.body.innerHTML = '';
   });
 
@@ -59,22 +57,35 @@ describe('StreamingActor Snapshots', () => {
   });
 
   describe('injected styles', () => {
-    it('injects styles into document head', () => {
-      const styleTag = document.querySelector('style[data-actor="streaming"]');
+    it('injects styles via EventStateManager', () => {
+      // Manager should have streaming styles registered
+      expect(manager.hasStyles('streaming')).toBe(true);
+
+      // Shared style element should exist
+      const styleTag = document.getElementById('actor-styles');
       expect(styleTag).toBeTruthy();
-      expect(styleTag?.textContent).toMatchSnapshot();
+      expect(styleTag?.getAttribute('data-managed-by')).toBe('EventStateManager');
+
+      // Should contain streaming styles (marked with comment)
+      expect(manager.getStyleContent()).toContain('/* === streaming === */');
     });
 
-    it('only injects styles once', () => {
-      // Create another actor
+    it('only injects styles once per actor type', () => {
+      // Create another actor with the same manager
       const element2 = document.createElement('div');
       element2.id = 'streaming-root-2';
       document.body.appendChild(element2);
 
       const actor2 = new StreamingActor(manager, element2);
 
-      const styleTags = document.querySelectorAll('style[data-actor="streaming"]');
+      // Should still only have one style element
+      const styleTags = document.querySelectorAll('#actor-styles');
       expect(styleTags.length).toBe(1);
+
+      // Content should not be duplicated
+      const content = manager.getStyleContent();
+      const matches = content.match(/\/\* === streaming === \*\//g);
+      expect(matches?.length).toBe(1);
 
       actor2.destroy();
     });
@@ -87,7 +98,6 @@ describe('StreamingActor State Snapshots', () => {
   let actor: StreamingActor;
 
   beforeEach(() => {
-    StreamingActor.resetStylesInjected();
     manager = new EventStateManager();
     element = document.createElement('div');
     element.id = 'streaming-root';
@@ -97,6 +107,7 @@ describe('StreamingActor State Snapshots', () => {
 
   afterEach(() => {
     actor.destroy();
+    manager.resetStyles();
     document.body.innerHTML = '';
   });
 

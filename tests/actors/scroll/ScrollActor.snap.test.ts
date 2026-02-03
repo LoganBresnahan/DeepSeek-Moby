@@ -13,8 +13,6 @@ describe('ScrollActor Snapshots', () => {
   let actor: ScrollActor;
 
   beforeEach(() => {
-    ScrollActor.resetStylesInjected();
-
     manager = new EventStateManager();
     element = document.createElement('div');
     element.id = 'scroll-container';
@@ -31,14 +29,22 @@ describe('ScrollActor Snapshots', () => {
 
   afterEach(() => {
     actor.destroy();
+    manager.resetStyles();
     document.body.innerHTML = '';
   });
 
   describe('injected styles', () => {
-    it('injects styles into document head', () => {
-      const styleTag = document.querySelector('style[data-actor="scroll"]');
+    it('injects styles via EventStateManager', () => {
+      // Manager should have scroll styles registered
+      expect(manager.hasStyles('scroll')).toBe(true);
+
+      // Shared style element should exist
+      const styleTag = document.getElementById('actor-styles');
       expect(styleTag).toBeTruthy();
-      expect(styleTag?.textContent).toMatchSnapshot();
+      expect(styleTag?.getAttribute('data-managed-by')).toBe('EventStateManager');
+
+      // Should contain scroll styles (marked with comment)
+      expect(manager.getStyleContent()).toContain('/* === scroll === */');
     });
   });
 });
@@ -49,7 +55,6 @@ describe('ScrollActor State Snapshots', () => {
   let actor: ScrollActor;
 
   beforeEach(() => {
-    ScrollActor.resetStylesInjected();
     manager = new EventStateManager();
     element = document.createElement('div');
     element.id = 'scroll-container';
@@ -66,6 +71,7 @@ describe('ScrollActor State Snapshots', () => {
 
   afterEach(() => {
     actor.destroy();
+    manager.resetStyles();
     document.body.innerHTML = '';
   });
 

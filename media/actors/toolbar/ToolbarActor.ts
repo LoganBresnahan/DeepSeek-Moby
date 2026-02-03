@@ -243,13 +243,13 @@ export class ToolbarActor extends EventStateActor {
   private handleOutsideClick(e: MouseEvent): void {
     const target = e.target as Element;
 
-    // Close commands modal
-    if (this._commandsModal && !target.closest('.commands-modal') && !target.closest('.help-btn')) {
+    // Close commands modal (use data attributes for detection)
+    if (this._commandsModal && !target.closest('[data-modal="commands"]') && !target.closest('.help-btn')) {
       this.closeCommandsModal();
     }
 
-    // Close web search modal
-    if (this._webSearchModal && !target.closest('.web-search-modal') && !target.closest('.search-btn')) {
+    // Close web search modal (use data attributes for detection)
+    if (this._webSearchModal && !target.closest('[data-modal="web-search"]') && !target.closest('.search-btn')) {
       this.closeWebSearchModal();
     }
   }
@@ -285,6 +285,7 @@ export class ToolbarActor extends EventStateActor {
 
     const modal = document.createElement('div');
     modal.className = 'commands-modal';
+    modal.setAttribute('data-modal', 'commands');
     modal.innerHTML = `
       <div class="commands-modal-title">
         <span>Commands</span>
@@ -357,6 +358,7 @@ export class ToolbarActor extends EventStateActor {
 
     const modal = document.createElement('div');
     modal.className = 'web-search-modal';
+    modal.setAttribute('data-modal', 'web-search');
     modal.innerHTML = `
       <div class="web-search-modal-title">
         <span>Web Search Settings</span>

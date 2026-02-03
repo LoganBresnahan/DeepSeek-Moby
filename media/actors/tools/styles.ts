@@ -3,12 +3,6 @@
  * CSS for tool calls dropdown display
  */
 export const toolsStyles = `
-/* Tools Batch Wrapper (outer container from InterleavedContentActor) */
-.tools-batch {
-  position: relative;
-  z-index: 1;  /* Ensure tools appears above animation effects like printing-surface */
-}
-
 /* Tool Calls Container */
 .tools-container {
   margin: 8px 0;

@@ -240,6 +240,37 @@ export const animationStyles = `
 }
 
 /* ----------------------------------------
+   Dropdown Hover Interactions
+   ---------------------------------------- */
+
+/* Jiggle animation for hover feedback */
+.anim-jiggle {
+  animation: jiggle 0.4s ease-in-out;
+}
+
+@keyframes jiggle {
+  0%, 100% {
+    transform: translateX(0);
+  }
+  10%, 30%, 50%, 70%, 90% {
+    transform: translateX(-2px);
+  }
+  20%, 40%, 60%, 80% {
+    transform: translateX(2px);
+  }
+}
+
+/* Hover-ready state (cursor is over header) */
+.anim-hover-ready {
+  cursor: pointer;
+  transition: background-color var(--anim-fast) ease;
+}
+
+.anim-hover-ready:hover {
+  background-color: var(--vscode-list-hoverBackground, rgba(255,255,255,0.05));
+}
+
+/* ----------------------------------------
    Dropdown Expand/Collapse
    ---------------------------------------- */
 
@@ -290,7 +321,8 @@ export const animationStyles = `
   .anim-message-in,
   .anim-print-line,
   .anim-expand,
-  .anim-collapse {
+  .anim-collapse,
+  .anim-jiggle {
     animation-duration: 0.01ms !important;
   }
 
@@ -432,5 +464,207 @@ export class AnimationHelper {
         styleTag.remove();
       }
     }
+  }
+
+  /**
+   * Trigger jiggle animation on an element.
+   * Uses inline styles to work inside Shadow DOM.
+   */
+  static jiggle(element: HTMLElement): void {
+    // Remove any existing animation
+    element.style.animation = 'none';
+    // Force reflow to restart animation
+    void element.offsetWidth;
+    // Apply jiggle animation inline (works in Shadow DOM)
+    element.style.animation = 'jiggle 0.9s ease-in-out';
+
+    setTimeout(() => {
+      element.style.animation = '';
+    }, 900);
+  }
+
+  /**
+   * Inject jiggle keyframes into a shadow root (call once per shadow root)
+   */
+  static injectJiggleKeyframes(shadowRoot: ShadowRoot): void {
+    // Check if already injected
+    if (shadowRoot.querySelector('style[data-jiggle]')) return;
+
+    const style = document.createElement('style');
+    style.setAttribute('data-jiggle', 'true');
+    style.textContent = `
+      @keyframes jiggle {
+        0%, 100% { transform: translateX(0); }
+        10%, 30%, 50%, 70%, 90% { transform: translateX(-2px); }
+        20%, 40%, 60%, 80% { transform: translateX(2px); }
+      }
+    `;
+    shadowRoot.appendChild(style);
+  }
+
+  /**
+   * Setup hover-expand behavior for a dropdown
+   * - Jiggles header on mouseenter
+   * - Expands after delay if still hovering
+   * - Collapses on mouseleave
+   *
+   * @param header - The clickable header element
+   * @param body - The collapsible body element
+   * @param container - The parent container that gets 'expanded' class
+   * @param options - Configuration options
+   * @returns Cleanup function to remove listeners
+   */
+  static setupHoverExpand(
+    header: HTMLElement,
+    body: HTMLElement,
+    container: HTMLElement,
+    options: {
+      expandDelay?: number;
+      onExpand?: () => void;
+      onCollapse?: () => void;
+    } = {}
+  ): () => void {
+    const { expandDelay = 500, onExpand, onCollapse } = options;
+
+    let hoverTimer: ReturnType<typeof setTimeout> | null = null;
+    let isHoverExpanded = false;
+
+    const handleMouseEnter = () => {
+      // Jiggle feedback
+      this.jiggle(header);
+
+      // Start expand timer
+      hoverTimer = setTimeout(() => {
+        if (!container.classList.contains('expanded')) {
+          container.classList.add('expanded');
+          container.classList.add('hover-expanded');
+          isHoverExpanded = true;
+          this.animateIn(body, 'bubble');
+          onExpand?.();
+        }
+      }, expandDelay);
+    };
+
+    const handleMouseLeave = () => {
+      // Cancel pending expand
+      if (hoverTimer) {
+        clearTimeout(hoverTimer);
+        hoverTimer = null;
+      }
+
+      // Only collapse if we expanded via hover (not click)
+      if (isHoverExpanded && container.classList.contains('hover-expanded')) {
+        container.classList.remove('expanded');
+        container.classList.remove('hover-expanded');
+        isHoverExpanded = false;
+        this.animateOut(body, 'bubble');
+        onCollapse?.();
+      }
+    };
+
+    // Add hover-ready styling
+    header.classList.add('anim-hover-ready');
+
+    // Attach listeners to container (so leaving body doesn't trigger collapse)
+    container.addEventListener('mouseenter', handleMouseEnter);
+    container.addEventListener('mouseleave', handleMouseLeave);
+
+    // Return cleanup function
+    return () => {
+      if (hoverTimer) {
+        clearTimeout(hoverTimer);
+      }
+      header.classList.remove('anim-hover-ready');
+      container.removeEventListener('mouseenter', handleMouseEnter);
+      container.removeEventListener('mouseleave', handleMouseLeave);
+    };
+  }
+
+  /**
+   * Smooth height transition when content changes.
+   * Captures current height, allows content to change, then animates to new height.
+   * Keeps scroll anchored to bottom if user was at bottom.
+   *
+   * @param container - The element whose height will change
+   * @param scrollContainer - Optional scroll container to anchor (defaults to container's parent)
+   * @param duration - Animation duration in ms (default 300)
+   * @returns A function to call AFTER content has changed to trigger the animation
+   */
+  static prepareHeightTransition(
+    container: HTMLElement,
+    scrollContainer?: HTMLElement,
+    duration: number = 300
+  ): () => void {
+    // Capture current state
+    const startHeight = container.offsetHeight;
+    const scroller = scrollContainer || container.parentElement;
+
+    // Check if scrolled to bottom (with small tolerance)
+    const wasAtBottom = scroller
+      ? scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 10
+      : false;
+
+    // Return the function to call after content changes
+    return () => {
+      // Get natural height after content change
+      const endHeight = container.offsetHeight;
+
+      // If height didn't change significantly, skip animation
+      if (Math.abs(endHeight - startHeight) < 5) return;
+
+      // Set explicit start height
+      container.style.height = `${startHeight}px`;
+      container.style.overflow = 'hidden';
+      container.style.transition = `height ${duration}ms ease-out`;
+
+      // Force reflow
+      void container.offsetHeight;
+
+      // Animate to new height
+      container.style.height = `${endHeight}px`;
+
+      // Keep scroll at bottom if it was there
+      if (wasAtBottom && scroller) {
+        const animateScroll = () => {
+          scroller.scrollTop = scroller.scrollHeight - scroller.clientHeight;
+        };
+        // Run multiple times during animation to keep anchored
+        const interval = setInterval(animateScroll, 16);
+        setTimeout(() => {
+          clearInterval(interval);
+          animateScroll();
+        }, duration);
+      }
+
+      // Cleanup after animation
+      setTimeout(() => {
+        container.style.height = '';
+        container.style.overflow = '';
+        container.style.transition = '';
+      }, duration + 10);
+    };
+  }
+
+  /**
+   * Wrap a content-changing operation with smooth height transition.
+   * Automatically handles the before/after measurement.
+   *
+   * @param container - The element whose height will change
+   * @param contentChanger - Function that changes the content
+   * @param scrollContainer - Optional scroll container to anchor
+   * @param duration - Animation duration in ms
+   */
+  static async smoothHeightChange(
+    container: HTMLElement,
+    contentChanger: () => void | Promise<void>,
+    scrollContainer?: HTMLElement,
+    duration: number = 300
+  ): Promise<void> {
+    const finishTransition = this.prepareHeightTransition(container, scrollContainer, duration);
+    await contentChanger();
+    finishTransition();
+
+    // Wait for animation to complete
+    return new Promise(resolve => setTimeout(resolve, duration + 10));
   }
 }

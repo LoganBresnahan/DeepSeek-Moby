@@ -345,4 +345,109 @@ describe('EventStateManager', () => {
       expect(manager.getState('external.streamChunk')).toEqual({ content: 'hello' });
     });
   });
+
+  describe('CSS injection', () => {
+    afterEach(() => {
+      manager.resetStyles();
+    });
+
+    it('injects styles into document head', () => {
+      const css = '.test-class { color: red; }';
+      const result = manager.injectStyles('test-actor', css);
+
+      expect(result).toBe(true);
+
+      const styleTag = document.getElementById('actor-styles');
+      expect(styleTag).toBeTruthy();
+      expect(styleTag?.tagName).toBe('STYLE');
+    });
+
+    it('creates shared style element with proper attributes', () => {
+      manager.injectStyles('test-actor', '.test { color: blue; }');
+
+      const styleTag = document.getElementById('actor-styles');
+      expect(styleTag?.getAttribute('data-managed-by')).toBe('EventStateManager');
+    });
+
+    it('includes actor ID comment marker in style content', () => {
+      manager.injectStyles('my-actor', '.my-class { font-size: 12px; }');
+
+      const content = manager.getStyleContent();
+      expect(content).toContain('/* === my-actor === */');
+      expect(content).toContain('.my-class { font-size: 12px; }');
+    });
+
+    it('tracks injected styles by actor ID', () => {
+      expect(manager.hasStyles('streaming')).toBe(false);
+
+      manager.injectStyles('streaming', '.streaming { display: block; }');
+
+      expect(manager.hasStyles('streaming')).toBe(true);
+    });
+
+    it('only injects styles once per actor ID', () => {
+      const css1 = '.first { color: red; }';
+      const css2 = '.second { color: blue; }';
+
+      const result1 = manager.injectStyles('same-actor', css1);
+      const result2 = manager.injectStyles('same-actor', css2);
+
+      expect(result1).toBe(true);
+      expect(result2).toBe(false);
+
+      // Should only contain first CSS
+      const content = manager.getStyleContent();
+      expect(content).toContain('.first { color: red; }');
+      expect(content).not.toContain('.second { color: blue; }');
+    });
+
+    it('merges styles from multiple actors into single element', () => {
+      manager.injectStyles('actor-a', '.a { margin: 0; }');
+      manager.injectStyles('actor-b', '.b { padding: 0; }');
+      manager.injectStyles('actor-c', '.c { border: 0; }');
+
+      // Should still be only one style element
+      const styleTags = document.querySelectorAll('#actor-styles');
+      expect(styleTags.length).toBe(1);
+
+      // Should contain all styles
+      const content = manager.getStyleContent();
+      expect(content).toContain('/* === actor-a === */');
+      expect(content).toContain('/* === actor-b === */');
+      expect(content).toContain('/* === actor-c === */');
+      expect(content).toContain('.a { margin: 0; }');
+      expect(content).toContain('.b { padding: 0; }');
+      expect(content).toContain('.c { border: 0; }');
+    });
+
+    it('resetStyles clears all injected styles', () => {
+      manager.injectStyles('actor-a', '.a {}');
+      manager.injectStyles('actor-b', '.b {}');
+
+      expect(manager.hasStyles('actor-a')).toBe(true);
+      expect(manager.hasStyles('actor-b')).toBe(true);
+      expect(document.getElementById('actor-styles')).toBeTruthy();
+
+      manager.resetStyles();
+
+      expect(manager.hasStyles('actor-a')).toBe(false);
+      expect(manager.hasStyles('actor-b')).toBe(false);
+      expect(document.getElementById('actor-styles')).toBeFalsy();
+    });
+
+    it('can re-inject styles after reset', () => {
+      manager.injectStyles('test-actor', '.test1 {}');
+      manager.resetStyles();
+
+      const result = manager.injectStyles('test-actor', '.test2 {}');
+
+      expect(result).toBe(true);
+      expect(manager.hasStyles('test-actor')).toBe(true);
+      expect(manager.getStyleContent()).toContain('.test2 {}');
+    });
+
+    it('getStyleContent returns empty string when no styles injected', () => {
+      expect(manager.getStyleContent()).toBe('');
+    });
+  });
 });

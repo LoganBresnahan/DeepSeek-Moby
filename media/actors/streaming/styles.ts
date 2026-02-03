@@ -54,25 +54,8 @@ export const streamingStyles = `
   }
 }
 
-/* Streaming state class for message elements */
+/* Streaming state class for message elements - cursor removed */
 .message.streaming .message-content {
-  position: relative;
-}
-
-.message.streaming .message-content::after {
-  content: '▋';
-  display: inline;
-  animation: cursor-blink 1s step-end infinite;
-  color: var(--vscode-editor-foreground, #cccccc);
-  opacity: 0.7;
-}
-
-@keyframes cursor-blink {
-  0%, 100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0;
-  }
+  /* Streaming state indicator without cursor */
 }
 `;

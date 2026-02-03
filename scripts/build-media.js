@@ -123,4 +123,33 @@ for (const asset of assets) {
   console.log(`${asset}: copied`);
 }
 
+// ============================================
+// Dev Tools (separate bundle - NOT in production chat.js)
+// ============================================
+
+// Build dev.ts as a separate bundle that's only loaded when devMode is enabled
+const devTsPath = path.join(mediaDir, 'dev.ts');
+if (fs.existsSync(devTsPath)) {
+  try {
+    esbuild.buildSync({
+      entryPoints: [devTsPath],
+      outfile: path.join(outDir, 'dev.js'),
+      bundle: true,
+      platform: 'browser',
+      target: 'es2020',
+      sourcemap: !isProduction,
+      minify: isProduction,
+      loader: {
+        '.css': 'text'
+      }
+    });
+
+    const devOutputPath = path.join(outDir, 'dev.js');
+    const devOutputSize = fs.statSync(devOutputPath).size;
+    console.log(`dev.ts -> dev.js: ${(devOutputSize / 1024).toFixed(1)}KB (separate bundle, loaded only in dev mode)`);
+  } catch (error) {
+    console.error('Failed to build dev.ts:', error.message);
+  }
+}
+
 console.log('\nMedia files built successfully');
