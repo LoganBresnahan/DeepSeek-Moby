@@ -164,6 +164,13 @@ export abstract class InterleavedShadowActor extends EventStateActor {
         }
       }
 
+      /* Jiggle animation for hover feedback */
+      @keyframes jiggle {
+        0%, 100% { transform: translateX(0); }
+        10%, 30%, 50%, 70%, 90% { transform: translateX(-2px); }
+        20%, 40%, 60%, 80% { transform: translateX(2px); }
+      }
+
       /* Ensure VS Code theme variables work */
       *, *::before, *::after {
         box-sizing: border-box;
@@ -498,6 +505,25 @@ export abstract class InterleavedShadowActor extends EventStateActor {
     if (element) {
       element.addEventListener(eventType, handler as EventListener, options);
     }
+  }
+
+  /**
+   * Add an event listener to ALL matching elements within a container.
+   * Useful for non-bubbling events like mouseenter/mouseleave on multiple elements.
+   */
+  protected addListenerAllInContainer<K extends keyof HTMLElementEventMap>(
+    containerId: string,
+    selector: string,
+    eventType: K,
+    handler: (event: HTMLElementEventMap[K], element: HTMLElement) => void,
+    options?: AddEventListenerOptions
+  ): void {
+    const elements = this.queryAllInContainer<HTMLElement>(containerId, selector);
+    elements?.forEach(element => {
+      element.addEventListener(eventType, ((e: HTMLElementEventMap[K]) => {
+        handler(e, element);
+      }) as EventListener, options);
+    });
   }
 
   // ============================================

@@ -13,8 +13,6 @@ describe('ScrollActor', () => {
   let actor: ScrollActor;
 
   beforeEach(() => {
-    ScrollActor.resetStylesInjected();
-
     manager = new EventStateManager();
     element = document.createElement('div');
     element.id = 'scroll-container';
@@ -25,6 +23,7 @@ describe('ScrollActor', () => {
 
   afterEach(() => {
     actor.destroy();
+    manager.resetStyles();
     document.body.innerHTML = '';
   });
 
@@ -41,8 +40,9 @@ describe('ScrollActor', () => {
       expect(state.nearBottom).toBe(true);
     });
 
-    it('injects styles into document head', () => {
-      const styleTag = document.querySelector('style[data-actor="scroll"]');
+    it('injects styles via EventStateManager', () => {
+      expect(manager.hasStyles('scroll')).toBe(true);
+      const styleTag = document.getElementById('actor-styles');
       expect(styleTag).toBeTruthy();
     });
   });

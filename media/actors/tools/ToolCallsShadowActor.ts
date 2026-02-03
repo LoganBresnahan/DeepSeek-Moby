@@ -237,7 +237,7 @@ export class ToolCallsShadowActor extends InterleavedShadowActor {
   }
 
   /**
-   * Toggle expanded state of a specific batch by ID
+   * Toggle expanded state of a specific batch by ID.
    */
   toggleBatchExpanded(batchId: string): void {
     const batch = this._batches.find(b => b.id === batchId);
@@ -360,51 +360,71 @@ export class ToolCallsShadowActor extends InterleavedShadowActor {
       return;
     }
 
-    const doneCount = batch.calls.filter(t => t.status === 'done').length;
     const errorCount = batch.calls.filter(t => t.status === 'error').length;
-    const runningCount = batch.calls.filter(t => t.status === 'running').length;
     const hasErrors = errorCount > 0;
 
-    // container.content already has class="container" from InterleavedShadowActor
-    // Apply state classes directly to it
+    // Apply state classes
     container.content.classList.toggle('expanded', batch.expanded);
     container.content.classList.toggle('complete', batch.complete);
     container.content.classList.toggle('has-errors', hasErrors);
+
+    const toggleIcon = batch.expanded ? '−' : '+';
+    const preview = this.getPreviewText(batch);
 
     // Check if structure already exists
     const existingHeader = container.content.querySelector('.header');
 
     if (existingHeader) {
       // Incremental update - preserve event handlers
-      // Update title
+      const toggleEl = container.content.querySelector('.toggle');
+      if (toggleEl) toggleEl.textContent = toggleIcon;
+
       const titleEl = container.content.querySelector('.title');
-      if (titleEl) {
-        titleEl.textContent = this.getBatchTitle(batch);
-      }
+      if (titleEl) titleEl.textContent = this.getBatchTitle(batch);
+
+      const previewEl = container.content.querySelector('.preview');
+      if (previewEl) previewEl.textContent = preview;
+
+      const countEl = container.content.querySelector('.count');
+      if (countEl) countEl.textContent = `[${batch.calls.length}]`;
 
       // Update body content
       const body = container.content.querySelector('.body');
       if (body) {
-        body.innerHTML = batch.calls.map(tool => this.renderTool(tool)).join('');
+        body.innerHTML = batch.calls.map((tool, i, arr) =>
+          this.renderTool(tool, i === arr.length - 1)
+        ).join('');
       }
     } else {
-      // First render - create structure inside container.content
+      // First render - clean HTML with dotted border from CSS
       container.content.innerHTML = `
-        <div class="header">
-          <span class="icon">▶</span>
-          <span class="title">${this.getBatchTitle(batch)}</span>
-          <span class="summary"></span>
-        </div>
-        <div class="body">
-          ${batch.calls.map(tool => this.renderTool(tool)).join('')}
-        </div>
-      `;
+<div class="header">
+  <span class="toggle">${toggleIcon}</span>
+  <span class="icon">🔧</span>
+  <span class="title">${this.getBatchTitle(batch)}</span>
+  <span class="preview">${preview}</span>
+  <span class="count">[${batch.calls.length}]</span>
+</div>
+<div class="body">
+${batch.calls.map((tool, i, arr) => this.renderTool(tool, i === arr.length - 1)).join('\n')}
+</div>`;
 
-      // Bind click handler using event delegation
-      this.delegateInContainer(container.id, 'click', '.header', () => {
+      // Bind click handler to header only
+      const header = container.content.querySelector('.header');
+      header?.addEventListener('click', () => {
         this.toggleBatchExpanded(batch.id);
       });
     }
+  }
+
+  /**
+   * Get preview text for collapsed state
+   */
+  private getPreviewText(batch: ToolBatch): string {
+    if (batch.expanded) return '';
+    const names = batch.calls.slice(0, 3).map(t => t.name);
+    const preview = names.join(' · ');
+    return batch.calls.length > 3 ? `  ${preview} ...` : `  ${preview}`;
   }
 
   /**
@@ -437,17 +457,12 @@ export class ToolCallsShadowActor extends InterleavedShadowActor {
   /**
    * Render a single tool call
    */
-  private renderTool(tool: ToolCall): string {
+  private renderTool(tool: ToolCall, isLast: boolean = false): string {
     const statusIcon = this.getStatusIcon(tool.status);
     const spinClass = tool.status === 'running' ? 'spinning' : '';
+    const treeBranch = isLast ? '└─' : '├─';
 
-    return `
-      <div class="item" id="${tool.id}" data-status="${tool.status}">
-        <span class="status ${spinClass}">${statusIcon}</span>
-        <span class="name">${this.escapeHtml(tool.name)}</span>
-        <span class="detail">${this.escapeHtml(tool.detail)}</span>
-      </div>
-    `;
+    return `<div class="item" id="${tool.id}" data-status="${tool.status}">     <span class="tree">${treeBranch}</span> <span class="status ${spinClass}">${statusIcon}</span> <span class="name">${this.escapeHtml(tool.name)}</span>  <span class="detail">${this.escapeHtml(tool.detail)}</span></div>`;
   }
 
   /**

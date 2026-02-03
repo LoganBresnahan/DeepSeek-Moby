@@ -2,15 +2,17 @@
  * ToolbarShadowActor
  *
  * Shadow DOM toolbar with unified 3x2 button grid:
- * - Row 1: Files, Edit Mode
- * - Row 2: Help, Attach
- * - Row 3: Search, Send/Stop
+ * - Row 1: Web Search, Send/Stop
+ * - Row 2: Plan, Edit Mode
+ * - Row 3: Files, Attach
+ *
+ * Note: Commands button moved to header bar
  *
  * Publications:
  * - toolbar.editMode: 'manual' | 'ask' | 'auto'
  * - toolbar.webSearchEnabled: boolean
  * - toolbar.filesModalOpen: boolean
- * - toolbar.commandsModalOpen: boolean
+ * - toolbar.planEnabled: boolean
  * - toolbar.sendClicked: boolean (pulse to trigger send)
  *
  * Subscriptions:
@@ -27,14 +29,14 @@ export interface ToolbarState {
   editMode: EditMode;
   webSearchEnabled: boolean;
   filesModalOpen: boolean;
-  commandsModalOpen: boolean;
+  planEnabled: boolean;
   streaming: boolean;
 }
 
 export type EditModeHandler = (mode: EditMode) => void;
 export type WebSearchHandler = (enabled: boolean, settings?: WebSearchSettings) => void;
 export type FilesHandler = () => void;
-export type CommandHandler = (command: string) => void;
+export type PlanHandler = (enabled: boolean) => void;
 export type SendHandler = () => void;
 export type StopHandler = () => void;
 export type AttachHandler = () => void;
@@ -56,8 +58,8 @@ const ICONS = {
   edit: `<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
     <text x="8" y="11" font-size="10" font-weight="bold" text-anchor="middle" fill="currentColor">M</text>
   </svg>`,
-  help: `<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-    <path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 13A6 6 0 1 1 8 2a6 6 0 0 1 0 12zm-.5-3h1v1h-1v-1zm.5-7a2.5 2.5 0 0 0-2.5 2.5h1A1.5 1.5 0 1 1 8 8c-.55 0-1 .45-1 1v1h1v-.8c0-.11.09-.2.2-.2h.3a2.5 2.5 0 0 0 0-5z"/>
+  plan: `<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+    <text x="8" y="11" font-size="10" font-weight="bold" text-anchor="middle" fill="currentColor">P</text>
   </svg>`,
   search: `<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
     <circle cx="6" cy="6" r="5.5" fill="none" stroke="currentColor" stroke-width="1"/>
@@ -93,7 +95,7 @@ export class ToolbarShadowActor extends ShadowActor {
   private _editMode: EditMode = 'manual';
   private _webSearchEnabled = false;
   private _filesModalOpen = false;
-  private _commandsModalOpen = false;
+  private _planEnabled = false;
   private _streaming = false;
 
   // Web search settings
@@ -102,28 +104,14 @@ export class ToolbarShadowActor extends ShadowActor {
     searchDepth: 'basic'
   };
 
-  // Command definitions
-  private _commands = [
-    { section: 'Chat' },
-    { id: 'newChat', name: 'New Chat', desc: 'Start a new conversation', icon: '✨' },
-    { section: 'History' },
-    { id: 'showChatHistory', name: 'Show History', desc: 'View chat history', icon: '📚' },
-    { id: 'exportChatHistory', name: 'Export History', desc: 'Export all chats', icon: '📤' },
-    { id: 'searchChatHistory', name: 'Search History', desc: 'Search past chats', icon: '🔍' },
-    { section: 'Other' },
-    { id: 'showStats', name: 'Show Stats', desc: 'View usage statistics', icon: '📊' },
-    { id: 'showLogs', name: 'Show Logs', desc: 'View extension logs', icon: '📋' }
-  ] as const;
-
   // Modals (rendered in document.body, outside shadow DOM)
-  private _commandsModal: HTMLElement | null = null;
   private _webSearchModal: HTMLElement | null = null;
 
   // Handlers
   private _onEditModeChange: EditModeHandler | null = null;
   private _onWebSearchToggle: WebSearchHandler | null = null;
   private _onFilesOpen: FilesHandler | null = null;
-  private _onCommand: CommandHandler | null = null;
+  private _onPlan: PlanHandler | null = null;
   private _onSend: SendHandler | null = null;
   private _onStop: StopHandler | null = null;
   private _onAttach: AttachHandler | null = null;
@@ -141,7 +129,7 @@ export class ToolbarShadowActor extends ShadowActor {
         'toolbar.editMode': () => this._editMode,
         'toolbar.webSearchEnabled': () => this._webSearchEnabled,
         'toolbar.filesModalOpen': () => this._filesModalOpen,
-        'toolbar.commandsModalOpen': () => this._commandsModalOpen
+        'toolbar.planEnabled': () => this._planEnabled
       },
       subscriptions: {
         'streaming.active': (value: unknown) => this.handleStreamingChange(value as boolean)
@@ -159,20 +147,12 @@ export class ToolbarShadowActor extends ShadowActor {
   // ============================================
 
   private renderToolbar(): void {
+    // Grid layout (2 cols x 3 rows):
+    // Row 1: Web Search, Send/Stop
+    // Row 2: Plan, Edit Mode
+    // Row 3: Files, Attach
     this.render(`
       <div class="toolbar">
-        <button class="btn files-btn" title="Select files for context">
-          ${ICONS.files}
-        </button>
-        <button class="btn edit-mode-btn" title="Edit mode: Manual">
-          ${ICONS.edit}
-        </button>
-        <button class="btn help-btn" title="Commands">
-          ${ICONS.help}
-        </button>
-        <button class="btn attach-btn" title="Attach file">
-          ${ICONS.attach}
-        </button>
         <button class="btn search-btn" title="Web search">
           ${ICONS.search}
         </button>
@@ -182,18 +162,30 @@ export class ToolbarShadowActor extends ShadowActor {
         <button class="btn stop-btn" title="Stop generation" style="display: none;">
           ${ICONS.stop}
         </button>
+        <button class="btn plan-btn" title="Plan (coming soon)">
+          ${ICONS.plan}
+        </button>
+        <button class="btn edit-mode-btn" title="Edit mode: Manual">
+          ${ICONS.edit}
+        </button>
+        <button class="btn files-btn" title="Select files for context">
+          ${ICONS.files}
+        </button>
+        <button class="btn attach-btn" title="Attach file">
+          ${ICONS.attach}
+        </button>
       </div>
     `);
   }
 
   private setupEventHandlers(): void {
-    this.delegate('click', '.files-btn', (e) => this.handleFilesClick(e));
-    this.delegate('click', '.edit-mode-btn', () => this.handleEditModeClick());
-    this.delegate('click', '.help-btn', (e) => this.handleHelpClick(e));
     this.delegate('click', '.search-btn', (e) => this.handleSearchClick(e));
-    this.delegate('click', '.attach-btn', () => this.handleAttachClick());
     this.delegate('click', '.send-btn', () => this.handleSendClick());
     this.delegate('click', '.stop-btn', () => this.handleStopClick());
+    this.delegate('click', '.plan-btn', () => this.handlePlanClick());
+    this.delegate('click', '.edit-mode-btn', () => this.handleEditModeClick());
+    this.delegate('click', '.files-btn', (e) => this.handleFilesClick(e));
+    this.delegate('click', '.attach-btn', () => this.handleAttachClick());
   }
 
   private setupGlobalHandlers(): void {
@@ -227,10 +219,12 @@ export class ToolbarShadowActor extends ShadowActor {
     this.publish({ 'toolbar.editMode': newMode });
   }
 
-  private handleHelpClick(e: Event): void {
-    e.stopPropagation();
-    this.closeAllModals();
-    this.showCommandsModal();
+  private handlePlanClick(): void {
+    this._planEnabled = !this._planEnabled;
+    this.query<HTMLButtonElement>('.plan-btn')?.classList.toggle('active', this._planEnabled);
+    this._onPlan?.(this._planEnabled);
+    this._vscode?.postMessage({ type: 'togglePlan', enabled: this._planEnabled });
+    this.publish({ 'toolbar.planEnabled': this._planEnabled });
   }
 
   private handleSearchClick(e: Event): void {
@@ -265,11 +259,8 @@ export class ToolbarShadowActor extends ShadowActor {
   private handleOutsideClick(e: MouseEvent): void {
     const target = e.target as Element;
 
-    if (this._commandsModal && !target.closest('.commands-modal') && !this.isInsideShadow(target, '.help-btn')) {
-      this.closeCommandsModal();
-    }
-
-    if (this._webSearchModal && !target.closest('.web-search-modal') && !this.isInsideShadow(target, '.search-btn')) {
+    // Use data attributes for modal detection (cleaner than class names)
+    if (this._webSearchModal && !target.closest('[data-modal="web-search"]') && !this.isInsideShadow(target, '.search-btn')) {
       this.closeWebSearchModal();
     }
   }
@@ -319,75 +310,6 @@ export class ToolbarShadowActor extends ShadowActor {
   }
 
   // ============================================
-  // Commands Modal (in document.body)
-  // ============================================
-
-  private showCommandsModal(): void {
-    const helpBtn = this.query<HTMLButtonElement>('.help-btn');
-    if (!helpBtn) return;
-
-    const modal = document.createElement('div');
-    modal.className = 'commands-modal';
-    modal.innerHTML = `
-      <div class="commands-modal-title">
-        <span>Commands</span>
-        <button class="commands-modal-close">×</button>
-      </div>
-      <div class="commands-list">
-        ${this._commands.map(cmd => {
-          if ('section' in cmd && !('id' in cmd)) {
-            return `<div class="commands-section-title">${cmd.section}</div>`;
-          }
-          const c = cmd as { id: string; name: string; desc: string; icon: string };
-          return `
-            <div class="command-item" data-command="${c.id}">
-              <span class="command-icon">${c.icon}</span>
-              <div class="command-info">
-                <div class="command-name">${c.name}</div>
-                <div class="command-desc">${c.desc}</div>
-              </div>
-            </div>
-          `;
-        }).join('')}
-      </div>
-    `;
-
-    // Position relative to the host element (not the shadow button)
-    const rect = this.element.getBoundingClientRect();
-    modal.style.bottom = `${window.innerHeight - rect.top + 5}px`;
-    modal.style.left = `${rect.left}px`;
-
-    modal.querySelector('.commands-modal-close')?.addEventListener('click', () => {
-      this.closeCommandsModal();
-    });
-
-    modal.querySelectorAll('.command-item').forEach(item => {
-      item.addEventListener('click', () => {
-        const commandId = (item as HTMLElement).dataset.command;
-        if (commandId) {
-          this._onCommand?.(commandId);
-          this._vscode?.postMessage({ type: 'executeCommand', command: `deepseek.${commandId}` });
-          this.closeCommandsModal();
-        }
-      });
-    });
-
-    document.body.appendChild(modal);
-    this._commandsModal = modal;
-    this._commandsModalOpen = true;
-    this.publish({ 'toolbar.commandsModalOpen': true });
-  }
-
-  private closeCommandsModal(): void {
-    if (this._commandsModal) {
-      this._commandsModal.remove();
-      this._commandsModal = null;
-    }
-    this._commandsModalOpen = false;
-    this.publish({ 'toolbar.commandsModalOpen': false });
-  }
-
-  // ============================================
   // Web Search Modal (in document.body)
   // ============================================
 
@@ -397,6 +319,7 @@ export class ToolbarShadowActor extends ShadowActor {
 
     const modal = document.createElement('div');
     modal.className = 'web-search-modal';
+    modal.setAttribute('data-modal', 'web-search');
     modal.innerHTML = `
       <div class="web-search-modal-title">
         <span>Web Search Settings</span>
@@ -475,7 +398,6 @@ export class ToolbarShadowActor extends ShadowActor {
   }
 
   private closeAllModals(): void {
-    this.closeCommandsModal();
     this.closeWebSearchModal();
   }
 
@@ -495,8 +417,8 @@ export class ToolbarShadowActor extends ShadowActor {
     this._onFilesOpen = handler;
   }
 
-  onCommand(handler: CommandHandler): void {
-    this._onCommand = handler;
+  onPlan(handler: PlanHandler): void {
+    this._onPlan = handler;
   }
 
   onSend(handler: SendHandler): void {
@@ -542,7 +464,7 @@ export class ToolbarShadowActor extends ShadowActor {
       editMode: this._editMode,
       webSearchEnabled: this._webSearchEnabled,
       filesModalOpen: this._filesModalOpen,
-      commandsModalOpen: this._commandsModalOpen,
+      planEnabled: this._planEnabled,
       streaming: this._streaming
     };
   }
@@ -561,7 +483,7 @@ export class ToolbarShadowActor extends ShadowActor {
     this._onEditModeChange = null;
     this._onWebSearchToggle = null;
     this._onFilesOpen = null;
-    this._onCommand = null;
+    this._onPlan = null;
     this._onSend = null;
     this._onStop = null;
     this._onAttach = null;

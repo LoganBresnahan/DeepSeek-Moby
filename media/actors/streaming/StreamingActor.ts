@@ -28,8 +28,6 @@ export interface StreamingState {
 }
 
 export class StreamingActor extends EventStateActor {
-  private static stylesInjected = false;
-
   // Internal state
   private _active = false;
   private _content = '';
@@ -53,21 +51,7 @@ export class StreamingActor extends EventStateActor {
     };
 
     super(config);
-    this.injectStyles();
-  }
-
-  /**
-   * Inject CSS styles (once per class)
-   */
-  private injectStyles(): void {
-    if (StreamingActor.stylesInjected) return;
-    if (typeof document === 'undefined') return; // SSR/test safety
-
-    const style = document.createElement('style');
-    style.setAttribute('data-actor', 'streaming');
-    style.textContent = styles;
-    document.head.appendChild(style);
-    StreamingActor.stylesInjected = true;
+    manager.injectStyles('streaming', styles);
   }
 
   /**

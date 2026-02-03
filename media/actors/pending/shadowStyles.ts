@@ -1,108 +1,119 @@
 /**
  * Pending Changes Shadow Actor styles
- * Simplified CSS for Shadow DOM encapsulation - no prefixes needed
+ * Clean dotted border design - no ASCII art
  */
 export const pendingShadowStyles = `
-/* Container - applied to shadow content root */
+/* Container - dotted border, no background */
 .container {
   margin: 8px 0;
-  border: 1px solid var(--vscode-panel-border);
-  border-radius: 6px;
-  overflow: hidden;
-  background: var(--vscode-editor-background);
+  border: 1px dotted var(--vscode-panel-border);
+  border-radius: 4px;
+  font-family: var(--vscode-font-family);
+  font-size: 13px;
+  line-height: 1.4;
+  cursor: pointer;
+  user-select: none;
 }
 
 .container.entering {
-  animation: slideIn 0.2s ease-out;
+  animation: fadeIn 0.5s ease-out forwards;
 }
 
-@keyframes slideIn {
-  from {
-    opacity: 0;
-    transform: translateY(-10px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
-/* Header */
+/* Header row */
 .header {
   display: flex;
   align-items: center;
+  padding: 6px 10px;
   gap: 8px;
-  padding: 8px 12px;
-  background: var(--vscode-editorWidget-background);
-  cursor: pointer;
-  user-select: none;
-  transition: background 0.15s ease;
 }
 
-.header:hover {
+.container:hover .header {
   background: var(--vscode-list-hoverBackground);
 }
 
-.icon {
-  font-size: 10px;
-  color: var(--vscode-foreground);
-  transition: transform 0.2s ease;
-}
-
-.container.expanded .icon {
-  transform: rotate(90deg);
-}
-
-.title {
-  flex: 1;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--vscode-foreground);
-}
-
-.count {
-  background: var(--vscode-badge-background);
-  color: var(--vscode-badge-foreground);
-  padding: 2px 6px;
-  border-radius: 10px;
-  font-size: 10px;
-  font-weight: 500;
-}
-
-/* Body */
-.body {
-  max-height: 0;
-  overflow: hidden;
-  transition: max-height 0.3s ease, padding 0.3s ease;
-}
-
-.container.expanded .body {
-  max-height: 500px;
-  padding: 8px 12px;
-  overflow-y: auto;
-}
-
-/* Item */
-.item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 0;
-  border-bottom: 1px solid var(--vscode-panel-border);
-}
-
-.item:last-child {
-  border-bottom: none;
-}
-
-.status {
-  width: 16px;
-  text-align: center;
+/* +/- toggle icon */
+.toggle {
+  color: var(--vscode-descriptionForeground);
+  font-family: monospace;
+  font-weight: bold;
+  width: 12px;
   flex-shrink: 0;
 }
 
+/* Emoji/status icon */
+.icon {
+  flex-shrink: 0;
+}
+
+/* Title text */
+.title {
+  color: var(--vscode-foreground);
+  font-weight: 500;
+}
+
+/* Preview text (collapsed state) */
+.preview {
+  color: var(--vscode-descriptionForeground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  font-size: 12px;
+}
+
+/* Count badge */
+.count {
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+/* Body - hidden when collapsed */
+.body {
+  display: none;
+  padding: 8px 10px;
+  border-top: 1px dotted var(--vscode-panel-border);
+}
+
+/* Expanded state - show body */
+.container.expanded .body {
+  display: block;
+}
+
+/* Empty body - hide completely */
+.body:empty {
+  display: none;
+}
+
+/* File item */
+.item {
+  padding: 4px 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Tree branch characters */
+.tree {
+  color: var(--vscode-panel-border);
+  font-family: monospace;
+  flex-shrink: 0;
+}
+
+/* Status icon */
+.status {
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+}
+
 .status.pending {
-  color: var(--vscode-editorWarning-foreground, #cca700);
+  color: var(--vscode-terminal-ansiYellow);
 }
 
 .status.applied {
@@ -110,23 +121,17 @@ export const pendingShadowStyles = `
 }
 
 .status.rejected {
-  color: var(--vscode-errorForeground, #f48771);
+  color: var(--vscode-errorForeground);
 }
 
 .status.superseded {
-  color: var(--vscode-textLink-foreground, #3794ff);
+  color: var(--vscode-descriptionForeground);
 }
 
 /* File name */
 .file {
-  flex: 1;
-  font-family: var(--vscode-editor-font-family);
-  font-size: 12px;
   color: var(--vscode-textLink-foreground);
   cursor: pointer;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .file:hover {
@@ -145,72 +150,41 @@ export const pendingShadowStyles = `
 /* Actions */
 .actions {
   display: flex;
-  gap: 4px;
-  flex-shrink: 0;
+  gap: 8px;
+  margin-left: auto;
 }
 
 .btn {
-  width: 24px;
-  height: 24px;
+  padding: 2px 6px;
   border: none;
-  border-radius: 4px;
+  background: none;
   cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  font-family: inherit;
   font-size: 12px;
-  transition: filter 0.15s ease;
+  border-radius: 3px;
 }
 
 .btn.accept-btn {
-  background: var(--vscode-terminal-ansiGreen, #4ec9b0);
-  color: var(--vscode-editor-background);
+  color: var(--vscode-terminal-ansiGreen);
 }
 
 .btn.accept-btn:hover {
-  background: var(--vscode-terminal-ansiBrightGreen, #5fd7af);
+  background: var(--vscode-list-hoverBackground);
 }
 
 .btn.reject-btn {
-  background: var(--vscode-errorForeground, #f48771);
-  color: var(--vscode-editor-background);
+  color: var(--vscode-errorForeground);
 }
 
 .btn.reject-btn:hover {
-  filter: brightness(1.15);
+  background: var(--vscode-list-hoverBackground);
 }
 
 /* Status labels */
 .label {
-  font-size: 10px;
-  font-weight: 500;
-  padding: 2px 6px;
-  border-radius: 4px;
-}
-
-.label.applied {
-  background: var(--vscode-terminal-ansiGreen);
-  color: var(--vscode-editor-background);
-}
-
-.label.rejected {
-  background: var(--vscode-errorForeground, #f48771);
-  color: var(--vscode-editor-background);
-}
-
-.label.superseded {
-  background: var(--vscode-textLink-foreground, #3794ff);
-  color: var(--vscode-editor-background);
-}
-
-.label.auto {
-  background: var(--vscode-terminal-ansiGreen);
-  color: var(--vscode-editor-background);
-}
-
-/* Auto mode styling */
-.container.auto-mode .item {
-  padding: 4px 0;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+  margin-left: auto;
 }
 
 /* Superseded items */
@@ -223,7 +197,8 @@ export const pendingShadowStyles = `
   color: var(--vscode-descriptionForeground);
 }
 
-.item[data-superseded="true"] .status {
-  color: var(--vscode-descriptionForeground);
+/* Auto mode styling */
+.container.auto-mode .item {
+  padding: 4px 0;
 }
 `;

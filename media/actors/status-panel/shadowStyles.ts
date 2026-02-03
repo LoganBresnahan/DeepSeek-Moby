@@ -84,15 +84,15 @@ export const statusPanelShadowStyles = `
 
 /* Colored spurt variants */
 .moby.spurt-blue .droplet {
-  background: #4fc3f7;
+  background: var(--vscode-terminal-ansiBrightCyan, #4fc3f7);
 }
 
 .moby.spurt-yellow .droplet {
-  background: #cca700;
+  background: var(--vscode-editorWarning-foreground, #cca700);
 }
 
 .moby.spurt-red .droplet {
-  background: #f48771;
+  background: var(--vscode-errorForeground, #f48771);
 }
 
 /* Left panel */

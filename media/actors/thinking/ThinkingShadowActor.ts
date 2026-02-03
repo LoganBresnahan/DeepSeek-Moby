@@ -19,7 +19,7 @@
  * - streaming.active: boolean - track streaming state
  */
 
-import { InterleavedShadowActor, ShadowContainer } from '../../state/InterleavedShadowActor';
+import { InterleavedShadowActor } from '../../state/InterleavedShadowActor';
 import { EventStateManager } from '../../state/EventStateManager';
 import { thinkingShadowStyles } from './shadowStyles';
 
@@ -43,6 +43,10 @@ export class ThinkingShadowActor extends InterleavedShadowActor {
   private _expandedIndices: Set<number> = new Set();
   private _streaming = false;
   private _currentIteration = 0;
+  // Track the accumulated thinking length when each iteration starts
+  // This allows us to extract only the current iteration's content from the full accumulated string
+  private _iterationBaseOffset = 0;
+  private _lastKnownThinkingLength = 0;
 
   constructor(manager: EventStateManager, element: HTMLElement) {
     super({
@@ -68,7 +72,7 @@ export class ThinkingShadowActor extends InterleavedShadowActor {
   // ============================================
 
   private handleStreamingThinking(content: string): void {
-    console.log('[ThinkingShadowActor] Received streaming.thinking, content length:', content?.length || 0);
+    console.log('[ThinkingShadowActor] Received streaming.thinking, content length:', content?.length || 0, 'baseOffset:', this._iterationBaseOffset);
     if (!content) return;
 
     this._streaming = true;
@@ -79,11 +83,17 @@ export class ThinkingShadowActor extends InterleavedShadowActor {
       this.startIteration();
     }
 
-    // Update current iteration content
+    // Track total length for next iteration's base offset
+    this._lastKnownThinkingLength = content.length;
+
+    // Update current iteration content - only use content AFTER the base offset
+    // This ensures each iteration only shows its own thinking, not accumulated from previous iterations
     const currentIdx = this._currentIteration;
     const iteration = this._iterations.find(i => i.index === currentIdx);
     if (iteration) {
-      iteration.content = content;
+      const iterationContent = content.slice(this._iterationBaseOffset);
+      console.log('[ThinkingShadowActor] Setting iteration', currentIdx, 'content from offset', this._iterationBaseOffset, 'length:', iterationContent.length);
+      iteration.content = iterationContent;
     }
 
     // Render only the current iteration
@@ -123,18 +133,22 @@ export class ThinkingShadowActor extends InterleavedShadowActor {
    */
   startIteration(): number {
     this._currentIteration++;
-    console.log('[ThinkingShadowActor] Creating container for iteration', this._currentIteration);
 
-    // Auto-expand new iterations so user can see content during streaming
-    this._expandedIndices.add(this._currentIteration);
+    // Set the base offset for this iteration to the current accumulated thinking length
+    // This ensures we only show content from THIS iteration, not previous ones
+    this._iterationBaseOffset = this._lastKnownThinkingLength;
+    console.log('[ThinkingShadowActor] Creating container for iteration', this._currentIteration, 'baseOffset:', this._iterationBaseOffset);
+
+    // Iterations start collapsed by default - user can click to expand
+    // (Previously auto-expanded which broke scroll tracking)
 
     // Create shadow-encapsulated container
     const container = this.createContainer('thinking', {
       dataAttributes: { iteration: this._currentIteration.toString() }
     });
 
-    // Add entering animation and expanded state (iterations start expanded)
-    container.content.classList.add('entering', 'expanded');
+    // Add entering animation only (starts collapsed)
+    container.content.classList.add('entering');
 
     // Debug: Log container position and visibility
     const childIndex = Array.from(this.element.children).indexOf(container.host);
@@ -211,7 +225,7 @@ export class ThinkingShadowActor extends InterleavedShadowActor {
   }
 
   /**
-   * Toggle expansion of an iteration
+   * Toggle expansion of an iteration.
    */
   toggleExpanded(index: number): void {
     if (this._expandedIndices.has(index)) {
@@ -274,6 +288,8 @@ export class ThinkingShadowActor extends InterleavedShadowActor {
     this._expandedIndices.clear();
     this._streaming = false;
     this._currentIteration = 0;
+    this._iterationBaseOffset = 0;
+    this._lastKnownThinkingLength = 0;
 
     this.publish({
       'thinking.content': '',
@@ -355,28 +371,32 @@ export class ThinkingShadowActor extends InterleavedShadowActor {
       return;
     }
 
+    // Check expansion state
     const isExpanded = this._expandedIndices.has(iteration.index);
     const isStreaming = this._streaming && iteration.index === this._currentIteration;
     console.log('[ThinkingShadowActor] renderIteration', index, 'expanded:', isExpanded, 'streaming:', isStreaming, 'contentLen:', iteration.content.length);
 
-    // container.content already has class="container" from InterleavedShadowActor
-    // Apply state classes directly to it (expanded = arrow rotates, body shows)
+    // Apply state classes
     container.content.classList.toggle('expanded', isExpanded);
     container.content.classList.toggle('streaming', isStreaming);
+
+    const toggleIcon = isExpanded ? '−' : '+';
+    const label = this.getIterationLabel(iteration);
+    const preview = this.getPreviewText(iteration.content, isExpanded);
 
     // Check if structure already exists (header element)
     const existingHeader = container.content.querySelector('.header');
 
     if (existingHeader) {
       // Incremental update - preserve event handlers
-      // Update label if needed
-      const label = this._iterations.length > 1
-        ? `Thinking (Iteration ${iteration.index})`
-        : 'Chain of Thought';
+      const toggleEl = container.content.querySelector('.toggle');
+      if (toggleEl) toggleEl.textContent = toggleIcon;
+
       const labelEl = container.content.querySelector('.label');
-      if (labelEl && labelEl.textContent !== label) {
-        labelEl.textContent = label;
-      }
+      if (labelEl) labelEl.textContent = label;
+
+      const previewEl = container.content.querySelector('.preview');
+      if (previewEl) previewEl.textContent = preview;
 
       // Update body content
       const body = container.content.querySelector('.body');
@@ -387,25 +407,42 @@ export class ThinkingShadowActor extends InterleavedShadowActor {
         }
       }
     } else {
-      // First render - create header and body inside container.content
-      const label = this._iterations.length > 1
-        ? `Thinking (Iteration ${iteration.index})`
-        : 'Chain of Thought';
-
+      // First render - clean HTML with dotted border from CSS
       container.content.innerHTML = `
-        <div class="header">
-          <span class="icon">▶</span>
-          <span class="emoji">💭</span>
-          <span class="label">${label}</span>
-        </div>
-        <div class="body">${this.formatContent(iteration.content)}</div>
-      `;
+<div class="header">
+  <span class="toggle">${toggleIcon}</span>
+  <span class="emoji">💭</span>
+  <span class="label">${label}</span>
+  <span class="preview">${preview}</span>
+</div>
+<div class="body">${this.formatContent(iteration.content)}</div>`;
 
-      // Bind click handler using event delegation
-      this.delegateInContainer(container.id, 'click', '.header', () => {
+      // Bind click handler to header only
+      const header = container.content.querySelector('.header');
+      header?.addEventListener('click', () => {
         this.toggleExpanded(iteration.index);
       });
     }
+  }
+
+  /**
+   * Get label for iteration
+   */
+  private getIterationLabel(iteration: ThinkingIteration): string {
+    if (this._streaming && iteration.index === this._currentIteration) {
+      return 'Thinking...';
+    }
+    return iteration.complete ? 'Thought' : 'Thinking...';
+  }
+
+  /**
+   * Get preview text for collapsed state
+   */
+  private getPreviewText(content: string, isExpanded: boolean): string {
+    if (isExpanded || !content) return '';
+    const firstLine = content.split('\n')[0].trim();
+    const preview = firstLine.slice(0, 50);
+    return preview.length < firstLine.length ? `  ${preview}...` : `  ${preview}`;
   }
 
   /**

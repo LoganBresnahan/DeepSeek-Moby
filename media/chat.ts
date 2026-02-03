@@ -17,7 +17,9 @@ import {
   PendingChangesShadowActor,
   InputAreaShadowActor,
   StatusPanelShadowActor,
-  ToolbarShadowActor
+  ToolbarShadowActor,
+  InspectorShadowActor
+  // Note: DropdownFocusActor removed - see media/actors/dropdown-focus/UNUSED.txt
 } from './actors';
 import { AnimationHelper } from './utils';
 
@@ -126,6 +128,9 @@ function initializeActorSystem(): void {
   const thinking = new ThinkingShadowActor(manager, chatMessages);
   const pending = new PendingChangesShadowActor(manager, chatMessages);
 
+  // Note: DropdownFocusActor removed - dropdowns are now simple collapsibles
+  // See media/actors/dropdown-focus/UNUSED.txt for details
+
   // Debug: Verify chatMessages is NOT a shadow host (critical for interleaving)
   console.log('[ActorSystem] Initialized. chatMessages.shadowRoot:', chatMessages.shadowRoot,
     'children:', chatMessages.children.length);
@@ -138,6 +143,57 @@ function initializeActorSystem(): void {
 
   // ToolbarShadowActor - owns its DOM, renders into toolbarContainer
   const toolbar = new ToolbarShadowActor(manager, toolbarContainer, vscode);
+
+  // InspectorShadowActor - UI inspection tool, uses its own host element
+  const inspectorHost = document.createElement('div');
+  inspectorHost.id = 'inspectorHost';
+  inspectorHost.style.cssText = 'position: fixed; top: 0; left: 0; width: 0; height: 0; z-index: 999999;';
+  document.body.appendChild(inspectorHost);
+  const inspector = new InspectorShadowActor(manager, inspectorHost);
+
+  // Wire up inspector toggle button
+  const inspectorBtn = getElementOrNull<HTMLButtonElement>('inspectorBtn');
+  if (inspectorBtn) {
+    inspectorBtn.addEventListener('click', () => {
+      inspector.toggle();
+      inspectorBtn.classList.toggle('active', inspector.isVisible());
+    });
+
+    // Listen for inspector close (e.g., when closed via X button)
+    inspectorHost.addEventListener('inspector-hidden', () => {
+      inspectorBtn.classList.remove('active');
+    });
+  }
+
+  // Wire up commands dropdown
+  const commandsBtn = getElementOrNull<HTMLButtonElement>('commandsBtn');
+  const commandsDropdown = getElementOrNull<HTMLDivElement>('commandsDropdown');
+
+  if (commandsBtn && commandsDropdown) {
+    commandsBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const isVisible = commandsDropdown.style.display === 'block';
+      commandsDropdown.style.display = isVisible ? 'none' : 'block';
+    });
+
+    // Handle command clicks
+    commandsDropdown.querySelectorAll('.command-item').forEach(item => {
+      item.addEventListener('click', () => {
+        const command = (item as HTMLElement).dataset.command;
+        if (command) {
+          vscode.postMessage({ type: 'executeCommand', command });
+          commandsDropdown.style.display = 'none';
+        }
+      });
+    });
+
+    // Close when clicking outside
+    document.addEventListener('click', (e) => {
+      if (!commandsDropdown.contains(e.target as Node) && e.target !== commandsBtn) {
+        commandsDropdown.style.display = 'none';
+      }
+    });
+  }
 
   // Set up InputAreaActor handlers
   inputArea.onSend((content, attachments) => {
@@ -216,15 +272,16 @@ function initializeActorSystem(): void {
     switch (msg.type) {
       // ---- Streaming Messages ----
       case 'startResponse':
+        console.log('[Frontend] startResponse: beginning new stream, isReasoner=' + msg.isReasoner);
         isStreaming = true;
         isReasonerMode = msg.isReasoner || false;
 
         // Reset segment state for new response
         currentSegmentContent = '';
         hasInterleavedContent = false;
+        console.log('[Frontend] startResponse: reset segment state (content="", interleaved=false)');
 
-        // Enable printing surface effect during streaming
-        AnimationHelper.enablePrintingSurface(chatMessages);
+        // Printing surface effect removed - was too distracting
 
         // Start stream - this publishes streaming.active: true
         // InputAreaActor subscribes to this and handles button visibility
@@ -235,11 +292,17 @@ function initializeActorSystem(): void {
         // This ensures thinking appears inline with the response flow, not at the top.
         break;
 
-      case 'streamToken':
+      case 'streamToken': {
+        const tokenPreview = msg.token.length > 50 ? msg.token.slice(0, 50) + '...' : msg.token;
+        console.log(`[Frontend] streamToken: "${tokenPreview.replace(/\n/g, '\\n')}" (${msg.token.length} chars, segment now ${currentSegmentContent.length + msg.token.length} chars, interleaved=${hasInterleavedContent})`);
+
         // Check if we need to start a new segment after tools/shell interrupted
         if (message.needsNewSegment()) {
+          console.log('[Frontend] streamToken: needsNewSegment=true, calling resumeWithNewSegment()');
           message.resumeWithNewSegment();
           currentSegmentContent = '';
+          hasInterleavedContent = false; // Reset for the new segment so thinking/iteration can finalize it
+          console.log('[Frontend] streamToken: reset segment state after resume (content="", interleaved=false)');
         }
 
         // Track content for the current segment
@@ -253,31 +316,43 @@ function initializeActorSystem(): void {
 
         streaming.handleContentChunk(msg.token);
         break;
+      }
 
       case 'streamReasoning':
         // Finalize current text segment before thinking content
         // This ensures thinking appears after the text that preceded it
         if (message.isStreaming() && !hasInterleavedContent) {
-          message.finalizeCurrentSegment();
-          hasInterleavedContent = true;
+          console.log(`[Frontend] streamReasoning: finalizing segment before thinking (content=${currentSegmentContent.length} chars)`);
+          const didFinalize = message.finalizeCurrentSegment();
+          if (didFinalize) {
+            hasInterleavedContent = true;
+          }
+        } else {
+          console.log(`[Frontend] streamReasoning: skipping finalize (streaming=${message.isStreaming()}, interleaved=${hasInterleavedContent})`);
         }
         streaming.handleThinkingChunk(msg.token);
         break;
 
       case 'iterationStart':
+        console.log(`[Frontend] iterationStart: iteration=${msg.iteration}`);
         // Finalize current text segment before thinking iteration starts
         if (message.isStreaming() && !hasInterleavedContent) {
-          message.finalizeCurrentSegment();
-          hasInterleavedContent = true;
+          console.log(`[Frontend] iterationStart: finalizing segment (content=${currentSegmentContent.length} chars)`);
+          const didFinalize = message.finalizeCurrentSegment();
+          if (didFinalize) {
+            hasInterleavedContent = true;
+          }
+        } else {
+          console.log(`[Frontend] iterationStart: skipping finalize (streaming=${message.isStreaming()}, interleaved=${hasInterleavedContent})`);
         }
         thinking.startIteration();
         break;
 
       case 'endResponse':
+        console.log(`[Frontend] endResponse: ending stream (interleaved=${hasInterleavedContent}, segmentContent=${currentSegmentContent.length} chars)`);
         isStreaming = false;
 
-        // Disable printing surface effect
-        AnimationHelper.disablePrintingSurface(chatMessages);
+        // Printing surface effect removed - was too distracting
 
         // End stream - this publishes streaming.active: false
         // InputAreaActor subscribes to this and handles button visibility
@@ -289,6 +364,7 @@ function initializeActorSystem(): void {
         // is already displayed in continuation segments - updating the original message
         // would cause duplicates.
         if (msg.message) {
+          console.log(`[Frontend] endResponse: finalizing message (useContent=${!hasInterleavedContent}, contentLength=${msg.message.content?.length || 0})`);
           message.finalizeLastMessage({
             content: hasInterleavedContent ? undefined : msg.message.content,
             thinking: msg.message.reasoning
@@ -298,6 +374,7 @@ function initializeActorSystem(): void {
         // Reset segment state
         currentSegmentContent = '';
         hasInterleavedContent = false;
+        console.log('[Frontend] endResponse: reset segment state (content="", interleaved=false)');
 
         // Complete current thinking iteration
         thinking.completeIteration();
@@ -305,12 +382,16 @@ function initializeActorSystem(): void {
 
       // ---- Shell Messages ----
       case 'shellExecuting':
+        console.log(`[Frontend] shellExecuting: ${msg.commands?.length || 0} commands (streaming=${message.isStreaming()}, segmentContent=${currentSegmentContent.length} chars)`);
         if (msg.commands && Array.isArray(msg.commands)) {
           // Finalize current text segment before showing shell commands
           // This preserves the text that came before the shell execution
           if (message.isStreaming()) {
-            message.finalizeCurrentSegment();
-            hasInterleavedContent = true;
+            console.log(`[Frontend] shellExecuting: finalizing segment before shell (content=${currentSegmentContent.length} chars)`);
+            const didFinalize = message.finalizeCurrentSegment();
+            if (didFinalize) {
+              hasInterleavedContent = true;
+            }
           }
 
           // Create segment and start it
@@ -333,12 +414,16 @@ function initializeActorSystem(): void {
 
       // ---- Tool Calls Messages ----
       case 'toolCallsStart':
+        console.log(`[Frontend] toolCallsStart: ${msg.tools?.length || 0} tools (streaming=${message.isStreaming()}, segmentContent=${currentSegmentContent.length} chars)`);
         if (msg.tools && Array.isArray(msg.tools)) {
           // Finalize current text segment before showing tools
           // This preserves the text that came before the tools
           if (message.isStreaming()) {
-            message.finalizeCurrentSegment();
-            hasInterleavedContent = true;
+            console.log(`[Frontend] toolCallsStart: finalizing segment before tools (content=${currentSegmentContent.length} chars)`);
+            const didFinalize = message.finalizeCurrentSegment();
+            if (didFinalize) {
+              hasInterleavedContent = true;
+            }
           }
 
           toolCalls.startBatch(msg.tools.map((t: { name: string; detail: string }) => ({
@@ -382,8 +467,10 @@ function initializeActorSystem(): void {
         if (msg.filePath) {
           // Finalize current text segment before showing pending files
           if (message.isStreaming()) {
-            message.finalizeCurrentSegment();
-            hasInterleavedContent = true;
+            const didFinalize = message.finalizeCurrentSegment();
+            if (didFinalize) {
+              hasInterleavedContent = true;
+            }
           }
           pending.addFile(msg.filePath, msg.diffId, msg.iteration);
         }
@@ -414,13 +501,17 @@ function initializeActorSystem(): void {
         break;
 
       case 'diffListChanged':
+        console.log(`[Frontend] diffListChanged: ${msg.diffs?.length || 0} diffs (streaming=${message.isStreaming()}, segmentContent=${currentSegmentContent.length} chars)`);
         // Extension sends diffListChanged with full list of diffs
         // Sync with pending changes actor - track by diffId to support multiple versions of same file
         if (msg.diffs && Array.isArray(msg.diffs)) {
           // Finalize current text segment before showing pending files
           if (message.isStreaming() && msg.diffs.length > 0) {
-            message.finalizeCurrentSegment();
-            hasInterleavedContent = true;
+            console.log(`[Frontend] diffListChanged: finalizing segment before diffs (content=${currentSegmentContent.length} chars)`);
+            const didFinalize = message.finalizeCurrentSegment();
+            if (didFinalize) {
+              hasInterleavedContent = true;
+            }
           }
 
           // Get current pending files and build a map by diffId
@@ -618,8 +709,7 @@ function initializeActorSystem(): void {
       case 'generationStopped':
         isStreaming = false;
 
-        // Disable printing surface effect
-        AnimationHelper.disablePrintingSurface(chatMessages);
+        // Printing surface effect removed - was too distracting
 
         // End the stream - this publishes streaming.active: false
         // InputAreaActor subscribes to this and handles:
@@ -1298,6 +1388,9 @@ function initializeActorSystem(): void {
   };
 
   console.log('[ActorSystem] Initialized with 10 actors (full actor mode)');
+
+  // Dev tools are loaded separately via <script> tag injection by the extension
+  // when deepseek.devMode is enabled. This keeps dev code out of production bundle.
 }
 
 // Initialize when DOM is ready

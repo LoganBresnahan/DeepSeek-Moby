@@ -3,12 +3,13 @@
  */
 
 export { ToolbarActor } from './ToolbarActor';
+export { ToolbarShadowActor } from './ToolbarShadowActor';
 export type {
   EditMode,
   ToolbarState,
   EditModeHandler,
   WebSearchHandler,
   FilesHandler,
-  CommandHandler,
+  PlanHandler,
   WebSearchSettings
-} from './ToolbarActor';
+} from './ToolbarShadowActor';

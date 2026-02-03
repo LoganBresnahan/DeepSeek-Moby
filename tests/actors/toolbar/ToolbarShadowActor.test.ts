@@ -2,7 +2,7 @@
  * Tests for ToolbarShadowActor
  *
  * Tests Shadow DOM encapsulation, edit mode cycling,
- * web search toggle, and command palette.
+ * web search toggle, plan button, and send/stop controls.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -42,7 +42,7 @@ describe('ToolbarShadowActor', () => {
       expect(element.shadowRoot?.querySelector('.toolbar')).toBeTruthy();
       expect(element.shadowRoot?.querySelector('.files-btn')).toBeTruthy();
       expect(element.shadowRoot?.querySelector('.edit-mode-btn')).toBeTruthy();
-      expect(element.shadowRoot?.querySelector('.help-btn')).toBeTruthy();
+      expect(element.shadowRoot?.querySelector('.plan-btn')).toBeTruthy();
       expect(element.shadowRoot?.querySelector('.search-btn')).toBeTruthy();
       expect(element.shadowRoot?.querySelector('.attach-btn')).toBeTruthy();
       expect(element.shadowRoot?.querySelector('.send-btn')).toBeTruthy();
@@ -139,55 +139,47 @@ describe('ToolbarShadowActor', () => {
     });
   });
 
-  describe('Commands modal', () => {
+  describe('Plan button', () => {
     beforeEach(() => {
       actor = new ToolbarShadowActor(manager, element, mockVscode);
     });
 
-    it('opens commands modal on help click', () => {
-      const helpBtn = element.shadowRoot?.querySelector('.help-btn') as HTMLButtonElement;
-      helpBtn.click();
-
-      const modal = document.body.querySelector('.commands-modal');
-      expect(modal).toBeTruthy();
+    it('starts disabled', () => {
+      expect(actor.getState().planEnabled).toBe(false);
     });
 
-    it('shows command items in modal', () => {
-      const helpBtn = element.shadowRoot?.querySelector('.help-btn') as HTMLButtonElement;
-      helpBtn.click();
+    it('toggles plan state on click', () => {
+      const planBtn = element.shadowRoot?.querySelector('.plan-btn') as HTMLButtonElement;
 
-      const commands = document.body.querySelectorAll('.command-item');
-      expect(commands.length).toBeGreaterThan(0);
+      planBtn.click();
+      expect(actor.getState().planEnabled).toBe(true);
+      expect(planBtn.classList.contains('active')).toBe(true);
+
+      planBtn.click();
+      expect(actor.getState().planEnabled).toBe(false);
+      expect(planBtn.classList.contains('active')).toBe(false);
     });
 
-    it('closes modal when command selected', () => {
+    it('calls handler when toggled', () => {
       const handler = vi.fn();
-      actor.onCommand(handler);
+      actor.onPlan(handler);
 
-      const helpBtn = element.shadowRoot?.querySelector('.help-btn') as HTMLButtonElement;
-      helpBtn.click();
+      const planBtn = element.shadowRoot?.querySelector('.plan-btn') as HTMLButtonElement;
+      planBtn.click();
 
-      const commandItem = document.body.querySelector('.command-item') as HTMLElement;
-      commandItem.click();
+      expect(handler).toHaveBeenCalledWith(true);
 
-      const modal = document.body.querySelector('.commands-modal');
-      expect(modal).toBeNull();
+      planBtn.click();
+      expect(handler).toHaveBeenCalledWith(false);
     });
 
-    it('calls handler and vscode on command select', () => {
-      const handler = vi.fn();
-      actor.onCommand(handler);
+    it('posts message to vscode on toggle', () => {
+      const planBtn = element.shadowRoot?.querySelector('.plan-btn') as HTMLButtonElement;
+      planBtn.click();
 
-      const helpBtn = element.shadowRoot?.querySelector('.help-btn') as HTMLButtonElement;
-      helpBtn.click();
-
-      const commandItem = document.body.querySelector('[data-command="newChat"]') as HTMLElement;
-      commandItem.click();
-
-      expect(handler).toHaveBeenCalledWith('newChat');
       expect(mockVscode.postMessage).toHaveBeenCalledWith({
-        type: 'executeCommand',
-        command: 'deepseek.newChat'
+        type: 'togglePlan',
+        enabled: true
       });
     });
   });
@@ -254,7 +246,7 @@ describe('ToolbarShadowActor', () => {
         editMode: 'manual',
         webSearchEnabled: false,
         filesModalOpen: false,
-        commandsModalOpen: false,
+        planEnabled: false,
         streaming: false
       });
     });
@@ -351,15 +343,15 @@ describe('ToolbarShadowActor', () => {
     it('cleans up modals on destroy', () => {
       actor = new ToolbarShadowActor(manager, element, mockVscode);
 
-      // Open a modal
-      const helpBtn = element.shadowRoot?.querySelector('.help-btn') as HTMLButtonElement;
-      helpBtn.click();
+      // Open web search modal
+      const searchBtn = element.shadowRoot?.querySelector('.search-btn') as HTMLButtonElement;
+      searchBtn.click();
 
-      expect(document.body.querySelector('.commands-modal')).toBeTruthy();
+      expect(document.body.querySelector('.web-search-modal')).toBeTruthy();
 
       actor.destroy();
 
-      expect(document.body.querySelector('.commands-modal')).toBeNull();
+      expect(document.body.querySelector('.web-search-modal')).toBeNull();
     });
   });
 });

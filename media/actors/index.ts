@@ -80,5 +80,13 @@ export { ToolbarShadowActor } from './toolbar/ToolbarShadowActor';
 export type { ToolbarState, EditModeHandler, WebSearchHandler, FilesHandler, CommandHandler, WebSearchSettings } from './toolbar';
 // Note: EditMode is also exported from ./pending, so toolbar's version is accessed via ToolbarActor.EditMode if needed
 
+// Dropdown Focus - UNUSED (see media/actors/dropdown-focus/UNUSED.txt)
+// export { DropdownFocusActor } from './dropdown-focus';
+// export type { DropdownInfo, DropdownFocusState } from './dropdown-focus';
+
+// Inspector
+export { InspectorShadowActor } from './inspector';
+export type { InspectorState, StyleProperty, StyleCategory, InspectedElement } from './inspector';
+
 // Future actors will be exported here as they're implemented:
 // export { MarkdownActor } from './markdown';

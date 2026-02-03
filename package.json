@@ -186,6 +186,12 @@
           "default": false,
           "markdownDescription": "**Walk on the Wild Side**: Allow ALL shell commands for the Reasoner model (R1). Disables the safety blocklist that prevents catastrophic operations like `rm -rf /`. Only enable if you trust R1 completely.",
           "scope": "application"
+        },
+        "deepseek.devMode": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "**Developer Mode**: Enable dev tools for UI development. Shows a floating token editor panel (Ctrl+Shift+I) that allows real-time adjustment of spacing and style tokens across all shadow DOM components.",
+          "scope": "window"
         }
       }
     },

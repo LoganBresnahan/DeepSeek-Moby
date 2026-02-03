@@ -249,9 +249,12 @@ describe('PendingChangesShadowActor', () => {
       expect(actor.getState().expanded).toBe(true);
     });
 
-    it('applies expanded class to container', () => {
+    it('applies expanded class to container', async () => {
       const container = element.querySelector('[data-container-id]');
       const content = container?.shadowRoot?.querySelector('.container');
+
+      // Wait for RAF - first render uses requestAnimationFrame to animate expansion
+      await new Promise(r => requestAnimationFrame(r));
 
       expect(content?.classList.contains('expanded')).toBe(true);
 
@@ -299,7 +302,7 @@ describe('PendingChangesShadowActor', () => {
 
       const container = element.querySelector('[data-container-id]');
       const count = container?.shadowRoot?.querySelector('.count');
-      expect(count?.textContent).toBe('2');
+      expect(count?.textContent).toBe('[2]');
     });
 
     it('renders file items', () => {
@@ -325,7 +328,7 @@ describe('PendingChangesShadowActor', () => {
       actor.acceptFile(id);
 
       const container = element.querySelector('[data-container-id]');
-      const label = container?.shadowRoot?.querySelector('.label.applied');
+      const label = container?.shadowRoot?.querySelector('.label');
       const buttons = container?.shadowRoot?.querySelector('.actions');
       expect(label?.textContent).toBe('Accepted');
       expect(buttons).toBeNull();
@@ -336,7 +339,7 @@ describe('PendingChangesShadowActor', () => {
       actor.addFile('/path/to/file.ts');
 
       const container = element.querySelector('[data-container-id]');
-      const label = container?.shadowRoot?.querySelector('.label.auto');
+      const label = container?.shadowRoot?.querySelector('.label');
       expect(label?.textContent).toBe('Auto Applied');
     });
   });

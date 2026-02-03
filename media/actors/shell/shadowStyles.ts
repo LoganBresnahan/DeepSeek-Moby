@@ -1,109 +1,126 @@
 /**
  * Shell Shadow Actor styles
- * Simplified CSS for Shadow DOM encapsulation - no prefixes needed
+ * Clean dotted border design - no ASCII art
  */
 export const shellShadowStyles = `
-/* Container - applied to shadow content root */
+/* Container - dotted border, no background */
 .container {
   margin: 8px 0;
-  border: 1px solid var(--vscode-panel-border);
-  border-radius: 6px;
-  overflow: hidden;
-  background: var(--vscode-editor-background);
+  border: 1px dotted var(--vscode-panel-border);
+  border-radius: 4px;
+  font-family: var(--vscode-font-family);
+  font-size: 13px;
+  line-height: 1.4;
+  cursor: pointer;
+  user-select: none;
 }
 
 .container.entering {
-  animation: slideDown 0.2s ease-out forwards;
+  animation: fadeIn 0.5s ease-out forwards;
 }
 
-@keyframes slideDown {
-  from {
-    opacity: 0;
-    transform: translateY(-10px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
-/* Header */
+/* Header row */
 .header {
   display: flex;
   align-items: center;
+  padding: 6px 10px;
   gap: 8px;
-  padding: 8px 12px;
-  background: var(--vscode-editorWidget-background);
-  cursor: pointer;
-  user-select: none;
-  transition: background 0.15s ease;
 }
 
-.header:hover {
+.container:hover .header {
   background: var(--vscode-list-hoverBackground);
 }
 
+/* +/- toggle icon */
+.toggle {
+  color: var(--vscode-descriptionForeground);
+  font-family: monospace;
+  font-weight: bold;
+  width: 12px;
+  flex-shrink: 0;
+}
+
+/* $ icon */
 .icon {
-  font-size: 10px;
-  color: var(--vscode-foreground);
-  transition: transform 0.2s ease;
+  color: var(--vscode-terminal-ansiYellow);
+  font-family: monospace;
+  font-weight: bold;
+  flex-shrink: 0;
 }
 
-.container.expanded .icon {
-  transform: rotate(90deg);
-}
-
+/* Title text */
 .title {
+  color: var(--vscode-foreground);
+  font-weight: 500;
+}
+
+/* Preview text (collapsed state) */
+.preview {
+  color: var(--vscode-descriptionForeground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   flex: 1;
   font-size: 12px;
-  color: var(--vscode-foreground);
 }
 
-.summary {
-  font-size: 11px;
-  color: var(--vscode-descriptionForeground);
+/* Status indicators in header */
+.header-status {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
 }
 
-/* Body */
+/* Body - hidden when collapsed */
 .body {
-  max-height: 0;
-  overflow: hidden;
-  transition: max-height 0.3s ease, padding 0.3s ease;
+  display: none;
+  padding: 8px 10px;
+  border-top: 1px dotted var(--vscode-panel-border);
 }
 
+/* Expanded state - show body */
 .container.expanded .body {
-  max-height: 500px;
-  padding: 8px 12px;
-  overflow-y: auto;
+  display: block;
+}
+
+/* Empty body - hide completely */
+.body:empty {
+  display: none;
 }
 
 /* Command Item */
 .item {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 6px 0;
-  border-bottom: 1px solid var(--vscode-panel-border);
+  padding: 4px 0;
 }
 
-.item:last-child {
-  border-bottom: none;
-}
-
-.item-header {
+.item-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
 }
 
-.status {
-  width: 16px;
-  text-align: center;
+/* Tree branch characters */
+.tree {
+  color: var(--vscode-panel-border);
+  font-family: monospace;
   flex-shrink: 0;
+}
+
+/* Status icon */
+.status {
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
 }
 
 .status.spinning {
   animation: spin 1s linear infinite;
+  display: inline-block;
 }
 
 @keyframes spin {
@@ -127,42 +144,46 @@ export const shellShadowStyles = `
   color: var(--vscode-errorForeground);
 }
 
+/* Command text */
 .command {
+  color: var(--vscode-foreground);
   font-family: var(--vscode-editor-font-family);
   font-size: 12px;
-  color: var(--vscode-terminal-ansiYellow);
 }
 
-.command::before {
-  content: '$ ';
-  color: var(--vscode-descriptionForeground);
-}
-
-/* Output */
+/* Output block */
 .output {
-  font-family: var(--vscode-editor-font-family);
-  font-size: 11px;
-  color: var(--vscode-terminal-foreground);
-  background: var(--vscode-terminal-background);
-  padding: 8px;
+  background: var(--vscode-textCodeBlock-background);
+  padding: 6px 10px;
   border-radius: 4px;
-  margin-top: 4px;
+  font-size: 11px;
+  margin: 4px 0 4px 22px;
+  max-height: 150px;
+  overflow-y: auto;
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 200px;
-  overflow-y: auto;
+  color: var(--vscode-descriptionForeground);
+  font-family: var(--vscode-editor-font-family);
 }
 
 .output:empty {
   display: none;
 }
 
-/* Complete state */
-.container.complete .header {
-  opacity: 0.7;
+.output .success {
+  color: var(--vscode-terminal-ansiGreen);
 }
 
-.container.complete .header:hover {
+.output .error {
+  color: var(--vscode-errorForeground);
+}
+
+/* Complete state - slightly muted */
+.container.complete {
+  opacity: 0.85;
+}
+
+.container.complete:hover {
   opacity: 1;
 }
 

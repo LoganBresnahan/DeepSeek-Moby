@@ -12,8 +12,12 @@ export const messageShadowStyles = `
 
 /* Individual message */
 .message {
-  margin-bottom: 20px;
+  margin-bottom: 0;
   position: relative;
+}
+
+.message.assistant {
+  padding-bottom: 0;
 }
 
 /* Continuation messages (after tools/shell) */
@@ -30,7 +34,7 @@ export const messageShadowStyles = `
 .message-divider {
   display: flex;
   align-items: center;
-  margin-bottom: 8px;
+  margin-bottom: 0;
 }
 
 .message-divider::before,
@@ -118,22 +122,9 @@ export const messageShadowStyles = `
   opacity: 0.8;
 }
 
-/* Streaming cursor */
-.message.streaming .content::after {
-  content: '▋';
-  display: inline;
-  animation: cursor-blink 1s step-end infinite;
-  color: var(--vscode-editor-foreground, #cccccc);
-  opacity: 0.7;
-}
-
-@keyframes cursor-blink {
-  0%, 100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0;
-  }
+/* Streaming state - no cursor, just indicates message is being streamed */
+.message.streaming {
+  /* Parent container is marked as streaming */
 }
 
 /* Code blocks - dropdown style matching shell/thinking */
@@ -267,16 +258,35 @@ export const messageShadowStyles = `
   display: none;
 }
 
-/* Code body - smooth expand/collapse */
+/* Code body - collapsed shows preview with fade */
 .code-body {
-  max-height: 0;
+  position: relative;
+  max-height: 50px;
   overflow: hidden;
   transition: max-height 0.3s ease;
+}
+
+/* Fade overlay for collapsed state */
+.code-body::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 30px;
+  background: linear-gradient(transparent, var(--vscode-textCodeBlock-background, #1e1e1e));
+  pointer-events: none;
+  opacity: 1;
+  transition: opacity 0.2s ease;
 }
 
 .code-block.expanded .code-body {
   max-height: 500px;
   overflow-y: auto;
+}
+
+.code-block.expanded .code-body::after {
+  opacity: 0;
 }
 
 .code-body pre {

@@ -23,9 +23,10 @@
  * - streaming.model: string - model being used
  */
 
-import { InterleavedShadowActor, ShadowContainer } from '../../state/InterleavedShadowActor';
+import { InterleavedShadowActor } from '../../state/InterleavedShadowActor';
 import { EventStateManager } from '../../state/EventStateManager';
 import { messageShadowStyles } from './shadowStyles';
+// Note: DropdownHoverEvent, DropdownClickEvent removed - modal/ghost features disabled
 
 export interface Message {
   id: string;
@@ -125,13 +126,16 @@ export class MessageShadowActor extends InterleavedShadowActor {
   private handleStreamingMessageId(messageId: string | null): void {
     if (messageId && !this._streamingContainerId) {
       // New streaming message starting - reset segment state
+      // NOTE: Container is NOT created here - it's created lazily when content arrives
+      // This ensures the container appears AFTER any tool calls that precede content
       this._streamingMessageId = messageId;
       this._segmentCounter = 0;
       this._currentSegmentContent = '';
       this._segmentsPaused = false;
       this._useDirectContentUpdates = false;
 
-      this.createStreamingMessage(messageId);
+      // Don't create container yet - will be created when content arrives
+      // This fixes the issue where empty containers appear before tool calls
 
       this.publish({
         'message.count': this._messages.length,
@@ -200,10 +204,15 @@ export class MessageShadowActor extends InterleavedShadowActor {
   // ============================================
 
   /**
-   * Finalize the current streaming segment before tools/shell content
+   * Finalize the current streaming segment before tools/shell content.
+   * Returns true if a segment was actually finalized, false if there was nothing to finalize.
    */
-  finalizeCurrentSegment(): void {
-    if (!this._streamingContainerId) return;
+  finalizeCurrentSegment(): boolean {
+    if (!this._streamingContainerId) {
+      // No container exists yet - nothing to finalize
+      // This happens when tool calls arrive before any content
+      return false;
+    }
 
     const container = this.getContainer(this._streamingContainerId);
     if (container) {
@@ -217,6 +226,7 @@ export class MessageShadowActor extends InterleavedShadowActor {
 
     this._streamingContainerId = null;
     this._segmentsPaused = true;
+    return true;
   }
 
   /**
@@ -263,9 +273,17 @@ export class MessageShadowActor extends InterleavedShadowActor {
   }
 
   /**
-   * Update the current segment with new content
+   * Update the current segment with new content.
+   * Creates the container lazily if it doesn't exist yet.
    */
   updateCurrentSegmentContent(segmentContent: string): void {
+    // Lazy container creation: create container when first content arrives
+    // This ensures the container is positioned AFTER any tool calls
+    if (!this._streamingContainerId && this._streamingMessageId) {
+      console.log('[MessageShadowActor] Lazy creating container for messageId:', this._streamingMessageId);
+      this.createStreamingMessage(this._streamingMessageId);
+    }
+
     if (!this._streamingContainerId) return;
 
     this._useDirectContentUpdates = true;
@@ -477,13 +495,16 @@ export class MessageShadowActor extends InterleavedShadowActor {
    * Setup code block handlers for a specific container
    */
   private setupCodeBlockHandlersForContainer(containerId: string): void {
+    const container = this.getContainer(containerId);
+    if (!container) return;
+
     // Header click toggles expand/collapse
     this.delegateInContainer(containerId, 'click', '.code-header', (e, header) => {
       // Don't toggle if clicking on action buttons
       const target = e.target as HTMLElement;
       if (target.closest('.code-actions')) return;
 
-      const codeBlock = header.closest('.code-block');
+      const codeBlock = header.closest('.code-block') as HTMLElement;
       if (codeBlock) {
         codeBlock.classList.toggle('expanded');
       }

@@ -1,103 +1,120 @@
 /**
  * Tool Calls Shadow Actor styles
- * Simplified CSS for Shadow DOM encapsulation - no prefixes needed
+ * Clean dotted border design - no ASCII art
  */
 export const toolsShadowStyles = `
-/* Container - applied to shadow content root */
+/* Container - dotted border, no background */
 .container {
   margin: 8px 0;
-  border: 1px solid var(--vscode-panel-border);
-  border-radius: 6px;
-  overflow: hidden;
-  background: var(--vscode-editor-background);
+  border: 1px dotted var(--vscode-panel-border);
+  border-radius: 4px;
+  font-family: var(--vscode-font-family);
+  font-size: 13px;
+  line-height: 1.4;
+  cursor: pointer;
+  user-select: none;
 }
 
 .container.entering {
-  animation: slideDown 0.2s ease-out forwards;
+  animation: fadeIn 0.5s ease-out forwards;
 }
 
-@keyframes slideDown {
-  from {
-    opacity: 0;
-    transform: translateY(-10px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
-/* Header */
+/* Header row */
 .header {
   display: flex;
   align-items: center;
+  padding: 6px 10px;
   gap: 8px;
-  padding: 8px 12px;
-  background: var(--vscode-editorWidget-background);
-  cursor: pointer;
-  user-select: none;
-  transition: background 0.15s ease;
 }
 
-.header:hover {
+.container:hover .header {
   background: var(--vscode-list-hoverBackground);
 }
 
+/* +/- toggle icon */
+.toggle {
+  color: var(--vscode-descriptionForeground);
+  font-family: monospace;
+  font-weight: bold;
+  width: 12px;
+  flex-shrink: 0;
+}
+
+/* Emoji icon */
 .icon {
-  font-size: 10px;
-  color: var(--vscode-foreground);
-  transition: transform 0.2s ease;
+  flex-shrink: 0;
 }
 
-.container.expanded .icon {
-  transform: rotate(90deg);
-}
-
+/* Title text */
 .title {
+  color: var(--vscode-foreground);
+  font-weight: 500;
+}
+
+/* Preview text (collapsed state) */
+.preview {
+  color: var(--vscode-descriptionForeground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   flex: 1;
   font-size: 12px;
-  color: var(--vscode-foreground);
 }
 
-.summary {
-  font-size: 11px;
+/* Count badge */
+.count {
   color: var(--vscode-descriptionForeground);
-}
-
-/* Body */
-.body {
-  max-height: 0;
-  overflow: hidden;
-  transition: max-height 0.3s ease, padding 0.3s ease;
-}
-
-.container.expanded .body {
-  max-height: 500px;
-  padding: 8px 12px;
-  overflow-y: auto;
-}
-
-/* Tool Item */
-.item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 0;
-  border-bottom: 1px solid var(--vscode-panel-border);
-}
-
-.item:last-child {
-  border-bottom: none;
-}
-
-.status {
-  width: 16px;
-  text-align: center;
+  font-size: 12px;
   flex-shrink: 0;
+}
+
+/* Body - hidden when collapsed */
+.body {
+  display: none;
+  padding: 8px 10px;
+  border-top: 1px dotted var(--vscode-panel-border);
+}
+
+/* Expanded state - show body */
+.container.expanded .body {
+  display: block;
+}
+
+/* Empty body - hide completely */
+.body:empty {
+  display: none;
+}
+
+/* Individual tool item */
+.item {
+  padding: 4px 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+/* Tree branch characters */
+.tree {
+  color: var(--vscode-panel-border);
+  font-family: monospace;
+  flex-shrink: 0;
+}
+
+/* Status icon */
+.status {
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
 }
 
 .status.spinning {
   animation: spin 1s linear infinite;
+  display: inline-block;
 }
 
 @keyframes spin {
@@ -121,24 +138,27 @@ export const toolsShadowStyles = `
   color: var(--vscode-errorForeground);
 }
 
+/* Tool name */
 .name {
+  color: var(--vscode-foreground);
   font-weight: 500;
-  color: var(--vscode-textLink-foreground);
+  flex-shrink: 0;
 }
 
+/* Tool detail */
 .detail {
-  flex: 1;
   color: var(--vscode-descriptionForeground);
-  word-break: break-all;
-  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 12px;
 }
 
-/* Complete state */
-.container.complete .header {
-  opacity: 0.7;
+/* Complete state - slightly muted */
+.container.complete {
+  opacity: 0.85;
 }
 
-.container.complete .header:hover {
+.container.complete:hover {
   opacity: 1;
 }
 

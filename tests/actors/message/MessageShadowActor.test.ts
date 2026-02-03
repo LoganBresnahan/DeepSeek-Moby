@@ -159,7 +159,7 @@ describe('MessageShadowActor', () => {
       actor = new MessageShadowActor(manager, element);
     });
 
-    it('creates streaming message on messageId change', async () => {
+    it('creates streaming message lazily when content arrives', async () => {
       // Wait for actor registration
       await Promise.resolve();
       await Promise.resolve();
@@ -172,14 +172,20 @@ describe('MessageShadowActor', () => {
         timestamp: Date.now()
       });
 
-      // With InterleavedShadowActor, the streaming class is on the host element
-      const container = findMessageContainer('streaming');
+      // Container is NOT created immediately - lazy creation
+      let container = findMessageContainer('streaming');
+      expect(container).toBeNull();
+
+      // Container is created when content arrives (via updateCurrentSegmentContent)
+      actor.updateCurrentSegmentContent('Hello world');
+
+      container = findMessageContainer('streaming');
       expect(container).toBeTruthy();
       const message = container?.shadowRoot?.querySelector('.message');
       expect(message).toBeTruthy();
     });
 
-    it('updates streaming message content', async () => {
+    it('updates streaming message content via direct updates', async () => {
       await Promise.resolve();
       await Promise.resolve();
 
@@ -191,15 +197,11 @@ describe('MessageShadowActor', () => {
         timestamp: Date.now()
       });
 
-      manager.handleStateChange({
-        source: 'streaming-actor',
-        state: { 'streaming.content': 'Streaming content...' },
-        changedKeys: ['streaming.content'],
-        publicationChain: [],
-        timestamp: Date.now()
-      });
+      // Use direct content update (which triggers lazy container creation)
+      actor.updateCurrentSegmentContent('Streaming content...');
 
       const container = findMessageContainer('streaming');
+      expect(container).toBeTruthy();
       const content = container?.shadowRoot?.querySelector('.message .content');
       expect(content?.textContent).toContain('Streaming content...');
     });
@@ -252,7 +254,7 @@ describe('MessageShadowActor', () => {
       expect(actor.isStreaming()).toBe(true);
     });
 
-    it('finalizes current segment', async () => {
+    it('finalizes current segment when container exists', async () => {
       await Promise.resolve();
       await Promise.resolve();
 
@@ -264,8 +266,31 @@ describe('MessageShadowActor', () => {
         timestamp: Date.now()
       });
 
-      actor.finalizeCurrentSegment();
+      // Create container by adding content
+      actor.updateCurrentSegmentContent('Some content');
+
+      // Now finalize should work
+      const didFinalize = actor.finalizeCurrentSegment();
+      expect(didFinalize).toBe(true);
       expect(actor.needsNewSegment()).toBe(true);
+    });
+
+    it('finalizeCurrentSegment returns false when no container exists', async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+
+      manager.handleStateChange({
+        source: 'streaming-actor',
+        state: { 'streaming.messageId': 'stream-1' },
+        changedKeys: ['streaming.messageId'],
+        publicationChain: [],
+        timestamp: Date.now()
+      });
+
+      // No container created yet (lazy creation)
+      const didFinalize = actor.finalizeCurrentSegment();
+      expect(didFinalize).toBe(false);
+      expect(actor.needsNewSegment()).toBe(false); // Nothing to resume from
     });
 
     it('resumes with new segment creating new shadow container', async () => {
@@ -280,7 +305,10 @@ describe('MessageShadowActor', () => {
         timestamp: Date.now()
       });
 
-      // Should have 1 container initially
+      // Create the first container with some content
+      actor.updateCurrentSegmentContent('First segment');
+
+      // Should have 1 container initially (lazy-created)
       expect(element.querySelectorAll('[data-actor="message"]').length).toBe(1);
 
       actor.finalizeCurrentSegment();

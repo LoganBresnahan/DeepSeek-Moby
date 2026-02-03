@@ -410,11 +410,11 @@
 }
 
 .stats-row-balance.balance-ok .stats-row-value {
-  color: #4caf50;
+  color: var(--vscode-terminal-ansiGreen, #4caf50);
 }
 
 .stats-row-balance.balance-low .stats-row-value {
-  color: #f44336;
+  color: var(--vscode-errorForeground, #f44336);
 }
 
 /* Stats Section Divider for Tavily */

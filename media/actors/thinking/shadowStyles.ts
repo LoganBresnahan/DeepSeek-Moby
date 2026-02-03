@@ -1,94 +1,93 @@
 /**
  * Thinking actor styles for Shadow DOM
- *
- * These styles are scoped to each thinking iteration's shadow root.
- * No prefixes needed - simple class names work because of encapsulation.
- * Matches old .reasoning-content styling with amber left border.
+ * Clean dotted border design - no ASCII art
  */
 export const thinkingShadowStyles = `
-/* Container (the main content wrapper inside shadow) */
+/* Container - dotted border, no background */
 .container {
   margin: 8px 0;
-  border-left: 3px solid var(--vscode-symbolIcon-classForeground, #ee9d28);
-  border-radius: 0 6px 6px 0;
-  background: var(--vscode-editorWidget-background);
-  overflow: hidden;
+  border: 1px dotted var(--vscode-panel-border);
+  border-radius: 4px;
+  font-family: var(--vscode-font-family);
+  font-size: 13px;
+  line-height: 1.4;
+  cursor: pointer;
+  user-select: none;
 }
 
 .container.entering {
-  animation: slideDown 0.2s ease-out forwards;
+  animation: fadeIn 0.5s ease-out forwards;
 }
 
-@keyframes slideDown {
-  from {
-    opacity: 0;
-    transform: translateY(-10px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
-/* Header - clickable row with icon, label, toggle */
+/* Header row */
 .header {
   display: flex;
   align-items: center;
+  padding: 6px 10px;
   gap: 8px;
-  padding: 8px 12px;
-  cursor: pointer;
-  user-select: none;
-  color: var(--vscode-foreground);
-  font-size: 12px;
-  font-weight: 500;
-  background: var(--vscode-editorWidget-background);
-  transition: background 0.15s ease;
 }
 
-.header:hover {
+.container:hover .header {
   background: var(--vscode-list-hoverBackground);
 }
 
-/* Arrow icon on left - rotates when expanded */
-.icon {
-  font-size: 10px;
-  color: var(--vscode-foreground);
-  transition: transform 0.2s ease;
-}
-
-.container.expanded .icon {
-  transform: rotate(90deg);
-}
-
-.emoji {
-  font-size: 14px;
-}
-
-.label {
-  flex: 1;
-}
-
-/* Body - smooth max-height transition */
-.body {
-  max-height: 0;
-  overflow: hidden;
-  transition: max-height 0.3s ease, padding 0.3s ease;
-}
-
-.container.expanded .body {
-  max-height: 300px;
-  padding: 0 10px 8px 10px;
-  overflow-y: auto;
-}
-
-/* Body text styling */
-.body-content {
-  font-size: 12px;
+/* +/- toggle icon */
+.toggle {
   color: var(--vscode-descriptionForeground);
-  line-height: 1.5;
+  font-family: monospace;
+  font-weight: bold;
+  width: 12px;
+  flex-shrink: 0;
+}
+
+/* Emoji icon */
+.emoji {
+  flex-shrink: 0;
+}
+
+/* Label text */
+.label {
+  color: var(--vscode-foreground);
+  font-weight: 500;
+}
+
+/* Preview text (collapsed state) */
+.preview {
+  color: var(--vscode-descriptionForeground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  font-size: 12px;
+}
+
+/* Body - hidden when collapsed */
+.body {
+  display: none;
+  padding: 8px 10px 10px 30px;
+  border-top: 1px dotted var(--vscode-panel-border);
+  max-height: 300px;
+  overflow-y: auto;
   white-space: pre-wrap;
   word-break: break-word;
-  background: transparent;
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* Expanded state - show body */
+.container.expanded .body {
+  display: block;
+}
+
+/* Empty body - hide completely */
+.body:empty {
+  display: none;
 }
 
 /* Code blocks in thinking content */
@@ -98,6 +97,7 @@ export const thinkingShadowStyles = `
   border-radius: 4px;
   margin: 8px 0;
   overflow-x: auto;
+  white-space: pre;
 }
 
 .body code {
@@ -105,7 +105,7 @@ export const thinkingShadowStyles = `
   font-size: 11px;
 }
 
-/* Streaming state - subtle pulsing animation on emoji */
+/* Streaming state - pulsing emoji */
 .container.streaming .emoji {
   animation: pulse 1.5s ease-in-out infinite;
 }

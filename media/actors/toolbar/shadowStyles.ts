@@ -86,9 +86,21 @@ export const toolbarShadowStyles = `
   background: var(--vscode-terminal-ansiBrightBlue, #5ca8ff);
 }
 
-/* Help button */
-.btn.help-btn {
-  /* default styling */
+/* Plan button */
+.btn.plan-btn {
+  font-weight: bold;
+  font-size: 10px;
+}
+
+.btn.plan-btn.active {
+  opacity: 1;
+  background: var(--vscode-terminal-ansiMagenta, #c586c0);
+  color: var(--vscode-editor-background);
+  border-color: var(--vscode-terminal-ansiMagenta, #c586c0);
+}
+
+.btn.plan-btn.active:hover {
+  background: var(--vscode-terminal-ansiBrightMagenta, #d7a3d7);
 }
 
 /* Search button */

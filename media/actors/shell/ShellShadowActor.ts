@@ -184,6 +184,7 @@ export class ShellShadowActor extends InterleavedShadowActor {
     segment.complete = true;
 
     this.renderSegment(segment);
+
     this.publish({
       'shell.segments': this._segments.map(s => ({
         id: s.id,
@@ -220,7 +221,7 @@ export class ShellShadowActor extends InterleavedShadowActor {
   }
 
   /**
-   * Toggle segment expanded state
+   * Toggle segment expanded state.
    */
   toggleExpanded(segmentId: string): void {
     const segment = this._segments.find(s => s.id === segmentId);
@@ -351,51 +352,87 @@ export class ShellShadowActor extends InterleavedShadowActor {
       return;
     }
 
+    // Check expansion state
     const isExpanded = this._expandedIds.has(segment.id);
     const hasErrors = segment.commands.some(cmd => cmd.status === 'error');
 
-    // container.content already has class="container" from InterleavedShadowActor
-    // Apply state classes directly to it
+    // Apply state classes
     container.content.classList.toggle('expanded', isExpanded);
     container.content.classList.toggle('complete', segment.complete);
     container.content.classList.toggle('has-errors', hasErrors);
+
+    const toggleIcon = isExpanded ? '−' : '+';
+    const preview = this.getPreviewText(segment, isExpanded);
+    const statusIcons = this.getHeaderStatusIcons(segment);
 
     // Check if structure already exists
     const existingHeader = container.content.querySelector('.header');
 
     if (existingHeader) {
       // Incremental update - preserve event handlers
-      // Update title
+      const toggleEl = container.content.querySelector('.toggle');
+      if (toggleEl) toggleEl.textContent = toggleIcon;
+
       const titleEl = container.content.querySelector('.title');
-      if (titleEl) {
-        titleEl.textContent = this.getSegmentTitle(segment);
-      }
+      if (titleEl) titleEl.textContent = this.getSegmentTitle(segment);
+
+      const previewEl = container.content.querySelector('.preview');
+      if (previewEl) previewEl.textContent = preview;
+
+      const statusEl = container.content.querySelector('.header-status');
+      if (statusEl) statusEl.innerHTML = statusIcons;
 
       // Update body content
       const body = container.content.querySelector('.body');
       if (body) {
-        body.innerHTML = segment.commands.map((cmd, i) =>
-          this.renderCommand(cmd, segment.id, i)
+        body.innerHTML = segment.commands.map((cmd, i, arr) =>
+          this.renderCommand(cmd, segment.id, i, i === arr.length - 1)
         ).join('');
       }
     } else {
-      // First render - create structure inside container.content
+      // First render - clean HTML with dotted border from CSS
       container.content.innerHTML = `
-        <div class="header">
-          <span class="icon">▶</span>
-          <span class="title">${this.getSegmentTitle(segment)}</span>
-          <span class="summary"></span>
-        </div>
-        <div class="body">
-          ${segment.commands.map((cmd, i) => this.renderCommand(cmd, segment.id, i)).join('')}
-        </div>
-      `;
+<div class="header">
+  <span class="toggle">${toggleIcon}</span>
+  <span class="icon">$</span>
+  <span class="title">${this.getSegmentTitle(segment)}</span>
+  <span class="preview">${preview}</span>
+  <span class="header-status">${statusIcons}</span>
+</div>
+<div class="body">
+${segment.commands.map((cmd, i, arr) => this.renderCommand(cmd, segment.id, i, i === arr.length - 1)).join('\n')}
+</div>`;
 
-      // Bind click handler using event delegation
-      this.delegateInContainer(container.id, 'click', '.header', () => {
+      // Bind click handler to header only
+      const header = container.content.querySelector('.header');
+      header?.addEventListener('click', () => {
         this.toggleExpanded(segment.id);
       });
     }
+  }
+
+  /**
+   * Get preview text for collapsed state
+   */
+  private getPreviewText(segment: ShellSegment, isExpanded: boolean): string {
+    if (isExpanded) return '';
+    const firstCmd = segment.commands[0]?.command || '';
+    const preview = firstCmd.slice(0, 30);
+    return preview.length < firstCmd.length ? `  ${preview}...` : `  ${preview}`;
+  }
+
+  /**
+   * Get status icons for header (collapsed view)
+   */
+  private getHeaderStatusIcons(segment: ShellSegment): string {
+    return segment.commands.map(cmd => {
+      switch (cmd.status) {
+        case 'done': return '<span style="color: var(--vscode-terminal-ansiGreen)">✓</span>';
+        case 'error': return '<span style="color: var(--vscode-errorForeground)">✕</span>';
+        case 'running': return '<span style="color: var(--vscode-terminal-ansiYellow)">⟳</span>';
+        default: return '<span style="color: var(--vscode-descriptionForeground)">○</span>';
+      }
+    }).join('');
   }
 
   /**
@@ -428,19 +465,17 @@ export class ShellShadowActor extends InterleavedShadowActor {
   /**
    * Render a single command
    */
-  private renderCommand(cmd: ShellCommand, segmentId: string, index: number): string {
+  private renderCommand(cmd: ShellCommand, segmentId: string, index: number, isLast: boolean = false): string {
     const statusIcon = this.getStatusIcon(cmd.status);
     const spinClass = cmd.status === 'running' ? 'spinning' : '';
+    const treeBranch = isLast ? '└─' : '├─';
 
-    return `
-      <div class="item" id="${segmentId}-item-${index}" data-status="${cmd.status}">
-        <div class="item-header">
-          <span class="status ${spinClass}">${statusIcon}</span>
-          <code class="command">${this.escapeHtml(cmd.command)}</code>
-        </div>
-        ${cmd.output ? `<pre class="output">${this.escapeHtml(cmd.output)}</pre>` : ''}
-      </div>
-    `;
+    const outputHtml = cmd.output ? `
+       <div class="output">${this.escapeHtml(cmd.output)}</div>` : '';
+
+    return `<div class="item" id="${segmentId}-item-${index}" data-status="${cmd.status}">
+<div class="item-row">     <span class="tree">${treeBranch}</span> <span class="status ${spinClass}">${statusIcon}</span> <span class="command">${this.escapeHtml(cmd.command)}</span></div>${outputHtml}
+</div>`;
   }
 
   /**

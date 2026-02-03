@@ -1,0 +1,29 @@
+# DropdownFocusActor - UNUSED
+
+This actor is currently not in use. It was designed to provide:
+
+1. **Sticky Ghost Hover** - When hovering a dropdown during streaming, a "ghost"
+   element would appear near the cursor that stays visible as chat scrolls.
+
+2. **Modal Popup** - Clicking a dropdown during streaming would open its content
+   in a floating modal overlay, allowing users to read content while chat continues
+   scrolling.
+
+## Why Unused
+
+The modal and ghost features were removed in favor of simpler dropdown behavior:
+- All dropdowns now function as normal collapsible sections
+- Scroll behavior handles keeping up with streaming content instead
+
+## Files in this directory
+
+- DropdownFocusActor.ts - The main actor implementation
+- shadowStyles.ts - CSS styles for ghost and modal UI
+- index.ts - Module exports
+
+## To Re-enable
+
+If you want to bring back these features:
+1. Import and initialize DropdownFocusActor in chat.ts
+2. Re-enable hover/click event publishing in ThinkingShadowActor and ShellShadowActor
+3. Delete this UNUSED.txt file

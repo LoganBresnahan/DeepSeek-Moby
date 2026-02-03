@@ -1,0 +1,165 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`InspectorShadowActor Snapshots > Inspect mode states > renders inspect button in active state 1`] = `"<button class="inspect-btn header-btn active" title="Select element (right-click)"><span>🎯</span> Right Click = select</button>"`;
+
+exports[`InspectorShadowActor Snapshots > Inspect mode states > renders inspect button in default state 1`] = `
+"<button class="inspect-btn header-btn" title="Select element (right-click)">
+            <span>🎯</span> Select
+          </button>"
+`;
+
+exports[`InspectorShadowActor Snapshots > Panel structure > renders header section 1`] = `
+"
+        <div class="inspector-header-left">
+          <span class="inspector-icon">🎯</span>
+          <span class="inspector-title">Inspector</span>
+          <span class="inspector-badge">DEV</span>
+        </div>
+        <div class="inspector-header-actions">
+          <button class="inspect-btn header-btn" title="Select element (right-click)">
+            <span>🎯</span> Select
+          </button>
+          <button class="match-btn header-btn active" title="Apply to all matching elements">All</button>
+          <button class="clear-btn header-btn" title="Clear selection">Clear</button>
+        </div>
+        <button class="inspector-close">×</button>
+      "
+`;
+
+exports[`InspectorShadowActor Snapshots > Panel structure > renders no-selection state 1`] = `
+"
+          <div class="no-selection-icon">👆</div>
+          <div class="no-selection-text">
+            Click "Select" then<br>right-click any element
+          </div>
+        "
+`;
+
+exports[`InspectorShadowActor Snapshots > Panel structure > renders panel with correct structure 1`] = `
+"
+      <div class="inspector-header">
+        <div class="inspector-header-left">
+          <span class="inspector-icon">🎯</span>
+          <span class="inspector-title">Inspector</span>
+          <span class="inspector-badge">DEV</span>
+        </div>
+        <div class="inspector-header-actions">
+          <button class="inspect-btn header-btn" title="Select element (right-click)">
+            <span>🎯</span> Select
+          </button>
+          <button class="match-btn header-btn active" title="Apply to all matching elements">All</button>
+          <button class="clear-btn header-btn" title="Clear selection">Clear</button>
+        </div>
+        <button class="inspector-close">×</button>
+      </div>
+
+      <div class="inspector-body">
+        <div class="no-selection">
+          <div class="no-selection-icon">👆</div>
+          <div class="no-selection-text">
+            Click "Select" then<br>right-click any element
+          </div>
+        </div>
+        <div class="selection-info">
+          <div class="element-path"></div>
+          <div class="box-model collapsed">
+            <div class="box-model-header">
+              <span class="box-model-toggle">▶</span>
+              <span class="box-model-label">Box Model</span>
+            </div>
+            <div class="box-model-diagram">
+              <div class="box-margin">
+                <span class="box-value margin-top">0</span>
+                <span class="box-value margin-right">0</span>
+                <span class="box-value margin-bottom">0</span>
+                <span class="box-value margin-left">0</span>
+                <span class="box-label margin-label">margin</span>
+                <div class="box-border">
+                  <span class="box-value border-top">0</span>
+                  <span class="box-value border-right">0</span>
+                  <span class="box-value border-bottom">0</span>
+                  <span class="box-value border-left">0</span>
+                  <span class="box-label border-label">border</span>
+                  <div class="box-padding">
+                    <span class="box-value padding-top">0</span>
+                    <span class="box-value padding-right">0</span>
+                    <span class="box-value padding-bottom">0</span>
+                    <span class="box-value padding-left">0</span>
+                    <span class="box-label padding-label">padding</span>
+                    <div class="box-content">
+                      <span class="content-size">0 × 0</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="style-controls"></div>
+          <div class="history-section">
+            <div class="history-header">
+              <span class="history-title">Changes Made:</span>
+              <button class="copy-history-btn" title="Copy all changes as CSS">📋</button>
+            </div>
+            <div class="history-list">
+              <div class="history-empty">No changes yet</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="resize-handle"></div>
+    "
+`;
+
+exports[`InspectorShadowActor Snapshots > Panel structure > renders toolbar section 1`] = `undefined`;
+
+exports[`InspectorShadowActor Snapshots > Selection state > renders selection info with element path 1`] = `
+"
+          <div class="element-path"></div>
+          <div class="box-model collapsed">
+            <div class="box-model-header">
+              <span class="box-model-toggle">▶</span>
+              <span class="box-model-label">Box Model</span>
+            </div>
+            <div class="box-model-diagram">
+              <div class="box-margin">
+                <span class="box-value margin-top">0</span>
+                <span class="box-value margin-right">0</span>
+                <span class="box-value margin-bottom">0</span>
+                <span class="box-value margin-left">0</span>
+                <span class="box-label margin-label">margin</span>
+                <div class="box-border">
+                  <span class="box-value border-top">0</span>
+                  <span class="box-value border-right">0</span>
+                  <span class="box-value border-bottom">0</span>
+                  <span class="box-value border-left">0</span>
+                  <span class="box-label border-label">border</span>
+                  <div class="box-padding">
+                    <span class="box-value padding-top">0</span>
+                    <span class="box-value padding-right">0</span>
+                    <span class="box-value padding-bottom">0</span>
+                    <span class="box-value padding-left">0</span>
+                    <span class="box-label padding-label">padding</span>
+                    <div class="box-content">
+                      <span class="content-size">0 × 0</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="style-controls"></div>
+          <div class="history-section">
+            <div class="history-header">
+              <span class="history-title">Changes Made:</span>
+              <button class="copy-history-btn" title="Copy all changes as CSS">📋</button>
+            </div>
+            <div class="history-list">
+              <div class="history-empty">No changes yet</div>
+            </div>
+          </div>
+        "
+`;
+
+exports[`InspectorShadowActor Snapshots > Selection state > renders style controls 1`] = `""`;
+
+exports[`InspectorShadowActor Snapshots > Shadow DOM element selection > renders shadow indicator for shadow DOM elements 1`] = `""`;

@@ -176,7 +176,7 @@ export class PendingChangesShadowActor extends InterleavedShadowActor {
   }
 
   /**
-   * Toggle expanded state
+   * Toggle expanded state.
    */
   toggleExpanded(): void {
     this._expanded = !this._expanded;
@@ -264,7 +264,7 @@ export class PendingChangesShadowActor extends InterleavedShadowActor {
    */
   private ensureContainer(): ShadowContainer {
     if (!this._currentContainerId) {
-      const container = this.createContainer('pending', { skipAnimation: true });
+      const container = this.createContainer('pending');
       this._currentContainerId = container.id;
     }
     return this.getContainer(this._currentContainerId)!;
@@ -296,24 +296,69 @@ export class PendingChangesShadowActor extends InterleavedShadowActor {
 
     const isAutoMode = this._editMode === 'auto';
     const title = isAutoMode ? 'Modified Files' : 'Pending Changes';
+    const toggleIcon = this._expanded ? '−' : '+';
+    const headerIcon = isAutoMode ? '✓' : '📝';
+    const preview = this.getPreviewText();
 
-    // Apply state classes to container.content
-    container.content.classList.toggle('expanded', this._expanded);
+    // Check if this is a fresh render (no existing structure)
+    const existingHeader = container.content.querySelector('.header');
+
+    // Apply auto-mode class immediately
     container.content.classList.toggle('auto-mode', isAutoMode);
+    container.content.classList.toggle('expanded', this._expanded);
 
-    container.content.innerHTML = `
-      <div class="header">
-        <span class="icon">▶</span>
-        <span class="title">${title}</span>
-        <span class="count">${this._files.length}</span>
-      </div>
-      <div class="body">
-        ${this._files.map(file => this.renderFile(file)).join('')}
-      </div>
-    `;
+    if (existingHeader) {
+      // Incremental update - preserve event handlers
+      const toggleEl = container.content.querySelector('.toggle');
+      if (toggleEl) toggleEl.textContent = toggleIcon;
 
-    // Bind click handlers using event delegation
-    this.bindEventHandlers(container.id);
+      const iconEl = container.content.querySelector('.icon');
+      if (iconEl) iconEl.textContent = headerIcon;
+
+      const titleEl = container.content.querySelector('.title');
+      if (titleEl) titleEl.textContent = title;
+
+      const previewEl = container.content.querySelector('.preview');
+      if (previewEl) previewEl.textContent = preview;
+
+      const countEl = container.content.querySelector('.count');
+      if (countEl) countEl.textContent = `[${this._files.length}]`;
+
+      // Update body content
+      const body = container.content.querySelector('.body');
+      if (body) {
+        body.innerHTML = this._files.map((file, i, arr) => this.renderFile(file, i === arr.length - 1)).join('');
+      }
+
+      // Re-bind file event handlers
+      this.bindFileEventHandlers(container.id);
+    } else {
+      // First render - clean HTML with dotted border from CSS
+      container.content.innerHTML = `
+<div class="header">
+  <span class="toggle">${toggleIcon}</span>
+  <span class="icon">${headerIcon}</span>
+  <span class="title">${title}</span>
+  <span class="preview">${preview}</span>
+  <span class="count">[${this._files.length}]</span>
+</div>
+<div class="body">
+${this._files.map((file, i, arr) => this.renderFile(file, i === arr.length - 1)).join('\n')}
+</div>`;
+
+      // Bind click handlers
+      this.bindEventHandlers(container.id);
+    }
+  }
+
+  /**
+   * Get preview text for collapsed state
+   */
+  private getPreviewText(): string {
+    if (this._expanded) return '';
+    const names = this._files.slice(0, 3).map(f => f.fileName);
+    const preview = names.join(' · ');
+    return this._files.length > 3 ? `  ${preview} ...` : `  ${preview}`;
   }
 
   /**
@@ -323,32 +368,43 @@ export class PendingChangesShadowActor extends InterleavedShadowActor {
     const container = this.getContainer(containerId);
     if (!container) return;
 
-    // Header toggle
-    const header = container.shadow.querySelector('.header');
-    if (header) {
-      // Remove old listeners by replacing element
-      const newHeader = header.cloneNode(true);
-      header.parentNode?.replaceChild(newHeader, header);
-      newHeader.addEventListener('click', (e) => {
-        e.stopPropagation();
-        this.toggleExpanded();
-      });
-    }
+    // Add click handler to container for expand/collapse
+    container.content.addEventListener('click', (e) => {
+      const target = e.target as HTMLElement;
+      // Don't toggle if clicking on action buttons, clickable files, or inside body when expanded
+      if (target.closest('.btn') || target.closest('.file:not(.no-click)')) {
+        return;
+      }
+      if (target.closest('.body') && this._expanded) {
+        return;
+      }
+      this.toggleExpanded();
+    });
+
+    // Bind file event handlers
+    this.bindFileEventHandlers(containerId);
+  }
+
+  /**
+   * Bind event handlers for file items (called on each render)
+   */
+  private bindFileEventHandlers(containerId: string): void {
+    const container = this.getContainer(containerId);
+    if (!container) return;
 
     // File clicks and action buttons
     this._files.forEach(file => {
       const fileEl = container.shadow.querySelector(`#${file.id} .file`) as HTMLElement | null;
       if (fileEl && file.status === 'pending' && !file.superseded) {
-        const newFileEl = fileEl.cloneNode(true);
-        fileEl.parentNode?.replaceChild(newFileEl, fileEl);
-        newFileEl.addEventListener('click', () => this.focusFile(file.id));
+        fileEl.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this.focusFile(file.id);
+        });
       }
 
       const acceptBtn = container.shadow.querySelector(`#${file.id} .accept-btn`) as HTMLElement | null;
       if (acceptBtn) {
-        const newAcceptBtn = acceptBtn.cloneNode(true);
-        acceptBtn.parentNode?.replaceChild(newAcceptBtn, acceptBtn);
-        newAcceptBtn.addEventListener('click', (e) => {
+        acceptBtn.addEventListener('click', (e) => {
           e.stopPropagation();
           this.acceptFile(file.id);
         });
@@ -356,9 +412,7 @@ export class PendingChangesShadowActor extends InterleavedShadowActor {
 
       const rejectBtn = container.shadow.querySelector(`#${file.id} .reject-btn`) as HTMLElement | null;
       if (rejectBtn) {
-        const newRejectBtn = rejectBtn.cloneNode(true);
-        rejectBtn.parentNode?.replaceChild(newRejectBtn, rejectBtn);
-        newRejectBtn.addEventListener('click', (e) => {
+        rejectBtn.addEventListener('click', (e) => {
           e.stopPropagation();
           this.rejectFile(file.id);
         });
@@ -369,37 +423,27 @@ export class PendingChangesShadowActor extends InterleavedShadowActor {
   /**
    * Render a single file item
    */
-  private renderFile(file: PendingFile): string {
+  private renderFile(file: PendingFile, isLast: boolean = false): string {
     const statusIcon = file.superseded ? this.getStatusIcon('superseded') : this.getStatusIcon(file.status);
     const statusClass = file.superseded ? 'superseded' : file.status;
     const isClickable = file.status === 'pending' && !file.superseded;
     const fileClass = isClickable ? 'file' : 'file no-click';
+    const treeBranch = isLast ? '└─' : '├─';
 
     let actionsHtml = '';
     if (this._editMode === 'auto') {
-      actionsHtml = `<span class="label auto">Auto Applied</span>`;
+      actionsHtml = `<span class="label">Auto Applied</span>`;
     } else if (file.status === 'applied') {
-      actionsHtml = `<span class="label applied">Accepted</span>`;
+      actionsHtml = `<span class="label">Accepted</span>`;
     } else if (file.status === 'rejected') {
-      actionsHtml = `<span class="label rejected">Rejected</span>`;
+      actionsHtml = `<span class="label">Rejected</span>`;
     } else if (file.superseded) {
-      actionsHtml = `<span class="label superseded">Superseded</span>`;
+      actionsHtml = `<span class="label">Superseded</span>`;
     } else if (file.status === 'pending') {
-      actionsHtml = `
-        <div class="actions">
-          <button class="btn accept-btn" title="Accept changes">✓</button>
-          <button class="btn reject-btn" title="Reject changes">✕</button>
-        </div>
-      `;
+      actionsHtml = `<span class="actions"><button class="btn accept-btn" title="Accept">[✓]</button> <button class="btn reject-btn" title="Reject">[✕]</button></span>`;
     }
 
-    return `
-      <div class="item" id="${file.id}" data-status="${file.status}" data-superseded="${file.superseded || false}">
-        <span class="status ${statusClass}">${statusIcon}</span>
-        <span class="${fileClass}" title="${this.escapeHtml(file.filePath)}">${this.escapeHtml(file.fileName)}</span>
-        ${actionsHtml}
-      </div>
-    `;
+    return `<div class="item" id="${file.id}" data-status="${file.status}" data-superseded="${file.superseded || false}">     <span class="tree">${treeBranch}</span> <span class="status ${statusClass}">${statusIcon}</span> <span class="${fileClass}" title="${this.escapeHtml(file.filePath)}">${this.escapeHtml(file.fileName)}</span> ${actionsHtml}</div>`;
   }
 
   /**

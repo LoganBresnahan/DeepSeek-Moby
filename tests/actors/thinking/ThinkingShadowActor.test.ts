@@ -156,39 +156,40 @@ describe('ThinkingShadowActor', () => {
       actor.setIterationContent(1, 'Test content');
     });
 
-    it('iterations start expanded (auto-expand for streaming visibility)', () => {
-      // New behavior: iterations auto-expand so users can see content during streaming
+    it('iterations start collapsed (user must click to expand)', () => {
+      // Iterations start collapsed so scroll behavior works correctly
       const state = actor.getState();
-      expect(state.expandedIndices).toHaveLength(1);
+      expect(state.expandedIndices).toHaveLength(0);
+      expect(state.expandedIndices).not.toContain(1);
+    });
+
+    it('toggleExpanded expands collapsed iteration', () => {
+      // Since iterations start collapsed, toggle expands them
+      actor.toggleExpanded(1);
+
+      const state = actor.getState();
       expect(state.expandedIndices).toContain(1);
     });
 
-    it('toggleExpanded collapses auto-expanded iteration', () => {
-      // Since iterations start expanded, toggle collapses them
+    it('toggleExpanded collapses expanded iteration', () => {
+      // First expand, then toggle to collapse
+      actor.expand(1);
       actor.toggleExpanded(1);
 
       const state = actor.getState();
       expect(state.expandedIndices).not.toContain(1);
     });
 
-    it('toggleExpanded expands collapsed iteration', () => {
-      // First collapse, then toggle to expand
-      actor.collapse(1);
-      actor.toggleExpanded(1);
-
-      const state = actor.getState();
-      expect(state.expandedIndices).toContain(1);
-    });
-
     it('expand adds to expanded set', () => {
-      actor.collapse(1);  // First collapse
-      actor.expand(1);    // Then expand
+      // Start collapsed, then expand
+      actor.expand(1);
 
       expect(actor.getState().expandedIndices).toContain(1);
     });
 
     it('collapse removes from expanded set', () => {
-      // Already expanded by default, so just collapse
+      // First expand, then collapse
+      actor.expand(1);
       actor.collapse(1);
 
       expect(actor.getState().expandedIndices).not.toContain(1);
@@ -218,16 +219,21 @@ describe('ThinkingShadowActor', () => {
       expect(actor.getState().expandedIndices).toHaveLength(0);
     });
 
-    it('expanded by default, expanded class removed after collapse', () => {
+    it('collapsed by default, expanded class added after expand', () => {
       const iterationHost = parentElement.querySelector('[data-actor="thinking"]');
       const container = iterationHost?.shadowRoot?.querySelector('.container');
 
-      // Starts expanded (has expanded class)
+      // Starts collapsed (no expanded class)
+      expect(container?.classList.contains('expanded')).toBe(false);
+
+      actor.expand(1);
+
+      // Expanded = has expanded class
       expect(container?.classList.contains('expanded')).toBe(true);
 
       actor.collapse(1);
 
-      // Collapsed = no expanded class
+      // Collapsed again = no expanded class
       expect(container?.classList.contains('expanded')).toBe(false);
     });
   });
@@ -237,30 +243,31 @@ describe('ThinkingShadowActor', () => {
       actor = new ThinkingShadowActor(manager, parentElement);
     });
 
-    it('renders header with arrow icon, emoji, and label', () => {
+    it('renders header with toggle, emoji, and label', () => {
       actor.startIteration();
 
       const iterationHost = parentElement.querySelector('[data-actor="thinking"]');
       const header = iterationHost?.shadowRoot?.querySelector('.header');
 
-      // Arrow icon on left (matches shell dropdown pattern)
-      expect(header?.querySelector('.icon')?.textContent).toBe('▶');
-      // Emoji after arrow
+      // +/- toggle on left (ASCII art style)
+      expect(header?.querySelector('.toggle')?.textContent).toBe('+');
+      // Emoji after toggle
       expect(header?.querySelector('.emoji')?.textContent).toBe('💭');
       expect(header?.querySelector('.label')).toBeTruthy();
     });
 
-    it('renders "Chain of Thought" label for single iteration', () => {
+    it('renders "Thinking..." label for single incomplete iteration', () => {
       actor.startIteration();
 
       const iterationHost = parentElement.querySelector('[data-actor="thinking"]');
       const label = iterationHost?.shadowRoot?.querySelector('.label');
 
-      expect(label?.textContent).toBe('Chain of Thought');
+      expect(label?.textContent).toBe('Thinking...');
     });
 
-    it('renders "Thinking (Iteration N)" for multiple iterations', () => {
+    it('renders "Thought" for complete iterations and "Thinking..." for incomplete', () => {
       actor.startIteration();
+      actor.completeIteration();
       vi.advanceTimersByTime(1);
       actor.startIteration();
 
@@ -268,8 +275,9 @@ describe('ThinkingShadowActor', () => {
       const label1 = iterations[0].shadowRoot?.querySelector('.label');
       const label2 = iterations[1].shadowRoot?.querySelector('.label');
 
-      expect(label1?.textContent).toBe('Thinking (Iteration 1)');
-      expect(label2?.textContent).toBe('Thinking (Iteration 2)');
+      // Complete iteration shows "Thought", incomplete shows "Thinking..."
+      expect(label1?.textContent).toBe('Thought');
+      expect(label2?.textContent).toBe('Thinking...');
     });
 
     it('renders content in body', () => {
@@ -318,16 +326,16 @@ describe('ThinkingShadowActor', () => {
       const iterationHost = parentElement.querySelector('[data-actor="thinking"]');
       const header = iterationHost?.shadowRoot?.querySelector('.header') as HTMLElement;
 
-      // Starts expanded (auto-expand behavior)
-      expect(actor.getState().expandedIndices).toContain(1);
-
-      // First click collapses
-      header?.click();
+      // Starts collapsed (collapsed by default)
       expect(actor.getState().expandedIndices).not.toContain(1);
 
-      // Second click expands
+      // First click expands
       header?.click();
       expect(actor.getState().expandedIndices).toContain(1);
+
+      // Second click collapses
+      header?.click();
+      expect(actor.getState().expandedIndices).not.toContain(1);
     });
   });
 
@@ -440,6 +448,243 @@ describe('ThinkingShadowActor', () => {
       expect(state).toHaveProperty('expandedIndices');
       expect(state.expandedIndices).toContain(1);
       expect(state).toHaveProperty('streaming', false);
+    });
+  });
+
+  describe('Multi-iteration baseOffset tracking', () => {
+    /**
+     * These tests verify the critical baseOffset tracking feature that ensures
+     * each iteration only displays its own thinking content, not the accumulated
+     * content from all iterations.
+     *
+     * The flow is:
+     * 1. Backend sends `streaming.thinking` with ACCUMULATED content (iteration1 + iteration2 + ...)
+     * 2. ThinkingShadowActor tracks `_iterationBaseOffset` when each iteration starts
+     * 3. Content is sliced from the baseOffset to extract only the current iteration's content
+     */
+
+    async function setupStreamingActor(): Promise<void> {
+      const streamingEl = document.createElement('div');
+      streamingEl.id = 'streaming';
+      document.body.appendChild(streamingEl);
+
+      manager.register({
+        actorId: 'streaming',
+        element: streamingEl,
+        publicationKeys: ['streaming.thinking', 'streaming.active'],
+        subscriptionKeys: []
+      }, {});
+
+      // Wait for registration
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+
+    function publishThinkingContent(content: string): void {
+      manager.handleStateChange({
+        source: 'streaming',
+        state: { 'streaming.thinking': content },
+        changedKeys: ['streaming.thinking'],
+        publicationChain: [],
+        timestamp: Date.now()
+      });
+    }
+
+    function publishStreamingActive(active: boolean): void {
+      manager.handleStateChange({
+        source: 'streaming',
+        state: { 'streaming.active': active },
+        changedKeys: ['streaming.active'],
+        publicationChain: [],
+        timestamp: Date.now()
+      });
+    }
+
+    it('first iteration receives full accumulated content (baseOffset = 0)', async () => {
+      actor = new ThinkingShadowActor(manager, parentElement);
+      await setupStreamingActor();
+
+      // Simulate streaming.thinking with content for first iteration
+      publishThinkingContent('First iteration thinking');
+
+      const iterations = actor.getIterations();
+      expect(iterations).toHaveLength(1);
+      expect(iterations[0].content).toBe('First iteration thinking');
+    });
+
+    it('second iteration only receives its own content (baseOffset = iteration1.length)', async () => {
+      actor = new ThinkingShadowActor(manager, parentElement);
+      await setupStreamingActor();
+
+      // Iteration 1: thinking content arrives
+      publishThinkingContent('First thinking');
+
+      // Iteration 1 ends, iteration 2 starts via startIteration()
+      // (In real flow, this is triggered by 'iterationStart' message in chat.ts)
+      vi.advanceTimersByTime(1);
+      actor.startIteration();
+
+      // Iteration 2: more thinking content arrives (accumulated)
+      // Backend sends "First thinking" + "Second thinking" = full accumulated content
+      publishThinkingContent('First thinkingSecond thinking');
+
+      const iterations = actor.getIterations();
+      expect(iterations).toHaveLength(2);
+      // Iteration 1 should have only "First thinking"
+      expect(iterations[0].content).toBe('First thinking');
+      // Iteration 2 should have only "Second thinking" (sliced from baseOffset)
+      expect(iterations[1].content).toBe('Second thinking');
+    });
+
+    it('three iterations each receive only their own content', async () => {
+      actor = new ThinkingShadowActor(manager, parentElement);
+      await setupStreamingActor();
+
+      // Iteration 1
+      publishThinkingContent('AAA');
+
+      // Start iteration 2
+      vi.advanceTimersByTime(1);
+      actor.startIteration();
+
+      // Iteration 2 content (accumulated: AAA + BBB)
+      publishThinkingContent('AAABBB');
+
+      // Start iteration 3
+      vi.advanceTimersByTime(1);
+      actor.startIteration();
+
+      // Iteration 3 content (accumulated: AAA + BBB + CCC)
+      publishThinkingContent('AAABBBCCC');
+
+      const iterations = actor.getIterations();
+      expect(iterations).toHaveLength(3);
+      expect(iterations[0].content).toBe('AAA');
+      expect(iterations[1].content).toBe('BBB');
+      expect(iterations[2].content).toBe('CCC');
+    });
+
+    it('streaming content updates only current iteration', async () => {
+      actor = new ThinkingShadowActor(manager, parentElement);
+      await setupStreamingActor();
+
+      // Iteration 1: streaming chunks
+      publishThinkingContent('Chunk1');
+      publishThinkingContent('Chunk1Chunk2');
+      publishThinkingContent('Chunk1Chunk2Chunk3');
+
+      const iterations = actor.getIterations();
+      expect(iterations).toHaveLength(1);
+      expect(iterations[0].content).toBe('Chunk1Chunk2Chunk3');
+    });
+
+    it('clear resets baseOffset tracking for next session', async () => {
+      actor = new ThinkingShadowActor(manager, parentElement);
+      await setupStreamingActor();
+
+      // First session
+      publishThinkingContent('Session1 Content');
+      vi.advanceTimersByTime(1);
+      actor.startIteration();
+      publishThinkingContent('Session1 ContentMore content');
+
+      // Clear for new session
+      actor.clear();
+
+      // New session starts fresh
+      publishThinkingContent('New session');
+
+      const iterations = actor.getIterations();
+      expect(iterations).toHaveLength(1);
+      expect(iterations[0].content).toBe('New session');
+    });
+
+    it('iteration auto-created via subscription when no iterations exist', async () => {
+      actor = new ThinkingShadowActor(manager, parentElement);
+      await setupStreamingActor();
+
+      // No explicit startIteration() call - should auto-create via subscription
+      expect(actor.getIterations()).toHaveLength(0);
+
+      publishThinkingContent('Auto-created');
+
+      expect(actor.getIterations()).toHaveLength(1);
+      expect(actor.getIterations()[0].content).toBe('Auto-created');
+    });
+
+    it('explicit startIteration before content prevents duplicate creation', async () => {
+      actor = new ThinkingShadowActor(manager, parentElement);
+      await setupStreamingActor();
+
+      // Explicit startIteration (simulating 'iterationStart' message)
+      actor.startIteration();
+      expect(actor.getIterations()).toHaveLength(1);
+
+      // Content arrives - should NOT create another iteration
+      publishThinkingContent('Content for iteration 1');
+
+      expect(actor.getIterations()).toHaveLength(1);
+      expect(actor.getIterations()[0].content).toBe('Content for iteration 1');
+    });
+
+    it('streaming.active false marks current iteration as complete', async () => {
+      actor = new ThinkingShadowActor(manager, parentElement);
+      await setupStreamingActor();
+
+      publishThinkingContent('Thinking content');
+      expect(actor.getIterations()[0].complete).toBe(false);
+      expect(actor.isStreaming()).toBe(true);
+
+      // End streaming
+      publishStreamingActive(false);
+
+      expect(actor.getIterations()[0].complete).toBe(true);
+      expect(actor.isStreaming()).toBe(false);
+    });
+
+    it('handles rapid iteration switches with correct content isolation', async () => {
+      actor = new ThinkingShadowActor(manager, parentElement);
+      await setupStreamingActor();
+
+      // Rapid sequence simulating R1 multi-iteration shell flow
+      const content1 = 'Let me analyze the codebase...';
+      const content2 = 'Now executing the fix...';
+      const content3 = 'Verifying the changes...';
+
+      // Iteration 1
+      publishThinkingContent(content1);
+
+      // Quick switch to iteration 2
+      vi.advanceTimersByTime(1);
+      actor.startIteration();
+      publishThinkingContent(content1 + content2);
+
+      // Quick switch to iteration 3
+      vi.advanceTimersByTime(1);
+      actor.startIteration();
+      publishThinkingContent(content1 + content2 + content3);
+
+      const iterations = actor.getIterations();
+      expect(iterations[0].content).toBe(content1);
+      expect(iterations[1].content).toBe(content2);
+      expect(iterations[2].content).toBe(content3);
+    });
+
+    it('content with newlines and special characters isolated correctly', async () => {
+      actor = new ThinkingShadowActor(manager, parentElement);
+      await setupStreamingActor();
+
+      const content1 = 'Line 1\nLine 2\n```code```\n';
+      const content2 = '<special>&chars\nMore lines';
+
+      publishThinkingContent(content1);
+      vi.advanceTimersByTime(1);
+      actor.startIteration();
+      publishThinkingContent(content1 + content2);
+
+      const iterations = actor.getIterations();
+      expect(iterations[0].content).toBe(content1);
+      expect(iterations[1].content).toBe(content2);
     });
   });
 });

@@ -20,6 +20,7 @@ import {
   stripShellTags,
   ShellResult
 } from '../tools/reasonerShellExecutor';
+import { ContentTransformBuffer, BufferedSegment, ShellCommand } from '../utils/ContentTransformBuffer';
 
 interface DiffMetadata {
   proposedUri: vscode.Uri;        // The "modified" side of the diff
@@ -85,6 +86,9 @@ export class ChatProvider implements vscode.WebviewViewProvider {
   private readFilesInTurn = new Set<string>(); // Track ALL files read by LLM during conversation turn
   private userMessageIntent: string | null = null; // Extracted file intent from user message
   private fileModalOpen = false; // Track whether file selection modal is open
+
+  // Content transform buffer for debounced streaming
+  private contentBuffer: ContentTransformBuffer | null = null;
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
@@ -201,6 +205,13 @@ export class ChatProvider implements vscode.WebviewViewProvider {
 
   private notifyDiffListChanged() {
     if (!this._view) return;
+
+    // IMPORTANT: Flush buffer before sending diffListChanged to prevent race condition
+    // where buffered content hasn't been emitted before segment finalization
+    if (this.contentBuffer) {
+      logger.info(`[Buffer] FLUSH before notifyDiffListChanged`);
+      this.contentBuffer.flush();
+    }
 
     // Combine pending diffs with resolved diffs
     const pendingDiffs = Array.from(this.activeDiffs.values()).map(meta => ({
@@ -1193,6 +1204,46 @@ ${webSearchContext}
       isReasoner: isReasonerModel
     });
 
+    // Initialize content transform buffer for debounced streaming
+    // This prevents jarring UI transitions when <shell> tags are detected
+    this.contentBuffer = new ContentTransformBuffer({
+      debounceMs: 150,
+      debug: true, // Enable extensive debug logging
+      log: (msg) => logger.info(msg), // Route buffer logs through our logger
+      onFlush: (segments) => {
+        logger.info(`[Buffer→Frontend] onFlush: ${segments.length} segment(s) to process`);
+        for (const segment of segments) {
+          switch (segment.type) {
+            case 'text':
+              // Send regular text to frontend
+              const textContent = segment.content as string;
+              const preview = textContent.length > 100 ? textContent.slice(0, 100) + '...' : textContent;
+              logger.info(`[Buffer→Frontend] streamToken: "${preview.replace(/\n/g, '\\n')}" (${textContent.length} chars)`);
+              this._view?.webview.postMessage({
+                type: 'streamToken',
+                token: textContent
+              });
+              break;
+
+            case 'shell':
+              // Don't send shell tags as text - they'll be handled by shellExecuting message
+              // Just log for debugging
+              logger.info(`[ContentBuffer] Detected shell commands, will be handled after iteration`);
+              break;
+
+            case 'thinking':
+              // Thinking tags are for R1 reasoner, handled separately via streamReasoning
+              // Just skip them here
+              logger.info(`[ContentBuffer] Detected thinking tags, handled separately`);
+              break;
+
+            // NOTE: Code blocks are no longer detected by the buffer - they flow through
+            // as normal text and are rendered by the frontend's markdown processing.
+          }
+        }
+      }
+    });
+
     // Log the API request
     const model = this.deepSeekClient.getModel();
     const hasAttachments = attachments && attachments.length > 0;
@@ -1329,10 +1380,17 @@ Now provide your final response based on what you learned. Do NOT attempt to use
             iterationResponse += token;
             accumulatedResponse += token;
             currentIterationContent += token;  // Track content per iteration
-            this._view?.webview.postMessage({
-              type: 'streamToken',
-              token
-            });
+
+            // Use content buffer for debounced streaming (filters shell tags)
+            if (this.contentBuffer) {
+              this.contentBuffer.append(token);
+            } else {
+              // Fallback if buffer not initialized
+              this._view?.webview.postMessage({
+                type: 'streamToken',
+                token
+              });
+            }
 
             // Detect complete code blocks and auto-handle in "ask" or "auto" mode
             if (this.editMode === 'ask' || this.editMode === 'auto') {
@@ -1424,7 +1482,16 @@ Now provide your final response based on what you learned. Do NOT attempt to use
           const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
           if (commands.length > 0 && workspacePath) {
+            // IMPORTANT: Flush buffer before sending shellExecuting to prevent race condition
+            // The frontend will finalize the current segment when it receives this message,
+            // so we need to ensure all pending buffered content is sent first
+            if (this.contentBuffer) {
+              logger.info(`[Buffer] FLUSH before shellExecuting (${commands.length} commands)`);
+              this.contentBuffer.flush();
+            }
+
             // Notify frontend about shell execution
+            logger.info(`[Frontend] Sending shellExecuting message`);
             this._view?.webview.postMessage({
               type: 'shellExecuting',
               commands: commands.map(c => c.command)
@@ -1573,6 +1640,14 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
         currentIterationContent = '';
       }
 
+      // Flush and reset the content buffer before finalizing
+      if (this.contentBuffer) {
+        logger.info(`[Buffer] FLUSH before endResponse (final)`);
+        this.contentBuffer.flush();
+        logger.info(`[Buffer] RESET after final flush`);
+        this.contentBuffer.reset();
+      }
+
       // Strip any DSML markup and shell tags from the final response
       // (DeepSeek chat outputs DSML, Reasoner outputs <shell> tags)
       // Use accumulatedResponse to include all content from all shell iterations
@@ -1683,6 +1758,13 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
       });
     } finally {
       this.abortController = null;
+      // Clean up content buffer
+      if (this.contentBuffer) {
+        logger.info(`[Buffer] FLUSH in finally block (cleanup)`);
+        this.contentBuffer.flush();
+        logger.info(`[Buffer] RESET in finally block (cleanup)`);
+        this.contentBuffer.reset();
+      }
     }
   }
 
@@ -2634,8 +2716,16 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
   private notifyAutoAppliedFilesChanged() {
     if (!this._view) return;
 
+    // IMPORTANT: Flush buffer before sending diffListChanged to prevent race condition
+    // where buffered content hasn't been emitted before segment finalization
+    if (this.contentBuffer) {
+      logger.info(`[Buffer] FLUSH before notifyAutoAppliedFilesChanged`);
+      this.contentBuffer.flush();
+    }
+
     // Use resolvedDiffs which has the proper structure (diffId, iteration)
     // Auto-applied files are added to resolvedDiffs with status 'applied'
+    logger.info(`[Frontend] Sending diffListChanged (auto-applied) message`);
     this._view.webview.postMessage({
       type: 'diffListChanged',
       diffs: this.resolvedDiffs.map(d => ({
@@ -2883,8 +2973,26 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
         }
 
         if (!document) {
-          vscode.window.showWarningMessage(`File not found in workspace: ${targetFilePath}`);
-          return;
+          // File doesn't exist - this might be a new file creation
+          // Create an empty file so we can show a diff (empty → new content)
+          logger.info(`[ChatProvider] File not found, creating new file: ${targetFilePath}`);
+
+          const newFileUri = vscode.Uri.joinPath(workspaceFolders[0].uri, targetFilePath);
+
+          // Ensure parent directory exists
+          const parentDir = vscode.Uri.joinPath(newFileUri, '..');
+          try {
+            await vscode.workspace.fs.createDirectory(parentDir);
+          } catch {
+            // Directory might already exist, that's fine
+          }
+
+          // Create empty file
+          await vscode.workspace.fs.writeFile(newFileUri, new Uint8Array());
+          document = await vscode.workspace.openTextDocument(newFileUri);
+          this.lastActiveEditorUri = document.uri;
+
+          logger.info(`[ChatProvider] Created new file for diff: ${targetFilePath}`);
         }
       } else {
         vscode.window.showWarningMessage('No workspace folder open');
@@ -3524,6 +3632,16 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
       vscode.Uri.joinPath(this._extensionUri, 'dist', 'media', 'moby.png')
     );
 
+    // Check if dev mode is enabled (via config or extension development host)
+    const config = vscode.workspace.getConfiguration('deepseek');
+    const isDevMode = config.get<boolean>('devMode', false);
+
+    // Dev script is a SEPARATE bundle - only loaded when devMode is true
+    // This keeps dev tools completely out of the production chat.js
+    const devScriptUri = isDevMode ? webview.asWebviewUri(
+      vscode.Uri.joinPath(this._extensionUri, 'dist', 'media', 'dev.js')
+    ) : null;
+
     return `
       <!DOCTYPE html>
       <html lang="en">
@@ -3533,7 +3651,7 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
         <title>DeepSeek Moby</title>
         <link href="${styleUri}" rel="stylesheet">
       </head>
-      <body data-moby-icon="${iconUri}">
+      <body data-moby-icon="${iconUri}" data-dev-mode="${isDevMode}">
         <div class="chat-container">
           <div class="header">
             <img src="${iconUri}" alt="DeepSeek Moby" class="header-icon">
@@ -3569,6 +3687,66 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
                     <label>Max Output Tokens: <span id="tokenLimitValue">8192</span></label>
                     <input type="range" id="tokenLimitSlider" min="256" max="65536" step="256" value="8192">
                     <span class="tool-limit-hint" id="tokenLimitHint">Maximum tokens in response. Chat: 8K, Reasoner: 64K</span>
+                  </div>
+                </div>
+              </div>
+              <button id="inspectorBtn" class="inspector-btn" title="UI Inspector">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                  <path d="M14.4 3.6L12.5 5.5a2.5 2.5 0 0 1-3.5 3.5l-5 5a1.4 1.4 0 0 1-2-2l5-5a2.5 2.5 0 0 1 3.5-3.5l1.9-1.9c.2-.2.5-.2.7 0l.3.3c.2.2.2.5 0 .7z"/>
+                </svg>
+              </button>
+              <div class="commands-selector">
+                <button id="commandsBtn" class="commands-btn" title="Commands">
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 13A6 6 0 1 1 8 2a6 6 0 0 1 0 12zm-.5-3h1v1h-1v-1zm.5-7a2.5 2.5 0 0 0-2.5 2.5h1A1.5 1.5 0 1 1 8 8c-.55 0-1 .45-1 1v1h1v-.8c0-.11.09-.2.2-.2h.3a2.5 2.5 0 0 0 0-5z"/>
+                  </svg>
+                </button>
+                <div id="commandsDropdown" class="commands-dropdown" style="display: none;">
+                  <div class="commands-dropdown-title">Commands</div>
+                  <div class="commands-section-title">Chat</div>
+                  <div class="command-item" data-command="deepseek.newChat">
+                    <span class="command-icon">✨</span>
+                    <div class="command-info">
+                      <div class="command-name">New Chat</div>
+                      <div class="command-desc">Start a new conversation</div>
+                    </div>
+                  </div>
+                  <div class="commands-section-title">History</div>
+                  <div class="command-item" data-command="deepseek.showChatHistory">
+                    <span class="command-icon">📚</span>
+                    <div class="command-info">
+                      <div class="command-name">Show History</div>
+                      <div class="command-desc">View chat history</div>
+                    </div>
+                  </div>
+                  <div class="command-item" data-command="deepseek.exportChatHistory">
+                    <span class="command-icon">📤</span>
+                    <div class="command-info">
+                      <div class="command-name">Export History</div>
+                      <div class="command-desc">Export all chats</div>
+                    </div>
+                  </div>
+                  <div class="command-item" data-command="deepseek.searchChatHistory">
+                    <span class="command-icon">🔍</span>
+                    <div class="command-info">
+                      <div class="command-name">Search History</div>
+                      <div class="command-desc">Search past chats</div>
+                    </div>
+                  </div>
+                  <div class="commands-section-title">Other</div>
+                  <div class="command-item" data-command="deepseek.showStats">
+                    <span class="command-icon">📊</span>
+                    <div class="command-info">
+                      <div class="command-name">Show Stats</div>
+                      <div class="command-desc">View usage statistics</div>
+                    </div>
+                  </div>
+                  <div class="command-item" data-command="deepseek.showLogs">
+                    <span class="command-icon">📋</span>
+                    <div class="command-info">
+                      <div class="command-name">Show Logs</div>
+                      <div class="command-desc">View extension logs</div>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -3847,6 +4025,7 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
         </div>
 
         <script src="${scriptUri}"></script>
+        ${devScriptUri ? `<script src="${devScriptUri}"></script>` : ''}
       </body>
       </html>
     `;

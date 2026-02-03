@@ -22,9 +22,69 @@ export class EventStateManager {
   /** Logger instance */
   private logger: EventStateLogger;
 
+  /** CSS injection tracking */
+  private injectedStyles: Set<string> = new Set();
+  private styleElement: HTMLStyleElement | null = null;
+
   constructor() {
     this.logger = new EventStateLogger();
     this.logger.managerInit();
+  }
+
+  /**
+   * Inject CSS styles for a light DOM actor.
+   * Styles are merged into a single <style> element in document.head.
+   * Safe to call multiple times - only injects once per actorId.
+   *
+   * @param actorId - Unique identifier for the actor
+   * @param styles - CSS string to inject
+   * @returns true if styles were injected, false if already existed
+   */
+  injectStyles(actorId: string, styles: string): boolean {
+    // SSR safety
+    if (typeof document === 'undefined') return false;
+
+    // Already injected
+    if (this.injectedStyles.has(actorId)) return false;
+
+    // Lazy create merged style element
+    if (!this.styleElement) {
+      this.styleElement = document.createElement('style');
+      this.styleElement.id = 'actor-styles';
+      this.styleElement.setAttribute('data-managed-by', 'EventStateManager');
+      document.head.appendChild(this.styleElement);
+    }
+
+    // Append with comment marker for debugging
+    this.styleElement.textContent += `\n/* === ${actorId} === */\n${styles}\n`;
+    this.injectedStyles.add(actorId);
+    return true;
+  }
+
+  /**
+   * Check if styles for an actor have been injected.
+   */
+  hasStyles(actorId: string): boolean {
+    return this.injectedStyles.has(actorId);
+  }
+
+  /**
+   * Reset style injection state (for testing).
+   * Removes the shared style element and clears tracking.
+   */
+  resetStyles(): void {
+    if (this.styleElement) {
+      this.styleElement.remove();
+      this.styleElement = null;
+    }
+    this.injectedStyles.clear();
+  }
+
+  /**
+   * Get injected style content (for testing).
+   */
+  getStyleContent(): string {
+    return this.styleElement?.textContent ?? '';
   }
 
   /**
