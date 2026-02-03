@@ -1,6 +1,6 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
-exports[`InspectorShadowActor Snapshots > Inspect mode states > renders inspect button in active state 1`] = `"<button class="inspect-btn header-btn active" title="Select element (right-click)"><span>🎯</span> Right Click = select</button>"`;
+exports[`InspectorShadowActor Snapshots > Inspect mode states > renders inspect button in active state 1`] = `"<button class="inspect-btn header-btn active" title="Select element (right-click)"><span>🎯</span> Right Click</button>"`;
 
 exports[`InspectorShadowActor Snapshots > Inspect mode states > renders inspect button in default state 1`] = `
 "<button class="inspect-btn header-btn" title="Select element (right-click)">

@@ -109,6 +109,9 @@ export class ChatHistoryManager {
             `[${msg.timestamp.toLocaleTimeString()}] ${msg.role === 'user' ? 'You' : 'DeepSeek Moby'}:\n` +
             msg.content + '\n'
           ).join('\n');
+
+      default:
+        return JSON.stringify(session, null, 2);
     }
   }
 
@@ -135,12 +138,11 @@ export class ChatHistoryManager {
           `**Language:** ${session.language || 'N/A'}  \n` +
           (session.filePath ? `**File:** ${session.filePath}  \n` : '') +
           (session.tags.length ? `**Tags:** ${session.tags.join(', ')}  \n` : '') +
-          `\n## Conversation\n` +
+          `\n## Conversation\n\n` +
           session.messages.map(msg =>
             `### ${msg.role === 'user' ? 'You' : 'DeepSeek Moby'}\n` +
             `*${msg.timestamp.toLocaleTimeString()}*\n\n` +
-            '```' + (session.language || 'text') + '\n' +
-            msg.content + '\n```\n'
+            msg.content + '\n'
           ).join('\n') + '\n---\n'
         ).join('\n');
 
@@ -158,6 +160,9 @@ export class ChatHistoryManager {
             msg.content + '\n'
           ).join('\n') + '\n\n'
         ).join('\n');
+
+      default:
+        return JSON.stringify(sessions, null, 2);
     }
   }
 

@@ -6,7 +6,6 @@ import { CommandProvider } from './providers/commandProvider';
 import { StatusBar } from './views/statusBar';
 import { ConfigManager } from './utils/config';
 import { ChatHistoryManager } from './chatHistory/ChatHistoryManager';
-import { ChatHistoryViewProvider } from './views/ChatHistoryViewProvider';
 import { TavilyClient } from './clients/tavilyClient';
 import { logger } from './utils/logger';
 
@@ -16,7 +15,6 @@ let commandProvider: CommandProvider;
 let statusBar: StatusBar;
 let deepSeekClient: DeepSeekClient;
 let chatHistoryManager: ChatHistoryManager;
-let chatHistoryViewProvider: ChatHistoryViewProvider;
 let tavilyClient: TavilyClient;
 
 export async function activate(context: vscode.ExtensionContext) {
@@ -45,16 +43,7 @@ export async function activate(context: vscode.ExtensionContext) {
     chatHistoryManager,
     tavilyClient
   );
-  
-  // Initialize chat history view provider
-  chatHistoryViewProvider = new ChatHistoryViewProvider(
-    context.extensionUri,
-    chatHistoryManager,
-    chatProvider,
-    deepSeekClient,
-    tavilyClient
-  );
-  
+
   // Initialize completion provider (inline suggestions)
   completionProvider = new CompletionProvider(deepSeekClient);
   
@@ -66,13 +55,6 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.window.registerWebviewViewProvider(
       ChatProvider.viewType,
       chatProvider,
-      { webviewOptions: { retainContextWhenHidden: true } }
-    ),
-    
-    // Register chat history view
-    vscode.window.registerWebviewViewProvider(
-      ChatHistoryViewProvider.viewType,
-      chatHistoryViewProvider,
       { webviewOptions: { retainContextWhenHidden: true } }
     )
   );
@@ -112,13 +94,13 @@ function registerCommands(context: vscode.ExtensionContext) {
     { name: 'insertCode', handler: () => commandProvider.insertCode() },
     
     // Chat History Commands
-    { name: 'showChatHistory', handler: () => chatHistoryViewProvider.reveal() },
+    { name: 'showChatHistory', handler: () => chatProvider.openHistoryModal() },
     { name: 'exportChatHistory', handler: () => commandProvider.exportChatHistory() },
     { name: 'importChatHistory', handler: () => commandProvider.importChatHistory() },
     { name: 'clearChatHistory', handler: () => commandProvider.clearChatHistory() },
-    { name: 'searchChatHistory', handler: () => commandProvider.searchChatHistory() },
+    { name: 'searchChatHistory', handler: () => chatProvider.openHistoryModal() },
     { name: 'exportCurrentSession', handler: () => commandProvider.exportCurrentSession() },
-    { name: 'showStats', handler: () => chatHistoryViewProvider.showStatsModal() },
+    { name: 'showStats', handler: () => chatProvider.showStats() },
     { name: 'showLogs', handler: () => logger.show() },
 
     // Diff quick pick command

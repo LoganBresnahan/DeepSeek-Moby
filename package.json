@@ -337,11 +337,6 @@
           "command": "deepseek.newChat",
           "when": "view == deepseek-chat-view",
           "group": "navigation@1"
-        },
-        {
-          "command": "deepseek.showStats",
-          "when": "view == deepseek-history-view",
-          "group": "navigation@1"
         }
       ]
     },
@@ -364,13 +359,6 @@
     },
     "views": {
       "deepseek-sidebar": [
-        {
-          "type": "webview",
-          "id": "deepseek-history-view",
-          "name": "History",
-          "contextualTitle": "Chat History",
-          "visibility": "collapsed"
-        },
         {
           "type": "webview",
           "id": "deepseek-chat-view",

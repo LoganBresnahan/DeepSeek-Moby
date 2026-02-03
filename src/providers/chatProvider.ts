@@ -445,6 +445,25 @@ which I already edited - would you like me to update it?"
         case 'resetToDefaults':
           await this.resetToDefaults();
           break;
+        // History modal messages
+        case 'getHistorySessions':
+          await this.sendHistorySessions();
+          break;
+        case 'switchToSession':
+          await this.loadSession(data.sessionId);
+          break;
+        case 'renameSession':
+          await this.renameSession(data.sessionId, data.title);
+          break;
+        case 'exportSession':
+          await this.exportSessionToFile(data.sessionId, data.format);
+          break;
+        case 'deleteSession':
+          await this.deleteSession(data.sessionId);
+          break;
+        case 'exportAllHistory':
+          await this.exportAllHistoryToFile(data.format);
+          break;
       }
     });
 
@@ -455,6 +474,64 @@ which I already edited - would you like me to update it?"
   public reveal() {
     if (this._view) {
       this._view.show?.(true);
+    }
+  }
+
+  /**
+   * Open the history modal in the chat view.
+   * Reveals the chat panel and triggers the history modal to open.
+   */
+  public async openHistoryModal() {
+    this.reveal();
+    // Small delay to ensure webview is ready
+    await new Promise(resolve => setTimeout(resolve, 100));
+    if (this._view) {
+      // Send history sessions first, then trigger modal open
+      await this.sendHistorySessions();
+      this._view.webview.postMessage({ type: 'openHistoryModal' });
+    }
+  }
+
+  /**
+   * Show stats in the chat view.
+   * Reveals the chat panel and displays usage statistics.
+   */
+  public async showStats() {
+    this.reveal();
+    // Small delay to ensure webview is ready
+    await new Promise(resolve => setTimeout(resolve, 100));
+    if (this._view) {
+      // Get stats
+      const stats = await this.chatHistoryManager.getSessionStats();
+
+      // Fetch balance from DeepSeek API
+      let balance = null;
+      try {
+        balance = await this.deepSeekClient.getBalance();
+      } catch (e) {
+        // Silently fail if balance fetch fails
+      }
+
+      // Get Tavily search stats (local tracking)
+      const tavilyStats = this.tavilyClient.getUsageStats();
+
+      // Get real Tavily API usage (from /usage endpoint)
+      let tavilyApiUsage = null;
+      if (this.tavilyClient.isConfigured()) {
+        try {
+          tavilyApiUsage = await this.tavilyClient.getApiUsage();
+        } catch (e) {
+          // Silently fail if API usage fetch fails
+        }
+      }
+
+      this._view.webview.postMessage({
+        type: 'statsLoaded',
+        stats,
+        balance,
+        tavilyStats,
+        tavilyApiUsage
+      });
     }
   }
 
@@ -740,8 +817,122 @@ Always:
       // Notify webview
       this._view?.webview.postMessage({ type: 'historyCleared' });
       this._view?.webview.postMessage({ type: 'clearChat' });
+
+      // Refresh history modal sessions
+      await this.sendHistorySessions();
     } catch (error) {
       logger.error(`[ChatProvider] Failed to clear history: ${error}`);
+    }
+  }
+
+  private async sendHistorySessions() {
+    try {
+      const sessions = await this.chatHistoryManager.getAllSessions();
+      this._view?.webview.postMessage({
+        type: 'historySessions',
+        sessions: sessions
+      });
+
+      // Also send current session ID
+      const currentSession = await this.chatHistoryManager.getCurrentSession();
+      if (currentSession) {
+        this._view?.webview.postMessage({
+          type: 'currentSessionId',
+          sessionId: currentSession.id
+        });
+      }
+    } catch (error) {
+      logger.error(`[ChatProvider] Failed to send history sessions: ${error}`);
+    }
+  }
+
+  private async renameSession(sessionId: string, title: string) {
+    try {
+      await this.chatHistoryManager.renameSession(sessionId, title);
+      logger.info(`[ChatProvider] Renamed session ${sessionId} to "${title}"`);
+
+      // Refresh sessions
+      await this.sendHistorySessions();
+    } catch (error) {
+      logger.error(`[ChatProvider] Failed to rename session: ${error}`);
+    }
+  }
+
+  private async exportSessionToFile(sessionId: string, format: 'json' | 'markdown' | 'txt') {
+    try {
+      const content = await this.chatHistoryManager.exportSession(sessionId, format);
+      if (!content) {
+        vscode.window.showErrorMessage('Session not found');
+        return;
+      }
+
+      const session = await this.chatHistoryManager.getSession(sessionId);
+      const title = session?.title || 'chat';
+      const ext = format === 'markdown' ? 'md' : format;
+      const defaultName = `${title.replace(/[^a-z0-9]/gi, '_')}.${ext}`;
+
+      const uri = await vscode.window.showSaveDialog({
+        defaultUri: vscode.Uri.file(defaultName),
+        filters: {
+          [format.toUpperCase()]: [ext]
+        }
+      });
+
+      if (uri) {
+        await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf8'));
+        vscode.window.showInformationMessage(`Exported to ${uri.fsPath}`);
+        logger.info(`[ChatProvider] Exported session ${sessionId} to ${uri.fsPath}`);
+      }
+    } catch (error) {
+      logger.error(`[ChatProvider] Failed to export session: ${error}`);
+      vscode.window.showErrorMessage('Failed to export session');
+    }
+  }
+
+  private async deleteSession(sessionId: string) {
+    try {
+      await this.chatHistoryManager.deleteSession(sessionId);
+      logger.info(`[ChatProvider] Deleted session ${sessionId}`);
+
+      // If we deleted the current session, clear it
+      if (this.currentSessionId === sessionId) {
+        this.currentSessionId = null;
+        this._view?.webview.postMessage({ type: 'clearChat' });
+      }
+
+      // Refresh sessions
+      await this.sendHistorySessions();
+    } catch (error) {
+      logger.error(`[ChatProvider] Failed to delete session: ${error}`);
+    }
+  }
+
+  private async exportAllHistoryToFile(format: 'json' | 'markdown' | 'txt') {
+    try {
+      const content = await this.chatHistoryManager.exportAllSessions(format);
+      if (!content) {
+        vscode.window.showWarningMessage('No chat history to export');
+        return;
+      }
+
+      const ext = format === 'markdown' ? 'md' : format;
+      const defaultName = `deepseek-history-${new Date().toISOString().split('T')[0]}.${ext}`;
+
+      const uri = await vscode.window.showSaveDialog({
+        defaultUri: vscode.Uri.file(defaultName),
+        filters: {
+          [format.toUpperCase()]: [ext]
+        }
+      });
+
+      if (uri) {
+        await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf8'));
+        vscode.window.showInformationMessage(`Exported all history to ${uri.fsPath}`);
+        logger.info(`[ChatProvider] Exported all history to ${uri.fsPath}`);
+      }
+    } catch (error) {
+      logger.error(`[ChatProvider] Failed to export history: ${error}`);
+      vscode.window.showErrorMessage('Failed to export history');
     }
   }
 
@@ -3690,6 +3881,11 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
                   </div>
                 </div>
               </div>
+              <button id="historyBtn" class="history-btn" title="Chat History">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                  <path d="M8 1a7 7 0 1 1 0 14A7 7 0 0 1 8 1zm0 1a6 6 0 1 0 0 12A6 6 0 0 0 8 2zm-.5 2h1v4.25l2.85 1.65-.5.85L7.5 8.75V4z"/>
+                </svg>
+              </button>
               <button id="inspectorBtn" class="inspector-btn" title="UI Inspector">
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
                   <path d="M14.4 3.6L12.5 5.5a2.5 2.5 0 0 1-3.5 3.5l-5 5a1.4 1.4 0 0 1-2-2l5-5a2.5 2.5 0 0 1 3.5-3.5l1.9-1.9c.2-.2.5-.2.7 0l.3.3c.2.2.2.5 0 .7z"/>

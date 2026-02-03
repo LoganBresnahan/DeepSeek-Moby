@@ -173,6 +173,24 @@ export class EventStateManager {
   }
 
   /**
+   * Publish state directly from outside the actor system.
+   * Use this to inject state from external sources (like VS Code postMessage).
+   *
+   * @param key - State key to publish
+   * @param value - Value to publish
+   * @param source - Optional source identifier (defaults to 'external')
+   */
+  publishDirect(key: string, value: unknown, source = 'external'): void {
+    this.handleStateChange({
+      source,
+      state: { [key]: value },
+      changedKeys: [key],
+      publicationChain: [],
+      timestamp: Date.now()
+    });
+  }
+
+  /**
    * Update global state with new values
    * Returns array of keys that actually changed
    */

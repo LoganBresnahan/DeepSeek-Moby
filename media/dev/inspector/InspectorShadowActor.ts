@@ -1383,7 +1383,7 @@ export class InspectorShadowActor extends EventStateActor {
 
     if (this._inspectMode) {
       btn.classList.add('active');
-      btn.innerHTML = '<span>🎯</span> Right Click = select';
+      btn.innerHTML = '<span>🎯</span> Right Click';
       document.body.style.cursor = 'crosshair';
       // Enable contextmenu (right-click) capture during inspect mode
       document.addEventListener('contextmenu', this.boundHandleContextMenu);

@@ -88,5 +88,9 @@ export type { ToolbarState, EditModeHandler, WebSearchHandler, FilesHandler, Com
 export { InspectorShadowActor } from './inspector';
 export type { InspectorState, StyleProperty, StyleCategory, InspectedElement } from './inspector';
 
+// History
+export { HistoryShadowActor } from './history';
+export type { HistorySession, HistoryMessage } from './history';
+
 // Future actors will be exported here as they're implemented:
 // export { MarkdownActor } from './markdown';

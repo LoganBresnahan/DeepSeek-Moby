@@ -339,6 +339,35 @@ body {
   opacity: 1;
 }
 
+/* History button - chat history modal */
+.history-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  color: var(--vscode-foreground);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s;
+  margin-left: 4px;
+}
+
+.history-btn:hover {
+  background: var(--vscode-button-secondaryHoverBackground, var(--vscode-toolbar-hoverBackground));
+}
+
+.history-btn svg {
+  opacity: 0.8;
+}
+
+.history-btn:hover svg {
+  opacity: 1;
+}
+
 /* Commands button - help/commands menu */
 .commands-selector {
   position: relative;

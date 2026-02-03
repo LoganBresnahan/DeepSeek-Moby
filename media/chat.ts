@@ -18,7 +18,8 @@ import {
   InputAreaShadowActor,
   StatusPanelShadowActor,
   ToolbarShadowActor,
-  InspectorShadowActor
+  InspectorShadowActor,
+  HistoryShadowActor
   // Note: DropdownFocusActor removed - see media/actors/dropdown-focus/UNUSED.txt
 } from './actors';
 import { AnimationHelper } from './utils';
@@ -151,6 +152,13 @@ function initializeActorSystem(): void {
   document.body.appendChild(inspectorHost);
   const inspector = new InspectorShadowActor(manager, inspectorHost);
 
+  // HistoryShadowActor - History modal, uses its own host element
+  const historyHost = document.createElement('div');
+  historyHost.id = 'historyHost';
+  historyHost.style.cssText = 'position: fixed; top: 0; left: 0; width: 0; height: 0;';
+  document.body.appendChild(historyHost);
+  const history = new HistoryShadowActor(manager, historyHost, vscode);
+
   // Wire up inspector toggle button
   const inspectorBtn = getElementOrNull<HTMLButtonElement>('inspectorBtn');
   if (inspectorBtn) {
@@ -162,6 +170,16 @@ function initializeActorSystem(): void {
     // Listen for inspector close (e.g., when closed via X button)
     inspectorHost.addEventListener('inspector-hidden', () => {
       inspectorBtn.classList.remove('active');
+    });
+  }
+
+  // Wire up history button
+  const historyBtn = getElementOrNull<HTMLButtonElement>('historyBtn');
+  if (historyBtn) {
+    historyBtn.addEventListener('click', () => {
+      // Request history sessions from backend and open modal
+      vscode.postMessage({ type: 'getHistorySessions' });
+      manager.publishDirect('history.modal.open', true);
     });
   }
 
@@ -181,7 +199,12 @@ function initializeActorSystem(): void {
       item.addEventListener('click', () => {
         const command = (item as HTMLElement).dataset.command;
         if (command) {
-          vscode.postMessage({ type: 'executeCommand', command });
+          // Intercept history commands to open modal instead of VS Code command
+          if (command === 'deepseek.showChatHistory' || command === 'deepseek.searchChatHistory') {
+            manager.publishDirect('history.modal.open', true);
+          } else {
+            vscode.postMessage({ type: 'executeCommand', command });
+          }
           commandsDropdown.style.display = 'none';
         }
       });
@@ -720,6 +743,27 @@ function initializeActorSystem(): void {
         // Reset segment state
         currentSegmentContent = '';
         hasInterleavedContent = false;
+        break;
+
+      // ---- History Modal Messages ----
+      case 'historySessions':
+        // Publish sessions to HistoryShadowActor
+        manager.publishDirect('history.sessions', msg.sessions);
+        break;
+
+      case 'currentSessionId':
+        // Publish current session ID to HistoryShadowActor
+        manager.publishDirect('session.id', msg.sessionId);
+        break;
+
+      case 'historyCleared':
+        // Optionally close the history modal after clearing
+        manager.publishDirect('history.sessions', []);
+        break;
+
+      case 'openHistoryModal':
+        // Open the history modal (triggered by VS Code command)
+        manager.publishDirect('history.modal.open', true);
         break;
 
       default:
