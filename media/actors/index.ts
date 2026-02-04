@@ -17,17 +17,25 @@ export type { ScrollState } from './scroll';
 export { SessionActor } from './session';
 export type { SessionData, SessionState, VSCodeAPI } from './session';
 
+// Edit Mode (manages edit mode state - no Shadow DOM needed)
+export { EditModeActor } from './edit-mode';
+export type { EditMode } from './edit-mode';
+
+// Message Gateway (boundary between VS Code extension and internal actor system)
+// See ARCHITECTURE/message-gateway.md for detailed documentation
+export { MessageGatewayActor } from './message-gateway';
+export type { ActorRefs, GatewayPhase } from './message-gateway';
+
 // Message
 export { MessageShadowActor } from './message/MessageShadowActor';
 export type { Message, MessageState } from './message/MessageShadowActor';
 
-// Header
+// Header (minimal version - just updates model name display)
 export { HeaderShadowActor } from './header/HeaderShadowActor';
-export type { HeaderState, HeaderAction, ActionHandler, ModelChangeHandler, TitleChangeHandler } from './header/HeaderShadowActor';
+export type { HeaderState } from './header/HeaderShadowActor';
 
-// Sidebar
-export { SidebarShadowActor } from './sidebar/SidebarShadowActor';
-export type { HistoryItem, SidebarState, SessionSelectHandler, SessionDeleteHandler } from './sidebar/SidebarShadowActor';
+// Sidebar - DELETED (was never used, different UI design)
+// See ARCHITECTURE/actor-diagram.md for details
 
 // Shell
 export { ShellShadowActor } from './shell/ShellShadowActor';

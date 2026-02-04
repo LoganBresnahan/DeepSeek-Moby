@@ -4,6 +4,10 @@
  * Manages session lifecycle, persistence, and coordination with VS Code extension.
  * This is the source of truth for session state in the webview.
  *
+ * NOTE: This actor does NOT listen for window messages directly.
+ * All external messages are routed through MessageGatewayActor.
+ * See ARCHITECTURE/message-gateway.md for details.
+ *
  * Publications:
  * - session.id: string | null - current session ID
  * - session.title: string - current session title
@@ -57,9 +61,6 @@ export class SessionActor extends EventStateActor {
   // VS Code API
   private _vscode: VSCodeAPI | null = null;
 
-  // Message handler
-  private _messageHandler: ((event: MessageEvent) => void) | null = null;
-
   constructor(manager: EventStateManager, element: HTMLElement, vscode?: VSCodeAPI) {
     const config: ActorConfig = {
       manager,
@@ -81,7 +82,6 @@ export class SessionActor extends EventStateActor {
     super(config);
     this._vscode = vscode || null;
     this.injectStyles();
-    this.setupMessageListener();
   }
 
   /**
@@ -98,66 +98,14 @@ export class SessionActor extends EventStateActor {
     SessionActor.stylesInjected = true;
   }
 
+  // ============================================
+  // Message Handlers (called by MessageGatewayActor)
+  // ============================================
+
   /**
-   * Setup listener for VS Code messages
+   * Handle sessionLoaded message from extension
    */
-  private setupMessageListener(): void {
-    if (typeof window === 'undefined') return;
-
-    this._messageHandler = (event: MessageEvent) => {
-      const message = event.data;
-      this.handleVSCodeMessage(message);
-    };
-
-    window.addEventListener('message', this._messageHandler);
-  }
-
-  // ============================================
-  // VS Code Message Handling
-  // ============================================
-
-  private handleVSCodeMessage(message: { type: string; [key: string]: unknown }): void {
-    switch (message.type) {
-      case 'sessionLoaded':
-        this.handleSessionLoaded(message as {
-          type: string;
-          sessionId: string;
-          title: string;
-          model: string;
-        });
-        break;
-
-      case 'sessionCreated':
-        this.handleSessionCreated(message as {
-          type: string;
-          sessionId: string;
-          model: string;
-        });
-        break;
-
-      case 'sessionError':
-        this.handleSessionError(message as {
-          type: string;
-          error: string;
-        });
-        break;
-
-      case 'modelChanged':
-        this.handleModelChanged(message as {
-          type: string;
-          model: string;
-        });
-        break;
-
-      case 'loadHistory':
-        // History is being loaded - handled by MessageActor
-        this._loading = false;
-        this.publish({ 'session.loading': false });
-        break;
-    }
-  }
-
-  private handleSessionLoaded(message: { sessionId: string; title: string; model: string }): void {
+  handleSessionLoaded(message: { sessionId: string; title: string; model: string }): void {
     this._sessionId = message.sessionId;
     this._title = message.title;
     this._model = message.model;
@@ -173,7 +121,10 @@ export class SessionActor extends EventStateActor {
     });
   }
 
-  private handleSessionCreated(message: { sessionId: string; model: string }): void {
+  /**
+   * Handle sessionCreated message from extension
+   */
+  handleSessionCreated(message: { sessionId: string; model: string }): void {
     this._sessionId = message.sessionId;
     this._title = 'New Chat';
     this._model = message.model;
@@ -189,7 +140,10 @@ export class SessionActor extends EventStateActor {
     });
   }
 
-  private handleSessionError(message: { error: string }): void {
+  /**
+   * Handle sessionError message from extension
+   */
+  handleSessionError(message: { error: string }): void {
     this._loading = false;
     this._error = message.error;
 
@@ -199,15 +153,24 @@ export class SessionActor extends EventStateActor {
     });
   }
 
-  private handleModelChanged(message: { model: string }): void {
+  /**
+   * Handle modelChanged message from extension
+   */
+  handleModelChanged(message: { model: string }): void {
     this._model = message.model;
 
     this.publish({
       'session.model': this._model
     });
+  }
 
-    // Notify VS Code of model change
-    this.postMessage({ type: 'modelChanged', model: this._model });
+  /**
+   * Handle loadHistory message - just update loading state
+   * (actual history loading is handled by MessageGatewayActor)
+   */
+  handleLoadHistory(): void {
+    this._loading = false;
+    this.publish({ 'session.loading': false });
   }
 
   // ============================================
@@ -418,10 +381,6 @@ export class SessionActor extends EventStateActor {
    * Destroy and cleanup
    */
   destroy(): void {
-    if (this._messageHandler) {
-      window.removeEventListener('message', this._messageHandler);
-      this._messageHandler = null;
-    }
     this._vscode = null;
     super.destroy();
   }

@@ -513,8 +513,33 @@ export class CodeBlockShadowActor extends InterleavedShadowActor {
       return `__TOKEN_${idx}__`;
     });
 
-    // Keywords
-    highlighted = highlighted.replace(/\b(function|const|let|var|if|else|for|while|return|class|def|import|export|from|async|await|try|catch|finally|throw|new|this|true|false|null|undefined)\b/g, (match) => {
+    // Keywords (JS/TS, Python, Ruby, Go, Rust, and common languages)
+    const keywords = [
+      // JS/TS
+      'function', 'const', 'let', 'var', 'if', 'else', 'for', 'while', 'return',
+      'class', 'import', 'export', 'from', 'async', 'await', 'try', 'catch',
+      'finally', 'throw', 'new', 'this', 'true', 'false', 'null', 'undefined',
+      'typeof', 'instanceof', 'in', 'of', 'switch', 'case', 'default', 'break',
+      'continue', 'do', 'extends', 'implements', 'interface', 'type', 'enum',
+      'public', 'private', 'protected', 'static', 'readonly', 'abstract',
+      // Python
+      'def', 'lambda', 'pass', 'with', 'as', 'yield', 'raise', 'except',
+      'assert', 'global', 'nonlocal', 'del', 'print', 'None', 'True', 'False',
+      'and', 'or', 'not', 'is', 'elif',
+      // Ruby
+      'end', 'begin', 'rescue', 'ensure', 'module', 'attr_reader',
+      'attr_writer', 'attr_accessor', 'require', 'include', 'puts', 'gets',
+      'nil', 'self', 'super', 'unless', 'until', 'when', 'then',
+      // Go
+      'func', 'package', 'struct', 'map', 'chan',
+      'go', 'defer', 'select', 'range', 'fallthrough', 'goto',
+      // Rust
+      'fn', 'mut', 'pub', 'mod', 'use', 'impl', 'trait', 'where',
+      'match', 'loop', 'move', 'ref', 'Self', 'unsafe', 'extern',
+      'crate', 'dyn', 'Some', 'Ok', 'Err',
+    ];
+    const keywordPattern = new RegExp(`\\b(${keywords.join('|')})\\b`, 'g');
+    highlighted = highlighted.replace(keywordPattern, (match) => {
       const idx = tokens.length;
       tokens.push(`<span class="token keyword">${match}</span>`);
       return `__TOKEN_${idx}__`;

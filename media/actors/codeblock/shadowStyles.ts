@@ -114,10 +114,11 @@ export const codeBlockShadowStyles = `
 }
 
 .content code {
-  font-family: var(--vscode-editor-font-family);
+  font-family: var(--vscode-editor-font-family, 'Consolas', 'Monaco', monospace);
   font-size: var(--vscode-editor-font-size, 13px);
   line-height: 1.5;
   white-space: pre;
+  color: var(--vscode-editor-foreground, #d4d4d4);
 }
 
 /* Fade overlay for collapsed state */
@@ -138,11 +139,13 @@ export const codeBlockShadowStyles = `
   opacity: 1;
 }
 
-/* Syntax highlighting tokens */
-.token.comment { color: var(--vscode-editor-foreground); opacity: 0.5; font-style: italic; }
-.token.string { color: var(--vscode-terminal-ansiGreen); }
-.token.number { color: var(--vscode-terminal-ansiYellow); }
-.token.keyword { color: var(--vscode-terminal-ansiMagenta); }
-.token.builtin { color: var(--vscode-terminal-ansiCyan); }
-.token.function { color: var(--vscode-terminal-ansiBlue); }
+/* Syntax highlighting tokens (with fallback colors for VSCode webview) */
+.token.comment { color: var(--vscode-editorLineNumber-foreground, #6a9955); font-style: italic; }
+.token.string { color: var(--vscode-terminal-ansiGreen, #4ec9b0); }
+.token.number { color: var(--vscode-terminal-ansiYellow, #b5cea8); }
+.token.keyword { color: var(--vscode-terminal-ansiMagenta, #c586c0); }
+.token.builtin { color: var(--vscode-terminal-ansiCyan, #4fc1ff); }
+.token.function { color: var(--vscode-terminal-ansiBlue, #dcdcaa); }
+.token.operator { color: var(--vscode-editor-foreground, #d4d4d4); }
+.token.punctuation { color: var(--vscode-editor-foreground, #d4d4d4); }
 `;

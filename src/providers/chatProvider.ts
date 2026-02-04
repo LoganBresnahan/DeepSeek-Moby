@@ -563,6 +563,15 @@ which I already edited - would you like me to update it?"
     );
     this.currentSessionId = session.id;
     logger.sessionStart(session.id, session.title);
+
+    // Notify webview of new session (for SessionActor)
+    if (this._view) {
+      this._view.webview.postMessage({
+        type: 'sessionCreated',
+        sessionId: session.id,
+        model: this.deepSeekClient.getModel()
+      });
+    }
   }
 
   private stopGeneration() {
@@ -1170,6 +1179,15 @@ Always:
         language
       );
       this.currentSessionId = session.id;
+
+      // Notify webview of new session (for SessionActor)
+      if (this._view) {
+        this._view.webview.postMessage({
+          type: 'sessionCreated',
+          sessionId: session.id,
+          model: this.deepSeekClient.getModel()
+        });
+      }
     }
 
     // Save user message to history (UI already shows it from frontend)
@@ -3769,6 +3787,14 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
   private async loadCurrentSessionHistory() {
     const currentSession = await this.chatHistoryManager.getCurrentSession();
     if (this._view && currentSession && currentSession.messages.length > 0) {
+      // Notify webview of loaded session (for SessionActor)
+      this._view.webview.postMessage({
+        type: 'sessionLoaded',
+        sessionId: currentSession.id,
+        title: currentSession.title,
+        model: this.deepSeekClient.getModel()
+      });
+
       this._view.webview.postMessage({
         type: 'loadHistory',
         history: currentSession.messages.map(msg => ({
@@ -3794,6 +3820,14 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
 
       // Don't switch to session's model - keep user's current model selection
       // The model dropdown reflects user preference, not per-session setting
+
+      // Notify webview of loaded session (for SessionActor)
+      this._view.webview.postMessage({
+        type: 'sessionLoaded',
+        sessionId: session.id,
+        title: session.title,
+        model: this.deepSeekClient.getModel() // Use current model, not session's
+      });
 
       // Load session messages via loadHistory (clears and loads)
       this._view.webview.postMessage({
