@@ -44,10 +44,10 @@ describe('InputAreaShadowActor', () => {
       expect(element.shadowRoot?.querySelector('textarea')).toBeTruthy();
     });
 
-    it('injects styles into shadow root', () => {
+    it('adopts stylesheets into shadow root', () => {
       actor = new InputAreaShadowActor(manager, element, mockVscode);
-      const style = element.shadowRoot?.querySelector('style');
-      expect(style).toBeTruthy();
+      const sheets = element.shadowRoot?.adoptedStyleSheets;
+      expect(sheets?.length).toBeGreaterThan(0);
     });
   });
 

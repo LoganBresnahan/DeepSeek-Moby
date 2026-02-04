@@ -79,7 +79,9 @@ export default defineConfig({
       '@': '/media',
       '@state': '/media/state',
       '@actors': '/media/actors',
-      '@utils': '/media/utils'
+      '@utils': '/media/utils',
+      // Mock VS Code API for extension-side tests
+      'vscode': resolve(__dirname, 'tests/__mocks__/vscode.ts')
     }
   }
 });

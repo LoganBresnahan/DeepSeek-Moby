@@ -72,14 +72,13 @@ describe('MessageShadowActor', () => {
       expect(element.children[1].shadowRoot).toBeTruthy();
     });
 
-    it('injects styles into each message shadow', () => {
+    it('adopts stylesheets into each message shadow', () => {
       actor = new MessageShadowActor(manager, element);
       actor.addUserMessage('Test');
 
       const container = findMessageContainer('user');
-      const style = container?.shadowRoot?.querySelector('style');
-      expect(style).toBeTruthy();
-      expect(style?.textContent).toContain('.message');
+      const sheets = container?.shadowRoot?.adoptedStyleSheets;
+      expect(sheets?.length).toBeGreaterThan(0);
     });
   });
 

@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import axios, { AxiosInstance } from 'axios';
+import { HttpClient, HttpError } from '../utils/httpClient';
 import { ConfigManager } from '../utils/config';
 
 export interface TavilySearchResult {
@@ -31,7 +31,7 @@ export interface TavilyApiUsage {
 }
 
 export class TavilyClient {
-  private axiosInstance: AxiosInstance;
+  private httpClient: HttpClient;
   private config: ConfigManager;
   private context: vscode.ExtensionContext;
   private usageStats: TavilyUsageStats;
@@ -40,7 +40,7 @@ export class TavilyClient {
     this.context = context;
     this.config = ConfigManager.getInstance();
 
-    this.axiosInstance = axios.create({
+    this.httpClient = new HttpClient({
       baseURL: 'https://api.tavily.com',
       timeout: 30000,
       headers: {
@@ -64,7 +64,12 @@ export class TavilyClient {
     const searchDepth = options?.searchDepth || this.config.get<string>('tavilySearchDepth') || 'basic';
 
     try {
-      const response = await this.axiosInstance.post('/search', {
+      const response = await this.httpClient.post<{
+        results?: TavilySearchResult[];
+        answer?: string;
+        query?: string;
+        response_time?: number;
+      }>('/search', {
         api_key: apiKey,
         query,
         search_depth: searchDepth,
@@ -80,14 +85,15 @@ export class TavilyClient {
         query: response.data.query || query,
         responseTime: response.data.response_time || 0
       };
-    } catch (error: any) {
-      if (error.response?.status === 401) {
+    } catch (error: unknown) {
+      const httpError = error as HttpError;
+      if (httpError.response?.status === 401) {
         throw new Error('Invalid Tavily API key. Please check your settings.');
       }
-      if (error.response?.status === 429) {
+      if (httpError.response?.status === 429) {
         throw new Error('Tavily rate limit exceeded. Please try again later.');
       }
-      throw new Error(`Tavily search failed: ${error.message}`);
+      throw new Error(`Tavily search failed: ${httpError.message}`);
     }
   }
 
@@ -140,7 +146,10 @@ export class TavilyClient {
     const apiKey = this.getApiKey();
 
     try {
-      const response = await this.axiosInstance.get('/usage', {
+      const response = await this.httpClient.get<{
+        key?: { limit?: number; usage?: number };
+        account?: { current_plan?: string };
+      }>('/usage', {
         headers: {
           Authorization: `Bearer ${apiKey}`
         }
@@ -150,16 +159,17 @@ export class TavilyClient {
       const accountData = response.data.account || {};
 
       return {
-        remaining: keyData.limit ? keyData.limit - keyData.usage : null,
+        remaining: keyData.limit ? keyData.limit - keyData.usage! : null,
         limit: keyData.limit || null,
         plan: accountData.current_plan || 'Unknown',
         used: keyData.usage || 0
       };
-    } catch (error: any) {
-      if (error.response?.status === 401) {
+    } catch (error: unknown) {
+      const httpError = error as HttpError;
+      if (httpError.response?.status === 401) {
         throw new Error('Invalid Tavily API key');
       }
-      throw new Error(`Failed to fetch Tavily usage: ${error.message}`);
+      throw new Error(`Failed to fetch Tavily usage: ${httpError.message}`);
     }
   }
 }

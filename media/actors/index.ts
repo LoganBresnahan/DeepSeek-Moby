@@ -1,96 +1,89 @@
 /**
  * Actor exports
+ *
+ * All UI actors are Shadow DOM based for style isolation.
+ * Utility actors (Streaming, Scroll) don't need Shadow DOM.
  */
 
-// Streaming
+// Streaming (utility - no Shadow DOM needed)
 export { StreamingActor } from './streaming';
 export type { StreamingState } from './streaming';
 
-// Message
-export { MessageActor } from './message';
-export { MessageShadowActor } from './message/MessageShadowActor';
-export type { Message, MessageState } from './message';
-
-// Input
-export { InputActor } from './input';
-export type { InputState, SubmitHandler } from './input';
-
-// Session
-export { SessionActor } from './session';
-export type { SessionData, SessionState, VSCodeAPI } from './session';
-
-// Header
-export { HeaderActor } from './header';
-export { HeaderShadowActor } from './header/HeaderShadowActor';
-export type { HeaderState, HeaderAction, ActionHandler, ModelChangeHandler, TitleChangeHandler } from './header';
-
-// Sidebar
-export { SidebarActor } from './sidebar';
-export { SidebarShadowActor } from './sidebar/SidebarShadowActor';
-export type { HistoryItem, SidebarState, SessionSelectHandler, SessionDeleteHandler } from './sidebar';
-
-// Shell
-export { ShellActor } from './shell';
-export { ShellShadowActor } from './shell/ShellShadowActor';
-export type { ShellCommand, ShellSegment, ShellState, ShellExecuteHandler } from './shell';
-
-// Tool Calls
-export { ToolCallsActor } from './tools';
-export { ToolCallsShadowActor } from './tools/ToolCallsShadowActor';
-export type { ToolCall, ToolCallsState } from './tools';
-
-// Pending Changes
-export { PendingChangesActor } from './pending';
-export { PendingChangesShadowActor } from './pending/PendingChangesShadowActor';
-export type { FileStatus, EditMode, PendingFile, PendingChangesState, FileActionHandler } from './pending';
-
-// Thinking
-export { ThinkingActor } from './thinking';
-export { ThinkingShadowActor } from './thinking/ThinkingShadowActor';
-export type { ThinkingIteration, ThinkingState } from './thinking';
-
-// Code Block
-export { CodeBlockActor } from './codeblock';
-export { CodeBlockShadowActor } from './codeblock/CodeBlockShadowActor';
-export type { CodeBlock, CodeBlockState, CodeActionHandler } from './codeblock';
-
-// Scroll
+// Scroll (utility - no Shadow DOM needed)
 export { ScrollActor } from './scroll';
 export type { ScrollState } from './scroll';
 
+// Session (manages VS Code extension communication - no Shadow DOM needed)
+export { SessionActor } from './session';
+export type { SessionData, SessionState, VSCodeAPI } from './session';
+
+// Message
+export { MessageShadowActor } from './message/MessageShadowActor';
+export type { Message, MessageState } from './message/MessageShadowActor';
+
+// Header
+export { HeaderShadowActor } from './header/HeaderShadowActor';
+export type { HeaderState, HeaderAction, ActionHandler, ModelChangeHandler, TitleChangeHandler } from './header/HeaderShadowActor';
+
+// Sidebar
+export { SidebarShadowActor } from './sidebar/SidebarShadowActor';
+export type { HistoryItem, SidebarState, SessionSelectHandler, SessionDeleteHandler } from './sidebar/SidebarShadowActor';
+
+// Shell
+export { ShellShadowActor } from './shell/ShellShadowActor';
+export type { ShellCommand, ShellSegment, ShellState, ShellExecuteHandler } from './shell/ShellShadowActor';
+
+// Tool Calls
+export { ToolCallsShadowActor } from './tools/ToolCallsShadowActor';
+export type { ToolCall, ToolCallsState } from './tools/ToolCallsShadowActor';
+
+// Pending Changes
+export { PendingChangesShadowActor } from './pending/PendingChangesShadowActor';
+export type { FileStatus, EditMode, PendingFile, PendingChangesState, FileActionHandler } from './pending/PendingChangesShadowActor';
+
+// Thinking
+export { ThinkingShadowActor } from './thinking/ThinkingShadowActor';
+export type { ThinkingIteration, ThinkingState } from './thinking/ThinkingShadowActor';
+
+// Code Block
+export { CodeBlockShadowActor } from './codeblock/CodeBlockShadowActor';
+export type { CodeBlock, CodeBlockState, CodeActionHandler } from './codeblock/CodeBlockShadowActor';
+
 // Diff
-export { DiffActor } from './diff';
 export { DiffShadowActor } from './diff/DiffShadowActor';
-export type { DiffLine, DiffData, DiffState } from './diff';
-export type { DiffActionHandler } from './diff/DiffShadowActor';
+export type { DiffLine, DiffData, DiffState, DiffActionHandler } from './diff/DiffShadowActor';
 
 // Input Area
-export { InputAreaActor } from './input-area';
 export { InputAreaShadowActor } from './input-area/InputAreaShadowActor';
-export type { Attachment, InputAreaState, SendHandler, StopHandler, InterruptHandler } from './input-area';
+export type { Attachment, InputAreaState, SendHandler, StopHandler, InterruptHandler } from './input-area/InputAreaShadowActor';
 
 // Status Panel
-export { StatusPanelActor } from './status-panel';
 export { StatusPanelShadowActor } from './status-panel/StatusPanelShadowActor';
-export type { StatusPanelState, LogsHandler } from './status-panel';
+export type { StatusPanelState, LogsHandler } from './status-panel/StatusPanelShadowActor';
 
 // Toolbar
-export { ToolbarActor } from './toolbar';
 export { ToolbarShadowActor } from './toolbar/ToolbarShadowActor';
-export type { ToolbarState, EditModeHandler, WebSearchHandler, FilesHandler, CommandHandler, WebSearchSettings } from './toolbar';
-// Note: EditMode is also exported from ./pending, so toolbar's version is accessed via ToolbarActor.EditMode if needed
-
-// Dropdown Focus - UNUSED (see media/actors/dropdown-focus/UNUSED.txt)
-// export { DropdownFocusActor } from './dropdown-focus';
-// export type { DropdownInfo, DropdownFocusState } from './dropdown-focus';
-
-// Inspector
-export { InspectorShadowActor } from './inspector';
-export type { InspectorState, StyleProperty, StyleCategory, InspectedElement } from './inspector';
+export type { ToolbarState, EditModeHandler, WebSearchHandler, FilesHandler, CommandHandler, WebSearchSettings } from './toolbar/ToolbarShadowActor';
 
 // History
 export { HistoryShadowActor } from './history';
 export type { HistorySession, HistoryMessage } from './history';
 
-// Future actors will be exported here as they're implemented:
-// export { MarkdownActor } from './markdown';
+// Files (context files modal)
+export { FilesShadowActor } from './files';
+export type { FileData, FilesState, FilesChangeHandler } from './files';
+
+// Commands (commands dropdown)
+export { CommandsShadowActor } from './commands';
+export type { CommandItem, CommandHandler } from './commands';
+
+// Model Selector (model dropdown with parameters)
+export { ModelSelectorShadowActor } from './model-selector';
+export type { ModelOption, ModelSettings, ModelChangeHandler as ModelSelectHandler, SettingsChangeHandler } from './model-selector';
+
+// Settings (settings dropdown)
+export { SettingsShadowActor } from './settings';
+export type { SettingsValues, DefaultPrompt } from './settings';
+
+// Inspector - Dev-only tool, not exported from production actors
+// Access via: import { InspectorShadowActor } from './dev/inspector'

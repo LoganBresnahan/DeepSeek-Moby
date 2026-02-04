@@ -1,0 +1,184 @@
+/**
+ * CommandsShadowActor
+ *
+ * Shadow DOM actor for the commands dropdown menu.
+ * Provides quick access to extension commands like New Chat,
+ * History, Export, etc.
+ *
+ * Publications:
+ * - commands.popup.visible: boolean - whether the popup is open
+ *
+ * Subscriptions:
+ * - commands.popup.open: boolean - request to open/close popup
+ */
+
+import { PopupShadowActor, PopupConfig } from '../../state/PopupShadowActor';
+import { EventStateManager } from '../../state/EventStateManager';
+import type { VSCodeAPI } from '../../state/types';
+import { commandsShadowStyles } from './shadowStyles';
+
+// ============================================
+// Types
+// ============================================
+
+export interface CommandItem {
+  id: string;
+  name: string;
+  description: string;
+  icon: string;
+  shortcut?: string;
+  section?: string;
+}
+
+export type CommandHandler = (commandId: string) => void;
+
+// ============================================
+// Default Commands
+// ============================================
+
+const DEFAULT_COMMANDS: CommandItem[] = [
+  // Chat section
+  { id: 'deepseek.newChat', name: 'New Chat', description: 'Start a new conversation', icon: '✨', section: 'Chat' },
+  // History section
+  { id: 'deepseek.showChatHistory', name: 'Show History', description: 'View chat history', icon: '📚', section: 'History' },
+  { id: 'deepseek.exportChatHistory', name: 'Export History', description: 'Export all chats', icon: '📤', section: 'History' },
+  { id: 'deepseek.searchChatHistory', name: 'Search History', description: 'Search past chats', icon: '🔍', section: 'History' }
+];
+
+// ============================================
+// CommandsShadowActor
+// ============================================
+
+export class CommandsShadowActor extends PopupShadowActor {
+  private _commands: CommandItem[] = DEFAULT_COMMANDS;
+  private _onCommand: CommandHandler | null = null;
+
+  constructor(manager: EventStateManager, element: HTMLElement, vscode: VSCodeAPI) {
+    const config: PopupConfig = {
+      manager,
+      element,
+      vscode,
+      header: 'Commands',
+      position: 'bottom-right',
+      width: '250px',
+      publications: {},
+      subscriptions: {},
+      additionalStyles: commandsShadowStyles,
+      openRequestKey: 'commands.popup.open',
+      visibleStateKey: 'commands.popup.visible'
+    };
+
+    super(config);
+
+    // Re-render now that instance properties are initialized
+    // (base class renders during construction when properties are undefined)
+    this.updateBodyContent(this.renderPopupContent());
+  }
+
+  // ============================================
+  // Abstract Method Implementations
+  // ============================================
+
+  protected renderPopupContent(): string {
+    // Defensive check: _commands may be undefined during base class construction
+    const commands = this._commands || [];
+
+    // Group commands by section
+    const sections = new Map<string, CommandItem[]>();
+
+    commands.forEach(cmd => {
+      const section = cmd.section || 'General';
+      if (!sections.has(section)) {
+        sections.set(section, []);
+      }
+      sections.get(section)!.push(cmd);
+    });
+
+    // Render sections
+    let html = '';
+    sections.forEach((commands, sectionName) => {
+      html += `<div class="commands-section-title">${this.escapeHtml(sectionName)}</div>`;
+      html += commands.map(cmd => this.renderCommandItem(cmd)).join('');
+    });
+
+    return html;
+  }
+
+  private renderCommandItem(cmd: CommandItem): string {
+    return `
+      <div class="command-item" data-command="${this.escapeHtml(cmd.id)}">
+        <span class="command-icon">${cmd.icon}</span>
+        <div class="command-info">
+          <div class="command-name">${this.escapeHtml(cmd.name)}</div>
+          <div class="command-desc">${this.escapeHtml(cmd.description)}</div>
+        </div>
+        ${cmd.shortcut ? `<span class="command-shortcut">${this.escapeHtml(cmd.shortcut)}</span>` : ''}
+      </div>
+    `;
+  }
+
+  protected setupPopupEvents(): void {
+    // Command item click (via delegation)
+    this.delegate('click', '.command-item', (e, element) => {
+      const commandId = element.getAttribute('data-command');
+      if (commandId) {
+        this.executeCommand(commandId);
+        this.close();
+      }
+    });
+  }
+
+  // ============================================
+  // Command Execution
+  // ============================================
+
+  private executeCommand(commandId: string): void {
+    // Special handling for history commands - open modal instead
+    if (commandId === 'deepseek.showChatHistory' || commandId === 'deepseek.searchChatHistory') {
+      this.manager.publishDirect('history.modal.open', true, this.actorId);
+      return;
+    }
+
+    // Call custom handler if set
+    if (this._onCommand) {
+      this._onCommand(commandId);
+    }
+
+    // Send to extension
+    this._vscode.postMessage({ type: 'executeCommand', command: commandId });
+  }
+
+  // ============================================
+  // Public API
+  // ============================================
+
+  /**
+   * Set a custom command handler.
+   */
+  onCommand(handler: CommandHandler): void {
+    this._onCommand = handler;
+  }
+
+  /**
+   * Update the commands list.
+   */
+  setCommands(commands: CommandItem[]): void {
+    this._commands = commands;
+    this.updateBodyContent(this.renderPopupContent());
+  }
+
+  /**
+   * Add a command to the list.
+   */
+  addCommand(command: CommandItem): void {
+    this._commands.push(command);
+    this.updateBodyContent(this.renderPopupContent());
+  }
+
+  /**
+   * Get the current commands.
+   */
+  getCommands(): CommandItem[] {
+    return [...this._commands];
+  }
+}

@@ -50,9 +50,9 @@ if (usesActorSystem) {
 // Legacy JS/CSS Minification
 // ============================================
 
-// Files to minify (legacy - will be removed after migration)
-const jsFiles = usesActorSystem ? ['history.js'] : ['chat.js', 'history.js'];
-const cssFiles = ['chat.css', 'history.css'];
+// Files to minify (legacy JS removed after actor system migration)
+const jsFiles = usesActorSystem ? [] : ['chat.js'];
+const cssFiles = ['chat.css'];
 
 // Minify JS files
 for (const file of jsFiles) {

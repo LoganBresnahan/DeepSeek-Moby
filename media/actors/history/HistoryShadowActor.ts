@@ -7,6 +7,7 @@
  *
  * Publications:
  * - history.modal.visible: boolean - whether the modal is open
+ * - history.modal.open: boolean - reset to false on close (enables repeated opens)
  *
  * Subscriptions:
  * - history.modal.open: boolean - request to open/close modal
@@ -483,7 +484,13 @@ export class HistoryShadowActor extends ShadowActor {
     document.removeEventListener('keydown', this._boundHandleKeydown);
     document.removeEventListener('click', this._boundHandleOutsideClick);
 
+    // Publish visible state change
     this.publish({ 'history.modal.visible': false });
+
+    // Reset the request state so the next open request triggers a change
+    // (Without this, clicking the button twice wouldn't reopen the modal
+    // because the state manager wouldn't detect a change from true -> true)
+    this.manager.publishDirect('history.modal.open', false, this.actorId);
   }
 
   // ============================================

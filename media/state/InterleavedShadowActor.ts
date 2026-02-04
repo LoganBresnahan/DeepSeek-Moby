@@ -14,16 +14,23 @@
  * - Containers are created dynamically as content streams in
  * - No z-index coordination needed between containers
  *
+ * Style Optimization:
+ * - Uses adoptedStyleSheets to share parsed CSS across all containers
+ * - Base styles (animations, resets) are shared across ALL interleaved actors
+ * - Actor-specific styles are cached and shared across all containers of same type
+ * - This eliminates duplicate CSS parsing and reduces memory usage
+ *
  * Container Structure:
  *   <div id="thinking-1-123456" data-actor="thinking">  <!-- shadow host -->
  *     #shadow-root (open)
- *       <style>...container styles...</style>
+ *       adoptedStyleSheets: [baseSheet, actorSheet]  <!-- shared CSSStyleSheet objects -->
  *       <div class="container">
  *         <!-- container content -->
  *       </div>
  *   </div>
  *
  * @see https://developer.mozilla.org/en-US/docs/Web/API/Web_components/Using_shadow_DOM
+ * @see https://developer.mozilla.org/en-US/docs/Web/API/CSSStyleSheet/adoptedStyleSheets
  */
 
 import { EventStateActor } from './EventStateActor';
@@ -73,8 +80,11 @@ export abstract class InterleavedShadowActor extends EventStateActor {
   /** Actor name for debugging */
   protected readonly actorName: string;
 
-  /** Styles injected into each container's shadow root */
-  protected readonly containerStyles: string;
+  /** Reference to manager for stylesheet caching */
+  protected readonly manager: EventStateManager;
+
+  /** Cached stylesheets for adoptedStyleSheets (parsed once, shared across all containers) */
+  private readonly _adoptedSheets: CSSStyleSheet[];
 
   /** Shadow mode for containers */
   protected readonly shadowMode: 'open' | 'closed';
@@ -103,81 +113,24 @@ export abstract class InterleavedShadowActor extends EventStateActor {
 
     super(actorConfig);
 
+    this.manager = config.manager;
+
     // Generate instance ID for debugging
     InterleavedShadowActor._instanceCount++;
     this.instanceId = InterleavedShadowActor._instanceCount;
 
     this.actorName = config.actorName;
-    this.containerStyles = this.buildContainerStyles(config.containerStyles);
     this.shadowMode = config.shadowMode ?? 'open';
+
+    // Pre-cache stylesheets for adoptedStyleSheets
+    // Base styles are shared across ALL interleaved actors (parsed once)
+    // Actor-specific styles are cached by actor name (shared across all containers of same type)
+    const baseSheet = this.manager.getInterleavedBaseSheet();
+    const actorSheet = this.manager.getStyleSheet(config.containerStyles, this.actorName);
+    this._adoptedSheets = [baseSheet, actorSheet];
 
     // Mark the parent element for debugging
     this.element.setAttribute('data-interleaved-actor', this.actorName);
-  }
-
-  /**
-   * Build the full container styles including base styles.
-   */
-  private buildContainerStyles(customStyles: string): string {
-    const baseStyles = `
-      /* Base container styles */
-      :host {
-        display: block;
-        position: relative;
-      }
-
-      :host([hidden]) {
-        display: none;
-      }
-
-      .container {
-        /* Reset for predictable styling */
-        box-sizing: border-box;
-      }
-
-      /* Animation classes */
-      :host(.anim-bubble-in) {
-        animation: bubbleIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
-      }
-
-      :host(.anim-fade-out) {
-        animation: fadeOut 0.2s ease forwards;
-      }
-
-      @keyframes bubbleIn {
-        from {
-          opacity: 0;
-          transform: scale(0.95) translateY(-5px);
-        }
-        to {
-          opacity: 1;
-          transform: scale(1) translateY(0);
-        }
-      }
-
-      @keyframes fadeOut {
-        from {
-          opacity: 1;
-        }
-        to {
-          opacity: 0;
-        }
-      }
-
-      /* Jiggle animation for hover feedback */
-      @keyframes jiggle {
-        0%, 100% { transform: translateX(0); }
-        10%, 30%, 50%, 70%, 90% { transform: translateX(-2px); }
-        20%, 40%, 60%, 80% { transform: translateX(2px); }
-      }
-
-      /* Ensure VS Code theme variables work */
-      *, *::before, *::after {
-        box-sizing: border-box;
-      }
-    `;
-
-    return baseStyles + '\n' + customStyles;
   }
 
   // ============================================
@@ -233,13 +186,12 @@ export abstract class InterleavedShadowActor extends EventStateActor {
       });
     }
 
-    // Create shadow root
+    // Create shadow root with adopted stylesheets
     const shadow = host.attachShadow({ mode: this.shadowMode });
 
-    // Inject styles
-    const styleElement = document.createElement('style');
-    styleElement.textContent = this.containerStyles;
-    shadow.appendChild(styleElement);
+    // Use adoptedStyleSheets for efficient style sharing
+    // All containers of this actor type share the same parsed CSSStyleSheet objects
+    shadow.adoptedStyleSheets = this._adoptedSheets;
 
     // Create content container
     const content = document.createElement('div');
@@ -543,10 +495,10 @@ export abstract class InterleavedShadowActor extends EventStateActor {
   // ============================================
 
   /**
-   * Get container style string (for testing).
+   * Get adopted stylesheets (for testing).
    */
-  getContainerStylesForTesting(): string {
-    return this.containerStyles;
+  getAdoptedSheetsForTesting(): CSSStyleSheet[] {
+    return this._adoptedSheets;
   }
 
   /**

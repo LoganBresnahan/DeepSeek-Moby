@@ -16,5 +16,11 @@ export type { ShadowActorConfig } from './ShadowActor';
 export { InterleavedShadowActor } from './InterleavedShadowActor';
 export type { ShadowContainer, InterleavedShadowConfig } from './InterleavedShadowActor';
 
+// Modal and Popup base classes
+export { ModalShadowActor, modalBaseStyles } from './ModalShadowActor';
+export type { ModalConfig } from './ModalShadowActor';
+export { PopupShadowActor, popupBaseStyles } from './PopupShadowActor';
+export type { PopupConfig, PopupPosition } from './PopupShadowActor';
+
 export { EventStateLogger, logger } from './EventStateLogger';
 export * from './types';

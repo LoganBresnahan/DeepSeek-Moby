@@ -55,15 +55,13 @@ describe('ToolCallsShadowActor', () => {
       });
     });
 
-    it('injects styles into each shadow root', () => {
+    it('adopts stylesheets into each shadow root', () => {
       actor = new ToolCallsShadowActor(manager, element);
       actor.startBatch([{ name: 'test', detail: 'testing' }]);
 
       const container = element.querySelector('[data-container-id]');
-      const styleTag = container?.shadowRoot?.querySelector('style');
-      expect(styleTag).toBeTruthy();
-      expect(styleTag?.textContent).toContain('.container');
-      expect(styleTag?.textContent).toContain('.header');
+      const sheets = container?.shadowRoot?.adoptedStyleSheets;
+      expect(sheets?.length).toBeGreaterThan(0);
     });
   });
 

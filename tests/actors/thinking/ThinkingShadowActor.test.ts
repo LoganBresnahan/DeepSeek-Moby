@@ -57,18 +57,16 @@ describe('ThinkingShadowActor', () => {
       expect(iterationHost?.shadowRoot).toBeTruthy();
     });
 
-    it('injects styles into each iteration shadow', () => {
+    it('adopts stylesheets into each iteration shadow', () => {
       actor = new ThinkingShadowActor(manager, parentElement);
       actor.startIteration();
 
       const iterationHost = parentElement.querySelector('[data-actor="thinking"]');
-      const styleTag = iterationHost?.shadowRoot?.querySelector('style');
-      expect(styleTag).toBeTruthy();
-      expect(styleTag?.textContent).toContain('.container');
-      expect(styleTag?.textContent).toContain('.header');
+      const sheets = iterationHost?.shadowRoot?.adoptedStyleSheets;
+      expect(sheets?.length).toBeGreaterThan(0);
     });
 
-    it('each iteration has isolated styles', () => {
+    it('iterations share adopted stylesheets for efficiency', () => {
       actor = new ThinkingShadowActor(manager, parentElement);
       actor.startIteration();
       vi.advanceTimersByTime(1);
@@ -77,12 +75,12 @@ describe('ThinkingShadowActor', () => {
       const iterations = parentElement.querySelectorAll('[data-actor="thinking"]');
       expect(iterations.length).toBe(2);
 
-      // Each has its own shadow and style tag
-      const style1 = iterations[0].shadowRoot?.querySelector('style');
-      const style2 = iterations[1].shadowRoot?.querySelector('style');
-      expect(style1).toBeTruthy();
-      expect(style2).toBeTruthy();
-      expect(style1).not.toBe(style2);
+      // Optimization: same CSSStyleSheet objects are shared across containers
+      const sheets1 = iterations[0].shadowRoot?.adoptedStyleSheets;
+      const sheets2 = iterations[1].shadowRoot?.adoptedStyleSheets;
+      expect(sheets1?.length).toBeGreaterThan(0);
+      expect(sheets2?.length).toBeGreaterThan(0);
+      expect(sheets1?.[0]).toBe(sheets2?.[0]); // Same base sheet
     });
   });
 

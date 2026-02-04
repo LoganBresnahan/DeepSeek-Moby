@@ -1,0 +1,143 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`HistoryShadowActor Snapshots > Date grouping > renders date group header 1`] = `undefined`;
+
+exports[`HistoryShadowActor Snapshots > Date grouping > renders multiple date groups 1`] = `
+[
+  "Today",
+  "This Year",
+]
+`;
+
+exports[`HistoryShadowActor Snapshots > Empty state > renders empty state when no sessions 1`] = `
+"
+            <div class="history-empty">No chat history found</div>
+          "
+`;
+
+exports[`HistoryShadowActor Snapshots > Entry dropdown menu > renders dropdown menu structure 1`] = `""`;
+
+exports[`HistoryShadowActor Snapshots > Entry dropdown menu > renders entry menu button 1`] = `undefined`;
+
+exports[`HistoryShadowActor Snapshots > Export dropdown > renders export dropdown structure 1`] = `
+"
+                  <div class="export-dropdown-item" data-export-format="json">📄 JSON</div>
+                  <div class="export-dropdown-item" data-export-format="markdown">📝 Markdown</div>
+                  <div class="export-dropdown-item" data-export-format="txt">📃 Plain Text</div>
+                "
+`;
+
+exports[`HistoryShadowActor Snapshots > Modal structure > renders footer with actions 1`] = `
+"
+            <div class="history-footer-left">
+              <span class="history-count" data-history-count="">
+                0 sessions
+              </span>
+            </div>
+            <div class="history-footer-right">
+              <div class="export-dropdown-container">
+                <button class="history-btn history-btn-secondary" data-action="exportAll">
+                  📤 Export All ▾
+                </button>
+                <div class="export-dropdown" data-export-dropdown="">
+                  <div class="export-dropdown-item" data-export-format="json">📄 JSON</div>
+                  <div class="export-dropdown-item" data-export-format="markdown">📝 Markdown</div>
+                  <div class="export-dropdown-item" data-export-format="txt">📃 Plain Text</div>
+                </div>
+              </div>
+              <button class="history-btn history-btn-danger" data-action="deleteAll">
+                🗑️ Delete All
+              </button>
+            </div>
+          "
+`;
+
+exports[`HistoryShadowActor Snapshots > Modal structure > renders initial hidden state 1`] = `
+"<div class="shadow-content">
+      <div class="history-backdrop" data-history-backdrop="">
+        <div class="history-modal" data-history-modal="">
+          <div class="history-header">
+            <div class="history-title">
+              <span class="history-title-icon">📋</span>
+              <span>Chat History</span>
+            </div>
+            <button class="history-close" data-action="close" title="Close (Esc)">✕</button>
+          </div>
+          <div class="history-search">
+            <input type="text" class="history-search-input" placeholder="Search history..." data-search-input="">
+          </div>
+          <div class="history-list" data-history-list="">
+            <div class="history-empty">No chat history found</div>
+          </div>
+          <div class="history-footer">
+            <div class="history-footer-left">
+              <span class="history-count" data-history-count="">
+                0 sessions
+              </span>
+            </div>
+            <div class="history-footer-right">
+              <div class="export-dropdown-container">
+                <button class="history-btn history-btn-secondary" data-action="exportAll">
+                  📤 Export All ▾
+                </button>
+                <div class="export-dropdown" data-export-dropdown="">
+                  <div class="export-dropdown-item" data-export-format="json">📄 JSON</div>
+                  <div class="export-dropdown-item" data-export-format="markdown">📝 Markdown</div>
+                  <div class="export-dropdown-item" data-export-format="txt">📃 Plain Text</div>
+                </div>
+              </div>
+              <button class="history-btn history-btn-danger" data-action="deleteAll">
+                🗑️ Delete All
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>"
+`;
+
+exports[`HistoryShadowActor Snapshots > Modal structure > renders modal header 1`] = `
+"
+            <div class="history-title">
+              <span class="history-title-icon">📋</span>
+              <span>Chat History</span>
+            </div>
+            <button class="history-close" data-action="close" title="Close (Esc)">✕</button>
+          "
+`;
+
+exports[`HistoryShadowActor Snapshots > Modal structure > renders search input 1`] = `
+"
+            <input type="text" class="history-search-input" placeholder="Search history..." data-search-input="">
+          "
+`;
+
+exports[`HistoryShadowActor Snapshots > Session count > renders plural session count 1`] = `
+"
+                0 sessions
+              "
+`;
+
+exports[`HistoryShadowActor Snapshots > Session count > renders singular session count 1`] = `
+"
+                0 sessions
+              "
+`;
+
+exports[`HistoryShadowActor Snapshots > Session list > renders active session highlight 1`] = `""`;
+
+exports[`HistoryShadowActor Snapshots > Session list > renders session with long preview 1`] = `undefined`;
+
+exports[`HistoryShadowActor Snapshots > Session list > renders session with no messages 1`] = `undefined`;
+
+exports[`HistoryShadowActor Snapshots > Session list > renders session with reasoner model 1`] = `
+"
+            <div class="history-empty">No chat history found</div>
+          "
+`;
+
+exports[`HistoryShadowActor Snapshots > Session list > renders single session 1`] = `
+"
+            <div class="history-empty">No chat history found</div>
+          "
+`;

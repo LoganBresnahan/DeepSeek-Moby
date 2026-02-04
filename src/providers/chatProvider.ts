@@ -3848,38 +3848,13 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
             <img src="${iconUri}" alt="DeepSeek Moby" class="header-icon">
             <div id="toastContainer" class="toast-container"></div>
             <div class="header-actions">
+              <!-- Model selector - button acts as click target, parent is Shadow DOM host -->
               <div class="model-selector">
                 <button id="modelBtn" class="model-btn" title="Click to change model">
                   <span id="currentModelName">Chat (V3)</span>
                   <span class="model-dropdown-arrow">▼</span>
                 </button>
-                <div id="modelDropdown" class="model-dropdown" style="display: none;">
-                  <div class="model-option" data-model="deepseek-chat">
-                    <span class="model-option-name">DeepSeek Chat (V3)</span>
-                    <span class="model-option-desc">Fast, general-purpose</span>
-                  </div>
-                  <div class="model-option" data-model="deepseek-reasoner">
-                    <span class="model-option-name">DeepSeek Reasoner (R1)</span>
-                    <span class="model-option-desc">Chain-of-thought reasoning</span>
-                  </div>
-                  <div class="model-dropdown-divider"></div>
-                  <div class="temperature-control">
-                    <label>Temperature: <span id="tempValue">0.7</span></label>
-                    <input type="range" id="tempSlider" min="0" max="2" step="0.1" value="0.7">
-                    <span class="tool-limit-hint">Controls randomness in responses. 0 = deterministic, 2 = very creative</span>
-                  </div>
-                  <div id="toolLimitControl" class="temperature-control" style="display: block;">
-                    <label>Tool Iterations: <span id="toolLimitValue">25</span></label>
-                    <input type="range" id="toolLimitSlider" min="5" max="100" step="5" value="25">
-                    <span class="tool-limit-hint">Limits tool calling loops (each loop can have multiple tools). 100 = No limit</span>
-                  </div>
-                  <div class="model-dropdown-divider"></div>
-                  <div class="temperature-control">
-                    <label>Max Output Tokens: <span id="tokenLimitValue">8192</span></label>
-                    <input type="range" id="tokenLimitSlider" min="256" max="65536" step="256" value="8192">
-                    <span class="tool-limit-hint" id="tokenLimitHint">Maximum tokens in response. Chat: 8K, Reasoner: 64K</span>
-                  </div>
-                </div>
+                <!-- Shadow DOM popup renders here via ModelSelectorShadowActor -->
               </div>
               <button id="historyBtn" class="history-btn" title="Chat History">
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
@@ -3891,166 +3866,23 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
                   <path d="M14.4 3.6L12.5 5.5a2.5 2.5 0 0 1-3.5 3.5l-5 5a1.4 1.4 0 0 1-2-2l5-5a2.5 2.5 0 0 1 3.5-3.5l1.9-1.9c.2-.2.5-.2.7 0l.3.3c.2.2.2.5 0 .7z"/>
                 </svg>
               </button>
+              <!-- Commands dropdown - button acts as click target, parent is Shadow DOM host -->
               <div class="commands-selector">
                 <button id="commandsBtn" class="commands-btn" title="Commands">
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
                     <path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 13A6 6 0 1 1 8 2a6 6 0 0 1 0 12zm-.5-3h1v1h-1v-1zm.5-7a2.5 2.5 0 0 0-2.5 2.5h1A1.5 1.5 0 1 1 8 8c-.55 0-1 .45-1 1v1h1v-.8c0-.11.09-.2.2-.2h.3a2.5 2.5 0 0 0 0-5z"/>
                   </svg>
                 </button>
-                <div id="commandsDropdown" class="commands-dropdown" style="display: none;">
-                  <div class="commands-dropdown-title">Commands</div>
-                  <div class="commands-section-title">Chat</div>
-                  <div class="command-item" data-command="deepseek.newChat">
-                    <span class="command-icon">✨</span>
-                    <div class="command-info">
-                      <div class="command-name">New Chat</div>
-                      <div class="command-desc">Start a new conversation</div>
-                    </div>
-                  </div>
-                  <div class="commands-section-title">History</div>
-                  <div class="command-item" data-command="deepseek.showChatHistory">
-                    <span class="command-icon">📚</span>
-                    <div class="command-info">
-                      <div class="command-name">Show History</div>
-                      <div class="command-desc">View chat history</div>
-                    </div>
-                  </div>
-                  <div class="command-item" data-command="deepseek.exportChatHistory">
-                    <span class="command-icon">📤</span>
-                    <div class="command-info">
-                      <div class="command-name">Export History</div>
-                      <div class="command-desc">Export all chats</div>
-                    </div>
-                  </div>
-                  <div class="command-item" data-command="deepseek.searchChatHistory">
-                    <span class="command-icon">🔍</span>
-                    <div class="command-info">
-                      <div class="command-name">Search History</div>
-                      <div class="command-desc">Search past chats</div>
-                    </div>
-                  </div>
-                  <div class="commands-section-title">Other</div>
-                  <div class="command-item" data-command="deepseek.showStats">
-                    <span class="command-icon">📊</span>
-                    <div class="command-info">
-                      <div class="command-name">Show Stats</div>
-                      <div class="command-desc">View usage statistics</div>
-                    </div>
-                  </div>
-                  <div class="command-item" data-command="deepseek.showLogs">
-                    <span class="command-icon">📋</span>
-                    <div class="command-info">
-                      <div class="command-name">Show Logs</div>
-                      <div class="command-desc">View extension logs</div>
-                    </div>
-                  </div>
-                </div>
+                <!-- Shadow DOM popup renders here via CommandsShadowActor -->
               </div>
+              <!-- Settings dropdown - button acts as click target, parent is Shadow DOM host -->
               <div class="settings-selector">
                 <button id="settingsBtn" class="settings-btn" title="Settings">
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
                     <path d="M9.1 4.4L8.6 2H7.4l-.5 2.4-.7.3-2-1.3-.9.8 1.3 2-.2.7-2.4.5v1.2l2.4.5.3.8-1.3 2 .8.8 2-1.3.8.3.4 2.3h1.2l.5-2.4.8-.3 2 1.3.8-.8-1.3-2 .3-.8 2.3-.4V7.4l-2.4-.5-.3-.8 1.3-2-.8-.8-2 1.3-.7-.2zM9.4 1l.5 2.4L12 2.1l2 2-1.4 2.1 2.4.4v2.8l-2.4.5L14 12l-2 2-2.1-1.4-.5 2.4H6.6l-.5-2.4L4 13.9l-2-2 1.4-2.1L1 9.4V6.6l2.4-.5L2.1 4l2-2 2.1 1.4.4-2.4h2.8zm.6 7a2 2 0 1 1-4 0 2 2 0 0 1 4 0z"/>
                   </svg>
                 </button>
-                <div id="settingsDropdown" class="settings-dropdown" style="display: none;">
-                  <div class="settings-section">
-                    <div class="settings-section-title">Logging</div>
-                    <div class="settings-control">
-                      <label>Log Level: <span id="logLevelValue">INFO</span></label>
-                      <select id="logLevelSelect" class="settings-select">
-                        <option value="DEBUG">Debug (verbose)</option>
-                        <option value="INFO" selected>Info (default)</option>
-                        <option value="WARN">Warnings only</option>
-                        <option value="ERROR">Errors only</option>
-                        <option value="OFF">Off</option>
-                      </select>
-                    </div>
-                    <div class="settings-control">
-                      <label>
-                        <input type="checkbox" id="logColorsCheck" checked>
-                        Color-coded logs
-                      </label>
-                    </div>
-                    <button id="openLogsBtn" class="settings-action-btn">Open Logs</button>
-                  </div>
-                  <div class="settings-divider"></div>
-                  <div class="settings-section">
-                    <div class="settings-section-title">Reasoner (R1)</div>
-                    <div class="settings-control">
-                      <label class="settings-wild-label">
-                        <input type="checkbox" id="allowAllCommandsCheck">
-                        <span class="settings-wild-icon">🐾</span> Walk on the Wild Side
-                      </label>
-                      <div class="settings-hint" style="margin-top: 4px;">Allow ALL shell commands. Disables safety blocklist.</div>
-                    </div>
-                  </div>
-                  <div class="settings-divider"></div>
-                  <div class="settings-section">
-                    <div class="settings-section-title">System Prompt</div>
-                    <div class="settings-hint">Custom prompt prepended to all requests. Leave empty for model default.</div>
-                    <textarea id="systemPromptInput" class="settings-textarea" placeholder="Enter custom system prompt..." rows="4"></textarea>
-                    <div class="settings-btn-row">
-                      <button id="saveSystemPromptBtn" class="settings-action-btn">Save</button>
-                      <button id="resetSystemPromptBtn" class="settings-action-btn">Reset to Default</button>
-                      <button id="showDefaultPromptBtn" class="settings-action-btn">Show Default</button>
-                    </div>
-                    <div id="defaultPromptPreview" class="settings-preview" style="display: none;">
-                      <div class="settings-preview-header">
-                        <span>Default prompt for <strong id="defaultPromptModel">current model</strong>:</span>
-                        <button id="closeDefaultPromptBtn" class="settings-close-btn">&times;</button>
-                      </div>
-                      <pre id="defaultPromptContent" class="settings-preview-content"></pre>
-                    </div>
-                  </div>
-                  <div class="settings-divider"></div>
-                  <div class="settings-section">
-                    <div class="settings-section-title">Web Search</div>
-                    <div class="settings-control">
-                      <label>Search Depth</label>
-                      <select id="searchDepthSelect" class="settings-select">
-                        <option value="basic" selected>Basic (faster)</option>
-                        <option value="advanced">Advanced (thorough)</option>
-                      </select>
-                    </div>
-                    <div class="settings-control">
-                      <label>Searches per prompt: <span id="searchesPerPromptValue">1</span></label>
-                      <input type="range" id="searchesPerPromptSlider" class="settings-slider" min="1" max="10" step="1" value="1">
-                    </div>
-                    <div class="settings-control">
-                      <label>Cache duration: <span id="cacheDurationValue">15</span> min</label>
-                      <input type="range" id="cacheDurationSlider" class="settings-slider" min="0" max="60" step="5" value="15">
-                    </div>
-                    <button id="clearSearchCacheBtn" class="settings-action-btn">Clear Search Cache</button>
-                  </div>
-                  <div class="settings-divider"></div>
-                  <div class="settings-section">
-                    <div class="settings-section-title">History</div>
-                    <div class="settings-control">
-                      <label>
-                        <input type="checkbox" id="autoSaveHistoryCheck" checked>
-                        Auto-save history
-                      </label>
-                    </div>
-                    <div class="settings-control">
-                      <label>Max sessions: <span id="maxSessionsValue">100</span></label>
-                      <input type="range" id="maxSessionsSlider" class="settings-slider" min="10" max="500" step="10" value="100">
-                    </div>
-                    <button id="clearHistoryBtn" class="settings-action-btn settings-danger-btn">Clear All History</button>
-                  </div>
-                  <div class="settings-divider"></div>
-                  <div class="settings-section">
-                    <div class="settings-section-title">Debug</div>
-                    <div class="settings-btn-row">
-                      <button id="testStatusBtn" class="settings-action-btn">Test Status</button>
-                      <button id="testWarningBtn" class="settings-action-btn">Test Warning</button>
-                      <button id="testErrorBtn" class="settings-action-btn">Test Error</button>
-                    </div>
-                  </div>
-                  <div class="settings-divider"></div>
-                  <div class="settings-section">
-                    <button id="resetDefaultsBtn" class="settings-action-btn settings-danger-btn">Reset All to Defaults</button>
-                  </div>
-                </div>
+                <!-- Shadow DOM popup renders here via SettingsShadowActor -->
               </div>
             </div>
           </div>
@@ -4065,157 +3897,6 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
                 <div id="inputAreaContainer" class="input-area-container"></div>
                 <div id="statusPanelContainer" class="status-panel-container"></div>
               </div>
-            </div>
-          </div>
-
-          <!-- Legacy input area - hidden when Shadow actors are active -->
-          <div class="input-area" style="display: none;">
-            <div class="input-row">
-              <div class="input-buttons-grid">
-                <!-- Row 1: Files + Edit Mode -->
-                <button id="filesBtn" class="grid-btn files-btn" title="Select files for context">
-                  <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-                    <path d="M14.5 2h-6L7 .5 1.5 1v13l.5.5h12l.5-.5v-12l-.5-.5zM14 14H2V2h4.5l1.5 1.5h6V14z"/>
-                  </svg>
-                  <!-- Keep water spurt CSS for future use (not triggered) -->
-                  <div class="water-spurt">
-                    <div class="droplet"></div>
-                    <div class="droplet"></div>
-                    <div class="droplet"></div>
-                    <div class="droplet"></div>
-                    <div class="droplet"></div>
-                  </div>
-                </button>
-                <button id="editModeBtn" class="grid-btn edit-mode-btn" title="Edit mode: Manual">
-                  <svg id="editModeIcon" width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-                    <!-- Letter "M" for Manual mode -->
-                    <text x="8" y="11" font-size="10" font-weight="bold" text-anchor="middle" fill="currentColor">M</text>
-                  </svg>
-                </button>
-                <!-- Row 2: Help + Attach -->
-                <button id="helpBtn" class="grid-btn help-btn" title="Commands">
-                  <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-                    <path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 13A6 6 0 1 1 8 2a6 6 0 0 1 0 12zm-.5-3h1v1h-1v-1zm.5-7a2.5 2.5 0 0 0-2.5 2.5h1A1.5 1.5 0 1 1 8 8c-.55 0-1 .45-1 1v1h1v-.8c0-.11.09-.2.2-.2h.3a2.5 2.5 0 0 0 0-5z"/>
-                  </svg>
-                </button>
-                <button id="attachBtn" class="grid-btn attach-btn" title="Attach file">
-                  <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-                    <path d="M4.5 3a2.5 2.5 0 0 1 5 0v9a1.5 1.5 0 0 1-3 0V5a.5.5 0 0 1 1 0v7a.5.5 0 0 0 1 0V3a1.5 1.5 0 1 0-3 0v9a2.5 2.5 0 0 0 5 0V5a.5.5 0 0 1 1 0v7a3.5 3.5 0 1 1-7 0V3z"/>
-                  </svg>
-                </button>
-                <button id="searchBtn" class="grid-btn search-btn" title="Web search">
-                  <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-                    <!-- Globe circle -->
-                    <circle cx="6" cy="6" r="5.5" fill="none" stroke="currentColor" stroke-width="1"/>
-                    <!-- Horizontal line (equator) -->
-                    <path d="M0.5 6h11" stroke="currentColor" stroke-width="0.8" fill="none"/>
-                    <!-- Vertical ellipse (meridian) -->
-                    <ellipse cx="6" cy="6" rx="2.5" ry="5.5" fill="none" stroke="currentColor" stroke-width="0.8"/>
-                    <!-- Magnifying glass handle -->
-                    <path d="M10 10l4.5 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-                  </svg>
-                </button>
-                <button id="sendBtn" class="grid-btn send-btn" title="Send message">
-                  <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-                    <path d="M1.724 1.053a.5.5 0 0 1 .545-.108l13 5.5a.5.5 0 0 1 0 .91l-13 5.5a.5.5 0 0 1-.69-.575l1.557-5.28-1.557-5.28a.5.5 0 0 1 .145-.467zM3.882 7.5l-1.06 3.593L12.14 8 2.822 4.907 3.882 8.5H8a.5.5 0 0 1 0 1H3.882z"/>
-                  </svg>
-                </button>
-                <button id="stopBtn" class="grid-btn stop-btn" title="Stop generation" style="display: none;">
-                  <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-                    <rect x="3" y="3" width="10" height="10" rx="1"/>
-                  </svg>
-                </button>
-              </div>
-              <div class="input-textarea-wrapper">
-                <textarea
-                  id="messageInput"
-                  placeholder="Seek deep..."
-                  rows="1"
-                ></textarea>
-                <!-- Status Panel - Messages, Warnings, Errors -->
-                <div class="status-panel">
-                  <div class="status-panel-moby" id="statusPanelMoby">
-                    <img src="${iconUri}" alt="Moby">
-                    <div class="water-spurt">
-                      <div class="droplet"></div>
-                      <div class="droplet"></div>
-                      <div class="droplet"></div>
-                      <div class="droplet"></div>
-                      <div class="droplet"></div>
-                    </div>
-                  </div>
-                  <div class="status-panel-left">
-                    <div class="status-panel-messages" id="statusPanelMessages"></div>
-                  </div>
-                  <!-- Resizable separator -->
-                  <div class="status-panel-separator" id="statusPanelSeparator"></div>
-                  <div class="status-panel-right">
-                    <div class="status-panel-warnings" id="statusPanelWarnings"></div>
-                  </div>
-                  <!-- Logs button outside of flexing right panel so it stays anchored -->
-                  <button class="status-panel-logs-btn" id="statusPanelLogsBtn" title="Show Logs">
-                    <svg viewBox="0 0 16 16" fill="currentColor">
-                      <path d="M3 3h10v1H3V3zm0 3h10v1H3V6zm0 3h7v1H3V9zm0 3h10v1H3v-1z"/>
-                    </svg>
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <!-- File chips - show selected files for context -->
-            <div id="fileChipsContainer" class="file-chips-container" style="display: none;">
-              <span class="file-chips-label">Context:</span>
-              <div id="fileChips"></div>
-            </div>
-            <input type="file" id="fileInput" accept=".js,.ts,.jsx,.tsx,.py,.java,.go,.rs,.cpp,.c,.h,.cs,.rb,.php,.swift,.kt,.scala,.vue,.svelte,.json,.yaml,.yml,.toml,.xml,.env,.ini,.conf,.md,.txt,.rst,.log,.html,.css,.scss,.less,.sh,.bash,.zsh,.sql,.graphql,.proto" style="display: none" multiple>
-            <div id="attachments" class="attachments"></div>
-          </div>
-        </div>
-
-        <!-- File selection modal -->
-        <div id="fileModalOverlay" class="file-modal-overlay" style="display: none;">
-          <div class="file-modal">
-            <div class="file-modal-header">
-              <h3 class="file-modal-title">Select Files for Context</h3>
-              <button id="fileModalClose" class="file-modal-close">&times;</button>
-            </div>
-            <div class="file-modal-body">
-              <!-- Open files section -->
-              <div class="file-section">
-                <div class="file-section-header">Open Files (<span id="openFilesCount">0</span>)</div>
-                <div id="openFilesList" class="open-files-list">
-                  <div class="file-search-no-results">No files currently open</div>
-                </div>
-              </div>
-
-              <!-- Search section -->
-              <div class="file-section">
-                <div class="file-section-header">Search Files</div>
-                <input
-                  type="text"
-                  id="fileSearchInput"
-                  class="file-search-input"
-                  placeholder="🔍 Type to search files. Searching is case sensitive"
-                />
-                <div id="fileSearchResults" class="file-search-results" style="display: none;">
-                  <!-- Search results will be inserted here -->
-                </div>
-              </div>
-
-              <!-- Selected files section -->
-              <div class="file-section">
-                <div class="selected-files-header">
-                  <div class="file-section-header">Selected Files (<span id="selectedFilesCount">0</span>)</div>
-                  <button id="clearSelectedBtn" class="selected-files-clear" style="display: none;">Clear All</button>
-                </div>
-                <div id="selectedFilesList" class="selected-files-list">
-                  <div class="selected-files-empty">No files selected</div>
-                </div>
-              </div>
-            </div>
-            <div class="file-modal-footer">
-              <button id="fileModalCancel" class="file-modal-btn file-modal-btn-cancel">Cancel</button>
-              <button id="fileModalAdd" class="file-modal-btn file-modal-btn-add" disabled>Add to Context</button>
             </div>
           </div>
         </div>

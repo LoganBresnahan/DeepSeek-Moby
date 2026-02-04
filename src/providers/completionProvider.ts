@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { DeepSeekClient } from '../deepseekClient';
+import { logger } from '../utils/logger';
 
 export class CompletionProvider implements vscode.InlineCompletionItemProvider {
   private deepSeekClient: DeepSeekClient;
@@ -45,8 +46,8 @@ export class CompletionProvider implements vscode.InlineCompletionItemProvider {
           } else {
             resolve(undefined);
           }
-        } catch (error) {
-          console.error('Completion error:', error);
+        } catch (error: any) {
+          logger.error('Completion error', error?.message);
           resolve(undefined);
         }
       }, 300); // 300ms debounce

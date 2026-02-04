@@ -34,6 +34,9 @@ export class InspectorShadowActor extends EventStateActor {
   private highlightOverlay: HTMLElement;
   private selectOverlay: HTMLElement;
 
+  // Reference to manager for stylesheet caching
+  private readonly _manager: EventStateManager;
+
   // Inspector state
   private _visible = false;
   private _inspectMode = false;
@@ -85,13 +88,14 @@ export class InspectorShadowActor extends EventStateActor {
       enableDOMChangeDetection: false
     });
 
+    this._manager = manager;
+
     // Create shadow root for inspector UI
     this.shadow = this.element.attachShadow({ mode: 'open' });
 
-    // Inject styles
-    const style = document.createElement('style');
-    style.textContent = inspectorShadowStyles;
-    this.shadow.appendChild(style);
+    // Use adoptedStyleSheets for efficient style sharing
+    const inspectorSheet = this._manager.getStyleSheet(inspectorShadowStyles, 'InspectorShadowActor');
+    this.shadow.adoptedStyleSheets = [inspectorSheet];
 
     // Create overlays (in light DOM so they cover everything)
     this.highlightOverlay = this.createOverlay('highlight');
@@ -601,10 +605,21 @@ export class InspectorShadowActor extends EventStateActor {
 
   private positionOverlay(overlay: HTMLElement, target: HTMLElement): void {
     const rect = target.getBoundingClientRect();
-    overlay.style.left = `${rect.left}px`;
-    overlay.style.top = `${rect.top}px`;
-    overlay.style.width = `${rect.width}px`;
-    overlay.style.height = `${rect.height}px`;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+
+    // Clamp overlay to viewport bounds to prevent scrollbar issues
+    const left = Math.max(0, rect.left);
+    const top = Math.max(0, rect.top);
+    const right = Math.min(vw, rect.right);
+    const bottom = Math.min(vh, rect.bottom);
+    const width = Math.max(0, right - left);
+    const height = Math.max(0, bottom - top);
+
+    overlay.style.left = `${left}px`;
+    overlay.style.top = `${top}px`;
+    overlay.style.width = `${width}px`;
+    overlay.style.height = `${height}px`;
   }
 
   private getElementPath(el: HTMLElement): string {

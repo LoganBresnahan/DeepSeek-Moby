@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { ChatSession, Message, createChatSession, generateSessionId } from './ChatSession';
+import { logger } from '../utils/logger';
 
 export class ChatStorage {
   private static instance: ChatStorage;
@@ -53,8 +54,8 @@ export class ChatStorage {
         if (this.currentSessionId) {
           await this.context.globalState.update('currentSessionId', this.currentSessionId);
         }
-      } catch (error) {
-        console.error('[ChatStorage] Failed to save sessions:', error);
+      } catch (error: any) {
+        logger.error('ChatStorage: Failed to save sessions', error?.message);
       }
     })();
 
@@ -181,8 +182,8 @@ export class ChatStorage {
       this.sessions.set(session.id, session);
       await this.saveSessions();
       return session;
-    } catch (error) {
-      console.error('Failed to import session:', error);
+    } catch (error: any) {
+      logger.error('Failed to import session', error?.message);
       return null;
     }
   }

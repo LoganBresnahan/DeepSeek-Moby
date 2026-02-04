@@ -18,7 +18,7 @@ let chatHistoryManager: ChatHistoryManager;
 let tavilyClient: TavilyClient;
 
 export async function activate(context: vscode.ExtensionContext) {
-  console.log('DeepSeek Moby extension is now active!');
+  logger.info('DeepSeek Moby extension activated');
 
   // Initialize configuration
   const config = ConfigManager.getInstance();

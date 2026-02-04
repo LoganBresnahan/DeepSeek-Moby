@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { logger } from './logger';
 
 export class FormattingEngine {
   private formatterCache = new Map<string, vscode.DocumentFormattingEditProvider>();
@@ -81,8 +82,8 @@ export class FormattingEngine {
         const formattedDoc = await vscode.workspace.openTextDocument(document.uri);
         return formattedDoc.getText();
       }
-    } catch (error) {
-      console.warn('VS Code formatter failed, using basic formatting:', error);
+    } catch (error: any) {
+      logger.warn('VS Code formatter failed, using basic formatting', error?.message);
     }
     
     return code;

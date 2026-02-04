@@ -163,22 +163,36 @@ describe('InterleavedShadowActor', () => {
       expect(container.host.getAttribute('data-container-id')).toBe(container.id);
     });
 
-    it('injects styles into container shadow', () => {
+    it('adopts stylesheets into container shadow', () => {
       actor = new TestInterleavedActor(manager, parentElement, '.custom { color: blue; }');
       const container = actor.exposedCreateContainer('test');
 
-      const styleTag = container.shadow.querySelector('style');
-      expect(styleTag).toBeTruthy();
-      expect(styleTag?.textContent).toContain('.custom { color: blue; }');
+      // Uses adoptedStyleSheets instead of <style> elements
+      const sheets = container.shadow.adoptedStyleSheets;
+      expect(sheets.length).toBeGreaterThan(0);
+
+      // The actor-specific styles should be in the second sheet
+      const actorSheet = sheets[1];
+      const cssRules = Array.from(actorSheet.cssRules);
+      const hasCustomRule = cssRules.some(rule => rule.cssText.includes('.custom'));
+      expect(hasCustomRule).toBe(true);
     });
 
-    it('includes base styles in container', () => {
+    it('includes base styles via adoptedStyleSheets', () => {
       actor = new TestInterleavedActor(manager, parentElement);
       const container = actor.exposedCreateContainer('test');
 
-      const styleTag = container.shadow.querySelector('style');
-      expect(styleTag?.textContent).toContain(':host');
-      expect(styleTag?.textContent).toContain('@keyframes bubbleIn');
+      // Uses adoptedStyleSheets - base sheet should contain :host and animations
+      const sheets = container.shadow.adoptedStyleSheets;
+      expect(sheets.length).toBeGreaterThan(0);
+
+      // The base sheet should contain :host and animations
+      const baseSheet = sheets[0];
+      const cssRules = Array.from(baseSheet.cssRules);
+      const hasHostRule = cssRules.some(rule => rule.cssText.includes(':host'));
+      const hasAnimation = cssRules.some(rule => rule.cssText.includes('bubbleIn'));
+      expect(hasHostRule).toBe(true);
+      expect(hasAnimation).toBe(true);
     });
 
     it('applies initial content to container', () => {
@@ -476,7 +490,7 @@ describe('InterleavedShadowActor', () => {
   });
 
   describe('Style isolation between containers', () => {
-    it('each container has its own isolated styles', () => {
+    it('containers share adopted stylesheets for efficiency', () => {
       actor = new TestInterleavedActor(manager, parentElement, '.test { color: red; }');
       const container1 = actor.exposedCreateContainer('test1', {
         initialContent: '<div class="test">Content 1</div>'
@@ -485,13 +499,16 @@ describe('InterleavedShadowActor', () => {
         initialContent: '<div class="test">Content 2</div>'
       });
 
-      // Each container has its own shadow with its own style tag
-      const style1 = container1.shadow.querySelector('style');
-      const style2 = container2.shadow.querySelector('style');
+      // Both containers should have adopted stylesheets
+      const sheets1 = container1.shadow.adoptedStyleSheets;
+      const sheets2 = container2.shadow.adoptedStyleSheets;
 
-      expect(style1).toBeTruthy();
-      expect(style2).toBeTruthy();
-      expect(style1).not.toBe(style2);
+      expect(sheets1.length).toBeGreaterThan(0);
+      expect(sheets2.length).toBeGreaterThan(0);
+
+      // The key optimization: same CSSStyleSheet objects are shared (not copied)
+      expect(sheets1[0]).toBe(sheets2[0]); // Same base sheet
+      expect(sheets1[1]).toBe(sheets2[1]); // Same actor-specific sheet
     });
 
     it('container styles do not affect siblings', () => {

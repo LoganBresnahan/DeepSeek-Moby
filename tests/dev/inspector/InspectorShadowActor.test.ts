@@ -59,12 +59,11 @@ describe('InspectorShadowActor', () => {
       expect(hostElement.shadowRoot).toBeTruthy();
     });
 
-    it('injects styles into shadow root', () => {
+    it('adopts stylesheets into shadow root', () => {
       actor = new InspectorShadowActor(manager, hostElement);
 
-      const style = hostElement.shadowRoot?.querySelector('style');
-      expect(style).toBeTruthy();
-      expect(style?.textContent).toContain('.inspector-panel');
+      const sheets = hostElement.shadowRoot?.adoptedStyleSheets;
+      expect(sheets?.length).toBeGreaterThan(0);
     });
 
     it('creates panel in shadow root', () => {

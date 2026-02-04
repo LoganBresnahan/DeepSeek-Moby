@@ -147,22 +147,34 @@ describe('ShadowActor', () => {
   });
 
   describe('Style encapsulation', () => {
-    it('injects styles into shadow root', () => {
+    it('adopts stylesheets into shadow root', () => {
       actor = new TestShadowActor(manager, element, '.test { color: red; }');
 
-      const styleTag = actor.getShadow().querySelector('style');
-      expect(styleTag).toBeTruthy();
-      expect(styleTag?.textContent).toContain('.test { color: red; }');
+      // Uses adoptedStyleSheets instead of <style> elements
+      const sheets = actor.getShadow().adoptedStyleSheets;
+      expect(sheets.length).toBeGreaterThan(0);
+
+      // The actor-specific styles should be in the second sheet
+      const actorSheet = sheets[1];
+      const cssRules = Array.from(actorSheet.cssRules);
+      const hasTestRule = cssRules.some(rule => rule.cssText.includes('.test'));
+      expect(hasTestRule).toBe(true);
     });
 
-    it('includes base styles in injected styles', () => {
-      // Use non-empty styles to ensure style tag is created
+    it('includes base styles via adoptedStyleSheets', () => {
       actor = new TestShadowActor(manager, element, '.test { }');
 
-      const styleTag = actor.getShadow().querySelector('style');
-      expect(styleTag).toBeTruthy();
-      expect(styleTag!.textContent).toContain(':host');
-      expect(styleTag!.textContent).toContain('.shadow-content');
+      // Uses adoptedStyleSheets - base sheet should contain :host and .shadow-content
+      const sheets = actor.getShadow().adoptedStyleSheets;
+      expect(sheets.length).toBeGreaterThan(0);
+
+      // The base sheet should contain :host rules
+      const baseSheet = sheets[0];
+      const cssRules = Array.from(baseSheet.cssRules);
+      const hasHostRule = cssRules.some(rule => rule.cssText.includes(':host'));
+      const hasShadowContentRule = cssRules.some(rule => rule.cssText.includes('.shadow-content'));
+      expect(hasHostRule).toBe(true);
+      expect(hasShadowContentRule).toBe(true);
     });
 
     it('styles do not leak to light DOM', () => {

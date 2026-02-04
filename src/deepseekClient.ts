@@ -1,7 +1,8 @@
 import * as vscode from 'vscode';
-import axios, { AxiosInstance } from 'axios';
+import { HttpClient, HttpError, createStreamReader } from './utils/httpClient';
 import { FormattingEngine } from './utils/formatting';
 import { ConfigManager } from './utils/config';
+import { logger } from './utils/logger';
 
 export type MessageContent = string | Array<{
   type: 'text';
@@ -76,8 +77,8 @@ export interface ChatOptions {
 }
 
 export class DeepSeekClient {
-  private axiosInstance: AxiosInstance;
-  private betaAxiosInstance: AxiosInstance;
+  private httpClient: HttpClient;
+  private betaHttpClient: HttpClient;
   private formattingEngine: FormattingEngine;
   private config: ConfigManager;
   private context: vscode.ExtensionContext;
@@ -90,7 +91,7 @@ export class DeepSeekClient {
     this.formattingEngine = new FormattingEngine();
 
     // Standard API endpoint
-    this.axiosInstance = axios.create({
+    this.httpClient = new HttpClient({
       baseURL: 'https://api.deepseek.com',
       timeout: 60000,
       headers: {
@@ -99,7 +100,7 @@ export class DeepSeekClient {
     });
 
     // Beta API endpoint (for FIM)
-    this.betaAxiosInstance = axios.create({
+    this.betaHttpClient = new HttpClient({
       baseURL: 'https://api.deepseek.com/beta',
       timeout: 60000,
       headers: {
@@ -173,7 +174,10 @@ export class DeepSeekClient {
         requestBody.tools = options.tools;
       }
 
-      const response = await this.axiosInstance.post('/chat/completions', requestBody, {
+      const response = await this.httpClient.post<{
+        choices: Array<{ message: { content?: string; reasoning_content?: string; tool_calls?: ToolCall[] } }>;
+        usage?: ChatResponse['usage'];
+      }>('/chat/completions', requestBody, {
         headers: {
           'Authorization': `Bearer ${apiKey}`
         }
@@ -186,9 +190,11 @@ export class DeepSeekClient {
       const usage = response.data.usage;
 
       return { content, reasoning_content, tool_calls, usage };
-    } catch (error: any) {
-      console.error('DeepSeek API error:', error.response?.data || error.message);
-      throw this.handleError(error);
+    } catch (error: unknown) {
+      const httpError = error as HttpError;
+      const errorData = httpError.response?.data as { error?: { message?: string } } | undefined;
+      logger.apiError('DeepSeek API error', errorData?.error?.message || httpError.message);
+      throw this.handleError(httpError);
     }
   }
 
@@ -237,7 +243,7 @@ export class DeepSeekClient {
         requestBody.response_format = { type: 'json_object' };
       }
 
-      const response = await this.axiosInstance.post('/chat/completions', requestBody, {
+      const response = await this.httpClient.post<ReadableStream<Uint8Array>>('/chat/completions', requestBody, {
         headers: {
           'Authorization': `Bearer ${apiKey}`,
           'Accept': 'text/event-stream'
@@ -245,6 +251,8 @@ export class DeepSeekClient {
         responseType: 'stream',
         signal: options?.signal
       });
+
+      const stream = createStreamReader(response.data);
 
       return new Promise((resolve, reject) => {
         let fullResponse = '';
@@ -284,7 +292,7 @@ export class DeepSeekClient {
         // Start the inactivity timer
         resetInactivityTimer();
 
-        response.data.on('data', (chunk: Buffer) => {
+        stream.on('data', (chunk: Buffer) => {
           // Reset inactivity timer on each data chunk
           resetInactivityTimer();
 
@@ -338,15 +346,15 @@ export class DeepSeekClient {
           }
         });
 
-        response.data.on('error', (error: any) => {
+        stream.on('error', (error: Error) => {
           if (!resolved) {
             resolved = true;
             clearInactivityTimer();
-            reject(this.handleError(error));
+            reject(this.handleError(error as HttpError));
           }
         });
 
-        response.data.on('end', () => {
+        stream.on('end', () => {
           // Always resolve if we have data, even if [DONE] wasn't received
           if (!resolved) {
             resolved = true;
@@ -367,9 +375,10 @@ export class DeepSeekClient {
           }
         });
       });
-    } catch (error: any) {
-      console.error('DeepSeek stream error:', error);
-      throw this.handleError(error);
+    } catch (error: unknown) {
+      const httpError = error as HttpError;
+      logger.apiError('DeepSeek stream error', httpError.message);
+      throw this.handleError(httpError);
     }
   }
 
@@ -407,7 +416,10 @@ export class DeepSeekClient {
     try {
       const apiKey = this.getApiKey();
 
-      const response = await this.betaAxiosInstance.post('/completions', {
+      const response = await this.betaHttpClient.post<{
+        choices: Array<{ text?: string }>;
+        usage?: FIMResponse['usage'];
+      }>('/completions', {
         model: 'deepseek-chat',
         prompt: prefix,
         suffix: suffix,
@@ -424,9 +436,11 @@ export class DeepSeekClient {
       const usage = response.data.usage;
 
       return { completion, usage };
-    } catch (error: any) {
-      console.error('DeepSeek FIM error:', error.response?.data || error.message);
-      throw this.handleError(error);
+    } catch (error: unknown) {
+      const httpError = error as HttpError;
+      const errorData = httpError.response?.data as { error?: { message?: string } } | undefined;
+      logger.apiError('DeepSeek FIM error', errorData?.error?.message || httpError.message);
+      throw this.handleError(httpError);
     }
   }
 
@@ -436,7 +450,9 @@ export class DeepSeekClient {
       const apiKey = this.getApiKey();
 
       // Use the beta endpoint for FIM
-      const response = await this.betaAxiosInstance.post('/completions', {
+      const response = await this.betaHttpClient.post<{
+        choices: Array<{ text: string }>;
+      }>('/completions', {
         model: 'deepseek-chat',
         prompt,
         max_tokens: maxTokens,
@@ -448,7 +464,7 @@ export class DeepSeekClient {
         }
       });
 
-      const completions = response.data.choices.map((choice: any) => {
+      const completions = response.data.choices.map((choice) => {
         let completion = choice.text;
 
         // Apply formatting if enabled
@@ -460,9 +476,10 @@ export class DeepSeekClient {
       });
 
       return completions;
-    } catch (error: any) {
-      console.error('DeepSeek completions error:', error);
-      throw this.handleError(error);
+    } catch (error: unknown) {
+      const httpError = error as HttpError;
+      logger.apiError('DeepSeek completions error', httpError.message);
+      throw this.handleError(httpError);
     }
   }
 
@@ -567,7 +584,7 @@ export class DeepSeekClient {
     }
   }
 
-  private handleError(error: any): Error {
+  private handleError(error: HttpError): Error {
     if (error.response) {
       switch (error.response.status) {
         case 401:
@@ -576,8 +593,10 @@ export class DeepSeekClient {
           return new Error('Rate limit exceeded. Please wait before making more requests.');
         case 500:
           return new Error('DeepSeek API server error. Please try again later.');
-        default:
-          return new Error(`API error: ${error.response.data?.error?.message || error.message}`);
+        default: {
+          const errorData = error.response.data as { error?: { message?: string } } | undefined;
+          return new Error(`API error: ${errorData?.error?.message || error.message}`);
+        }
       }
     }
     if (error.code === 'ENOTFOUND') {
@@ -590,7 +609,10 @@ export class DeepSeekClient {
   async getBalance(): Promise<{ available: boolean; balance: string; currency: string } | null> {
     try {
       const apiKey = this.getApiKey();
-      const response = await this.axiosInstance.get('/user/balance', {
+      const response = await this.httpClient.get<{
+        is_available: boolean;
+        balance_infos: Array<{ currency: string; total_balance: string }>;
+      }>('/user/balance', {
         headers: {
           'Authorization': `Bearer ${apiKey}`
         }
@@ -599,7 +621,7 @@ export class DeepSeekClient {
       const data = response.data;
       if (data.balance_infos && data.balance_infos.length > 0) {
         // Prefer USD, fall back to first available
-        const usdBalance = data.balance_infos.find((b: any) => b.currency === 'USD');
+        const usdBalance = data.balance_infos.find((b) => b.currency === 'USD');
         const balanceInfo = usdBalance || data.balance_infos[0];
         return {
           available: data.is_available,
@@ -608,8 +630,9 @@ export class DeepSeekClient {
         };
       }
       return null;
-    } catch (error: any) {
-      console.error('Failed to fetch balance:', error.message);
+    } catch (error: unknown) {
+      const httpError = error as HttpError;
+      logger.apiError('Failed to fetch balance', httpError.message);
       return null;
     }
   }

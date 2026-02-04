@@ -69,6 +69,11 @@ export abstract class ShadowActor extends EventStateActor {
   protected readonly contentRoot: HTMLElement;
 
   /**
+   * Reference to the manager for stylesheet caching.
+   */
+  protected readonly manager: EventStateManager;
+
+  /**
    * Track if styles have been injected (for static style deduplication if needed)
    */
   private static _instanceCount = 0;
@@ -86,6 +91,8 @@ export abstract class ShadowActor extends EventStateActor {
 
     super(actorConfig);
 
+    this.manager = config.manager;
+
     // Generate instance ID for debugging
     ShadowActor._instanceCount++;
     this.instanceId = ShadowActor._instanceCount;
@@ -98,11 +105,16 @@ export abstract class ShadowActor extends EventStateActor {
     this.element.setAttribute('data-shadow-actor', this.constructor.name);
     this.element.setAttribute('data-shadow-instance', String(this.instanceId));
 
-    // Inject scoped styles into shadow root
+    // Use adoptedStyleSheets for efficient style sharing
+    // Base styles are shared across ALL shadow actors (parsed once)
+    // Actor-specific styles are cached and reused across instances of same actor type
     if (config.styles) {
-      const styleElement = document.createElement('style');
-      styleElement.textContent = this.processStyles(config.styles);
-      this.shadow.appendChild(styleElement);
+      const baseSheet = this.manager.getShadowBaseSheet();
+      const actorSheet = this.manager.getStyleSheet(config.styles, this.constructor.name);
+      this.shadow.adoptedStyleSheets = [baseSheet, actorSheet];
+    } else {
+      // Only base styles
+      this.shadow.adoptedStyleSheets = [this.manager.getShadowBaseSheet()];
     }
 
     // Create content container
@@ -114,35 +126,6 @@ export abstract class ShadowActor extends EventStateActor {
     if (config.template) {
       this.contentRoot.innerHTML = config.template;
     }
-  }
-
-  /**
-   * Process styles before injection.
-   * Adds common base styles and can be overridden for custom processing.
-   */
-  protected processStyles(styles: string): string {
-    // Add base styles that all shadow actors should have
-    const baseStyles = `
-      /* Base shadow actor styles */
-      :host {
-        display: block;
-      }
-
-      :host([hidden]) {
-        display: none;
-      }
-
-      .shadow-content {
-        display: contents;
-      }
-
-      /* Ensure VS Code theme variables are available */
-      *, *::before, *::after {
-        box-sizing: border-box;
-      }
-    `;
-
-    return baseStyles + '\n' + styles;
   }
 
   // ============================================

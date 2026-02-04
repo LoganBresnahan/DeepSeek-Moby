@@ -9,12 +9,12 @@ import { vi } from 'vitest';
 import { EventStateManager } from '../../media/state/EventStateManager';
 import {
   StreamingActor,
-  MessageActor,
   ScrollActor,
-  ShellActor,
-  ToolCallsActor,
-  ThinkingActor,
-  PendingChangesActor
+  MessageShadowActor,
+  ShellShadowActor,
+  ToolCallsShadowActor,
+  ThinkingShadowActor,
+  PendingChangesShadowActor
 } from '../../media/actors';
 
 // VS Code API mock
@@ -36,12 +36,12 @@ export function createMockVSCodeAPI(): MockVSCodeAPI {
 export interface TestActorSystem {
   manager: EventStateManager;
   streaming: StreamingActor;
-  message: MessageActor;
+  message: MessageShadowActor;
   scroll: ScrollActor;
-  shell: ShellActor;
-  toolCalls: ToolCallsActor;
-  thinking: ThinkingActor;
-  pending: PendingChangesActor;
+  shell: ShellShadowActor;
+  toolCalls: ToolCallsShadowActor;
+  thinking: ThinkingShadowActor;
+  pending: PendingChangesShadowActor;
   vscode: MockVSCodeAPI;
   elements: TestDOMElements;
   cleanup: () => void;
@@ -109,14 +109,10 @@ export function createTestDOM(): TestDOMElements {
  * Note: This is async because actors use queueMicrotask for registration
  */
 export async function createTestActorSystem(): Promise<TestActorSystem> {
-  // Reset static flags
+  // Reset static flags for non-shadow actors only
+  // Shadow actors use Shadow DOM for style isolation, no global styles to reset
   StreamingActor.resetStylesInjected();
-  MessageActor.resetStylesInjected();
-  ShellActor.resetStylesInjected();
-  ToolCallsActor.resetStylesInjected();
-  ThinkingActor.resetStylesInjected();
   ScrollActor.resetStylesInjected();
-  PendingChangesActor.resetStylesInjected();
 
   const vscode = createMockVSCodeAPI();
   const elements = createTestDOM();
@@ -124,13 +120,13 @@ export async function createTestActorSystem(): Promise<TestActorSystem> {
 
   // Create actors exactly as chat.ts does
   const streaming = new StreamingActor(manager, elements.streamingRoot);
-  const message = new MessageActor(manager, elements.chatMessages);
+  const message = new MessageShadowActor(manager, elements.chatMessages);
   const scroll = new ScrollActor(manager, elements.chatMessages);
-  // ShellActor, ToolCallsActor, and ThinkingActor use chatMessages directly and create elements dynamically
-  const shell = new ShellActor(manager, elements.chatMessages);
-  const toolCalls = new ToolCallsActor(manager, elements.chatMessages);
-  const thinking = new ThinkingActor(manager, elements.chatMessages);
-  const pending = new PendingChangesActor(manager, elements.chatMessages);
+  // Shadow actors use chatMessages directly and create elements dynamically
+  const shell = new ShellShadowActor(manager, elements.chatMessages);
+  const toolCalls = new ToolCallsShadowActor(manager, elements.chatMessages);
+  const thinking = new ThinkingShadowActor(manager, elements.chatMessages);
+  const pending = new PendingChangesShadowActor(manager, elements.chatMessages);
 
   // Message handler that mirrors chat.ts logic
   let isStreaming = false;
@@ -502,6 +498,76 @@ export async function waitForPubSub(ms = 10): Promise<void> {
   await waitForMicrotasks();
   // Then wait the specified time for pub/sub propagation
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Get all text content from an element including Shadow DOM content
+ * Shadow actors render inside shadow roots, so regular textContent won't work
+ */
+export function getShadowTextContent(element: Element): string {
+  let text = '';
+
+  // Get direct text content (text nodes only)
+  element.childNodes.forEach(node => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      text += node.textContent || '';
+    }
+  });
+
+  // Recursively get content from child elements (including shadow roots)
+  element.querySelectorAll('*').forEach(child => {
+    // If element has a shadow root, get content from it
+    if (child.shadowRoot) {
+      text += getShadowTextContent(child.shadowRoot as unknown as Element);
+    }
+    // Get text nodes directly in this element
+    child.childNodes.forEach(node => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        text += node.textContent || '';
+      }
+    });
+  });
+
+  return text;
+}
+
+/**
+ * Query selector that searches inside shadow roots
+ */
+export function queryShadowSelector(root: Element | Document, selector: string): Element | null {
+  // First try direct query
+  const direct = root.querySelector(selector);
+  if (direct) return direct;
+
+  // Search in shadow roots
+  const elements = root.querySelectorAll('*');
+  for (const el of elements) {
+    if (el.shadowRoot) {
+      const found = el.shadowRoot.querySelector(selector);
+      if (found) return found;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Query all matching selectors including inside shadow roots
+ */
+export function queryShadowSelectorAll(root: Element | Document, selector: string): Element[] {
+  const results: Element[] = [];
+
+  // Get direct matches
+  root.querySelectorAll(selector).forEach(el => results.push(el));
+
+  // Search in shadow roots
+  root.querySelectorAll('*').forEach(el => {
+    if (el.shadowRoot) {
+      el.shadowRoot.querySelectorAll(selector).forEach(found => results.push(found));
+    }
+  });
+
+  return results;
 }
 
 /**

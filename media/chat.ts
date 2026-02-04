@@ -18,10 +18,16 @@ import {
   InputAreaShadowActor,
   StatusPanelShadowActor,
   ToolbarShadowActor,
-  InspectorShadowActor,
-  HistoryShadowActor
+  HistoryShadowActor,
+  // New modal/popup actors
+  FilesShadowActor,
+  CommandsShadowActor,
+  ModelSelectorShadowActor,
+  SettingsShadowActor
   // Note: DropdownFocusActor removed - see media/actors/dropdown-focus/UNUSED.txt
 } from './actors';
+// Dev-only actor - not included in production bundle
+import { InspectorShadowActor } from './dev/inspector';
 import { AnimationHelper } from './utils';
 
 // ============================================
@@ -49,8 +55,8 @@ let currentShellSegmentId: string | null = null;
 // Edit mode options
 const editModes = ['manual', 'ask', 'auto'];
 
-// File selection state (still needed for file modal)
-const selectedFiles = new Map<string, string>();
+// File selection is now managed by FilesShadowActor
+// Legacy selectedFiles Map removed - actor handles state
 
 // Content segmentation state for interleaved rendering
 // This tracks content per segment to support text->tools->text ordering
@@ -159,6 +165,46 @@ function initializeActorSystem(): void {
   document.body.appendChild(historyHost);
   const history = new HistoryShadowActor(manager, historyHost, vscode);
 
+  // FilesShadowActor - File selection modal
+  const filesHost = document.createElement('div');
+  filesHost.id = 'filesHost';
+  filesHost.style.cssText = 'position: fixed; top: 0; left: 0; width: 0; height: 0;';
+  document.body.appendChild(filesHost);
+  const files = new FilesShadowActor(manager, filesHost, vscode);
+
+  // CommandsShadowActor - Commands dropdown (positioned relative to button)
+  const commandsHost = getElementOrNull<HTMLElement>('commandsBtn')?.parentElement;
+  let commands: CommandsShadowActor | null = null;
+  if (commandsHost) {
+    commandsHost.style.position = 'relative';
+    const commandsContainer = document.createElement('div');
+    commandsContainer.id = 'commandsActorHost';
+    commandsHost.appendChild(commandsContainer);
+    commands = new CommandsShadowActor(manager, commandsContainer, vscode);
+  }
+
+  // ModelSelectorShadowActor - Model dropdown with parameters
+  const modelHost = getElementOrNull<HTMLElement>('modelBtn')?.parentElement;
+  let modelSelector: ModelSelectorShadowActor | null = null;
+  if (modelHost) {
+    modelHost.style.position = 'relative';
+    const modelContainer = document.createElement('div');
+    modelContainer.id = 'modelActorHost';
+    modelHost.appendChild(modelContainer);
+    modelSelector = new ModelSelectorShadowActor(manager, modelContainer, vscode);
+  }
+
+  // SettingsShadowActor - Settings dropdown
+  const settingsHost = getElementOrNull<HTMLElement>('settingsBtn')?.parentElement;
+  let settings: SettingsShadowActor | null = null;
+  if (settingsHost) {
+    settingsHost.style.position = 'relative';
+    const settingsContainer = document.createElement('div');
+    settingsContainer.id = 'settingsActorHost';
+    settingsHost.appendChild(settingsContainer);
+    settings = new SettingsShadowActor(manager, settingsContainer, vscode);
+  }
+
   // Wire up inspector toggle button
   const inspectorBtn = getElementOrNull<HTMLButtonElement>('inspectorBtn');
   if (inspectorBtn) {
@@ -183,48 +229,20 @@ function initializeActorSystem(): void {
     });
   }
 
-  // Wire up commands dropdown
+  // Wire up commands dropdown (uses CommandsShadowActor)
   const commandsBtn = getElementOrNull<HTMLButtonElement>('commandsBtn');
-  const commandsDropdown = getElementOrNull<HTMLDivElement>('commandsDropdown');
-
-  if (commandsBtn && commandsDropdown) {
+  if (commandsBtn && commands) {
     commandsBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      const isVisible = commandsDropdown.style.display === 'block';
-      commandsDropdown.style.display = isVisible ? 'none' : 'block';
-    });
-
-    // Handle command clicks
-    commandsDropdown.querySelectorAll('.command-item').forEach(item => {
-      item.addEventListener('click', () => {
-        const command = (item as HTMLElement).dataset.command;
-        if (command) {
-          // Intercept history commands to open modal instead of VS Code command
-          if (command === 'deepseek.showChatHistory' || command === 'deepseek.searchChatHistory') {
-            manager.publishDirect('history.modal.open', true);
-          } else {
-            vscode.postMessage({ type: 'executeCommand', command });
-          }
-          commandsDropdown.style.display = 'none';
-        }
-      });
-    });
-
-    // Close when clicking outside
-    document.addEventListener('click', (e) => {
-      if (!commandsDropdown.contains(e.target as Node) && e.target !== commandsBtn) {
-        commandsDropdown.style.display = 'none';
-      }
+      commands.toggle();
     });
   }
 
   // Set up InputAreaActor handlers
   inputArea.onSend((content, attachments) => {
     // Add user message to UI immediately
+    // File attachments come from InputAreaActor, selected files handled by FilesShadowActor
     const fileNames = attachments?.map(a => a.name) || [];
-    if (selectedFiles.size > 0) {
-      fileNames.push(...Array.from(selectedFiles.keys()));
-    }
     message.addUserMessage(content, fileNames.length > 0 ? fileNames : undefined);
 
     // Send to backend
@@ -247,7 +265,8 @@ function initializeActorSystem(): void {
   });
 
   toolbar.onFilesOpen(() => {
-    openFileModal();
+    // Use the new FilesShadowActor
+    manager.publishDirect('files.modal.open', true);
   });
 
   // Wire toolbar buttons to input area
@@ -610,10 +629,11 @@ function initializeActorSystem(): void {
         hasInterleavedContent = false;
         break;
 
-      // ---- Settings Messages ----
+      // ---- Settings Messages (routed to actors via pub/sub) ----
       case 'modelChanged':
         currentModel = msg.model;
-        updateModelDisplay(msg.model);
+        // Route to ModelSelectorShadowActor
+        manager.publishDirect('model.current', msg.model);
         break;
 
       case 'editModeSettings':
@@ -626,73 +646,38 @@ function initializeActorSystem(): void {
         break;
 
       case 'settings':
-        if (msg.model) {
-          currentModel = msg.model;
-          updateModelDisplay(msg.model);
+        // Route model settings to ModelSelectorShadowActor
+        if (msg.model || msg.temperature !== undefined || msg.maxToolCalls !== undefined || msg.maxTokens !== undefined) {
+          currentModel = msg.model || currentModel;
+          manager.publishDirect('model.settings', {
+            model: msg.model,
+            temperature: msg.temperature,
+            toolLimit: msg.maxToolCalls,
+            maxTokens: msg.maxTokens
+          });
         }
-        if (msg.temperature !== undefined) {
-          updateTemperatureDisplay(msg.temperature);
-        }
-        if (msg.maxToolCalls !== undefined) {
-          updateToolLimitDisplay(msg.maxToolCalls);
-        }
-        if (msg.maxTokens !== undefined) {
-          updateTokenLimitDisplay(msg.maxTokens);
-        }
-        if (msg.logLevel !== undefined && msg.logColors !== undefined) {
-          const logLevelSelect = getElementOrNull<HTMLSelectElement>('logLevelSelect');
-          const logLevelValue = getElementOrNull<HTMLSpanElement>('logLevelValue');
-          const logColorsCheck = getElementOrNull<HTMLInputElement>('logColorsCheck');
-          if (logLevelSelect) logLevelSelect.value = msg.logLevel;
-          if (logLevelValue) logLevelValue.textContent = msg.logLevel;
-          if (logColorsCheck) logColorsCheck.checked = msg.logColors;
-        }
-        if (msg.systemPrompt !== undefined) {
-          const systemPromptInput = getElementOrNull<HTMLTextAreaElement>('systemPromptInput');
-          if (systemPromptInput) systemPromptInput.value = msg.systemPrompt;
-        }
-        // Web search settings
-        if (msg.webSearch) {
-          const searchDepthSelect = getElementOrNull<HTMLSelectElement>('searchDepthSelect');
-          const searchesPerPromptSlider = getElementOrNull<HTMLInputElement>('searchesPerPromptSlider');
-          const searchesPerPromptValue = getElementOrNull<HTMLSpanElement>('searchesPerPromptValue');
-          const cacheDurationSlider = getElementOrNull<HTMLInputElement>('cacheDurationSlider');
-          const cacheDurationValue = getElementOrNull<HTMLSpanElement>('cacheDurationValue');
-          if (searchDepthSelect) searchDepthSelect.value = msg.webSearch.searchDepth || 'basic';
-          if (searchesPerPromptSlider) searchesPerPromptSlider.value = String(msg.webSearch.searchesPerPrompt || 1);
-          if (searchesPerPromptValue) searchesPerPromptValue.textContent = String(msg.webSearch.searchesPerPrompt || 1);
-          if (cacheDurationSlider) cacheDurationSlider.value = String(msg.webSearch.cacheDuration || 15);
-          if (cacheDurationValue) cacheDurationValue.textContent = String(msg.webSearch.cacheDuration || 15);
-        }
-        // History settings
-        if (msg.autoSaveHistory !== undefined) {
-          const autoSaveHistoryCheck = getElementOrNull<HTMLInputElement>('autoSaveHistoryCheck');
-          if (autoSaveHistoryCheck) autoSaveHistoryCheck.checked = msg.autoSaveHistory;
-        }
-        if (msg.maxSessions !== undefined) {
-          const maxSessionsSlider = getElementOrNull<HTMLInputElement>('maxSessionsSlider');
-          const maxSessionsValue = getElementOrNull<HTMLSpanElement>('maxSessionsValue');
-          if (maxSessionsSlider) maxSessionsSlider.value = String(msg.maxSessions);
-          if (maxSessionsValue) maxSessionsValue.textContent = String(msg.maxSessions);
-        }
-        // Reasoner settings
-        if (msg.allowAllCommands !== undefined) {
-          const allowAllCommandsCheck = getElementOrNull<HTMLInputElement>('allowAllCommandsCheck');
-          if (allowAllCommandsCheck) allowAllCommandsCheck.checked = msg.allowAllCommands;
-        }
+
+        // Route settings values to SettingsShadowActor
+        manager.publishDirect('settings.values', {
+          logLevel: msg.logLevel,
+          logColors: msg.logColors,
+          allowAllCommands: msg.allowAllCommands,
+          systemPrompt: msg.systemPrompt,
+          searchDepth: msg.webSearch?.searchDepth,
+          searchesPerPrompt: msg.webSearch?.searchesPerPrompt,
+          cacheDuration: msg.webSearch?.cacheDuration,
+          autoSaveHistory: msg.autoSaveHistory,
+          maxSessions: msg.maxSessions
+        });
         break;
 
-      case 'defaultSystemPrompt': {
-        const defaultPromptPreview = getElementOrNull<HTMLDivElement>('defaultPromptPreview');
-        const defaultPromptModel = getElementOrNull<HTMLElement>('defaultPromptModel');
-        const defaultPromptContent = getElementOrNull<HTMLPreElement>('defaultPromptContent');
-        if (defaultPromptPreview && defaultPromptModel && defaultPromptContent) {
-          defaultPromptModel.textContent = msg.model || 'current model';
-          defaultPromptContent.textContent = msg.prompt || '(no default prompt)';
-          defaultPromptPreview.style.display = 'block';
-        }
+      case 'defaultSystemPrompt':
+        // Route to SettingsShadowActor
+        manager.publishDirect('settings.defaultPrompt', {
+          model: msg.model || 'current model',
+          prompt: msg.prompt || ''
+        });
         break;
-      }
 
       case 'settingsReset':
         // Request fresh settings after reset
@@ -703,22 +688,22 @@ function initializeActorSystem(): void {
         toolbar.setWebSearchEnabled(msg.enabled);
         break;
 
-      // ---- File Messages ----
+      // ---- File Messages (via FilesShadowActor pub/sub) ----
       case 'openFiles':
-        loadOpenFiles(msg.files || []);
+        manager.publishDirect('files.openFiles', msg.files || []);
         break;
 
       case 'searchResults':
-        displaySearchResults(msg.results || []);
+        manager.publishDirect('files.searchResults', msg.results || []);
         break;
 
       case 'fileContent':
-        addFileToSelection(msg.filePath, msg.content);
+        manager.publishDirect('files.content', { path: msg.filePath, content: msg.content });
         break;
 
       // ---- Status Messages ----
       case 'error':
-        statusPanel.showError(msg.message);
+        statusPanel.showError(msg.error || msg.message || 'An error occurred');
         break;
 
       case 'warning':
@@ -773,638 +758,57 @@ function initializeActorSystem(): void {
   });
 
   // ============================================
-  // UI Helper Functions
-  // ============================================
-
-  function updateModelDisplay(model: string): void {
-    const currentModelName = getElementOrNull<HTMLSpanElement>('currentModelName');
-    if (currentModelName) {
-      const displayNames: Record<string, string> = {
-        'deepseek-chat': 'Chat (V3)',
-        'deepseek-reasoner': 'Reasoner (R1)'
-      };
-      currentModelName.textContent = displayNames[model] || model;
-    }
-  }
-
-  function updateTemperatureDisplay(temp: number): void {
-    const tempValue = getElementOrNull<HTMLSpanElement>('tempValue');
-    const tempSlider = getElementOrNull<HTMLInputElement>('tempSlider');
-    if (tempValue) tempValue.textContent = temp.toString();
-    if (tempSlider) tempSlider.value = temp.toString();
-  }
-
-  function updateToolLimitDisplay(limit: number): void {
-    const toolLimitValue = getElementOrNull<HTMLSpanElement>('toolLimitValue');
-    const toolLimitSlider = getElementOrNull<HTMLInputElement>('toolLimitSlider');
-    if (toolLimitValue) toolLimitValue.textContent = limit.toString();
-    if (toolLimitSlider) toolLimitSlider.value = limit.toString();
-  }
-
-  function updateTokenLimitDisplay(limit: number): void {
-    const tokenLimitValue = getElementOrNull<HTMLSpanElement>('tokenLimitValue');
-    const tokenLimitSlider = getElementOrNull<HTMLInputElement>('tokenLimitSlider');
-    // Format with K suffix for readability
-    if (tokenLimitValue) {
-      tokenLimitValue.textContent = limit >= 1000 ? `${(limit / 1024).toFixed(1)}K` : limit.toString();
-    }
-    if (tokenLimitSlider) tokenLimitSlider.value = limit.toString();
-  }
-
-  // ============================================
   // Model Dropdown Handlers
   // ============================================
+  // Legacy UI helper functions removed (updateModelDisplay, updateTemperatureDisplay,
+  // updateToolLimitDisplay, updateTokenLimitDisplay) - actors handle their own display
 
+  // Wire up model dropdown (uses ModelSelectorShadowActor)
   const modelBtn = getElementOrNull<HTMLButtonElement>('modelBtn');
-  const modelDropdown = getElementOrNull<HTMLDivElement>('modelDropdown');
-
-  if (modelBtn && modelDropdown) {
+  if (modelBtn && modelSelector) {
     modelBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      const isVisible = modelDropdown.style.display === 'block';
-      modelDropdown.style.display = isVisible ? 'none' : 'block';
-    });
-
-    // Model option clicks
-    modelDropdown.querySelectorAll('.model-option').forEach(option => {
-      option.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const model = (option as HTMLElement).dataset.model;
-        if (model) {
-          vscode.postMessage({ type: 'selectModel', model });
-          modelDropdown.style.display = 'none';
-        }
-      });
-    });
-
-    // Prevent dropdown from closing when interacting with sliders or other controls inside
-    modelDropdown.addEventListener('click', (e) => {
-      // Only close if clicking a model option, not sliders or other controls
-      const target = e.target as HTMLElement;
-      if (!target.closest('.model-option')) {
-        e.stopPropagation();
-      }
-    });
-
-    // Close dropdown when clicking outside
-    document.addEventListener('click', () => {
-      modelDropdown.style.display = 'none';
+      modelSelector.toggle();
+      // Close settings if open
+      if (settings?.isVisible()) settings.close();
     });
   }
 
   // ============================================
-  // Temperature & Tool Limit Sliders
+  // Settings & Model Selection - Handled by Shadow Actors
   // ============================================
+  // Legacy settings handlers removed - SettingsShadowActor handles:
+  // - Log level, colors, allow all commands
+  // - System prompt (save, reset, show default)
+  // - Web search settings (depth, searches per prompt, cache)
+  // - History settings (auto-save, max sessions, clear)
+  // - Debug test buttons
+  // - Reset to defaults
+  //
+  // ModelSelectorShadowActor handles:
+  // - Model selection
+  // - Temperature, tool limit, max tokens sliders
 
-  const tempSlider = getElementOrNull<HTMLInputElement>('tempSlider');
-  const tempValue = getElementOrNull<HTMLSpanElement>('tempValue');
-  if (tempSlider && tempValue) {
-    tempSlider.addEventListener('input', (e) => {
-      e.stopPropagation();
-      const temp = parseFloat(tempSlider.value);
-      tempValue.textContent = temp.toString();
-      vscode.postMessage({ type: 'setTemperature', temperature: temp });
-    });
-  }
-
-  const toolLimitSlider = getElementOrNull<HTMLInputElement>('toolLimitSlider');
-  const toolLimitValue = getElementOrNull<HTMLSpanElement>('toolLimitValue');
-  if (toolLimitSlider && toolLimitValue) {
-    toolLimitSlider.addEventListener('input', (e) => {
-      e.stopPropagation();
-      const limit = parseInt(toolLimitSlider.value, 10);
-      toolLimitValue.textContent = limit.toString();
-      vscode.postMessage({ type: 'setToolLimit', toolLimit: limit });
-    });
-  }
-
-  const tokenLimitSlider = getElementOrNull<HTMLInputElement>('tokenLimitSlider');
-  const tokenLimitValue = getElementOrNull<HTMLSpanElement>('tokenLimitValue');
-  if (tokenLimitSlider && tokenLimitValue) {
-    tokenLimitSlider.addEventListener('input', (e) => {
-      e.stopPropagation();
-      const limit = parseInt(tokenLimitSlider.value, 10);
-      // Format with K suffix for readability
-      tokenLimitValue.textContent = limit >= 1000 ? `${(limit / 1024).toFixed(1)}K` : limit.toString();
-      vscode.postMessage({ type: 'setMaxTokens', maxTokens: limit });
-    });
-  }
-
-  // ============================================
-  // Settings Dropdown Handlers
-  // ============================================
-
+  // Wire up settings button to SettingsShadowActor
   const settingsBtn = getElementOrNull<HTMLButtonElement>('settingsBtn');
-  const settingsDropdown = getElementOrNull<HTMLDivElement>('settingsDropdown');
-
-  if (settingsBtn && settingsDropdown) {
+  if (settingsBtn && settings) {
     settingsBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      const isVisible = settingsDropdown.style.display === 'block';
-      settingsDropdown.style.display = isVisible ? 'none' : 'block';
+      settings.toggle();
       // Close model dropdown if open
-      if (modelDropdown) modelDropdown.style.display = 'none';
-    });
-
-    // Close when clicking outside
-    document.addEventListener('click', (e) => {
-      if (!settingsDropdown.contains(e.target as Node) && e.target !== settingsBtn) {
-        settingsDropdown.style.display = 'none';
-      }
-    });
-  }
-
-  // Log Level Select
-  const logLevelSelect = getElementOrNull<HTMLSelectElement>('logLevelSelect');
-  const logLevelValue = getElementOrNull<HTMLSpanElement>('logLevelValue');
-  if (logLevelSelect && logLevelValue) {
-    logLevelSelect.addEventListener('change', (e) => {
-      e.stopPropagation();
-      const level = logLevelSelect.value;
-      logLevelValue.textContent = level;
-      vscode.postMessage({ type: 'setLogLevel', logLevel: level });
-    });
-  }
-
-  // Log Colors Checkbox
-  const logColorsCheck = getElementOrNull<HTMLInputElement>('logColorsCheck');
-  if (logColorsCheck) {
-    logColorsCheck.addEventListener('change', (e) => {
-      e.stopPropagation();
-      vscode.postMessage({ type: 'setLogColors', enabled: logColorsCheck.checked });
-    });
-  }
-
-  // Open Logs Button
-  const openLogsBtn = getElementOrNull<HTMLButtonElement>('openLogsBtn');
-  if (openLogsBtn) {
-    openLogsBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      vscode.postMessage({ type: 'openLogs' });
-    });
-  }
-
-  // Walk on the Wild Side Checkbox
-  const allowAllCommandsCheck = getElementOrNull<HTMLInputElement>('allowAllCommandsCheck');
-  if (allowAllCommandsCheck) {
-    allowAllCommandsCheck.addEventListener('change', (e) => {
-      e.stopPropagation();
-      vscode.postMessage({ type: 'setAllowAllCommands', enabled: allowAllCommandsCheck.checked });
-    });
-  }
-
-  // System Prompt
-  const systemPromptInput = getElementOrNull<HTMLTextAreaElement>('systemPromptInput');
-  const saveSystemPromptBtn = getElementOrNull<HTMLButtonElement>('saveSystemPromptBtn');
-  const resetSystemPromptBtn = getElementOrNull<HTMLButtonElement>('resetSystemPromptBtn');
-  const showDefaultPromptBtn = getElementOrNull<HTMLButtonElement>('showDefaultPromptBtn');
-  const defaultPromptPreview = getElementOrNull<HTMLDivElement>('defaultPromptPreview');
-  const defaultPromptModel = getElementOrNull<HTMLElement>('defaultPromptModel');
-  const defaultPromptContent = getElementOrNull<HTMLPreElement>('defaultPromptContent');
-  const closeDefaultPromptBtn = getElementOrNull<HTMLButtonElement>('closeDefaultPromptBtn');
-
-  if (systemPromptInput && saveSystemPromptBtn) {
-    saveSystemPromptBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const prompt = systemPromptInput.value;
-      vscode.postMessage({ type: 'setSystemPrompt', systemPrompt: prompt });
-      // Show feedback
-      const originalText = saveSystemPromptBtn.textContent;
-      saveSystemPromptBtn.textContent = 'Saved!';
-      setTimeout(() => {
-        saveSystemPromptBtn.textContent = originalText;
-      }, 1500);
-    });
-  }
-
-  if (resetSystemPromptBtn && systemPromptInput) {
-    resetSystemPromptBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      systemPromptInput.value = '';
-      vscode.postMessage({ type: 'setSystemPrompt', systemPrompt: '' });
-      // Show feedback
-      const originalText = resetSystemPromptBtn.textContent;
-      resetSystemPromptBtn.textContent = 'Reset!';
-      setTimeout(() => {
-        resetSystemPromptBtn.textContent = originalText;
-      }, 1500);
-    });
-  }
-
-  if (showDefaultPromptBtn) {
-    showDefaultPromptBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      vscode.postMessage({ type: 'getDefaultSystemPrompt' });
-    });
-  }
-
-  if (closeDefaultPromptBtn && defaultPromptPreview) {
-    closeDefaultPromptBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      defaultPromptPreview.style.display = 'none';
+      if (modelSelector?.isVisible()) modelSelector.close();
     });
   }
 
   // ============================================
-  // Web Search Settings
+  // File Selection - Handled by FilesShadowActor
   // ============================================
-
-  const searchDepthSelect = getElementOrNull<HTMLSelectElement>('searchDepthSelect');
-  const searchDepthValue = getElementOrNull<HTMLSpanElement>('searchDepthValue');
-  if (searchDepthSelect && searchDepthValue) {
-    searchDepthSelect.addEventListener('change', (e) => {
-      e.stopPropagation();
-      const depth = searchDepthSelect.value;
-      searchDepthValue.textContent = depth;
-      vscode.postMessage({ type: 'setSearchDepth', searchDepth: depth });
-    });
-  }
-
-  const searchesPerPromptSlider = getElementOrNull<HTMLInputElement>('searchesPerPromptSlider');
-  const searchesPerPromptValue = getElementOrNull<HTMLSpanElement>('searchesPerPromptValue');
-  if (searchesPerPromptSlider && searchesPerPromptValue) {
-    searchesPerPromptSlider.addEventListener('input', (e) => {
-      e.stopPropagation();
-      const value = parseInt(searchesPerPromptSlider.value, 10);
-      searchesPerPromptValue.textContent = value.toString();
-    });
-    searchesPerPromptSlider.addEventListener('change', (e) => {
-      e.stopPropagation();
-      const value = parseInt(searchesPerPromptSlider.value, 10);
-      vscode.postMessage({ type: 'setSearchesPerPrompt', searchesPerPrompt: value });
-    });
-  }
-
-  const cacheDurationSlider = getElementOrNull<HTMLInputElement>('cacheDurationSlider');
-  const cacheDurationValue = getElementOrNull<HTMLSpanElement>('cacheDurationValue');
-  if (cacheDurationSlider && cacheDurationValue) {
-    cacheDurationSlider.addEventListener('input', (e) => {
-      e.stopPropagation();
-      const value = parseInt(cacheDurationSlider.value, 10);
-      cacheDurationValue.textContent = value.toString();
-    });
-    cacheDurationSlider.addEventListener('change', (e) => {
-      e.stopPropagation();
-      const value = parseInt(cacheDurationSlider.value, 10);
-      vscode.postMessage({ type: 'setCacheDuration', cacheDuration: value });
-    });
-  }
-
-  const clearSearchCacheBtn = getElementOrNull<HTMLButtonElement>('clearSearchCacheBtn');
-  if (clearSearchCacheBtn) {
-    clearSearchCacheBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      vscode.postMessage({ type: 'clearSearchCache' });
-      // Show feedback
-      const originalText = clearSearchCacheBtn.textContent;
-      clearSearchCacheBtn.textContent = 'Cleared!';
-      setTimeout(() => {
-        clearSearchCacheBtn.textContent = originalText;
-      }, 1500);
-    });
-  }
-
-  // ============================================
-  // History Settings
-  // ============================================
-
-  const autoSaveHistoryCheck = getElementOrNull<HTMLInputElement>('autoSaveHistoryCheck');
-  if (autoSaveHistoryCheck) {
-    autoSaveHistoryCheck.addEventListener('change', (e) => {
-      e.stopPropagation();
-      vscode.postMessage({ type: 'setAutoSaveHistory', enabled: autoSaveHistoryCheck.checked });
-    });
-  }
-
-  const maxSessionsSlider = getElementOrNull<HTMLInputElement>('maxSessionsSlider');
-  const maxSessionsValue = getElementOrNull<HTMLSpanElement>('maxSessionsValue');
-  if (maxSessionsSlider && maxSessionsValue) {
-    maxSessionsSlider.addEventListener('input', (e) => {
-      e.stopPropagation();
-      const value = parseInt(maxSessionsSlider.value, 10);
-      maxSessionsValue.textContent = value.toString();
-    });
-    maxSessionsSlider.addEventListener('change', (e) => {
-      e.stopPropagation();
-      const value = parseInt(maxSessionsSlider.value, 10);
-      vscode.postMessage({ type: 'setMaxSessions', maxSessions: value });
-    });
-  }
-
-  const clearHistoryBtn = getElementOrNull<HTMLButtonElement>('clearHistoryBtn');
-  if (clearHistoryBtn) {
-    clearHistoryBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      // Confirm before clearing
-      if (confirm('Are you sure you want to clear all chat history? This cannot be undone.')) {
-        vscode.postMessage({ type: 'clearAllHistory' });
-        // Show feedback
-        const originalText = clearHistoryBtn.textContent;
-        clearHistoryBtn.textContent = 'Cleared!';
-        setTimeout(() => {
-          clearHistoryBtn.textContent = originalText;
-        }, 1500);
-      }
-    });
-  }
-
-  // ============================================
-  // Debug Test Buttons
-  // ============================================
-
-  const testStatusBtn = getElementOrNull<HTMLButtonElement>('testStatusBtn');
-  if (testStatusBtn) {
-    testStatusBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      statusPanel.showMessage('This is a test status message');
-    });
-  }
-
-  const testWarningBtn = getElementOrNull<HTMLButtonElement>('testWarningBtn');
-  if (testWarningBtn) {
-    testWarningBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      statusPanel.showWarning('This is a test warning message');
-    });
-  }
-
-  const testErrorBtn = getElementOrNull<HTMLButtonElement>('testErrorBtn');
-  if (testErrorBtn) {
-    testErrorBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      statusPanel.showError('This is a test error message');
-    });
-  }
-
-  // ============================================
-  // Reset to Defaults
-  // ============================================
-
-  const resetDefaultsBtn = getElementOrNull<HTMLButtonElement>('resetDefaultsBtn');
-  if (resetDefaultsBtn) {
-    resetDefaultsBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      if (confirm('Reset all settings to their default values?')) {
-        vscode.postMessage({ type: 'resetToDefaults' });
-        // Show feedback
-        const originalText = resetDefaultsBtn.textContent;
-        resetDefaultsBtn.textContent = 'Reset!';
-        setTimeout(() => {
-          resetDefaultsBtn.textContent = originalText;
-        }, 1500);
-      }
-    });
-  }
-
-  // ============================================
-  // File Selection Modal Handlers
-  // ============================================
-
-  const filesBtn = getElementOrNull<HTMLButtonElement>('filesBtn');
-  const fileModalOverlay = getElementOrNull<HTMLDivElement>('fileModalOverlay');
-  const fileModalClose = getElementOrNull<HTMLButtonElement>('fileModalClose');
-  const fileModalCancel = getElementOrNull<HTMLButtonElement>('fileModalCancel');
-  const fileModalAdd = getElementOrNull<HTMLButtonElement>('fileModalAdd');
-  const fileSearchInput = getElementOrNull<HTMLInputElement>('fileSearchInput');
-  const clearSelectedBtn = getElementOrNull<HTMLButtonElement>('clearSelectedBtn');
-
-  function openFileModal(): void {
-    if (!fileModalOverlay) return;
-    vscode.postMessage({ type: 'getOpenFiles' });
-    vscode.postMessage({ type: 'fileModalOpened' });
-    fileModalOverlay.style.display = 'flex';
-    setTimeout(() => fileSearchInput?.focus(), 100);
-  }
-
-  function closeFileModal(): void {
-    if (!fileModalOverlay) return;
-    vscode.postMessage({ type: 'fileModalClosed' });
-    fileModalOverlay.style.display = 'none';
-    if (fileSearchInput) fileSearchInput.value = '';
-    const fileSearchResults = getElementOrNull<HTMLDivElement>('fileSearchResults');
-    if (fileSearchResults) {
-      fileSearchResults.style.display = 'none';
-      fileSearchResults.innerHTML = '';
-    }
-  }
-
-  if (filesBtn) filesBtn.addEventListener('click', openFileModal);
-  if (fileModalClose) fileModalClose.addEventListener('click', closeFileModal);
-  if (fileModalCancel) fileModalCancel.addEventListener('click', closeFileModal);
-  if (fileModalOverlay) {
-    fileModalOverlay.addEventListener('click', (e) => {
-      if (e.target === fileModalOverlay) closeFileModal();
-    });
-  }
-
-  if (fileModalAdd) {
-    fileModalAdd.addEventListener('click', () => {
-      const filesData = Array.from(selectedFiles.entries()).map(([path, content]) => ({ path, content }));
-      vscode.postMessage({ type: 'setSelectedFiles', files: filesData });
-      renderFileChips();
-      closeFileModal();
-    });
-  }
-
-  if (clearSelectedBtn) {
-    clearSelectedBtn.addEventListener('click', () => {
-      selectedFiles.clear();
-      updateSelectedFilesList();
-    });
-  }
-
-  let searchTimeout: ReturnType<typeof setTimeout> | null = null;
-  if (fileSearchInput) {
-    fileSearchInput.addEventListener('input', () => {
-      if (searchTimeout) clearTimeout(searchTimeout);
-      searchTimeout = setTimeout(() => {
-        const query = fileSearchInput.value.trim();
-        if (query.length >= 2) {
-          vscode.postMessage({ type: 'searchFiles', query });
-        } else {
-          const fileSearchResults = getElementOrNull<HTMLDivElement>('fileSearchResults');
-          if (fileSearchResults) fileSearchResults.style.display = 'none';
-        }
-      }, 300);
-    });
-  }
-
-  function loadOpenFiles(files: string[]): void {
-    const openFilesList = getElementOrNull<HTMLDivElement>('openFilesList');
-    const openFilesCount = getElementOrNull<HTMLSpanElement>('openFilesCount');
-    if (!openFilesList || !openFilesCount) return;
-
-    openFilesCount.textContent = files.length.toString();
-
-    if (files.length === 0) {
-      openFilesList.innerHTML = '<div class="file-search-no-results">No files currently open</div>';
-      return;
-    }
-
-    openFilesList.innerHTML = '';
-    files.forEach(filePath => {
-      const item = document.createElement('div');
-      item.className = 'open-file-item';
-
-      const checkbox = document.createElement('input');
-      checkbox.type = 'checkbox';
-      checkbox.className = 'open-file-checkbox';
-      checkbox.checked = selectedFiles.has(filePath);
-      checkbox.addEventListener('change', () => {
-        if (checkbox.checked) {
-          vscode.postMessage({ type: 'getFileContent', filePath });
-        } else {
-          selectedFiles.delete(filePath);
-          updateSelectedFilesList();
-        }
-      });
-
-      const name = document.createElement('span');
-      name.className = 'open-file-name';
-      name.textContent = filePath;
-      name.title = filePath;
-
-      item.appendChild(checkbox);
-      item.appendChild(name);
-      openFilesList.appendChild(item);
-    });
-  }
-
-  function displaySearchResults(results: string[]): void {
-    const fileSearchResults = getElementOrNull<HTMLDivElement>('fileSearchResults');
-    if (!fileSearchResults) return;
-
-    if (results.length === 0) {
-      fileSearchResults.innerHTML = '<div class="file-search-no-results">No files found</div>';
-      fileSearchResults.style.display = 'block';
-      return;
-    }
-
-    fileSearchResults.innerHTML = '';
-    fileSearchResults.style.display = 'block';
-
-    results.forEach(filePath => {
-      const item = document.createElement('div');
-      item.className = 'file-search-result-item';
-      item.textContent = filePath;
-      item.title = filePath;
-      item.addEventListener('click', () => {
-        vscode.postMessage({ type: 'getFileContent', filePath });
-        if (fileSearchInput) fileSearchInput.value = '';
-        fileSearchResults.style.display = 'none';
-      });
-      fileSearchResults.appendChild(item);
-    });
-  }
-
-  function addFileToSelection(filePath: string, content: string): void {
-    selectedFiles.set(filePath, content);
-    updateSelectedFilesList();
-
-    // Update checkbox in open files list
-    const openFilesList = getElementOrNull<HTMLDivElement>('openFilesList');
-    if (openFilesList) {
-      openFilesList.querySelectorAll('.open-file-item').forEach(item => {
-        const name = item.querySelector('.open-file-name');
-        const checkbox = item.querySelector('.open-file-checkbox') as HTMLInputElement;
-        if (name && checkbox && name.textContent === filePath) {
-          checkbox.checked = true;
-        }
-      });
-    }
-  }
-
-  function updateSelectedFilesList(): void {
-    const selectedFilesList = getElementOrNull<HTMLDivElement>('selectedFilesList');
-    const selectedFilesCount = getElementOrNull<HTMLSpanElement>('selectedFilesCount');
-    if (!selectedFilesList || !selectedFilesCount) return;
-
-    selectedFilesCount.textContent = selectedFiles.size.toString();
-
-    if (selectedFiles.size === 0) {
-      selectedFilesList.innerHTML = '<div class="selected-files-empty">No files selected</div>';
-      if (clearSelectedBtn) clearSelectedBtn.style.display = 'none';
-      if (fileModalAdd) fileModalAdd.disabled = true;
-      updateFilesButtonState();
-      return;
-    }
-
-    if (clearSelectedBtn) clearSelectedBtn.style.display = 'inline-block';
-    if (fileModalAdd) fileModalAdd.disabled = false;
-    selectedFilesList.innerHTML = '';
-
-    selectedFiles.forEach((_, filePath) => {
-      const chip = document.createElement('div');
-      chip.className = 'selected-file-chip';
-
-      const name = document.createElement('span');
-      name.className = 'selected-file-name';
-      name.textContent = filePath;
-      name.title = filePath;
-
-      const removeBtn = document.createElement('button');
-      removeBtn.className = 'selected-file-remove';
-      removeBtn.textContent = '×';
-      removeBtn.title = 'Remove';
-      removeBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        selectedFiles.delete(filePath);
-        updateSelectedFilesList();
-      });
-
-      chip.appendChild(name);
-      chip.appendChild(removeBtn);
-      selectedFilesList.appendChild(chip);
-    });
-
-    updateFilesButtonState();
-  }
-
-  function updateFilesButtonState(): void {
-    if (filesBtn) {
-      filesBtn.classList.toggle('active', selectedFiles.size > 0);
-    }
-  }
-
-  function renderFileChips(): void {
-    const fileChipsContainer = getElementOrNull<HTMLDivElement>('fileChipsContainer');
-    const fileChips = getElementOrNull<HTMLDivElement>('fileChips');
-    if (!fileChipsContainer || !fileChips) return;
-
-    if (selectedFiles.size === 0) {
-      fileChipsContainer.style.display = 'none';
-      fileChips.innerHTML = '';
-      return;
-    }
-
-    fileChipsContainer.style.display = 'flex';
-    fileChips.innerHTML = '';
-
-    selectedFiles.forEach((_, filePath) => {
-      const chip = document.createElement('div');
-      chip.className = 'file-chip';
-
-      const name = document.createElement('span');
-      name.className = 'file-chip-name';
-      name.textContent = filePath;
-      name.title = filePath;
-
-      const removeBtn = document.createElement('button');
-      removeBtn.className = 'file-chip-remove';
-      removeBtn.textContent = '×';
-      removeBtn.title = 'Remove';
-      removeBtn.addEventListener('click', () => {
-        selectedFiles.delete(filePath);
-        renderFileChips();
-        const filesData = Array.from(selectedFiles.entries()).map(([path, content]) => ({ path, content }));
-        vscode.postMessage({ type: 'setSelectedFiles', files: filesData });
-      });
-
-      chip.appendChild(name);
-      chip.appendChild(removeBtn);
-      fileChips.appendChild(chip);
-    });
-  }
+  // Legacy file modal code removed - FilesShadowActor handles:
+  // - Opening/closing modal via 'files.modal.open' subscription
+  // - Displaying open files via 'files.openFiles' subscription
+  // - Search via 'files.searchResults' subscription
+  // - File content via 'files.content' subscription
+  // - All UI rendering and state management
 
   // ============================================
   // Request Initial Settings

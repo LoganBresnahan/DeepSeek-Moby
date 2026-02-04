@@ -8,6 +8,7 @@
 import { deepEqual, deepClone, wildcardMatch } from '../utils';
 import { EventStateLogger } from './EventStateLogger';
 import type { ActorRegistration, StateChangeEvent, GlobalState } from './types';
+import { shadowBaseStyles, interleavedBaseStyles } from './sharedStyles';
 
 export class EventStateManager {
   /** Global state store */
@@ -15,6 +16,12 @@ export class EventStateManager {
 
   /** Registered actors */
   private actors: Map<string, ActorRegistration> = new Map();
+
+  /** Subscription index: exact key → Set of actor IDs (O(1) lookup) */
+  private exactSubscriptions: Map<string, Set<string>> = new Map();
+
+  /** Subscription index: wildcard pattern → Set of actor IDs (O(w) where w = wildcard count) */
+  private wildcardSubscriptions: Map<string, Set<string>> = new Map();
 
   /** Maximum publication chain depth before warning/blocking */
   private maxChainDepth = 10;
@@ -25,6 +32,13 @@ export class EventStateManager {
   /** CSS injection tracking */
   private injectedStyles: Set<string> = new Set();
   private styleElement: HTMLStyleElement | null = null;
+
+  /** Adopted stylesheets cache: CSS string hash → CSSStyleSheet */
+  private stylesheetCache: Map<string, CSSStyleSheet> = new Map();
+
+  /** Pre-parsed shared base stylesheets */
+  private _shadowBaseSheet: CSSStyleSheet | null = null;
+  private _interleavedBaseSheet: CSSStyleSheet | null = null;
 
   constructor() {
     this.logger = new EventStateLogger();
@@ -87,11 +101,112 @@ export class EventStateManager {
     return this.styleElement?.textContent ?? '';
   }
 
+  // ============================================
+  // Adopted StyleSheets Management
+  // ============================================
+
+  /**
+   * Get or create a CSSStyleSheet from CSS string.
+   * Caches parsed stylesheets to avoid duplicate parsing.
+   *
+   * This is the core of the adoptedStyleSheets optimization:
+   * - Parse CSS once, share the CSSStyleSheet object across multiple shadow roots
+   * - Reduces memory usage (one parsed CSSOM tree vs N copies)
+   * - Eliminates redundant CSS parsing
+   *
+   * @param css - CSS string to parse
+   * @param cacheKey - Optional cache key (defaults to CSS string hash)
+   * @returns CSSStyleSheet that can be adopted by shadow roots
+   */
+  getStyleSheet(css: string, cacheKey?: string): CSSStyleSheet {
+    const key = cacheKey ?? this.hashString(css);
+
+    let sheet = this.stylesheetCache.get(key);
+    if (!sheet) {
+      sheet = new CSSStyleSheet();
+      sheet.replaceSync(css);
+      this.stylesheetCache.set(key, sheet);
+    }
+
+    return sheet;
+  }
+
+  /**
+   * Get the shared base stylesheet for ShadowActor.
+   * Lazily created on first access.
+   */
+  getShadowBaseSheet(): CSSStyleSheet {
+    if (!this._shadowBaseSheet) {
+      this._shadowBaseSheet = new CSSStyleSheet();
+      this._shadowBaseSheet.replaceSync(shadowBaseStyles);
+    }
+    return this._shadowBaseSheet;
+  }
+
+  /**
+   * Get the shared base stylesheet for InterleavedShadowActor.
+   * Lazily created on first access.
+   */
+  getInterleavedBaseSheet(): CSSStyleSheet {
+    if (!this._interleavedBaseSheet) {
+      this._interleavedBaseSheet = new CSSStyleSheet();
+      this._interleavedBaseSheet.replaceSync(interleavedBaseStyles);
+    }
+    return this._interleavedBaseSheet;
+  }
+
+  /**
+   * Clear stylesheet cache (for testing).
+   */
+  resetStyleSheets(): void {
+    this.stylesheetCache.clear();
+    this._shadowBaseSheet = null;
+    this._interleavedBaseSheet = null;
+  }
+
+  /**
+   * Get stylesheet cache size (for testing/debugging).
+   */
+  getStyleSheetCacheSize(): number {
+    return this.stylesheetCache.size;
+  }
+
+  /**
+   * Simple string hash for cache keys.
+   * Uses djb2 algorithm - fast and good distribution for CSS strings.
+   */
+  private hashString(str: string): string {
+    let hash = 5381;
+    for (let i = 0; i < str.length; i++) {
+      hash = ((hash << 5) + hash) + str.charCodeAt(i);
+      hash = hash & hash; // Convert to 32-bit integer
+    }
+    return 'css_' + Math.abs(hash).toString(36);
+  }
+
   /**
    * Register an actor with the manager
    */
   register(actor: ActorRegistration, initialState: GlobalState): void {
     this.actors.set(actor.actorId, actor);
+
+    // Build subscription index for O(1) lookup
+    for (const pattern of actor.subscriptionKeys) {
+      if (pattern.includes('*')) {
+        // Wildcard pattern - store separately
+        if (!this.wildcardSubscriptions.has(pattern)) {
+          this.wildcardSubscriptions.set(pattern, new Set());
+        }
+        this.wildcardSubscriptions.get(pattern)!.add(actor.actorId);
+      } else {
+        // Exact key - O(1) indexable
+        if (!this.exactSubscriptions.has(pattern)) {
+          this.exactSubscriptions.set(pattern, new Set());
+        }
+        this.exactSubscriptions.get(pattern)!.add(actor.actorId);
+      }
+    }
+
     this.logger.actorRegister(
       actor.actorId,
       actor.publicationKeys,
@@ -110,6 +225,27 @@ export class EventStateManager {
    * Unregister an actor from the manager
    */
   unregister(actorId: string): void {
+    const actor = this.actors.get(actorId);
+
+    // Clean up subscription index
+    if (actor) {
+      for (const pattern of actor.subscriptionKeys) {
+        if (pattern.includes('*')) {
+          this.wildcardSubscriptions.get(pattern)?.delete(actorId);
+          // Clean up empty sets
+          if (this.wildcardSubscriptions.get(pattern)?.size === 0) {
+            this.wildcardSubscriptions.delete(pattern);
+          }
+        } else {
+          this.exactSubscriptions.get(pattern)?.delete(actorId);
+          // Clean up empty sets
+          if (this.exactSubscriptions.get(pattern)?.size === 0) {
+            this.exactSubscriptions.delete(pattern);
+          }
+        }
+      }
+    }
+
     this.actors.delete(actorId);
     this.logger.actorUnregister(actorId, this.actors.size);
   }
@@ -209,29 +345,58 @@ export class EventStateManager {
 
   /**
    * Broadcast state changes to subscribed actors
+   *
+   * Uses indexed subscriptions for O(1) exact key lookup.
+   * Wildcard patterns are O(w) where w = number of wildcard patterns (typically small).
+   * This replaces the previous O(n) scan of all actors.
    */
   private broadcast(source: string, changedKeys: string[], chain: string[]): void {
     const newChain = [...chain, source];
 
-    for (const [actorId, actor] of this.actors) {
-      // Skip the source actor
-      if (actorId === source) continue;
+    // Collect subscribers: actorId → Set of relevant keys
+    const subscriberKeys = new Map<string, Set<string>>();
 
-      // Find keys this actor cares about (supports wildcards)
-      const relevantKeys = changedKeys.filter(key =>
-        actor.subscriptionKeys.some(pattern => wildcardMatch(key, pattern))
-      );
-
-      if (relevantKeys.length > 0) {
-        this.logger.broadcastToActor(actorId, relevantKeys);
-        this.dispatchToActor(actor, {
-          source,
-          state: this.getStateForKeys(relevantKeys),
-          changedKeys: relevantKeys,
-          publicationChain: newChain,
-          timestamp: Date.now()
-        });
+    for (const key of changedKeys) {
+      // O(1) exact subscription lookup
+      const exactSubscribers = this.exactSubscriptions.get(key);
+      if (exactSubscribers) {
+        for (const actorId of exactSubscribers) {
+          if (actorId === source) continue; // Skip source actor
+          if (!subscriberKeys.has(actorId)) {
+            subscriberKeys.set(actorId, new Set());
+          }
+          subscriberKeys.get(actorId)!.add(key);
+        }
       }
+
+      // O(w) wildcard pattern check - iterate wildcard patterns, not all actors
+      for (const [pattern, subscribers] of this.wildcardSubscriptions) {
+        if (wildcardMatch(key, pattern)) {
+          for (const actorId of subscribers) {
+            if (actorId === source) continue; // Skip source actor
+            if (!subscriberKeys.has(actorId)) {
+              subscriberKeys.set(actorId, new Set());
+            }
+            subscriberKeys.get(actorId)!.add(key);
+          }
+        }
+      }
+    }
+
+    // Dispatch to each subscriber with their relevant keys
+    for (const [actorId, keysSet] of subscriberKeys) {
+      const actor = this.actors.get(actorId);
+      if (!actor) continue; // Actor may have been unregistered
+
+      const relevantKeys = Array.from(keysSet);
+      this.logger.broadcastToActor(actorId, relevantKeys);
+      this.dispatchToActor(actor, {
+        source,
+        state: this.getStateForKeys(relevantKeys),
+        changedKeys: relevantKeys,
+        publicationChain: newChain,
+        timestamp: Date.now()
+      });
     }
   }
 

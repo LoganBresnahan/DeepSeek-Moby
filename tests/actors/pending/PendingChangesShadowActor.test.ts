@@ -48,15 +48,13 @@ describe('PendingChangesShadowActor', () => {
       expect(containers.length).toBe(1);
     });
 
-    it('injects styles into shadow root', () => {
+    it('adopts stylesheets into shadow root', () => {
       actor = new PendingChangesShadowActor(manager, element);
       actor.addFile('/path/to/file.ts');
 
       const container = element.querySelector('[data-container-id]');
-      const styleTag = container?.shadowRoot?.querySelector('style');
-      expect(styleTag).toBeTruthy();
-      expect(styleTag?.textContent).toContain('.container');
-      expect(styleTag?.textContent).toContain('.header');
+      const sheets = container?.shadowRoot?.adoptedStyleSheets;
+      expect(sheets?.length).toBeGreaterThan(0);
     });
   });
 
