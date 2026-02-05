@@ -70,6 +70,9 @@ export const messageShadowStyles = `
   color: var(--vscode-editor-foreground, #cccccc);
   word-wrap: break-word;
   overflow-wrap: break-word;
+  padding-top: 15px;
+  padding-right: 0px;
+  padding-bottom: 15px;
 }
 
 .content p {

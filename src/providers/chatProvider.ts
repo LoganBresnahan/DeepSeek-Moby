@@ -2822,22 +2822,37 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
    */
   private async applyCodeDirectlyForAutoMode(filePath: string, code: string, description?: string) {
     try {
-      // Find the file in the workspace
-      const workspaceFolders = vscode.workspace.workspaceFolders;
-      if (!workspaceFolders || workspaceFolders.length === 0) {
-        throw new Error('No workspace folder open');
+      // Find the file - handle both absolute and relative paths
+      let fileUri: vscode.Uri | undefined;
+
+      // Check if path is absolute (Unix: starts with /, Windows: starts with drive letter)
+      const isAbsolutePath = filePath.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(filePath);
+
+      if (isAbsolutePath) {
+        // Try absolute path directly
+        const absoluteUri = vscode.Uri.file(filePath);
+        try {
+          await vscode.workspace.fs.stat(absoluteUri);
+          fileUri = absoluteUri;
+        } catch {
+          // Absolute path doesn't exist, will fall through to workspace search
+        }
       }
 
-      // Try to find the file
-      let fileUri: vscode.Uri | undefined;
-      for (const folder of workspaceFolders) {
-        const possibleUri = vscode.Uri.joinPath(folder.uri, filePath);
-        try {
-          await vscode.workspace.fs.stat(possibleUri);
-          fileUri = possibleUri;
-          break;
-        } catch {
-          // File doesn't exist in this folder, continue
+      // If not found via absolute path, try workspace-relative
+      if (!fileUri) {
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        if (workspaceFolders && workspaceFolders.length > 0) {
+          for (const folder of workspaceFolders) {
+            const possibleUri = vscode.Uri.joinPath(folder.uri, filePath);
+            try {
+              await vscode.workspace.fs.stat(possibleUri);
+              fileUri = possibleUri;
+              break;
+            } catch {
+              // File doesn't exist in this folder, continue
+            }
+          }
         }
       }
 

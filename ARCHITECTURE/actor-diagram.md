@@ -25,7 +25,7 @@ Visual map of all actors, their relationships, and identified gaps.
 │              └─────────────────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘│
 │                                                                                  │
 │  ┌────────────────────────────────────────────────────────────────────────────┐ │
-│  │ #currentModelName ← Updated by HeaderShadowActor (subscribes to session)   │ │
+│  │ #currentModelName ← Updated by HeaderActor (subscribes to session)   │ │
 │  │ #toastContainer (static div) ← No actor                                    │ │
 │  └────────────────────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────────────────┘
@@ -134,7 +134,7 @@ Visual map of all actors, their relationships, and identified gaps.
 | EditModeActor | State-only | Hidden | Edit mode state (manual/ask/auto) |
 | StreamingActor | State-only | Hidden | Streaming state management |
 | ScrollActor | State-only | chatMessages | Auto-scroll behavior |
-| HeaderShadowActor | Light DOM | Header | Updates #currentModelName |
+| HeaderActor | Light DOM | Header | Updates #currentModelName |
 | MessageShadowActor | Interleaved | chatMessages | User/assistant messages |
 | ShellShadowActor | Interleaved | chatMessages | Shell command output |
 | ToolCallsShadowActor | Interleaved | chatMessages | Tool call badges |
@@ -158,7 +158,7 @@ Visual map of all actors, their relationships, and identified gaps.
 |-------|------|--------|-------|
 | MessageGatewayActor | Gateway | ✅ INTEGRATED | Boundary between extension and actor system. Routes ALL external messages. See [message-gateway.md](message-gateway.md) |
 | SessionActor | State | ✅ INTEGRATED | Publishes session.* state. Handlers called by gateway. |
-| HeaderShadowActor | Light DOM | ✅ INTEGRATED | Minimal version - subscribes to session.model, updates #currentModelName |
+| HeaderActor | Light DOM | ✅ INTEGRATED | Minimal version - subscribes to session.model, updates #currentModelName |
 | EditModeActor | State | ✅ INTEGRATED | Manages edit mode state (manual/ask/auto) |
 
 ### ❌ DELETED (No longer exists)
@@ -186,7 +186,7 @@ Visual map of all actors, their relationships, and identified gaps.
 
 **Problem:** `#currentModelName` span was static HTML.
 
-**Solution:** HeaderShadowActor (minimal version) now:
+**Solution:** HeaderActor (minimal version) now:
 - Subscribes to `session.model`
 - Updates `#currentModelName` element when model changes
 - Uses light DOM (finds existing elements) rather than Shadow DOM
@@ -196,7 +196,7 @@ Current Flow:
 Extension ─► sessionCreated/modelChanged ─► SessionActor
                                                 │
                                                 ▼ publishes session.model
-                                           HeaderShadowActor
+                                           HeaderActor
                                                 │
                                                 ▼ updates
                                            #currentModelName
@@ -210,7 +210,7 @@ Extension ─► sessionCreated/modelChanged ─► SessionActor
 
 **Status:** Low priority - current design doesn't include visible session titles.
 
-**If needed:** HeaderShadowActor already subscribes to `session.title` and could display it.
+**If needed:** HeaderActor already subscribes to `session.title` and could display it.
 
 ---
 
@@ -319,7 +319,7 @@ But if we had a HeaderActor, it could own these handlers.
 │   - SettingsShadowActor ────► settings dropdown                                 │
 │                                                                                  │
 │   Subscribers to session.model:                                                  │
-│   - HeaderShadowActor ──────► updates #currentModelName                         │
+│   - HeaderActor ──────► updates #currentModelName                         │
 │                                                                                  │
 │   Subscribers to streaming.active:                                               │
 │   - InputAreaShadowActor ───► shows send/stop button                            │
@@ -332,7 +332,7 @@ But if we had a HeaderActor, it could own these handlers.
 ## Recommended Changes
 
 ### ✅ Priority 1: Fix Model Name Bug - COMPLETED
-HeaderShadowActor (minimal version) now subscribes to `session.model` and updates `#currentModelName`.
+HeaderActor (minimal version) now subscribes to `session.model` and updates `#currentModelName`.
 
 ### ✅ Priority 2: Implement SessionActor - COMPLETED
 - SessionActor instantiated in chat.ts
@@ -340,8 +340,8 @@ HeaderShadowActor (minimal version) now subscribes to `session.model` and update
 - Publishes `session.model`, `session.title`, `session.id`, `session.loading`, `session.error`
 - Extension updated to send these messages in `chatProvider.ts`
 
-### ✅ Priority 3: HeaderShadowActor - COMPLETED (Option B)
-Chose **Option B: Minimal HeaderShadowActor**
+### ✅ Priority 3: HeaderActor - COMPLETED (Option B)
+Chose **Option B: Minimal HeaderActor**
 - Subscribes to `session.model` and `session.title`
 - Updates existing DOM elements (light DOM, not Shadow DOM)
 - Does NOT duplicate functionality of other popup actors
@@ -360,7 +360,7 @@ media/actors/
 ├── diff/              DiffShadowActor          ✅ USED (embedded in pending)
 ├── edit-mode/         EditModeActor            ✅ USED (edit mode state)
 ├── files/             FilesShadowActor         ✅ USED
-├── header/            HeaderShadowActor        ✅ USED (minimal, updates model name)
+├── header/            HeaderActor        ✅ USED (minimal, updates model name)
 ├── history/           HistoryShadowActor       ✅ USED
 ├── input-area/        InputAreaShadowActor     ✅ USED
 ├── message/           MessageShadowActor       ✅ USED

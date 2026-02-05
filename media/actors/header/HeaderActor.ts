@@ -1,11 +1,14 @@
 /**
- * HeaderShadowActor (Minimal Version)
+ * HeaderActor
  *
- * Lightweight actor that updates header display elements.
- * Subscribes to session state and updates the UI accordingly.
+ * Lightweight actor that updates header display elements in light DOM.
+ * Subscribes to session state and updates existing UI elements accordingly.
  *
- * This is a refactored minimal version - the old version duplicated
- * functionality that now exists in separate actors (ModelSelectorShadowActor,
+ * NOTE: This actor does NOT use Shadow DOM. It receives references to
+ * pre-existing elements and updates them when state changes.
+ *
+ * This is a minimal version - the old HeaderShadowActor was refactored when
+ * its functionality moved to separate actors (ModelSelectorShadowActor,
  * HistoryShadowActor, etc).
  *
  * Publications:
@@ -25,16 +28,23 @@ export interface HeaderState {
   title: string;
 }
 
-export class HeaderShadowActor extends EventStateActor {
+export interface HeaderElements {
+  /** Element to display model name (e.g., "Chat (V3)") */
+  modelNameEl: HTMLElement;
+  /** Optional element to display session title */
+  titleEl?: HTMLElement;
+}
+
+export class HeaderActor extends EventStateActor {
   // Internal state
   private _model = 'deepseek-chat';
   private _title = 'New Chat';
 
-  // DOM elements (found in light DOM, not owned)
+  // DOM elements (passed in, not owned)
   private _modelNameEl: HTMLElement | null = null;
   private _titleEl: HTMLElement | null = null;
 
-  constructor(manager: EventStateManager, element: HTMLElement) {
+  constructor(manager: EventStateManager, element: HTMLElement, elements: HeaderElements) {
     const config: ActorConfig = {
       manager,
       element,
@@ -48,25 +58,9 @@ export class HeaderShadowActor extends EventStateActor {
 
     super(config);
 
-    // Find existing DOM elements to update
-    this.findElements();
-  }
-
-  // ============================================
-  // Element Discovery
-  // ============================================
-
-  private findElements(): void {
-    // Model name is in the header button
-    this._modelNameEl = document.getElementById('currentModelName');
-
-    // Title element - currently doesn't exist in the UI but could be added
-    // If we want to add session title display, add an element with id="sessionTitle"
-    this._titleEl = document.getElementById('sessionTitle');
-
-    if (!this._modelNameEl) {
-      console.warn('[HeaderShadowActor] #currentModelName element not found');
-    }
+    // Store element references (passed in from caller)
+    this._modelNameEl = elements.modelNameEl;
+    this._titleEl = elements.titleEl ?? null;
   }
 
   // ============================================
@@ -129,10 +123,9 @@ export class HeaderShadowActor extends EventStateActor {
   }
 
   /**
-   * Force refresh element references (useful if DOM changes)
+   * Force refresh displays (useful after element content is externally modified)
    */
-  refreshElements(): void {
-    this.findElements();
+  refreshDisplays(): void {
     this.updateModelDisplay();
     this.updateTitleDisplay();
   }

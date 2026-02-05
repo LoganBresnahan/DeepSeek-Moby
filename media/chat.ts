@@ -10,7 +10,7 @@ import {
   StreamingActor,
   ScrollActor,
   SessionActor,
-  HeaderShadowActor,
+  HeaderActor,
   EditModeActor,
   MessageGatewayActor,
   // Shadow DOM actors - own their DOM
@@ -115,13 +115,14 @@ function initializeActorSystem(): void {
   // Cast vscode to any - SessionActor's VSCodeAPI type is compatible but uses `unknown` for setState
   const session = new SessionActor(manager, sessionHost, vscode as any);
 
-  // HeaderShadowActor - subscribes to session.model and updates #currentModelName display
-  // Uses light DOM (finds existing elements) rather than Shadow DOM
+  // HeaderActor - subscribes to session.model and updates #currentModelName display
+  // Element references are passed in (not found via document.getElementById)
   const headerHost = document.createElement('div');
   headerHost.id = 'headerHost';
   headerHost.style.display = 'none';
   document.body.appendChild(headerHost);
-  const header = new HeaderShadowActor(manager, headerHost);
+  const modelNameEl = getElement<HTMLElement>('currentModelName');
+  const header = new HeaderActor(manager, headerHost, { modelNameEl });
 
   // EditModeActor - manages edit mode state ('manual' | 'ask' | 'auto')
   // Single source of truth for edit mode, publishes to 'edit.mode'

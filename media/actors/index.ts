@@ -30,9 +30,9 @@ export type { ActorRefs, GatewayPhase } from './message-gateway';
 export { MessageShadowActor } from './message/MessageShadowActor';
 export type { Message, MessageState } from './message/MessageShadowActor';
 
-// Header (minimal version - just updates model name display)
-export { HeaderShadowActor } from './header/HeaderShadowActor';
-export type { HeaderState } from './header/HeaderShadowActor';
+// Header (minimal version - just updates model name display, uses light DOM)
+export { HeaderActor } from './header/HeaderActor';
+export type { HeaderState, HeaderElements } from './header/HeaderActor';
 
 // Sidebar - DELETED (was never used, different UI design)
 // See ARCHITECTURE/actor-diagram.md for details

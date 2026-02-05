@@ -133,13 +133,35 @@ export class DeepSeekClient {
     return this.getModel() === 'deepseek-reasoner';
   }
 
+  /**
+   * Get the maximum allowed output tokens for the current model.
+   * deepseek-chat: 8192
+   * deepseek-reasoner: 65536
+   */
+  getModelMaxTokens(): number {
+    return this.isReasonerModel() ? 65536 : 8192;
+  }
+
+  /**
+   * Clamp max_tokens to the model's valid range [1, modelMax]
+   */
+  private clampMaxTokens(maxTokens: number): number {
+    const modelMax = this.getModelMaxTokens();
+    const clamped = Math.max(1, Math.min(maxTokens, modelMax));
+    if (clamped !== maxTokens) {
+      logger.info(`max_tokens clamped: ${maxTokens} → ${clamped} (model limit: ${modelMax})`);
+    }
+    return clamped;
+  }
+
   // Standard chat completion
   async chat(messages: Message[], systemPrompt?: string, options?: ChatOptions): Promise<ChatResponse> {
     try {
       const apiKey = this.getApiKey();
       const model = this.getModel();
       const temperature = options?.temperature ?? this.config.get<number>('temperature') ?? 0.7;
-      const maxTokens = options?.maxTokens ?? this.config.get<number>('maxTokens') ?? 8192;
+      const rawMaxTokens = options?.maxTokens ?? this.config.get<number>('maxTokens') ?? 8192;
+      const maxTokens = this.clampMaxTokens(rawMaxTokens);
 
       const requestMessages = [...messages].map(m => ({
         role: m.role,
@@ -213,7 +235,8 @@ export class DeepSeekClient {
       // Reasoner model can use up to 64K for reasoning chain + code edits
       // Chat model supports up to 8K output
       const defaultMaxTokens = this.isReasonerModel() ? 16384 : 8192;
-      const maxTokens = options?.maxTokens ?? this.config.get<number>('maxTokens') ?? defaultMaxTokens;
+      const rawMaxTokens = options?.maxTokens ?? this.config.get<number>('maxTokens') ?? defaultMaxTokens;
+      const maxTokens = this.clampMaxTokens(rawMaxTokens);
 
       const requestMessages = [...messages].map(m => ({
         role: m.role,

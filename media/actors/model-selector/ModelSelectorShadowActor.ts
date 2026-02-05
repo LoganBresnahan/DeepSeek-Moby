@@ -107,13 +107,16 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
     const toolLimit = this._toolLimit ?? 25;
     const maxTokens = this._maxTokens ?? 8192;
 
+    // Use the selected model's max tokens as the slider maximum
+    const modelMaxTokens = this.getSelectedModelMaxTokens();
+
     return `
       ${models.map(model => this.renderModelOption(model)).join('')}
       <div class="model-dropdown-divider"></div>
       ${this.renderParameterControl('temperature', 'Temperature', temperature.toString(), 0, 2, 0.1, 'Controls randomness. 0 = deterministic, 2 = very creative')}
       ${this.renderParameterControl('toolLimit', 'Tool Iterations', toolLimit.toString(), 5, 100, 5, 'Limits tool calling loops. 100 = No limit')}
       <div class="model-dropdown-divider"></div>
-      ${this.renderParameterControl('maxTokens', 'Max Output Tokens', this.formatTokens(maxTokens), 256, 65536, 256, this.getTokenHint())}
+      ${this.renderParameterControl('maxTokens', 'Max Output Tokens', this.formatTokens(maxTokens), 256, modelMaxTokens, 256, this.getTokenHint())}
     `;
   }
 
@@ -236,16 +239,18 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
 
   private selectModel(modelId: string): void {
     this._selectedModel = modelId;
-    this.updateSelectedVisual();
 
-    // Update max tokens hint
-    const selectedModel = this._models.find(m => m.id === modelId);
-    if (selectedModel) {
-      const hintEl = this.query<HTMLElement>('[data-param="maxTokens"]')?.parentElement?.querySelector('.parameter-hint');
-      if (hintEl) {
-        hintEl.textContent = this.getTokenHint();
-      }
+    // Clamp maxTokens to new model's limit and update slider
+    const newModelMaxTokens = this.getSelectedModelMaxTokens();
+    if (this._maxTokens > newModelMaxTokens) {
+      this._maxTokens = newModelMaxTokens;
+      // Notify extension of the clamped value
+      this._vscode.postMessage({ type: 'setMaxTokens', maxTokens: this._maxTokens });
+      this.publish({ 'model.maxTokens': this._maxTokens });
     }
+
+    // Re-render to update slider max and hint
+    this.updateBodyContent(this.renderPopupContent());
 
     // Notify handlers
     if (this._onModelChange) {
@@ -309,11 +314,18 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
   }
 
   private getTokenHint(): string {
+    const selectedModel = this._selectedModel || 'deepseek-chat';
+    return `Maximum tokens in response. ${selectedModel === 'deepseek-reasoner' ? 'Reasoner: 64K' : 'Chat: 8K'}`;
+  }
+
+  /**
+   * Get the max tokens limit for the currently selected model.
+   */
+  private getSelectedModelMaxTokens(): number {
     const models = this._models || [];
     const selectedModel = this._selectedModel || 'deepseek-chat';
     const model = models.find(m => m.id === selectedModel);
-    const maxStr = model ? this.formatTokens(model.maxTokens) : '8K';
-    return `Maximum tokens in response. ${selectedModel === 'deepseek-reasoner' ? 'Reasoner: 64K' : 'Chat: 8K'}`;
+    return model?.maxTokens ?? 8192;
   }
 
   // ============================================
