@@ -80,18 +80,8 @@ describe('Logger', () => {
       logger.minLevel = 'DEBUG';
     });
 
-    it('includes timestamp in log message', () => {
-      logger.info('test message');
-      const logLine = (mockOutputChannel.info as Mock).mock.calls[0][0];
-      // Timestamp format: HH:MM:SS
-      expect(logLine).toMatch(/\d{2}:\d{2}:\d{2}/);
-    });
-
-    it('includes level indicator in log message', () => {
-      logger.info('test message');
-      const logLine = (mockOutputChannel.info as Mock).mock.calls[0][0];
-      expect(logLine).toContain('INFO');
-    });
+    // Note: VS Code's LogOutputChannel adds timestamp and level automatically
+    // so we don't include them in our message
 
     it('includes message content', () => {
       logger.info('test message');

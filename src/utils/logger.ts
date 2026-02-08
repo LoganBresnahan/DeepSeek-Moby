@@ -77,39 +77,33 @@ class Logger {
     return LOG_LEVEL_PRIORITY[level] >= LOG_LEVEL_PRIORITY[this._minLevel];
   }
 
-  private formatTimestamp(): string {
-    const now = new Date();
-    const pad = (n: number) => n.toString().padStart(2, '0');
-    return `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
-  }
-
   private colorize(text: string, color: keyof typeof COLORS): string {
     if (!this._useColors) return text;
     return `${COLORS[color]}${text}${COLORS.reset}`;
   }
 
-  private getLevelColor(level: LogLevel): keyof typeof COLORS {
-    switch (level) {
-      case 'DEBUG': return 'debug';
-      case 'INFO': return 'info';
-      case 'WARN': return 'warn';
-      case 'ERROR': return 'error';
-      default: return 'reset';
-    }
-  }
-
+  /**
+   * Format: ":vscode | Moby: 2026-02-08T22:45:23.732Z [INFO] Message"
+   *
+   * We include our own timestamp and level because:
+   * 1. We can't rely on VS Code's level matching ours
+   * 2. Provides clear attribution (logs from Moby extension)
+   * 3. ISO timestamps are unambiguous and LLM-friendly
+   */
   private log(level: LogLevel, message: string, details?: string, component?: keyof typeof COLORS) {
     if (!this.shouldLog(level)) return;
 
-    const timestamp = this.colorize(this.formatTimestamp(), 'timestamp');
-    const levelStr = this.colorize(level.padEnd(5), this.getLevelColor(level));
+    const timestamp = new Date().toISOString();
     const msg = component ? this.colorize(message, component) : message;
 
-    let logLine = `${timestamp} ${levelStr} ${msg}`;
+    // Format: ":vscode | Moby: ISO_TIMESTAMP [LEVEL] message"
+    let logLine = `:vscode | Moby: ${timestamp} [${level}] ${msg}`;
 
     if (details) {
-      const detailLines = details.replace(/\n/g, '\n         ');
-      logLine += `\n         ${this.colorize(detailLines, 'dim')}`;
+      // Indent details to align with message start
+      const indent = '      '; // 6 spaces for alignment under message
+      const detailLines = details.replace(/\n/g, `\n${indent}`);
+      logLine += `\n${indent}${this.colorize(detailLines, 'dim')}`;
     }
 
     // Use the appropriate log method based on level

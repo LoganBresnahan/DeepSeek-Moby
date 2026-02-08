@@ -16,19 +16,25 @@ describe('EventStateLogger', () => {
   describe('configuration', () => {
     it('has default configuration', () => {
       // Default is ERROR level, so debug/info/warn should not log
-      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
+      const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
       testLogger.debug('test message');
       testLogger.info('test message');
       testLogger.warn('test message');
 
-      expect(consoleSpy).not.toHaveBeenCalled();
+      expect(debugSpy).not.toHaveBeenCalled();
+      expect(infoSpy).not.toHaveBeenCalled();
+      expect(warnSpy).not.toHaveBeenCalled();
 
-      consoleSpy.mockRestore();
+      debugSpy.mockRestore();
+      infoSpy.mockRestore();
+      warnSpy.mockRestore();
     });
 
     it('configure updates settings', () => {
-      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
 
       testLogger.configure({ logLevel: LogLevel.DEBUG });
       testLogger.debug('test message');
@@ -39,7 +45,7 @@ describe('EventStateLogger', () => {
     });
 
     it('setLogLevel changes log level', () => {
-      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
 
       testLogger.setLogLevel(LogLevel.INFO);
       testLogger.info('test message');
@@ -78,8 +84,8 @@ describe('EventStateLogger', () => {
       testLogger.setLogLevel(LogLevel.DEBUG);
     });
 
-    it('debug logs with debug icon', () => {
-      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    it('debug logs with debug icon using console.debug', () => {
+      const consoleSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
 
       testLogger.debug('test message');
 
@@ -91,8 +97,8 @@ describe('EventStateLogger', () => {
       consoleSpy.mockRestore();
     });
 
-    it('info logs with info icon', () => {
-      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    it('info logs with info icon using console.info', () => {
+      const consoleSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
 
       testLogger.info('test message');
 
@@ -104,8 +110,8 @@ describe('EventStateLogger', () => {
       consoleSpy.mockRestore();
     });
 
-    it('warn logs with warning icon', () => {
-      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    it('warn logs with warning icon using console.warn', () => {
+      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
       testLogger.warn('test message');
 
@@ -117,8 +123,8 @@ describe('EventStateLogger', () => {
       consoleSpy.mockRestore();
     });
 
-    it('error logs with error icon', () => {
-      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    it('error logs with error icon using console.error', () => {
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
       testLogger.error('test message');
 
@@ -131,7 +137,7 @@ describe('EventStateLogger', () => {
     });
 
     it('logs additional arguments', () => {
-      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
 
       testLogger.info('test', { data: 'value' }, 123);
 
@@ -147,12 +153,13 @@ describe('EventStateLogger', () => {
   });
 
   describe('timestamps', () => {
-    it('shows timestamps when enabled', () => {
-      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    it('shows relative timestamps when useWallClock is false', () => {
+      const consoleSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
 
       testLogger.configure({
         logLevel: LogLevel.DEBUG,
-        showTimestamps: true
+        showTimestamps: true,
+        useWallClock: false
       });
 
       testLogger.debug('test message');
@@ -165,8 +172,28 @@ describe('EventStateLogger', () => {
       consoleSpy.mockRestore();
     });
 
+    it('shows wall clock timestamps when useWallClock is true', () => {
+      const consoleSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
+
+      testLogger.configure({
+        logLevel: LogLevel.DEBUG,
+        showTimestamps: true,
+        useWallClock: true
+      });
+
+      testLogger.debug('test message');
+
+      // Wall clock format: [HH:MM:SS.mmm]
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/\[\d{2}:\d{2}:\d{2}\.\d{3}\]/),
+        'test message'
+      );
+
+      consoleSpy.mockRestore();
+    });
+
     it('hides timestamps when disabled', () => {
-      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
 
       testLogger.configure({
         logLevel: LogLevel.DEBUG,
@@ -179,6 +206,88 @@ describe('EventStateLogger', () => {
         expect.not.stringMatching(/\[\d+\.\d+ms\]/),
         'test message'
       );
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.not.stringMatching(/\[\d{2}:\d{2}:\d{2}\.\d{3}\]/),
+        'test message'
+      );
+
+      consoleSpy.mockRestore();
+    });
+
+    it('uses wall clock by default', () => {
+      const consoleSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
+
+      // Create a fresh logger with default config
+      const freshLogger = new EventStateLogger();
+      freshLogger.setLogLevel(LogLevel.DEBUG);
+
+      freshLogger.debug('test message');
+
+      // Default should be wall clock format: [HH:MM:SS.mmm]
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/\[\d{2}:\d{2}:\d{2}\.\d{3}\]/),
+        'test message'
+      );
+
+      consoleSpy.mockRestore();
+    });
+  });
+
+  describe('configure and resetTimer', () => {
+    it('configure does NOT reset startTime', async () => {
+      const consoleSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
+
+      testLogger.configure({
+        logLevel: LogLevel.DEBUG,
+        showTimestamps: true,
+        useWallClock: false
+      });
+
+      // Wait a bit to accumulate elapsed time
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      // Configure again - should NOT reset the timer
+      testLogger.configure({
+        flatMode: true
+      });
+
+      testLogger.debug('test message');
+
+      // Get the logged timestamp - should be >= 50ms, not reset to ~0
+      const loggedPrefix = consoleSpy.mock.calls[0][0] as string;
+      const match = loggedPrefix.match(/\[(\d+\.\d+)ms\]/);
+      expect(match).toBeTruthy();
+
+      const elapsedMs = parseFloat(match![1]);
+      expect(elapsedMs).toBeGreaterThanOrEqual(40); // Allow some timing variance
+
+      consoleSpy.mockRestore();
+    });
+
+    it('resetTimer explicitly resets startTime', async () => {
+      const consoleSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
+
+      testLogger.configure({
+        logLevel: LogLevel.DEBUG,
+        showTimestamps: true,
+        useWallClock: false
+      });
+
+      // Wait a bit to accumulate elapsed time
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      // Explicitly reset the timer
+      testLogger.resetTimer();
+
+      testLogger.debug('test message');
+
+      // Get the logged timestamp - should be close to 0 since we reset
+      const loggedPrefix = consoleSpy.mock.calls[0][0] as string;
+      const match = loggedPrefix.match(/\[(\d+\.\d+)ms\]/);
+      expect(match).toBeTruthy();
+
+      const elapsedMs = parseFloat(match![1]);
+      expect(elapsedMs).toBeLessThan(20); // Should be near 0, with some tolerance
 
       consoleSpy.mockRestore();
     });
@@ -190,7 +299,7 @@ describe('EventStateLogger', () => {
     });
 
     it('managerInit logs initialization', () => {
-      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
 
       testLogger.managerInit();
 
@@ -219,7 +328,7 @@ describe('EventStateLogger', () => {
     });
 
     it('actorUnregister logs unregistration', () => {
-      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
 
       testLogger.actorUnregister('test-actor', 5);
 
@@ -245,7 +354,7 @@ describe('EventStateLogger', () => {
     });
 
     it('broadcastToActor logs broadcast info', () => {
-      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
 
       testLogger.broadcastToActor('target-actor', ['key1', 'key2']);
 
@@ -409,7 +518,7 @@ describe('EventStateLogger', () => {
   describe('flat mode', () => {
     it('skips console groups in flat mode', () => {
       const groupSpy = vi.spyOn(console, 'group').mockImplementation(() => {});
-      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
 
       testLogger.configure({
         logLevel: LogLevel.DEBUG,

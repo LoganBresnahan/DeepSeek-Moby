@@ -10,7 +10,8 @@ import { LogLevel, type LoggerConfig } from './types';
 export class EventStateLogger {
   private config: LoggerConfig = {
     logLevel: LogLevel.ERROR,
-    showTimestamps: false,
+    showTimestamps: true,      // Changed: enabled by default for debugging
+    useWallClock: true,        // New: wall clock for cross-boundary correlation
     useGroups: true,
     flatMode: false,
     logGlobalState: false
@@ -20,10 +21,19 @@ export class EventStateLogger {
   private componentName = 'EventState';
 
   /**
-   * Configure the logger
+   * Configure the logger.
+   * Note: Does NOT reset startTime - use resetTimer() for that.
    */
   configure(options: Partial<LoggerConfig>): void {
     this.config = { ...this.config, ...options };
+    // Intentionally NOT resetting startTime here - that was a bug
+  }
+
+  /**
+   * Reset the elapsed timer to zero.
+   * Call this explicitly if you need to restart relative timing.
+   */
+  resetTimer(): void {
     this.startTime = performance.now();
   }
 
@@ -60,16 +70,26 @@ export class EventStateLogger {
   }
 
   /**
-   * Get formatted timestamp
+   * Get formatted timestamp.
+   * Wall clock format: [HH:MM:SS.mmm] - correlates with extension logs
+   * Relative format: [1234.5ms] - useful for performance profiling
    */
   private getTimestamp(): string {
     if (!this.config.showTimestamps) return '';
+
+    if (this.config.useWallClock) {
+      const now = new Date();
+      const pad = (n: number, len = 2) => n.toString().padStart(len, '0');
+      return `[${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}.${pad(now.getMilliseconds(), 3)}] `;
+    }
+
     const elapsed = performance.now() - this.startTime;
     return `[${elapsed.toFixed(1)}ms] `;
   }
 
   /**
-   * Internal log method
+   * Internal log method.
+   * Uses appropriate console methods for proper devtools filtering.
    */
   private log(level: LogLevel, icon: string, message: string, ...args: unknown[]): void {
     if (!this.shouldLog(level)) return;
@@ -77,10 +97,24 @@ export class EventStateLogger {
     const timestamp = this.getTimestamp();
     const prefix = `${timestamp}${icon} ${this.componentName}:`;
 
-    if (args.length > 0) {
-      console.log(prefix, message, ...args);
-    } else {
-      console.log(prefix, message);
+    // Use appropriate console method for devtools filtering
+    const logArgs = args.length > 0 ? [prefix, message, ...args] : [prefix, message];
+
+    switch (level) {
+      case LogLevel.DEBUG:
+        console.debug(...logArgs);
+        break;
+      case LogLevel.INFO:
+        console.info(...logArgs);
+        break;
+      case LogLevel.WARN:
+        console.warn(...logArgs);
+        break;
+      case LogLevel.ERROR:
+        console.error(...logArgs);
+        break;
+      default:
+        console.log(...logArgs);
     }
   }
 

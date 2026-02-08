@@ -98,6 +98,13 @@ export interface LoggerConfig {
   /** Show timestamps in logs */
   showTimestamps: boolean;
 
+  /**
+   * Use wall clock time (HH:MM:SS.mmm) instead of relative elapsed time.
+   * Wall clock enables correlation with extension logs across the bridge.
+   * Relative time is useful for performance profiling within the webview.
+   */
+  useWallClock: boolean;
+
   /** Use collapsible console groups */
   useGroups: boolean;
 
