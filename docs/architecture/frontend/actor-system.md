@@ -226,39 +226,37 @@ Current actors in the system:
 
 | Actor | Publications | Subscriptions |
 |-------|-------------|---------------|
+| **VirtualMessageGatewayActor** | `gateway.*` | - |
+| **VirtualListActor** | `virtualList.*` | `streaming.active`, `edit.mode` |
+| **MessageTurnActor** | `turn.*` | - |
 | StreamingActor | `streaming.*` | - |
-| MessageShadowActor | `message.*` | `streaming.*`, `session.id` |
-| ThinkingShadowActor | `thinking.*` | `streaming.thinking` |
-| ShellShadowActor | `shell.*` | - |
-| ToolCallsShadowActor | `toolcalls.*` | - |
-| PendingChangesShadowActor | `pending.*` | - |
+| SessionActor | `session.*` | - |
+| EditModeActor | `edit.*` | - |
 | InputAreaShadowActor | `input.*` | `streaming.active` |
 | StatusPanelShadowActor | `status.*` | - |
 | ToolbarShadowActor | `toolbar.*` | `streaming.active` |
 | HistoryShadowActor | `history.modal.*` | `history.*`, `session.id` |
-| ScrollActor | - | `message.*`, `streaming.*` |
-| **MessageTurnActor** | `turn.*` | - |
-| **VirtualListActor** | `virtualList.*` | `streaming.active` |
+| ScrollActor | - | `turn.*`, `streaming.*` |
+| HeaderActor | - | `session.model`, `session.title` |
+| ModelSelectorShadowActor | `model.*` | `model.current`, `model.settings` |
+| FilesShadowActor | `files.*` | - |
+| CommandsShadowActor | - | - |
+| SettingsShadowActor | - | - |
+| InspectorShadowActor | - | - |
 
-## 1B Architecture: MessageTurnActor
+## Unified Turn Architecture
 
-The **1B architecture** consolidates multiple per-type actors into a single per-turn actor with multiple shadow containers. This enables virtual rendering and actor pooling.
+The **Unified Turn Architecture** consolidates all content types into a single per-turn actor (`MessageTurnActor`) with multiple shadow containers. This is the sole rendering architecture - there is no legacy mode.
 
-### Problem with Current Architecture
+### Why Unified Turns?
 
-The current architecture creates separate actors for each content type:
-- MessageShadowActor (text segments)
-- ThinkingShadowActor (thinking iterations)
-- ToolCallsShadowActor (tool batches)
-- ShellShadowActor (shell segments)
-- PendingChangesShadowActor (pending files)
+Previously, the architecture created separate actors for each content type. This created challenges:
 
-This works but creates challenges for:
-- **Virtual rendering**: Can't easily pool/recycle actors across turns
-- **Coordination**: MessageGatewayActor must orchestrate 5+ separate actors
+- **Virtual rendering**: Couldn't easily pool/recycle actors across turns
+- **Coordination**: Gateway had to orchestrate 5+ separate actors
 - **State management**: Turn-level state scattered across actors
 
-### 1B Solution: MessageTurnActor
+### The Solution: MessageTurnActor
 
 One `MessageTurnActor` per conversation turn that internally creates multiple shadow containers:
 
@@ -481,4 +479,4 @@ this._container.addEventListener('click', (e) => {
 | Virtual Rendering | 100+ items in scrollable lists |
 | Object Pooling | Rapid create/destroy cycles causing GC pauses |
 
-See [REMINDER.md Scalability section](../REMINDER.md#scalability--mitigations) for implementation details.
+See [REMINDER.md Scalability section](../../../REMINDER.md#scalability--mitigations) for implementation details.

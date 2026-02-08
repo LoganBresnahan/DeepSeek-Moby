@@ -10,7 +10,7 @@ This document lists all pub/sub state keys used in the actor system.
 
 Examples:
   streaming.active
-  message.content
+  turn.content
   history.modal.open
 ```
 
@@ -22,59 +22,27 @@ Keys related to AI response streaming.
 
 | Key | Type | Publisher | Subscribers | Description |
 |-----|------|-----------|-------------|-------------|
-| `streaming.active` | `boolean` | StreamingActor | InputAreaShadowActor, ToolbarShadowActor, ScrollActor | Whether a response is being streamed |
-| `streaming.content` | `string` | StreamingActor | MessageShadowActor | Current streamed content |
-| `streaming.thinking` | `string` | StreamingActor | ThinkingShadowActor | Current thinking/reasoning content |
-| `streaming.messageId` | `string` | StreamingActor | MessageShadowActor | ID of current streaming message |
+| `streaming.active` | `boolean` | StreamingActor | InputAreaShadowActor, ToolbarShadowActor, ScrollActor, VirtualListActor | Whether a response is being streamed |
+| `streaming.messageId` | `string` | StreamingActor | VirtualListActor | ID of current streaming message |
 | `streaming.model` | `string` | StreamingActor | - | Model being used |
 
-### message.*
+### turn.*
 
-Keys related to chat messages.
-
-| Key | Type | Publisher | Subscribers | Description |
-|-----|------|-----------|-------------|-------------|
-| `message.added` | `Message` | MessageShadowActor | ScrollActor | New message was added |
-| `message.updated` | `{ id, content }` | MessageShadowActor | - | Message content updated |
-| `message.cleared` | `boolean` | MessageShadowActor | ScrollActor | All messages cleared |
-
-### thinking.*
-
-Keys related to thinking/reasoning display.
+Keys related to conversation turns (Unified Turn Architecture).
 
 | Key | Type | Publisher | Subscribers | Description |
 |-----|------|-----------|-------------|-------------|
-| `thinking.active` | `boolean` | ThinkingShadowActor | - | Thinking block visible |
-| `thinking.content` | `string` | ThinkingShadowActor | - | Current thinking text |
-| `thinking.iteration` | `number` | ThinkingShadowActor | - | Current iteration number |
+| `turn.active` | `string` | VirtualListActor | - | Currently active turn ID |
+| `turn.streaming` | `boolean` | VirtualListActor | ScrollActor | Whether a turn is streaming |
 
-### shell.*
+### virtualList.*
 
-Keys related to shell command execution.
-
-| Key | Type | Publisher | Subscribers | Description |
-|-----|------|-----------|-------------|-------------|
-| `shell.executing` | `boolean` | ShellShadowActor | - | Commands being executed |
-| `shell.commands` | `ShellCommand[]` | ShellShadowActor | - | Current commands |
-| `shell.results` | `ShellResult[]` | ShellShadowActor | - | Command outputs |
-
-### toolcalls.*
-
-Keys related to tool call display.
+Keys related to virtual list state.
 
 | Key | Type | Publisher | Subscribers | Description |
 |-----|------|-----------|-------------|-------------|
-| `toolcalls.active` | `boolean` | ToolCallsShadowActor | - | Tool calls in progress |
-| `toolcalls.calls` | `ToolCall[]` | ToolCallsShadowActor | - | Current tool calls |
-
-### pending.*
-
-Keys related to pending file changes.
-
-| Key | Type | Publisher | Subscribers | Description |
-|-----|------|-----------|-------------|-------------|
-| `pending.files` | `PendingFile[]` | PendingChangesShadowActor | - | Files with pending changes |
-| `pending.editMode` | `string` | PendingChangesShadowActor | - | Current edit mode |
+| `virtualList.turnCount` | `number` | VirtualListActor | - | Total number of turns |
+| `virtualList.visibleRange` | `{start, end}` | VirtualListActor | - | Currently visible turn range |
 
 ### input.*
 
@@ -92,8 +60,17 @@ Keys related to toolbar state.
 
 | Key | Type | Publisher | Subscribers | Description |
 |-----|------|-----------|-------------|-------------|
-| `toolbar.editMode` | `string` | ToolbarShadowActor | PendingChangesShadowActor | Selected edit mode |
+| `toolbar.editMode` | `string` | ToolbarShadowActor | VirtualListActor | Selected edit mode |
 | `toolbar.webSearch` | `boolean` | ToolbarShadowActor | - | Web search enabled |
+
+### edit.*
+
+Keys related to edit mode.
+
+| Key | Type | Publisher | Subscribers | Description |
+|-----|------|-----------|-------------|-------------|
+| `edit.mode` | `EditMode` | EditModeActor | VirtualListActor, ToolbarShadowActor | Current edit mode (manual/ask/auto) |
+| `edit.mode.set` | `EditMode` | external | EditModeActor | Request to change edit mode |
 
 ### history.*
 
@@ -111,8 +88,26 @@ Keys related to current session.
 
 | Key | Type | Publisher | Subscribers | Description |
 |-----|------|-----------|-------------|-------------|
-| `session.id` | `string` | external | MessageShadowActor, HistoryShadowActor | Current session ID |
-| `session.title` | `string` | external | - | Current session title |
+| `session.id` | `string` | SessionActor | HistoryShadowActor | Current session ID |
+| `session.title` | `string` | SessionActor | HeaderActor | Current session title |
+| `session.model` | `string` | SessionActor | HeaderActor, ModelSelectorShadowActor | Current model ID |
+| `session.loading` | `boolean` | SessionActor | - | Session is loading |
+| `session.error` | `string` | SessionActor | - | Session error message |
+
+### model.*
+
+Keys related to model selection.
+
+| Key | Type | Publisher | Subscribers | Description |
+|-----|------|-----------|-------------|-------------|
+| `model.popup.open` | `boolean` | external | ModelSelectorShadowActor | Open model popup |
+| `model.popup.visible` | `boolean` | ModelSelectorShadowActor | - | Popup visibility |
+| `model.selected` | `string` | ModelSelectorShadowActor | - | Selected model in popup |
+| `model.current` | `string` | external | ModelSelectorShadowActor | Current model from extension |
+| `model.settings` | `ModelSettings` | external | ModelSelectorShadowActor | Model settings from extension |
+| `model.temperature` | `number` | ModelSelectorShadowActor | - | Temperature setting |
+| `model.toolLimit` | `number` | ModelSelectorShadowActor | - | Tool iteration limit |
+| `model.maxTokens` | `number` | ModelSelectorShadowActor | - | Max output tokens |
 
 ### status.*
 
@@ -122,6 +117,15 @@ Keys related to status display.
 |-----|------|-----------|-------------|-------------|
 | `status.message` | `string` | StatusPanelShadowActor | - | Current status message |
 | `status.type` | `string` | StatusPanelShadowActor | - | info/warning/error |
+
+### gateway.*
+
+Keys for gateway observability (debugging).
+
+| Key | Type | Publisher | Subscribers | Description |
+|-----|------|-----------|-------------|-------------|
+| `gateway.phase` | `GatewayPhase` | VirtualMessageGatewayActor | - | idle/streaming/waiting |
+| `gateway.currentTurn` | `string` | VirtualMessageGatewayActor | - | Current streaming turn ID |
 
 ### external.*
 
@@ -143,7 +147,7 @@ subscriptionKeys: ['streaming.*']
 subscriptionKeys: ['streaming.active']
 
 // Subscribe to multiple domains
-subscriptionKeys: ['streaming.*', 'session.id', 'history.*']
+subscriptionKeys: ['streaming.active', 'session.id', 'history.*']
 ```
 
 ### Common Subscription Patterns
@@ -163,17 +167,17 @@ class MyActor {
 
 // Actor that tracks multiple states
 class DashboardActor {
-  subscriptionKeys = ['streaming.*', 'toolcalls.*', 'pending.*'];
+  subscriptionKeys = ['streaming.*', 'turn.*', 'edit.*'];
 
   onStateChange(event: StateChangeEvent) {
     // Check which domain changed
     for (const key of event.changedKeys) {
       if (key.startsWith('streaming.')) {
         this.updateStreamingStatus(event.state);
-      } else if (key.startsWith('toolcalls.')) {
-        this.updateToolsStatus(event.state);
-      } else if (key.startsWith('pending.')) {
-        this.updatePendingStatus(event.state);
+      } else if (key.startsWith('turn.')) {
+        this.updateTurnStatus(event.state);
+      } else if (key.startsWith('edit.')) {
+        this.updateEditMode(event.state);
       }
     }
   }
@@ -208,8 +212,9 @@ manager.publishDirect('session.id', sessionId);
 │                                                          │
 │  globalState: {                                          │
 │    'streaming.active': false,                            │
-│    'streaming.content': '',                              │
 │    'session.id': 'abc123',                              │
+│    'session.model': 'deepseek-chat',                    │
+│    'edit.mode': 'manual',                               │
 │    'history.sessions': [...],                           │
 │    ...                                                   │
 │  }                                                       │
@@ -220,13 +225,13 @@ manager.publishDirect('session.id', sessionId);
             │               │               │
             ▼               ▼               ▼
     ┌───────────┐   ┌───────────┐   ┌───────────┐
-    │ Message   │   │ Thinking  │   │ History   │
-    │ Actor     │   │ Actor     │   │ Actor     │
+    │ Virtual   │   │ Input     │   │ History   │
+    │ ListActor │   │ Area      │   │ Actor     │
     │           │   │           │   │           │
     │ subs:     │   │ subs:     │   │ subs:     │
     │ streaming │   │ streaming │   │ history.* │
-    │ .*, sess  │   │ .thinking │   │ session.  │
-    │ ion.id    │   │           │   │ id        │
+    │ .*, edit  │   │ .active   │   │ session.  │
+    │ .mode     │   │           │   │ id        │
     └───────────┘   └───────────┘   └───────────┘
 ```
 

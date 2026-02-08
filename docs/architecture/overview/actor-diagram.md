@@ -1,6 +1,6 @@
 # Actor System Diagram
 
-Visual map of all actors, their relationships, and identified gaps.
+Visual map of all actors and their relationships in the Unified Turn Architecture.
 
 ---
 
@@ -25,8 +25,7 @@ Visual map of all actors, their relationships, and identified gaps.
 │              └─────────────────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘│
 │                                                                                  │
 │  ┌────────────────────────────────────────────────────────────────────────────┐ │
-│  │ #currentModelName ← Updated by HeaderActor (subscribes to session)   │ │
-│  │ #toastContainer (static div) ← No actor                                    │ │
+│  │ #currentModelName ← Updated by HeaderActor (subscribes to session.model)   │ │
 │  └────────────────────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────────────────┘
 
@@ -35,34 +34,20 @@ Visual map of all actors, their relationships, and identified gaps.
 │                              (#chatMessages)                                     │
 │                                                                                  │
 │  ┌────────────────────────────────────────────────────────────────────────────┐ │
-│  │ MessageShadowActor ✅                                                      │ │
-│  │ - User messages                                                            │ │
-│  │ - Assistant messages (with CodeBlockShadowActor ✅ for code)              │ │
-│  │ - Edit mode indicators                                                     │ │
-│  └────────────────────────────────────────────────────────────────────────────┘ │
-│                                                                                  │
-│  ┌────────────────────────────────────────────────────────────────────────────┐ │
-│  │ ThinkingShadowActor ✅  (interleaved)                                      │ │
-│  │ - Reasoning content dropdowns                                              │ │
-│  │ - Collapsed by default                                                     │ │
-│  └────────────────────────────────────────────────────────────────────────────┘ │
-│                                                                                  │
-│  ┌────────────────────────────────────────────────────────────────────────────┐ │
-│  │ ShellShadowActor ✅  (interleaved)                                         │ │
-│  │ - Shell command output                                                     │ │
-│  │ - Command grouping                                                         │ │
-│  └────────────────────────────────────────────────────────────────────────────┘ │
-│                                                                                  │
-│  ┌────────────────────────────────────────────────────────────────────────────┐ │
-│  │ ToolCallsShadowActor ✅  (interleaved)                                     │ │
-│  │ - Tool call badges                                                         │ │
-│  │ - Status indicators                                                        │ │
-│  └────────────────────────────────────────────────────────────────────────────┘ │
-│                                                                                  │
-│  ┌────────────────────────────────────────────────────────────────────────────┐ │
-│  │ PendingChangesShadowActor ✅  (interleaved)                                │ │
-│  │ - File change previews                                                     │ │
-│  │ - Accept/reject controls                                                   │ │
+│  │ VirtualListActor ✅                                                        │ │
+│  │ - Manages pool of MessageTurnActors                                        │ │
+│  │ - Virtual rendering for large conversations                                │ │
+│  │ - Source of truth for turn data                                            │ │
+│  │                                                                            │ │
+│  │   ┌──────────────────────────────────────────────────────────────────────┐│ │
+│  │   │ MessageTurnActor (pooled) ✅                                         ││ │
+│  │   │ - User/Assistant messages                                            ││ │
+│  │   │ - Text segments with code blocks (copy/diff/apply)                   ││ │
+│  │   │ - Thinking iterations (collapsible)                                  ││ │
+│  │   │ - Tool call batches with status                                      ││ │
+│  │   │ - Shell command output                                               ││ │
+│  │   │ - Pending file changes (accept/reject)                               ││ │
+│  │   └──────────────────────────────────────────────────────────────────────┘│ │
 │  └────────────────────────────────────────────────────────────────────────────┘ │
 │                                                                                  │
 │  ┌────────────────────────────────────────────────────────────────────────────┐ │
@@ -74,7 +59,7 @@ Visual map of all actors, their relationships, and identified gaps.
 │  ┌────────────────────────────────────────────────────────────────────────────┐ │
 │  │ StreamingActor ✅  (state-only, hidden root)                               │ │
 │  │ - Streaming state management                                               │ │
-│  │ - publishes: streaming.active, streaming.content                           │ │
+│  │ - publishes: streaming.active, streaming.messageId                         │ │
 │  └────────────────────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────────────────┘
 
@@ -86,7 +71,6 @@ Visual map of all actors, their relationships, and identified gaps.
 │  │ - Edit mode buttons (Manual/Ask/Auto)                                      │ │
 │  │ - Files button → triggers FilesShadowActor                                │ │
 │  │ - Web search toggle                                                        │ │
-│  │ - Pending changes controls                                                 │ │
 │  └────────────────────────────────────────────────────────────────────────────┘ │
 │                                                                                  │
 │  ┌────────────────────────────────────────────────────────────────────────────┐ │
@@ -112,12 +96,6 @@ Visual map of all actors, their relationships, and identified gaps.
 │  │ - File picker modal                                                        │ │
 │  │ - Search, tabs, selection                                                  │ │
 │  └────────────────────────────────────────────────────────────────────────────┘ │
-│                                                                                  │
-│  ┌────────────────────────────────────────────────────────────────────────────┐ │
-│  │ DiffShadowActor ✅ (created by PendingChangesShadowActor)                  │ │
-│  │ - Diff view for file changes                                               │ │
-│  │ - Accept/reject per-file                                                   │ │
-│  └────────────────────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -125,21 +103,18 @@ Visual map of all actors, their relationships, and identified gaps.
 
 ## Actor Status Summary
 
-### ✅ USED (Instantiated in chat.ts)
+### ✅ Active Actors
 
 | Actor | Type | Location | Purpose |
 |-------|------|----------|---------|
-| MessageGatewayActor | Gateway | Hidden | External message routing, coordination state |
+| VirtualMessageGatewayActor | Gateway | Hidden | External message routing to VirtualListActor |
+| VirtualListActor | Virtual Rendering | chatMessages | Pool management, turn data source of truth |
+| MessageTurnActor | Pooled UI | chatMessages | Renders all turn content (text, thinking, tools, shell, pending) |
 | SessionActor | State-only | Hidden | Session state (model, title, id) |
 | EditModeActor | State-only | Hidden | Edit mode state (manual/ask/auto) |
 | StreamingActor | State-only | Hidden | Streaming state management |
 | ScrollActor | State-only | chatMessages | Auto-scroll behavior |
 | HeaderActor | Light DOM | Header | Updates #currentModelName |
-| MessageShadowActor | Interleaved | chatMessages | User/assistant messages |
-| ShellShadowActor | Interleaved | chatMessages | Shell command output |
-| ToolCallsShadowActor | Interleaved | chatMessages | Tool call badges |
-| ThinkingShadowActor | Interleaved | chatMessages | Reasoning dropdowns |
-| PendingChangesShadowActor | Interleaved | chatMessages | File change previews |
 | InputAreaShadowActor | Shadow | inputAreaContainer | Text input |
 | StatusPanelShadowActor | Shadow | statusPanelContainer | Status display |
 | ToolbarShadowActor | Shadow | toolbarContainer | Action buttons |
@@ -149,103 +124,6 @@ Visual map of all actors, their relationships, and identified gaps.
 | CommandsShadowActor | Popup | commandsHost | Commands dropdown |
 | ModelSelectorShadowActor | Popup | modelHost | Model/settings popup |
 | SettingsShadowActor | Popup | settingsHost | Settings dropdown |
-| CodeBlockShadowActor | Embedded | Inside messages | Code syntax highlighting |
-| DiffShadowActor | Embedded | Inside pending | Diff view |
-
-### ✅ RECENTLY INTEGRATED
-
-| Actor | Type | Status | Notes |
-|-------|------|--------|-------|
-| MessageGatewayActor | Gateway | ✅ INTEGRATED | Boundary between extension and actor system. Routes ALL external messages. See [message-gateway.md](message-gateway.md) |
-| SessionActor | State | ✅ INTEGRATED | Publishes session.* state. Handlers called by gateway. |
-| HeaderActor | Light DOM | ✅ INTEGRATED | Minimal version - subscribes to session.model, updates #currentModelName |
-| EditModeActor | State | ✅ INTEGRATED | Manages edit mode state (manual/ask/auto) |
-
-### ❌ DELETED (No longer exists)
-
-| Actor | Type | Why Deleted | Notes |
-|-------|------|-------------|-------|
-| SidebarShadowActor | Shadow | Different UI layout | Deleted - sidebar not in current design |
-
----
-
-## Identified Gaps
-
-### ✅ GAP 1: Session State Not Published - FIXED
-
-**Problem:** Session state (model, title, id) not available via pub/sub.
-
-**Solution:** SessionActor now:
-- Handles `sessionLoaded`, `sessionCreated`, `modelChanged` messages from extension
-- Publishes `session.model`, `session.title`, `session.id`, `session.loading`, `session.error`
-- Extension updated to send these messages in `chatProvider.ts`
-
----
-
-### ✅ GAP 2: Model Name Display Never Updates - FIXED
-
-**Problem:** `#currentModelName` span was static HTML.
-
-**Solution:** HeaderActor (minimal version) now:
-- Subscribes to `session.model`
-- Updates `#currentModelName` element when model changes
-- Uses light DOM (finds existing elements) rather than Shadow DOM
-
-```
-Current Flow:
-Extension ─► sessionCreated/modelChanged ─► SessionActor
-                                                │
-                                                ▼ publishes session.model
-                                           HeaderActor
-                                                │
-                                                ▼ updates
-                                           #currentModelName
-```
-
----
-
-### GAP 3: Session Title Not Displayed (OPTIONAL - LOW PRIORITY)
-
-**Problem:** No session title shown in UI.
-
-**Status:** Low priority - current design doesn't include visible session titles.
-
-**If needed:** HeaderActor already subscribes to `session.title` and could display it.
-
----
-
-### GAP 4: Toast Container Not Actor-Managed
-
-**Problem:** `#toastContainer` is static HTML with no actor.
-
-```
-Current:
-┌────────────────────────────────────────┐
-│ <div id="toastContainer">              │ ← just exists
-│   (manually populated by chat.ts?)     │
-│ </div>                                 │
-└────────────────────────────────────────┘
-```
-
-**Question:** Is toast functionality used? If so, should be actor.
-
----
-
-### GAP 5: Header Buttons Have Scattered Handlers
-
-**Problem:** Each header button has its own addEventListener in chat.ts.
-
-```
-chat.ts:
-  inspectorBtn.addEventListener('click', ...)
-  historyBtn.addEventListener('click', ...)
-  commandsBtn.addEventListener('click', ...)
-  settingsBtn.addEventListener('click', ...)
-  modelBtn.addEventListener('click', ...)
-```
-
-**Not necessarily a problem** - buttons trigger their respective popup actors.
-But if we had a HeaderActor, it could own these handlers.
 
 ---
 
@@ -268,31 +146,40 @@ But if we had a HeaderActor, it could own these handlers.
                                        │ postMessage()
                                        ▼
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│                        MessageGatewayActor (BOUNDARY)                            │
+│                    VirtualMessageGatewayActor (BOUNDARY)                         │
 │                                                                                  │
 │   The Gateway Pattern / Anti-Corruption Layer                                    │
 │   See ARCHITECTURE/message-gateway.md for full documentation                     │
 │                                                                                  │
 │   Responsibilities:                                                              │
 │   1. Receive ALL external messages from VS Code extension                        │
-│   2. Maintain coordination state (segmentContent, hasInterleaved, phase)         │
-│   3. Orchestrate internal actors with ORDERING GUARANTEES                        │
-│   4. Translate external protocol → internal actor calls                          │
+│   2. Route to VirtualListActor using turn-based API                              │
+│   3. Translate external protocol → internal actor calls                          │
 │                                                                                  │
 │   Coordination State:                                                            │
-│   - _segmentContent: Accumulated content during streaming                        │
-│   - _hasInterleaved: Whether tools/thinking interrupted text flow                │
-│   - _shellSegmentId: Pending shell operation tracking                            │
+│   - _currentTurnId: Active turn being streamed                                   │
 │   - _phase: 'idle' | 'streaming' | 'waiting-for-results'                         │
+└─────────────────────────────────────────────────────────────────────────────────┘
+                                       │
+                                       │ Turn-based API calls
+                                       ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                            VirtualListActor                                      │
 │                                                                                  │
-│   Publications (for debugging/observability):                                    │
-│   - gateway.segmentContent, gateway.interleaved, gateway.phase                   │
+│   Pool Management:                                                               │
+│   - Pre-warms pool of MessageTurnActors                                          │
+│   - Binds actors to visible turns                                                │
+│   - Releases actors when turns scroll out of view                                │
+│                                                                                  │
+│   Turn Data (Source of Truth):                                                   │
+│   - Map<turnId, TurnData> stores all conversation content                        │
+│   - Actors are just views - can be detached and reattached                       │
 └─────────────────────────────────────────────────────────────────────────────────┘
                                        │
           ┌────────────────────────────┼────────────────────────────┐
           │                            │                            │
-    Direct calls              Pub/sub (broadcast)            Getters
-    (ordering)                 (state changes)              (queries)
+    Pub/sub                    Direct method calls           Actor delegation
+    (state)                    (turn operations)             (content updates)
           │                            │                            │
           ▼                            ▼                            ▼
 ┌─────────────────────────────────────────────────────────────────────────────────┐
@@ -300,54 +187,29 @@ But if we had a HeaderActor, it could own these handlers.
 │                                                                                  │
 │   State Actors (no DOM):                                                         │
 │   - SessionActor ──────► publishes session.model, session.title, session.id     │
-│   - StreamingActor ────► publishes streaming.active, streaming.content          │
+│   - StreamingActor ────► publishes streaming.active, streaming.messageId        │
 │   - EditModeActor ─────► publishes edit.mode                                    │
 │   - ScrollActor ───────► manages scroll position                                │
 │                                                                                  │
 │   UI Actors (own DOM):                                                           │
-│   - MessageShadowActor ─────► user/assistant messages                           │
-│   - ShellShadowActor ───────► shell command output                              │
-│   - ToolCallsShadowActor ───► tool call badges                                  │
-│   - ThinkingShadowActor ────► reasoning dropdowns                               │
-│   - PendingChangesShadowActor ► file change previews                            │
-│   - InputAreaShadowActor ───► text input, send/stop buttons                     │
-│   - StatusPanelShadowActor ─► status display                                    │
-│   - ToolbarShadowActor ─────► edit mode, files, web search                      │
-│   - HistoryShadowActor ─────► history modal                                     │
-│   - FilesShadowActor ───────► file picker modal                                 │
+│   - MessageTurnActor ─────► all turn content (text, thinking, tools, etc.)      │
+│   - InputAreaShadowActor ─► text input, send/stop buttons                       │
+│   - StatusPanelShadowActor ► status display                                     │
+│   - ToolbarShadowActor ───► edit mode, files, web search                        │
+│   - HistoryShadowActor ───► history modal                                       │
+│   - FilesShadowActor ─────► file picker modal                                   │
 │   - ModelSelectorShadowActor ► model/settings popup                             │
-│   - SettingsShadowActor ────► settings dropdown                                 │
+│   - SettingsShadowActor ──► settings dropdown                                   │
 │                                                                                  │
 │   Subscribers to session.model:                                                  │
-│   - HeaderActor ──────► updates #currentModelName                         │
+│   - HeaderActor ──────► updates #currentModelName                                │
 │                                                                                  │
 │   Subscribers to streaming.active:                                               │
-│   - InputAreaShadowActor ───► shows send/stop button                            │
-│   - ToolbarShadowActor ─────► updates UI state                                  │
+│   - InputAreaShadowActor ─► shows send/stop button                              │
+│   - ToolbarShadowActor ───► updates UI state                                    │
+│   - VirtualListActor ─────► manages streaming turn                              │
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
-
----
-
-## Recommended Changes
-
-### ✅ Priority 1: Fix Model Name Bug - COMPLETED
-HeaderActor (minimal version) now subscribes to `session.model` and updates `#currentModelName`.
-
-### ✅ Priority 2: Implement SessionActor - COMPLETED
-- SessionActor instantiated in chat.ts
-- Handles `sessionLoaded`, `sessionCreated`, `modelChanged` messages
-- Publishes `session.model`, `session.title`, `session.id`, `session.loading`, `session.error`
-- Extension updated to send these messages in `chatProvider.ts`
-
-### ✅ Priority 3: HeaderActor - COMPLETED (Option B)
-Chose **Option B: Minimal HeaderActor**
-- Subscribes to `session.model` and `session.title`
-- Updates existing DOM elements (light DOM, not Shadow DOM)
-- Does NOT duplicate functionality of other popup actors
-
-### ✅ Priority 4: Remove Dead Code - COMPLETED
-- SidebarShadowActor deleted (different UI design, never used)
 
 ---
 
@@ -355,28 +217,22 @@ Chose **Option B: Minimal HeaderActor**
 
 ```
 media/actors/
-├── codeblock/         CodeBlockShadowActor     ✅ USED (embedded in messages)
 ├── commands/          CommandsShadowActor      ✅ USED
-├── diff/              DiffShadowActor          ✅ USED (embedded in pending)
 ├── edit-mode/         EditModeActor            ✅ USED (edit mode state)
 ├── files/             FilesShadowActor         ✅ USED
-├── header/            HeaderActor        ✅ USED (minimal, updates model name)
+├── header/            HeaderActor              ✅ USED (updates model name)
 ├── history/           HistoryShadowActor       ✅ USED
 ├── input-area/        InputAreaShadowActor     ✅ USED
-├── message/           MessageShadowActor       ✅ USED
-├── message-gateway/   MessageGatewayActor      ✅ USED (external boundary)
+├── message-gateway/   VirtualMessageGatewayActor ✅ USED (external boundary)
 ├── model-selector/    ModelSelectorShadowActor ✅ USED
-├── pending/           PendingChangesShadowActor ✅ USED
 ├── scroll/            ScrollActor              ✅ USED
 ├── session/           SessionActor             ✅ USED (session state pub/sub)
 ├── settings/          SettingsShadowActor      ✅ USED
-├── shell/             ShellShadowActor         ✅ USED
-├── sidebar/           (DELETED)
 ├── status-panel/      StatusPanelShadowActor   ✅ USED
 ├── streaming/         StreamingActor           ✅ USED
-├── thinking/          ThinkingShadowActor      ✅ USED
 ├── toolbar/           ToolbarShadowActor       ✅ USED
-└── tools/             ToolCallsShadowActor     ✅ USED
+├── turn/              MessageTurnActor         ✅ USED (unified turn rendering)
+└── virtual-list/      VirtualListActor         ✅ USED (pool + virtual rendering)
 
 media/dev/
 └── inspector/         InspectorShadowActor     ✅ USED (dev only)
@@ -386,5 +242,7 @@ media/dev/
 
 ## Related Documentation
 
-- [message-gateway.md](message-gateway.md) - Gateway pattern and coordination state
-- [getter-pattern.md](getter-pattern.md) - When to use getters vs publications
+- [actor-system.md](../frontend/actor-system.md) - Unified Turn Architecture details
+- [message-gateway.md](../frontend/message-gateway.md) - Gateway pattern and coordination
+- [getter-pattern.md](../reference/getter-pattern.md) - When to use getters vs publications
+- [state-keys.md](../reference/state-keys.md) - All pub/sub state keys

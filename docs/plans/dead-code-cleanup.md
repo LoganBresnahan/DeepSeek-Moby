@@ -1,13 +1,21 @@
 # Dead Code Cleanup Analysis
 
+## ✅ CLEANUP COMPLETE
+
+**Completed:** 2026-02-08
+
+All phases of dead code cleanup have been committed. The codebase now uses the Unified Turn Architecture exclusively.
+
+---
+
 ## Executive Summary
 
 The codebase evolved through three phases:
 1. **Initial Actor Refactor** (`bade773`) - Created non-shadow DOM actors including CodeBlockActor and DiffActor
 2. **Shadow DOM Migration** (`6bc6d57`) - Created Shadow DOM versions of all actors, including CodeBlockShadowActor and DiffShadowActor
-3. **1B Virtual Rendering** (uncommitted) - Created MessageTurnActor + VirtualListActor, superseding legacy interleaved actors
+3. **Unified Turn Architecture** (`b561596`) - Created MessageTurnActor + VirtualListActor, superseding legacy interleaved actors
 
-The `USE_VIRTUAL_RENDERING = true` flag (line 51 of `chat.ts`) makes the legacy code path unreachable.
+The legacy `USE_VIRTUAL_RENDERING` flag has been removed - the Unified Turn Architecture is now the only code path.
 
 ---
 
@@ -390,15 +398,29 @@ Experimental declarative UI framework inspired by React's component model. Never
 
 ## Verification Checklist
 
-After each phase:
+All phases complete. Final verification:
 
-1. **Build:** `npm run build:media`
-2. **Tests:** `npx vitest run`
+1. **Build:** `npm run build:media` ✅
+2. **Tests:** `npx vitest run` ✅
 3. **Runtime testing:**
-   - [ ] User messages display correctly
-   - [ ] Assistant streaming works
-   - [ ] Thinking iterations collapse/expand
-   - [ ] Tool calls show status progression
-   - [ ] Shell output displays
-   - [ ] Modified Files works in all edit modes
-   - [ ] Code blocks have copy/diff/apply buttons
+   - [x] User messages display correctly
+   - [x] Assistant streaming works
+   - [x] Thinking iterations collapse/expand
+   - [x] Tool calls show status progression
+   - [x] Shell output displays
+   - [x] Modified Files works in all edit modes
+   - [x] Code blocks have copy/diff/apply buttons
+
+---
+
+## Summary of Removed Code
+
+| Category | Files Removed | Lines Removed |
+|----------|---------------|---------------|
+| Never Integrated Actors | CodeBlockShadowActor, DiffShadowActor, InterleavedContentActor | ~1,600 |
+| Legacy Mode Actors | MessageShadowActor, ThinkingShadowActor, ToolCallsShadowActor, ShellShadowActor, PendingChangesShadowActor, MessageGatewayActor | ~4,000 |
+| Experimental UI Framework | media/ui/* | ~800 |
+| Test Files | ~15 test files | ~3,500 |
+| **Total** | | **~10,000 lines** |
+
+The codebase is now significantly cleaner with a single, unified architecture for rendering conversation content.
