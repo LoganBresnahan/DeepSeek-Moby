@@ -2,19 +2,19 @@ import * as vscode from 'vscode';
 import { DeepSeekClient } from '../deepseekClient';
 import { StatusBar } from '../views/statusBar';
 import { ConfigManager } from '../utils/config';
-import { ChatHistoryManager } from '../chatHistory/ChatHistoryManager';
+import { ConversationManager } from '../events';
 
 export class CommandProvider {
   private deepSeekClient: DeepSeekClient;
   private statusBar: StatusBar;
   private config: ConfigManager;
-  private chatHistoryManager: ChatHistoryManager;
+  private conversationManager: ConversationManager;
 
-  constructor(deepSeekClient: DeepSeekClient, statusBar: StatusBar, chatHistoryManager: ChatHistoryManager) {
+  constructor(deepSeekClient: DeepSeekClient, statusBar: StatusBar, conversationManager: ConversationManager) {
     this.deepSeekClient = deepSeekClient;
     this.statusBar = statusBar;
     this.config = ConfigManager.getInstance();
-    this.chatHistoryManager = chatHistoryManager;
+    this.conversationManager = conversationManager;
   }
 
   async explainCode() {
@@ -236,7 +236,7 @@ export class CommandProvider {
     if (!format) return;
     
     const formatLower = format.toLowerCase() as 'json' | 'markdown' | 'txt';
-    const content = await this.chatHistoryManager.exportAllSessions(formatLower);
+    const content = await this.conversationManager.exportAllSessions(formatLower);
     
     const doc = await vscode.workspace.openTextDocument({
       content,
@@ -259,7 +259,7 @@ export class CommandProvider {
       const fileContent = await vscode.workspace.fs.readFile(fileUri[0]);
       const content = Buffer.from(fileContent).toString('utf8');
       
-      const session = await this.chatHistoryManager.importSession(content);
+      const session = await this.conversationManager.importSession(content);
       if (session) {
         vscode.window.showInformationMessage(`Chat session "${session.title}" imported successfully`);
       }
@@ -277,7 +277,7 @@ export class CommandProvider {
     );
 
     if (result === 'Delete All') {
-      await this.chatHistoryManager.clearAllHistory();
+      await this.conversationManager.clearAllHistory();
       vscode.window.showInformationMessage('All chat history deleted');
     }
   }
@@ -290,7 +290,7 @@ export class CommandProvider {
     
     if (!query) return;
     
-    const sessions = await this.chatHistoryManager.searchHistory(query);
+    const sessions = await this.conversationManager.searchHistory(query);
     
     if (sessions.length === 0) {
       vscode.window.showInformationMessage('No matching chat sessions found');
@@ -299,8 +299,8 @@ export class CommandProvider {
     
     const items = sessions.map(session => ({
       label: session.title,
-      description: `${session.messages.length} messages`,
-      detail: session.messages.slice(-1)[0]?.content.substring(0, 100) + '...',
+      description: `${session.eventCount} events`,
+      detail: session.lastActivityPreview || session.firstUserMessage || '',
       session
     }));
     
@@ -314,19 +314,19 @@ export class CommandProvider {
   }
 
   async exportCurrentSession() {
-    const currentSession = await this.chatHistoryManager.getCurrentSession();
+    const currentSession = await this.conversationManager.getCurrentSession();
     if (!currentSession) {
       vscode.window.showWarningMessage('No active chat session');
       return;
     }
-    
-    const content = await this.chatHistoryManager.exportSession(currentSession.id);
-    
+
+    const content = await this.conversationManager.exportSession(currentSession.id);
+
     const doc = await vscode.workspace.openTextDocument({
       content,
       language: 'json'
     });
-    
+
     await vscode.window.showTextDocument(doc);
     vscode.window.showInformationMessage(`Session "${currentSession.title}" exported`);
   }
@@ -362,16 +362,14 @@ export class CommandProvider {
         );
 
         // Save to chat history
-        await this.chatHistoryManager.addMessageToCurrentSession({
+        await this.conversationManager.addMessageToCurrentSession({
           role: 'user',
-          content: prompt,
-          tokens: this.deepSeekClient.estimateTokens(prompt)
+          content: prompt
         });
-        
-        await this.chatHistoryManager.addMessageToCurrentSession({
+
+        await this.conversationManager.addMessageToCurrentSession({
           role: 'assistant',
-          content: formattedResponse,
-          tokens: this.deepSeekClient.estimateTokens(formattedResponse)
+          content: formattedResponse
         });
 
         // Show in new document

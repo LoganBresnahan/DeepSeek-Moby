@@ -237,6 +237,172 @@ Current actors in the system:
 | ToolbarShadowActor | `toolbar.*` | `streaming.active` |
 | HistoryShadowActor | `history.modal.*` | `history.*`, `session.id` |
 | ScrollActor | - | `message.*`, `streaming.*` |
+| **MessageTurnActor** | `turn.*` | - |
+| **VirtualListActor** | `virtualList.*` | `streaming.active` |
+
+## 1B Architecture: MessageTurnActor
+
+The **1B architecture** consolidates multiple per-type actors into a single per-turn actor with multiple shadow containers. This enables virtual rendering and actor pooling.
+
+### Problem with Current Architecture
+
+The current architecture creates separate actors for each content type:
+- MessageShadowActor (text segments)
+- ThinkingShadowActor (thinking iterations)
+- ToolCallsShadowActor (tool batches)
+- ShellShadowActor (shell segments)
+- PendingChangesShadowActor (pending files)
+
+This works but creates challenges for:
+- **Virtual rendering**: Can't easily pool/recycle actors across turns
+- **Coordination**: MessageGatewayActor must orchestrate 5+ separate actors
+- **State management**: Turn-level state scattered across actors
+
+### 1B Solution: MessageTurnActor
+
+One `MessageTurnActor` per conversation turn that internally creates multiple shadow containers:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  MessageTurnActor (turn 1 - assistant)                              │
+│                                                                     │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │  <div class="text-container">                               │   │
+│  │    #shadow-root: [First paragraph...]                       │   │
+│  ├─────────────────────────────────────────────────────────────┤   │
+│  │  <div class="thinking-container">                           │   │
+│  │    #shadow-root: [Let me analyze this...]                   │   │
+│  ├─────────────────────────────────────────────────────────────┤   │
+│  │  <div class="tools-container">                              │   │
+│  │    #shadow-root: [shell_execute: ls -la]                    │   │
+│  ├─────────────────────────────────────────────────────────────┤   │
+│  │  <div class="text-container continuation">                  │   │
+│  │    #shadow-root: [Based on that output...]                  │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Benefits
+
+1. **Poolable**: Actor can be reset and rebound to new turn data
+2. **Full shadow isolation**: Each container type has its own shadow root
+3. **Simpler coordination**: Actor self-coordinates its segments
+4. **Enables virtual rendering**: VirtualListActor can pool MessageTurnActor instances
+
+### Pool Lifecycle
+
+```typescript
+// Acquire from pool
+const actor = pool.acquire() ?? new MessageTurnActor(config);
+actor.bind({ turnId: 'turn-1', role: 'assistant', timestamp: Date.now() });
+
+// Use the actor
+actor.startStreaming();
+actor.createTextSegment('Hello');
+actor.startThinkingIteration();
+// ... more operations ...
+actor.endStreaming();
+
+// Release back to pool
+actor.reset();  // Clears all containers and state
+pool.release(actor);
+```
+
+### File Location
+
+```
+media/actors/turn/
+├── MessageTurnActor.ts   # Main actor implementation
+├── types.ts              # Type definitions
+├── index.ts              # Exports
+└── styles/
+    └── index.ts          # Combined styles for all container types
+```
+
+See [media/actors/turn/MessageTurnActor.ts](../media/actors/turn/MessageTurnActor.ts) for implementation.
+
+## VirtualListActor: Pool Management & Virtual Rendering
+
+The **VirtualListActor** manages a pool of `MessageTurnActor` instances, implementing virtual rendering to handle large conversations efficiently.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  VirtualListActor                                                   │
+│                                                                     │
+│  ┌───────────────┐  ┌───────────────────────────────────────────┐  │
+│  │    Pool       │  │        Turn Data (Source of Truth)        │  │
+│  │ [actor, ...]  │  │  Map<turnId, TurnData>                    │  │
+│  └───────────────┘  └───────────────────────────────────────────┘  │
+│                                                                     │
+│  Scroll Container (viewport)                                        │
+│  ┌───────────────────────────────────────────────────────────┐     │
+│  │ Content Container (full height)                           │     │
+│  │                                                           │     │
+│  │   ┌─ turn-1 ─────────────────────────────────────────┐   │     │
+│  │   │ (off-screen, no actor bound)                      │   │     │
+│  │   └──────────────────────────────────────────────────┘   │     │
+│  │   ┌─ turn-2 ─────────────────────────────────────────┐   │     │
+│  │   │ MessageTurnActor bound ✓                          │◄─┼─ visible
+│  │   └──────────────────────────────────────────────────┘   │     │
+│  │   ┌─ turn-3 ─────────────────────────────────────────┐   │     │
+│  │   │ MessageTurnActor bound ✓                          │◄─┼─ visible
+│  │   └──────────────────────────────────────────────────┘   │     │
+│  │   ┌─ turn-4 ─────────────────────────────────────────┐   │     │
+│  │   │ (off-screen, no actor bound)                      │   │     │
+│  │   └──────────────────────────────────────────────────┘   │     │
+│  └───────────────────────────────────────────────────────────┘     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Features
+
+1. **Actor Pooling**: Pre-warms pool, acquires/releases actors based on visibility
+2. **Source of Truth**: Turn data stored in VirtualListActor, actors are just views
+3. **Scroll-based Visibility**: Debounced scroll handling with configurable overscan
+4. **Height Measurement**: Measures actual heights after render, adjusts offsets
+5. **Content Delegation**: All content operations update data first, then delegate to bound actors
+
+### Usage
+
+```typescript
+const virtualList = new VirtualListActor(manager, scrollContainer, {
+  config: {
+    minPoolSize: 5,      // Pre-warmed actors
+    maxPoolSize: 20,     // Max pooled actors
+    overscan: 2,         // Extra turns to render outside viewport
+    defaultTurnHeight: 150
+  }
+});
+
+// Add turns - binding happens automatically if visible
+const turn = virtualList.addTurn('turn-1', 'assistant');
+virtualList.startStreamingTurn('turn-1');
+
+// Content operations delegate to bound actor
+virtualList.addTextSegment('turn-1', 'Hello');
+virtualList.startThinkingIteration('turn-1');
+virtualList.startToolBatch('turn-1', [{ name: 'read_file', detail: 'src/main.ts' }]);
+
+// End streaming
+virtualList.endStreamingTurn();
+
+// Get stats
+const stats = virtualList.getPoolStats();
+// { totalTurns: 50, visibleTurns: 5, actorsInUse: 5, actorsInPool: 15, totalActorsCreated: 20 }
+```
+
+### File Location
+
+```
+media/actors/virtual-list/
+├── VirtualListActor.ts   # Main actor with pool management
+├── types.ts              # TurnData, PoolStats, VisibleRange, etc.
+└── index.ts              # Exports
+```
+
+See [media/actors/virtual-list/VirtualListActor.ts](../media/actors/virtual-list/VirtualListActor.ts) for implementation.
 
 ## Best Practices
 
@@ -245,3 +411,74 @@ Current actors in the system:
 3. **Immutable Updates**: Always create new objects when publishing
 4. **Minimal Subscriptions**: Only subscribe to what you need
 5. **No DOM Manipulation**: Never touch another actor's DOM directly
+
+## Scalability & Performance
+
+The actor system includes several optimizations for performance at scale. See [REMINDER.md](../REMINDER.md) for the full list of mitigations with implementation status.
+
+### Implemented Optimizations
+
+#### Indexed Subscriptions (O(1) Lookup)
+
+Instead of scanning all actors on each publish, subscriptions are indexed:
+
+```typescript
+// O(1) exact key lookup
+exactSubscriptions: Map<string, Set<actorId>>
+
+// O(w) wildcard matching (w = number of wildcard patterns)
+wildcardSubscriptions: Map<string, Set<actorId>>
+```
+
+**Best practice**: Prefer exact subscription keys over wildcards when you know the specific keys you need.
+
+```typescript
+// BETTER - O(1) lookup
+subscriptions: {
+  'streaming.active': (v) => this.handleActive(v),
+  'streaming.content': (v) => this.handleContent(v)
+}
+
+// OK for catch-all - but O(w) per publish
+subscriptions: {
+  'streaming.*': (v, key) => this.handleAny(key, v)
+}
+```
+
+#### Adopted StyleSheets (Shared CSS)
+
+Shadow DOM actors share parsed CSS via `adoptedStyleSheets`:
+
+```typescript
+// Manager caches parsed stylesheets
+const baseSheet = manager.getShadowBaseSheet();           // Shared by ALL shadow actors
+const actorSheet = manager.getStyleSheet(css, 'ActorName'); // Cached per actor type
+
+this.shadow.adoptedStyleSheets = [baseSheet, actorSheet];
+```
+
+Benefits:
+- One parsed CSSOM tree shared across N shadow roots
+- ~300KB savings at 100 actors with 3KB CSS each
+
+#### Container-Level Event Delegation
+
+Actors use container-level delegation instead of per-item listeners:
+
+```typescript
+// ONE listener handles all items (current and future)
+this._container.addEventListener('click', (e) => {
+  const item = (e.target as HTMLElement).closest('.item');
+  if (item) this.handleItemClick(item.dataset.id);
+});
+```
+
+### Future Optimizations (Not Yet Needed)
+
+| Optimization | When to Consider |
+|--------------|------------------|
+| Batched Publications | 5+ subscribers to high-frequency events |
+| Virtual Rendering | 100+ items in scrollable lists |
+| Object Pooling | Rapid create/destroy cycles causing GC pauses |
+
+See [REMINDER.md Scalability section](../REMINDER.md#scalability--mitigations) for implementation details.

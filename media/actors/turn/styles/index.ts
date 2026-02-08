@@ -1,0 +1,881 @@
+/**
+ * MessageTurnActor Combined Styles
+ *
+ * All styles for the different container types within a turn.
+ * Each container type has its own shadow root with these styles adopted.
+ * Styles are namespaced by container class to avoid conflicts.
+ *
+ * Container Types:
+ * - .text-container: Text message segments
+ * - .thinking-container: Chain-of-thought reasoning
+ * - .tools-container: Tool call execution
+ * - .shell-container: Shell command execution
+ * - .pending-container: Pending file changes
+ */
+
+// ============================================
+// Base Styles (shared across all containers)
+// ============================================
+
+const baseStyles = `
+/* Container base - all containers inherit this */
+.container {
+  margin: 8px 0;
+  font-family: var(--vscode-font-family);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.container.entering {
+  animation: fadeIn 0.3s ease-out forwards;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Scrollbar styling */
+.scrollable::-webkit-scrollbar {
+  width: 8px;
+}
+
+.scrollable::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.scrollable::-webkit-scrollbar-thumb {
+  background: var(--vscode-scrollbarSlider-background);
+  border-radius: 4px;
+}
+
+.scrollable::-webkit-scrollbar-thumb:hover {
+  background: var(--vscode-scrollbarSlider-hoverBackground);
+}
+`;
+
+// ============================================
+// Text Message Styles
+// ============================================
+
+const textStyles = `
+/* Text container - message content */
+.text-container {
+  /* No border for text, flows naturally */
+}
+
+.text-container.streaming {
+  /* Active streaming indicator */
+}
+
+.text-container.continuation {
+  margin-top: 8px;
+}
+
+/* Divider with centered label */
+.message-divider {
+  display: flex;
+  align-items: center;
+  margin-bottom: 0;
+}
+
+.message-divider::before,
+.message-divider::after {
+  content: '';
+  flex: 1;
+  border-bottom: 1px dashed var(--vscode-panel-border, #3c3c3c);
+}
+
+.message-divider-label {
+  padding: 0 12px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--vscode-descriptionForeground, #8b8b8b);
+}
+
+/* Hide divider for continuation segments */
+.text-container.continuation .message-divider {
+  display: none;
+}
+
+/* Message content */
+.content {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--vscode-editor-foreground, #cccccc);
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  padding: 15px 0;
+}
+
+/* File attachments */
+.files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.file-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  background: var(--vscode-badge-background, #4d4d4d);
+  color: var(--vscode-badge-foreground, #ffffff);
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+/* Code blocks */
+.code-block {
+  margin: 0 0 12px 0;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--vscode-textCodeBlock-background, #1e1e1e);
+}
+
+.code-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--vscode-editorWidget-background);
+  border-bottom: 1px solid var(--vscode-panel-border);
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s ease;
+}
+
+.code-header:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.code-toggle {
+  font-size: 10px;
+  color: var(--vscode-foreground);
+  transition: transform 0.2s ease;
+  flex-shrink: 0;
+}
+
+.code-block.expanded .code-toggle {
+  transform: rotate(90deg);
+}
+
+.code-lang {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+.code-preview {
+  flex: 1;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.7;
+}
+
+.code-block.expanded .code-preview {
+  display: none;
+}
+
+.code-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.code-action-btn {
+  padding: 2px 8px;
+  border: none;
+  background: var(--vscode-button-secondaryBackground);
+  color: var(--vscode-button-secondaryForeground);
+  border-radius: 3px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.code-action-btn:hover {
+  background: var(--vscode-button-secondaryHoverBackground);
+}
+
+.code-action-btn.copy-btn.copied {
+  background: var(--vscode-terminal-ansiGreen);
+  color: var(--vscode-editor-background);
+}
+
+.code-action-btn.diff-btn.active {
+  background: var(--vscode-terminal-ansiBlue);
+  color: var(--vscode-editor-background);
+}
+
+.code-action-btn.apply-btn {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+.code-block.diffed .code-action-btn.apply-btn {
+  opacity: 1;
+  pointer-events: auto;
+  background: var(--vscode-terminal-ansiGreen);
+  color: var(--vscode-editor-background);
+}
+
+/* Hide diff/apply buttons when not in manual mode */
+.code-block[data-edit-mode="ask"] .diff-btn,
+.code-block[data-edit-mode="ask"] .apply-btn,
+.code-block[data-edit-mode="auto"] .diff-btn,
+.code-block[data-edit-mode="auto"] .apply-btn {
+  display: none;
+}
+
+.code-body {
+  position: relative;
+  max-height: 50px;
+  overflow: hidden;
+  transition: max-height 0.3s ease;
+}
+
+.code-body::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 30px;
+  background: linear-gradient(transparent, var(--vscode-textCodeBlock-background, #1e1e1e));
+  pointer-events: none;
+  opacity: 1;
+  transition: opacity 0.2s ease;
+}
+
+.code-block.expanded .code-body {
+  max-height: 500px;
+  overflow-y: auto;
+}
+
+.code-block.expanded .code-body::after {
+  opacity: 0;
+}
+
+.code-body pre {
+  margin: 0;
+  padding: 12px;
+  overflow-x: auto;
+}
+
+.code-body code {
+  font-family: var(--vscode-editor-font-family);
+  font-size: var(--vscode-editor-font-size, 13px);
+  line-height: 1.5;
+  white-space: pre;
+}
+
+code.inline-code {
+  padding: 2px 6px;
+  background: var(--vscode-textCodeBlock-background);
+  border-radius: 3px;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.9em;
+}
+`;
+
+// ============================================
+// Thinking Styles
+// ============================================
+
+const thinkingStyles = `
+/* Thinking container - dotted border on host */
+:host(.thinking-container) {
+  display: block;
+  margin: 8px 0;
+  border: 1px dotted var(--vscode-panel-border);
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: none;
+}
+
+:host(.thinking-container:hover) .thinking-header {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.thinking-header {
+  display: flex;
+  align-items: center;
+  padding: 6px 10px;
+  gap: 8px;
+}
+
+.thinking-toggle {
+  color: var(--vscode-descriptionForeground);
+  font-family: monospace;
+  font-weight: bold;
+  width: 12px;
+  flex-shrink: 0;
+}
+
+.thinking-emoji {
+  flex-shrink: 0;
+}
+
+.thinking-label {
+  color: var(--vscode-foreground);
+  font-weight: 500;
+}
+
+.thinking-preview {
+  color: var(--vscode-descriptionForeground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  font-size: 12px;
+}
+
+.thinking-body {
+  display: none;
+  padding: 8px 10px 10px 30px;
+  border-top: 1px dotted var(--vscode-panel-border);
+  max-height: 300px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+:host(.thinking-container.expanded) .thinking-body {
+  display: block;
+}
+
+.thinking-body:empty {
+  display: none;
+}
+
+:host(.thinking-container.streaming) .thinking-emoji {
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+`;
+
+// ============================================
+// Tool Calls Styles
+// ============================================
+
+const toolsStyles = `
+/* Tools container - dotted border on host */
+:host(.tools-container) {
+  display: block;
+  margin: 8px 0;
+  border: 1px dotted var(--vscode-panel-border);
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: none;
+}
+
+:host(.tools-container:hover) .tools-header {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.tools-header {
+  display: flex;
+  align-items: center;
+  padding: 6px 10px;
+  gap: 8px;
+}
+
+.tools-toggle {
+  color: var(--vscode-descriptionForeground);
+  font-family: monospace;
+  font-weight: bold;
+  width: 12px;
+  flex-shrink: 0;
+}
+
+.tools-icon {
+  flex-shrink: 0;
+}
+
+.tools-title {
+  color: var(--vscode-foreground);
+  font-weight: 500;
+}
+
+.tools-preview {
+  color: var(--vscode-descriptionForeground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  font-size: 12px;
+}
+
+.tools-count {
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.tools-body {
+  display: none;
+  padding: 8px 10px;
+  border-top: 1px dotted var(--vscode-panel-border);
+}
+
+:host(.tools-container.expanded) .tools-body {
+  display: block;
+}
+
+.tools-body:empty {
+  display: none;
+}
+
+.tool-item {
+  padding: 4px 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.tool-tree {
+  color: var(--vscode-panel-border);
+  font-family: monospace;
+  flex-shrink: 0;
+}
+
+.tool-status {
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+}
+
+.tool-status.spinning {
+  animation: spin 1s linear infinite;
+  display: inline-block;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.tool-item[data-status="pending"] .tool-status {
+  color: var(--vscode-descriptionForeground);
+}
+
+.tool-item[data-status="running"] .tool-status {
+  color: var(--vscode-terminal-ansiYellow);
+}
+
+.tool-item[data-status="done"] .tool-status {
+  color: var(--vscode-terminal-ansiGreen);
+}
+
+.tool-item[data-status="error"] .tool-status {
+  color: var(--vscode-errorForeground);
+}
+
+.tool-name {
+  color: var(--vscode-foreground);
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+.tool-detail {
+  color: var(--vscode-descriptionForeground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 12px;
+}
+
+:host(.tools-container.complete) {
+  opacity: 0.85;
+}
+
+:host(.tools-container.complete:hover) {
+  opacity: 1;
+}
+
+:host(.tools-container.has-errors) .tools-title {
+  color: var(--vscode-errorForeground);
+}
+`;
+
+// ============================================
+// Shell Execution Styles
+// ============================================
+
+const shellStyles = `
+/* Shell container - dotted border on host */
+:host(.shell-container) {
+  display: block;
+  margin: 8px 0;
+  border: 1px dotted var(--vscode-panel-border);
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: none;
+}
+
+:host(.shell-container:hover) .shell-header {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.shell-header {
+  display: flex;
+  align-items: center;
+  padding: 6px 10px;
+  gap: 8px;
+}
+
+.shell-toggle {
+  color: var(--vscode-descriptionForeground);
+  font-family: monospace;
+  font-weight: bold;
+  width: 12px;
+  flex-shrink: 0;
+}
+
+.shell-icon {
+  color: var(--vscode-terminal-ansiYellow);
+  font-family: monospace;
+  font-weight: bold;
+  flex-shrink: 0;
+}
+
+.shell-title {
+  color: var(--vscode-foreground);
+  font-weight: 500;
+}
+
+.shell-preview {
+  color: var(--vscode-descriptionForeground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  font-size: 12px;
+}
+
+.shell-header-status {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.shell-body {
+  display: none;
+  padding: 8px 10px;
+  border-top: 1px dotted var(--vscode-panel-border);
+}
+
+:host(.shell-container.expanded) .shell-body {
+  display: block;
+}
+
+.shell-body:empty {
+  display: none;
+}
+
+.shell-item {
+  padding: 4px 0;
+}
+
+.shell-item-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.shell-tree {
+  color: var(--vscode-panel-border);
+  font-family: monospace;
+  flex-shrink: 0;
+}
+
+.shell-status {
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+}
+
+.shell-status.spinning {
+  animation: spin 1s linear infinite;
+  display: inline-block;
+}
+
+.shell-item[data-status="pending"] .shell-status {
+  color: var(--vscode-descriptionForeground);
+}
+
+.shell-item[data-status="running"] .shell-status {
+  color: var(--vscode-terminal-ansiYellow);
+}
+
+.shell-item[data-status="done"] .shell-status {
+  color: var(--vscode-terminal-ansiGreen);
+}
+
+.shell-item[data-status="error"] .shell-status {
+  color: var(--vscode-errorForeground);
+}
+
+.shell-command {
+  color: var(--vscode-foreground);
+  font-family: var(--vscode-editor-font-family);
+  font-size: 12px;
+}
+
+.shell-output {
+  background: var(--vscode-textCodeBlock-background);
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  margin: 4px 0 4px 22px;
+  max-height: 150px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--vscode-descriptionForeground);
+  font-family: var(--vscode-editor-font-family);
+}
+
+.shell-output:empty {
+  display: none;
+}
+
+.shell-output .success {
+  color: var(--vscode-terminal-ansiGreen);
+}
+
+.shell-output .error {
+  color: var(--vscode-errorForeground);
+}
+
+:host(.shell-container.complete) {
+  opacity: 0.85;
+}
+
+:host(.shell-container.complete:hover) {
+  opacity: 1;
+}
+
+:host(.shell-container.has-errors) .shell-title {
+  color: var(--vscode-errorForeground);
+}
+`;
+
+// ============================================
+// Pending Files Styles
+// ============================================
+
+const pendingStyles = `
+/* Pending container - dotted border on host */
+:host(.pending-container) {
+  display: block;
+  margin: 8px 0;
+  border: 1px dotted var(--vscode-panel-border);
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: none;
+}
+
+:host(.pending-container:hover) .pending-header {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.pending-header {
+  display: flex;
+  align-items: center;
+  padding: 6px 10px;
+  gap: 8px;
+}
+
+.pending-toggle {
+  color: var(--vscode-descriptionForeground);
+  font-family: monospace;
+  font-weight: bold;
+  width: 12px;
+  flex-shrink: 0;
+}
+
+.pending-icon {
+  flex-shrink: 0;
+}
+
+.pending-title {
+  color: var(--vscode-foreground);
+  font-weight: 500;
+}
+
+.pending-preview {
+  color: var(--vscode-descriptionForeground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  font-size: 12px;
+}
+
+.pending-count {
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.pending-body {
+  display: none;
+  padding: 8px 10px;
+  border-top: 1px dotted var(--vscode-panel-border);
+}
+
+:host(.pending-container.expanded) .pending-body {
+  display: block;
+}
+
+.pending-body:empty {
+  display: none;
+}
+
+.pending-item {
+  padding: 4px 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pending-tree {
+  color: var(--vscode-panel-border);
+  font-family: monospace;
+  flex-shrink: 0;
+}
+
+.pending-status {
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+}
+
+.pending-status.pending {
+  color: var(--vscode-terminal-ansiYellow);
+}
+
+.pending-status.applied {
+  color: var(--vscode-terminal-ansiGreen);
+}
+
+.pending-status.rejected {
+  color: var(--vscode-errorForeground);
+}
+
+.pending-status.superseded {
+  color: var(--vscode-descriptionForeground);
+}
+
+.pending-status.error {
+  color: var(--vscode-errorForeground);
+}
+
+.pending-file {
+  color: var(--vscode-textLink-foreground);
+  cursor: pointer;
+}
+
+.pending-file:hover {
+  text-decoration: underline;
+}
+
+.pending-file.no-click {
+  cursor: default;
+  color: var(--vscode-descriptionForeground);
+}
+
+.pending-file.no-click:hover {
+  text-decoration: none;
+}
+
+.pending-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.pending-btn {
+  padding: 2px 6px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+  border-radius: 3px;
+}
+
+.pending-btn.accept-btn {
+  color: var(--vscode-terminal-ansiGreen);
+}
+
+.pending-btn.accept-btn:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.pending-btn.reject-btn {
+  color: var(--vscode-errorForeground);
+}
+
+.pending-btn.reject-btn:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.pending-label {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+  margin-left: auto;
+}
+
+.pending-label.auto-applied {
+  color: var(--vscode-charts-green, #89d185);
+}
+
+.pending-label.error {
+  color: var(--vscode-errorForeground);
+}
+
+.pending-item[data-superseded="true"] {
+  opacity: 0.6;
+}
+
+.pending-item[data-superseded="true"] .pending-file {
+  text-decoration: line-through;
+  color: var(--vscode-descriptionForeground);
+}
+
+:host(.pending-container.auto-mode) .pending-item {
+  padding: 4px 0;
+}
+`;
+
+// ============================================
+// Export Combined Styles
+// ============================================
+
+export const turnActorStyles = `
+${baseStyles}
+${textStyles}
+${thinkingStyles}
+${toolsStyles}
+${shellStyles}
+${pendingStyles}
+`;

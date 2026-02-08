@@ -118,7 +118,13 @@
         "deepseek.logLevel": {
           "type": "string",
           "default": "INFO",
-          "enum": ["DEBUG", "INFO", "WARN", "ERROR", "OFF"],
+          "enum": [
+            "DEBUG",
+            "INFO",
+            "WARN",
+            "ERROR",
+            "OFF"
+          ],
           "enumDescriptions": [
             "Show all messages including debug info",
             "Show info, warnings and errors (default)",
@@ -394,11 +400,13 @@
   },
   "devDependencies": {
     "@types/node": "^18.x",
+    "@types/uuid": "^10.0.0",
     "@types/vscode": "^1.85.0",
     "@typescript-eslint/eslint-plugin": "^6.13.1",
     "@typescript-eslint/parser": "^6.13.1",
     "@vitest/coverage-v8": "^2.0.0",
     "@vitest/ui": "^2.0.0",
+    "copy-webpack-plugin": "^13.0.1",
     "esbuild": "^0.19.12",
     "eslint": "^8.54.0",
     "glob": "^10.3.10",
@@ -412,7 +420,9 @@
   "dependencies": {
     "diff": "^8.0.3",
     "events": "^3.3.0",
-    "highlight.js": "^11.11.1"
+    "highlight.js": "^11.11.1",
+    "sql.js": "^1.13.0",
+    "uuid": "^11.0.5"
   },
   "repository": {
     "type": "git",

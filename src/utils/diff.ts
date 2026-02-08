@@ -14,7 +14,7 @@ export interface DiffResult {
  * Format:
  * <<<<<<< SEARCH
  * original code
- * =======
+ * ======= AND
  * replacement code
  * >>>>>>> REPLACE
  */
@@ -93,7 +93,7 @@ export class DiffEngine {
    * # File: path/to/file.ts (optional)
    * <<<<<<< SEARCH
    * original code to find
-   * =======
+   * ======= AND
    * replacement code
    * >>>>>>> REPLACE
    */
@@ -107,17 +107,31 @@ export class DiffEngine {
     logger.info(`[DiffEngine] parseSearchReplaceBlocks input (first 200): ${normalizedContent.substring(0, 200).replace(/\n/g, '\\n')}`);
 
     // Simple regex - just match the core pattern
-    // <<<<<<< SEARCH ... ======= ... >>>>>>> REPLACE
+    // <<<<<<< SEARCH ... ======= AND ... >>>>>>> REPLACE
     // Note: (?:\n)? makes the newline before ======= optional to support empty SEARCH sections
-    const regex = /<{5,9}\s*SEARCH\s*\n([\s\S]*?)(?:\n)?={5,9}\n([\s\S]*?)(?:\n)?>{5,9}\s*REPLACE/g;
+    // The "AND" keyword makes the middle marker more distinctive to avoid false positives
+    const regex = /<{5,9}\s*SEARCH\s*\n([\s\S]*?)(?:\n)?={5,9}\s*AND\s*\n([\s\S]*?)(?:\n)?>{5,9}\s*REPLACE/g;
 
     let match;
     while ((match = regex.exec(normalizedContent)) !== null) {
-      logger.info(`[DiffEngine] Found block! Search length: ${match[1].length}, Replace length: ${match[2].length}`);
-      blocks.push({
-        search: match[1],
-        replace: match[2]
-      });
+      let search = match[1];
+      let replace = match[2];
+
+      // Sanitize: Remove lines that are JUST conflict markers (=======, etc.)
+      // These are format artifacts, not actual code
+      const conflictMarkerLine = /^[=<>]{5,9}(\s*AND)?$/i;
+      const sanitizeLines = (text: string): string => {
+        return text
+          .split('\n')
+          .filter(line => !conflictMarkerLine.test(line.trim()))
+          .join('\n');
+      };
+
+      search = sanitizeLines(search);
+      replace = sanitizeLines(replace);
+
+      logger.info(`[DiffEngine] Found block! Search length: ${search.length}, Replace length: ${replace.length}`);
+      blocks.push({ search, replace });
     }
 
     logger.info(`[DiffEngine] Total blocks found: ${blocks.length}`);

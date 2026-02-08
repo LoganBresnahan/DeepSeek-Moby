@@ -246,6 +246,25 @@ export const messageShadowStyles = `
 `;
 ```
 
+### Adopted StyleSheets (Performance)
+
+Instead of injecting `<style>` elements into each shadow root, actors share pre-parsed `CSSStyleSheet` objects via `adoptedStyleSheets`:
+
+```typescript
+// EventStateManager caches parsed stylesheets
+const baseSheet = manager.getShadowBaseSheet();           // Shared by ALL shadow actors
+const actorSheet = manager.getStyleSheet(css, 'Message'); // Cached per actor type
+
+this.shadow.adoptedStyleSheets = [baseSheet, actorSheet];
+```
+
+**Benefits:**
+- One parsed CSSOM tree shared across N shadow roots
+- Reduces memory: 100 actors × 3KB CSS = 3KB total (not 300KB)
+- No duplicate style parsing on each shadow root creation
+
+**Implementation details:** See [REMINDER.md Scalability section](../REMINDER.md#scalability--mitigations)
+
 ### VS Code Theme Variables
 
 Actors use CSS custom properties from VS Code:

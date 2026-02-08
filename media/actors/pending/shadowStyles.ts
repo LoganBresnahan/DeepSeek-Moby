@@ -187,6 +187,10 @@ export const pendingShadowStyles = `
   margin-left: auto;
 }
 
+.label.auto-applied {
+  color: var(--vscode-charts-green, #89d185);
+}
+
 /* Superseded items */
 .item[data-superseded="true"] {
   opacity: 0.6;

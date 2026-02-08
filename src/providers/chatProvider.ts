@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { DeepSeekClient, Message as ApiMessage, ToolCall } from '../deepseekClient';
 import { StatusBar } from '../views/statusBar';
-import { ChatHistoryManager } from '../chatHistory/ChatHistoryManager';
+import { ConversationManager } from '../events';
 import { DiffEngine } from '../utils/diff';
 import { logger } from '../utils/logger';
 import { workspaceTools, applyCodeEditTool, executeToolCall } from '../tools/workspaceTools';
@@ -39,7 +39,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
   private _view?: vscode.WebviewView;
   private deepSeekClient: DeepSeekClient;
   private statusBar: StatusBar;
-  private chatHistoryManager: ChatHistoryManager;
+  private conversationManager: ConversationManager;
   private currentSessionId: string | null = null;
   private lastActiveEditorUri: vscode.Uri | null = null;
   private abortController: AbortController | null = null;
@@ -94,12 +94,12 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     private readonly _extensionUri: vscode.Uri,
     deepSeekClient: DeepSeekClient,
     statusBar: StatusBar,
-    chatHistoryManager: ChatHistoryManager,
+    conversationManager: ConversationManager,
     tavilyClient: TavilyClient
   ) {
     this.deepSeekClient = deepSeekClient;
     this.statusBar = statusBar;
-    this.chatHistoryManager = chatHistoryManager;
+    this.conversationManager = conversationManager;
     this.diffEngine = new DiffEngine();
     this.tavilyClient = tavilyClient;
 
@@ -233,8 +233,32 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       superseded: false
     }));
 
-    // Combine and sort by timestamp
-    const allDiffs = [...pendingDiffs, ...resolvedDiffsList]
+    // Combine all diffs
+    const combinedDiffs = [...pendingDiffs, ...resolvedDiffsList];
+
+    // Deduplicate by filePath - for resolved diffs, keep only the most recent entry per file
+    // Keep all pending diffs visible as user may need to accept/reject them
+    const pendingByPath = new Map<string, typeof pendingDiffs[0]>();
+    const resolvedByPath = new Map<string, typeof resolvedDiffsList[0]>();
+
+    for (const d of combinedDiffs) {
+      if (d.status === 'pending') {
+        // For pending, keep the most recent per file (older ones are superseded)
+        const existing = pendingByPath.get(d.filePath);
+        if (!existing || d.timestamp > existing.timestamp) {
+          pendingByPath.set(d.filePath, d);
+        }
+      } else {
+        // For resolved (applied/rejected), keep only the most recent per file
+        const existing = resolvedByPath.get(d.filePath);
+        if (!existing || d.timestamp > existing.timestamp) {
+          resolvedByPath.set(d.filePath, d);
+        }
+      }
+    }
+
+    // Combine deduplicated diffs and sort by timestamp
+    const allDiffs = [...pendingByPath.values(), ...resolvedByPath.values()]
       .sort((a, b) => a.timestamp - b.timestamp);
 
     this._view.webview.postMessage({
@@ -280,7 +304,7 @@ which I already edited - would you like me to update it?"
   }
 
   private async loadCurrentSession() {
-    const currentSession = await this.chatHistoryManager.getCurrentSession();
+    const currentSession = await this.conversationManager.getCurrentSession();
     if (currentSession) {
       this.currentSessionId = currentSession.id;
     }
@@ -402,6 +426,9 @@ which I already edited - would you like me to update it?"
         case 'focusDiff':
           await this.focusSpecificDiff(data.diffId);
           break;
+        case 'openFile':
+          await this.openFile(data.filePath);
+          break;
         // case 'rejectAllDiffs': ...
         // case 'focusDiff': ...
         case 'getOpenFiles':
@@ -502,7 +529,7 @@ which I already edited - would you like me to update it?"
     await new Promise(resolve => setTimeout(resolve, 100));
     if (this._view) {
       // Get stats
-      const stats = await this.chatHistoryManager.getSessionStats();
+      const stats = await this.conversationManager.getSessionStats();
 
       // Fetch balance from DeepSeek API
       let balance = null;
@@ -556,7 +583,7 @@ which I already edited - would you like me to update it?"
     // Create a new session for fresh conversation
     const editor = vscode.window.activeTextEditor;
     const language = editor?.document.languageId;
-    const session = await this.chatHistoryManager.startNewSession(
+    const session = await this.conversationManager.startNewSession(
       undefined,
       this.deepSeekClient.getModel(),
       language
@@ -705,7 +732,7 @@ For code changes, use the SEARCH/REPLACE format:
 # File: path/to/file.ts
 <<<<<<< SEARCH
 exact code to find
-=======
+======= AND
 replacement code
 >>>>>>> REPLACE
 \`\`\`
@@ -816,7 +843,7 @@ Always:
   private async clearAllHistory() {
     try {
       // Clear history using the manager
-      await this.chatHistoryManager.clearAllHistory();
+      await this.conversationManager.clearAllHistory();
 
       // Reset current session
       this.currentSessionId = null;
@@ -836,14 +863,14 @@ Always:
 
   private async sendHistorySessions() {
     try {
-      const sessions = await this.chatHistoryManager.getAllSessions();
+      const sessions = await this.conversationManager.getAllSessions();
       this._view?.webview.postMessage({
         type: 'historySessions',
         sessions: sessions
       });
 
       // Also send current session ID
-      const currentSession = await this.chatHistoryManager.getCurrentSession();
+      const currentSession = await this.conversationManager.getCurrentSession();
       if (currentSession) {
         this._view?.webview.postMessage({
           type: 'currentSessionId',
@@ -857,7 +884,7 @@ Always:
 
   private async renameSession(sessionId: string, title: string) {
     try {
-      await this.chatHistoryManager.renameSession(sessionId, title);
+      await this.conversationManager.renameSession(sessionId, title);
       logger.info(`[ChatProvider] Renamed session ${sessionId} to "${title}"`);
 
       // Refresh sessions
@@ -869,13 +896,13 @@ Always:
 
   private async exportSessionToFile(sessionId: string, format: 'json' | 'markdown' | 'txt') {
     try {
-      const content = await this.chatHistoryManager.exportSession(sessionId, format);
+      const content = await this.conversationManager.exportSession(sessionId, format);
       if (!content) {
         vscode.window.showErrorMessage('Session not found');
         return;
       }
 
-      const session = await this.chatHistoryManager.getSession(sessionId);
+      const session = await this.conversationManager.getSession(sessionId);
       const title = session?.title || 'chat';
       const ext = format === 'markdown' ? 'md' : format;
       const defaultName = `${title.replace(/[^a-z0-9]/gi, '_')}.${ext}`;
@@ -900,7 +927,7 @@ Always:
 
   private async deleteSession(sessionId: string) {
     try {
-      await this.chatHistoryManager.deleteSession(sessionId);
+      await this.conversationManager.deleteSession(sessionId);
       logger.info(`[ChatProvider] Deleted session ${sessionId}`);
 
       // If we deleted the current session, clear it
@@ -918,7 +945,7 @@ Always:
 
   private async exportAllHistoryToFile(format: 'json' | 'markdown' | 'txt') {
     try {
-      const content = await this.chatHistoryManager.exportAllSessions(format);
+      const content = await this.conversationManager.exportAllSessions(format);
       if (!content) {
         vscode.window.showWarningMessage('No chat history to export');
         return;
@@ -1173,7 +1200,7 @@ Always:
     if (!this.currentSessionId) {
       const editor = vscode.window.activeTextEditor;
       const language = editor?.document.languageId;
-      const session = await this.chatHistoryManager.startNewSession(
+      const session = await this.conversationManager.startNewSession(
         message,
         this.deepSeekClient.getModel(),
         language
@@ -1192,10 +1219,9 @@ Always:
 
     // Save user message to history (UI already shows it from frontend)
     if (this.currentSessionId) {
-      await this.chatHistoryManager.addMessageToCurrentSession({
+      await this.conversationManager.addMessageToCurrentSession({
         role: 'user',
-        content: message,
-        tokens: this.deepSeekClient.estimateTokens(message)
+        content: message
       });
     }
 
@@ -1255,7 +1281,7 @@ ${editModeDescriptions[this.editMode]}
 # File: path/to/file.ext
 <<<<<<< SEARCH
 exact code to find (copy from file verbatim)
-=======
+======= AND
 replacement code
 >>>>>>> REPLACE
 \`\`\`
@@ -1267,7 +1293,7 @@ replacement code
 export function calculate(x: number): number {
   return x + 1;
 }
-=======
+======= AND
 export function calculate(x: number): number {
   return x * 2;  // Changed from addition to multiplication
 }
@@ -1278,7 +1304,7 @@ export function calculate(x: number): number {
 1. ✓ Code block must start with triple backticks and optional language
 2. ✓ First line INSIDE the code block must be "# File: <path>"
 3. ✓ SEARCH section contains EXACT code from the file (including whitespace)
-4. ✓ All markers (<<<<<<< SEARCH, =======, >>>>>>> REPLACE) must be INSIDE the code block
+4. ✓ All markers (<<<<<<< SEARCH, ======= AND, >>>>>>> REPLACE) must be INSIDE the code block
 5. ✓ ONE code block per file edit - do NOT split into separate "before" and "after" blocks
 
 **For ADDING new code** (inserting new functions/methods):
@@ -1288,7 +1314,7 @@ export function calculate(x: number): number {
   async fetchUser(id: string): Promise<User> {
     // existing method
   }
-=======
+======= AND
   async fetchUser(id: string): Promise<User> {
     // existing method
   }
@@ -1304,7 +1330,7 @@ export function calculate(x: number): number {
 \`\`\`typescript
 # File: src/utils/newFile.ts
 <<<<<<< SEARCH
-=======
+======= AND
 // This is a brand new file
 export function newHelper(): string {
   return "hello";
@@ -1463,19 +1489,20 @@ ${webSearchContext}
 
     try {
       // Get current session messages for context (user message already saved above)
-      const currentSession = await this.chatHistoryManager.getCurrentSession();
-      const messageCount = currentSession ? currentSession.messages.length : 1;
+      const currentSession = await this.conversationManager.getCurrentSession();
+      const sessionMessages = currentSession
+        ? await this.conversationManager.getSessionMessagesCompat(currentSession.id)
+        : [];
+      const messageCount = sessionMessages.length || 1;
       logger.apiRequest(model, messageCount, hasAttachments);
 
       // Build messages array - handle multimodal content if attachments present
       const historyMessages: ApiMessage[] = [];
-      if (currentSession) {
-        for (const msg of currentSession.messages) {
-          historyMessages.push({
-            role: msg.role,
-            content: msg.content
-          });
-        }
+      for (const msg of sessionMessages) {
+        historyMessages.push({
+          role: msg.role,
+          content: msg.content
+        });
       }
 
       // If this message has file attachments, include their contents in the context
@@ -1573,9 +1600,15 @@ Now provide your final response based on what you learned. Do NOT attempt to use
         // Track iteration-specific response (accumulated response is declared outside try block)
         let iterationResponse = '';
 
+        // Timing metrics for debugging
+        const iterationStartTime = Date.now();
+        let firstReasoningTokenTime: number | null = null;
+        let firstContentTokenTime: number | null = null;
+
         // Log iteration start for debugging R1 continuation
         if (isReasonerModel) {
           logger.info(`[R1-Shell] Starting iteration ${shellIteration + 1}, messages in context: ${currentHistoryMessages.length}`);
+          logger.info(`[Timing] Iteration ${shellIteration + 1} started at ${new Date().toISOString()}`);
           // Notify frontend of new iteration for per-iteration thinking dropdowns
           this._view?.webview.postMessage({
             type: 'iterationStart',
@@ -1586,6 +1619,16 @@ Now provide your final response based on what you learned. Do NOT attempt to use
         const _response = await this.deepSeekClient.streamChat(
           currentHistoryMessages,
           async (token) => {
+            // Track timing for first content token
+            if (!firstContentTokenTime) {
+              firstContentTokenTime = Date.now();
+              const waitTime = firstContentTokenTime - iterationStartTime;
+              const afterReasoning = firstReasoningTokenTime
+                ? firstContentTokenTime - firstReasoningTokenTime
+                : 0;
+              logger.info(`[Timing] First content token after ${waitTime}ms (${afterReasoning}ms after reasoning started)`);
+            }
+
             iterationResponse += token;
             accumulatedResponse += token;
             currentIterationContent += token;  // Track content per iteration
@@ -1650,6 +1693,12 @@ Now provide your final response based on what you learned. Do NOT attempt to use
           currentSystemPrompt,
           // Reasoning callback for deepseek-reasoner
           isReasonerModel ? (reasoningToken) => {
+            // Track timing for first reasoning token
+            if (!firstReasoningTokenTime) {
+              firstReasoningTokenTime = Date.now();
+              const waitTime = firstReasoningTokenTime - iterationStartTime;
+              logger.info(`[Timing] First reasoning token after ${waitTime}ms`);
+            }
             fullReasoning += reasoningToken;
             currentIterationReasoning += reasoningToken;  // Track per-iteration
             this._view?.webview.postMessage({
@@ -1662,6 +1711,8 @@ Now provide your final response based on what you learned. Do NOT attempt to use
 
         // Log iteration completion for debugging R1 continuation
         if (isReasonerModel) {
+          const iterationDuration = Date.now() - iterationStartTime;
+          logger.info(`[Timing] Iteration ${shellIteration + 1} complete in ${iterationDuration}ms`);
           logger.info(`[R1-Shell] Iteration ${shellIteration + 1} complete, response length: ${iterationResponse.length} chars`);
           logger.info(`[R1-Shell] Response preview: ${iterationResponse.substring(0, 300).replace(/\n/g, '\\n')}...`);
 
@@ -1700,10 +1751,14 @@ Now provide your final response based on what you learned. Do NOT attempt to use
             }
 
             // Notify frontend about shell execution
-            logger.info(`[Frontend] Sending shellExecuting message`);
+            const shellCommandsPayload = commands.map(c => ({
+              command: c.command,
+              description: c.command.length > 50 ? c.command.substring(0, 50) + '...' : c.command
+            }));
+            logger.info(`[Frontend] Sending shellExecuting message: ${shellCommandsPayload.length} commands`);
             this._view?.webview.postMessage({
               type: 'shellExecuting',
-              commands: commands.map(c => c.command)
+              commands: shellCommandsPayload
             });
 
             // Check "Walk on the Wild Side" setting
@@ -1711,9 +1766,13 @@ Now provide your final response based on what you learned. Do NOT attempt to use
             const allowAllCommands = config.get<boolean>('allowAllShellCommands') ?? false;
 
             // Execute commands
+            const shellStartTime = Date.now();
+            logger.info(`[Timing] Shell execution started at ${new Date().toISOString()}`);
             const results = await executeShellCommands(commands, workspacePath, {
               allowAllCommands
             });
+            const shellDuration = Date.now() - shellStartTime;
+            logger.info(`[Timing] Shell execution completed in ${shellDuration}ms`);
             shellResultsForHistory.push(...results);
 
             // Notify frontend of results
@@ -1811,7 +1870,7 @@ You MUST now produce the code edits. Use the SEARCH/REPLACE format with "# File:
 # File: path/to/file.ext
 <<<<<<< SEARCH
 exact code to find
-=======
+======= AND
 replacement code
 >>>>>>> REPLACE
 \`\`\`
@@ -1897,16 +1956,13 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
       // Save assistant message to history (with clean response)
       const tokenCount = this.deepSeekClient.estimateTokens(cleanResponse + fullReasoning);
       if (this.currentSessionId && (cleanResponse || fullReasoning)) {
-        await this.chatHistoryManager.addMessageToCurrentSession({
+        // Combine reasoning and content for storage
+        const fullContent = fullReasoning
+          ? `<reasoning>\n${fullReasoning}\n</reasoning>\n\n${cleanResponse}`
+          : cleanResponse;
+        await this.conversationManager.addMessageToCurrentSession({
           role: 'assistant',
-          content: cleanResponse,
-          reasoning_content: fullReasoning || undefined,
-          reasoning_iterations: reasoningIterations.length > 0 ? reasoningIterations : undefined,
-          content_iterations: contentIterations.length > 0 ? contentIterations : undefined,
-          toolCalls: allToolCalls.length > 0 ? allToolCalls : undefined,
-          fileChanges: this.currentResponseFileChanges.length > 0 ? this.currentResponseFileChanges : undefined,
-          editMode: this.editMode,
-          tokens: tokenCount
+          content: fullContent
         });
       }
 
@@ -1923,26 +1979,15 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
         const partialContent = accumulatedResponse || fullResponse;
         if (this.currentSessionId && (partialContent || fullReasoning)) {
           const cleanPartialResponse = stripShellTags(stripDSML(partialContent));
-          const partialTokenCount = this.deepSeekClient.estimateTokens(cleanPartialResponse + fullReasoning);
-          // For partial save, include any reasoning and content accumulated so far
-          const partialReasoningIterations = currentIterationReasoning
-            ? [...reasoningIterations, currentIterationReasoning]
-            : reasoningIterations;
-          const partialContentIterations = currentIterationContent
-            ? [...contentIterations, currentIterationContent]
-            : contentIterations;
-          await this.chatHistoryManager.addMessageToCurrentSession({
+          // Combine reasoning and partial content for storage
+          const partialFullContent = fullReasoning
+            ? `<reasoning>\n${fullReasoning}\n</reasoning>\n\n${cleanPartialResponse}\n\n*[Generation stopped]*`
+            : `${cleanPartialResponse}\n\n*[Generation stopped]*`;
+          await this.conversationManager.addMessageToCurrentSession({
             role: 'assistant',
-            content: cleanPartialResponse + '\n\n*[Generation stopped]*',
-            reasoning_content: fullReasoning || undefined,
-            reasoning_iterations: partialReasoningIterations.length > 0 ? partialReasoningIterations : undefined,
-            content_iterations: partialContentIterations.length > 0 ? partialContentIterations : undefined,
-            toolCalls: toolCallsForHistory.length > 0 ? toolCallsForHistory : undefined,
-            fileChanges: this.currentResponseFileChanges.length > 0 ? this.currentResponseFileChanges : undefined,
-            editMode: this.editMode,
-            tokens: partialTokenCount
+            content: partialFullContent
           });
-          logger.info(`[ChatProvider] Saved partial response to history (${partialTokenCount} tokens)`);
+          logger.info(`[ChatProvider] Saved partial response to history`);
         }
         // Don't show error for user-initiated stops - handled by stopGeneration
         return;
@@ -1993,10 +2038,14 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
     const maxIterations = configuredLimit >= 100 ? Infinity : configuredLimit;
     let iterations = 0;
 
-    // Track ALL tool calls across all iterations for unified display
+    // Track ALL tool calls across all iterations for return value
     const allToolDetails: Array<{ name: string; detail: string; status: string }> = [];
+    // Track tools for the CURRENT BATCH (may span multiple iterations)
+    let batchToolDetails: Array<{ name: string; detail: string; status: string }> = [];
     let toolContainerStarted = false;
     let globalToolIndex = 0;
+    // Track if a file was modified in the current batch (triggers batch close)
+    let fileModifiedInBatch = false;
 
     while (iterations < maxIterations) {
       iterations++;
@@ -2067,16 +2116,30 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
         return { name, detail, args };
       });
 
-      // Add to global tracking
+      // Add tools from this iteration to the current batch
       const newTools = toolDetails.map(t => ({ name: t.name, detail: t.detail, status: 'pending' }));
+      batchToolDetails.push(...newTools);
+
+      // Add to global tracking (for return value)
       allToolDetails.push(...newTools);
 
-      // Create or update tool calls container - send ALL tools each time
-      this._view?.webview.postMessage({
-        type: toolContainerStarted ? 'toolCallsUpdate' : 'toolCallsStart',
-        tools: allToolDetails
-      });
-      toolContainerStarted = true;
+      // Start a NEW tool container OR update existing batch
+      if (!toolContainerStarted) {
+        // Start new batch
+        logger.info(`[Frontend] Sending toolCallsStart message: ${batchToolDetails.length} tools`);
+        this._view?.webview.postMessage({
+          type: 'toolCallsStart',
+          tools: batchToolDetails
+        });
+        toolContainerStarted = true;
+      } else {
+        // Update existing batch with all tools (including new ones)
+        logger.info(`[Frontend] Sending toolCallsUpdate message: batch now has ${batchToolDetails.length} tools`);
+        this._view?.webview.postMessage({
+          type: 'toolCallsUpdate',
+          tools: batchToolDetails
+        });
+      }
 
       // Add assistant message with tool calls (required for API contract)
       // Use empty content if no real content - the tool_calls field is what matters
@@ -2087,19 +2150,24 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
         tool_calls: response.tool_calls
       });
 
+      // Calculate batch-relative index for this iteration's tools
+      const batchStartIndex = batchToolDetails.length - newTools.length;
+
       // Execute each tool call
       for (let i = 0; i < response.tool_calls.length; i++) {
         const toolCall = response.tool_calls[i];
         const detail = toolDetails[i];
-        const currentIndex = globalToolIndex + i;
+        const globalIndex = globalToolIndex + i;
+        const batchIndex = batchStartIndex + i;
 
         logger.toolCall(toolCall.function.name);
 
-        // Update status to running
-        allToolDetails[currentIndex].status = 'running';
+        // Update status to running (use batch index for the current batch)
+        batchToolDetails[batchIndex].status = 'running';
+        allToolDetails[globalIndex].status = 'running';
         this._view?.webview.postMessage({
           type: 'toolCallUpdate',
-          index: currentIndex,
+          index: batchIndex, // Index within the current batch
           status: 'running',
           detail: detail.detail
         });
@@ -2148,8 +2216,11 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
                   await this.handleAutoShowDiff(codeWithHeader, language);
                 } else if (this.editMode === 'auto') {
                   logger.info(`[ChatProvider] Auto-applying code edit for: ${args.file}`);
-                  // In auto mode, apply code directly
-                  await this.applyCodeDirectlyForAutoMode(args.file, args.code, args.description);
+                  // In auto mode, apply code directly (skip notification, we'll batch it)
+                  const applied = await this.applyCodeDirectlyForAutoMode(args.file, args.code, args.description, true);
+                  if (applied) {
+                    fileModifiedInBatch = true;
+                  }
                 }
               }
             } else {
@@ -2167,25 +2238,45 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
           tool_call_id: toolCall.id
         });
 
-        // Update status to done
-        allToolDetails[currentIndex].status = success ? 'done' : 'error';
+        // Update status to done (use batch index for the current batch)
+        const finalStatus = success ? 'done' : 'error';
+        batchToolDetails[batchIndex].status = finalStatus;
+        allToolDetails[globalIndex].status = finalStatus;
         this._view?.webview.postMessage({
           type: 'toolCallUpdate',
-          index: currentIndex,
-          status: success ? 'done' : 'error',
+          index: batchIndex, // Index within the current batch
+          status: finalStatus,
           detail: detail.detail
         });
       }
 
       // Update global index for next iteration
       globalToolIndex += response.tool_calls.length;
+
+      // If a file was modified in this iteration, close the batch and show modified files
+      // This creates the interleaving: [Tools batch] [Modified Files] [Next Tools batch]
+      if (fileModifiedInBatch) {
+        this._view?.webview.postMessage({
+          type: 'toolCallsEnd'
+        });
+        toolContainerStarted = false;
+        logger.info(`[Frontend] Sent toolCallsEnd (file modified, closing batch after iteration ${iterations})`);
+
+        // Send the modified files notification
+        this.notifyAutoAppliedFilesChanged();
+
+        // Reset for next batch
+        batchToolDetails = [];
+        fileModifiedInBatch = false;
+      }
     }
 
-    // Mark tool calls section as complete (only if we had any tools)
+    // Close any remaining open batch at the end of the loop
     if (toolContainerStarted) {
       this._view?.webview.postMessage({
         type: 'toolCallsEnd'
       });
+      logger.info(`[Frontend] Sent toolCallsEnd (end of tool loop)`);
     }
 
     const limitReached = iterations >= maxIterations && maxIterations !== Infinity;
@@ -2819,8 +2910,10 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
 
   /**
    * Apply code changes directly to a file without showing a diff (for auto mode)
+   * @param skipNotification If true, don't send diffListChanged (caller handles batching)
+   * @returns true if code was applied successfully
    */
-  private async applyCodeDirectlyForAutoMode(filePath: string, code: string, description?: string) {
+  private async applyCodeDirectlyForAutoMode(filePath: string, code: string, description?: string, skipNotification = false): Promise<boolean> {
     try {
       // Find the file - handle both absolute and relative paths
       let fileUri: vscode.Uri | undefined;
@@ -2862,7 +2955,7 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
           type: 'warning',
           message: `Could not find file: ${filePath}. The file may have been moved or deleted.`
         });
-        return;
+        return false;
       }
 
       // Read current content
@@ -2923,13 +3016,17 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
         iteration
       });
 
-      // Notify frontend
-      this.notifyAutoAppliedFilesChanged();
+      // Notify frontend (unless caller is handling batching)
+      if (!skipNotification) {
+        this.notifyAutoAppliedFilesChanged();
+      }
       this.sendCodeAppliedStatus(true);
+      return true;
 
     } catch (error: any) {
       logger.error(`[ChatProvider] Auto mode: Failed to apply code to ${filePath}:`, error.message);
-      this.sendCodeAppliedStatus(false, error.message);
+      this.sendCodeAppliedStatus(false, error.message, filePath);
+      return false;
     }
   }
 
@@ -2949,17 +3046,30 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
 
     // Use resolvedDiffs which has the proper structure (diffId, iteration)
     // Auto-applied files are added to resolvedDiffs with status 'applied'
-    logger.info(`[Frontend] Sending diffListChanged (auto-applied) message`);
-    this._view.webview.postMessage({
-      type: 'diffListChanged',
-      diffs: this.resolvedDiffs.map(d => ({
+    // Deduplicate by filePath - keep only the most recent entry for each file
+    const deduplicatedDiffs = new Map<string, typeof this.resolvedDiffs[0]>();
+    for (const d of this.resolvedDiffs) {
+      const existing = deduplicatedDiffs.get(d.filePath);
+      if (!existing || d.timestamp > existing.timestamp) {
+        deduplicatedDiffs.set(d.filePath, d);
+      }
+    }
+
+    const diffsArray = Array.from(deduplicatedDiffs.values())
+      .sort((a, b) => a.timestamp - b.timestamp)
+      .map(d => ({
         filePath: d.filePath,
         timestamp: d.timestamp,
         status: d.status,
         iteration: d.iteration,
         diffId: d.diffId,
         superseded: false
-      })),
+      }));
+
+    logger.info(`[Frontend] Sending diffListChanged (auto-applied) message: ${diffsArray.length} unique files`);
+    this._view.webview.postMessage({
+      type: 'diffListChanged',
+      diffs: diffsArray,
       editMode: this.editMode
     });
   }
@@ -3005,6 +3115,37 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
     );
 
     logger.info(`[ChatProvider] Focused diff: ${diffId} (${metadata.targetFilePath})`);
+  }
+
+  /**
+   * Opens a file in the editor (used for auto-applied files without active diffs)
+   */
+  private async openFile(filePath: string) {
+    if (!filePath) {
+      logger.warn('[ChatProvider] openFile called with empty filePath');
+      return;
+    }
+
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    if (!workspaceFolder) {
+      logger.warn('[ChatProvider] No workspace folder found');
+      return;
+    }
+
+    const absolutePath = path.isAbsolute(filePath)
+      ? filePath
+      : path.join(workspaceFolder.uri.fsPath, filePath);
+
+    const uri = vscode.Uri.file(absolutePath);
+
+    try {
+      const doc = await vscode.workspace.openTextDocument(uri);
+      await vscode.window.showTextDocument(doc, { preview: false });
+      logger.info(`[ChatProvider] Opened file: ${filePath}`);
+    } catch (error) {
+      logger.warn(`[ChatProvider] Failed to open file: ${filePath}: ${error}`);
+      vscode.window.showWarningMessage(`Could not open file: ${filePath}`);
+    }
   }
 
   /**
@@ -3788,20 +3929,24 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
     return languageMap[language.toLowerCase()] || language;
   }
 
-  private sendCodeAppliedStatus(success: boolean, error?: string) {
-    logger.codeApplied(success);
+  private sendCodeAppliedStatus(success: boolean, error?: string, filePath?: string) {
+    logger.codeApplied(success, filePath);
     if (this._view) {
       this._view.webview.postMessage({
         type: 'codeApplied',
         success,
-        error
+        error,
+        filePath
       });
     }
   }
 
   private async loadCurrentSessionHistory() {
-    const currentSession = await this.chatHistoryManager.getCurrentSession();
-    if (this._view && currentSession && currentSession.messages.length > 0) {
+    const currentSession = await this.conversationManager.getCurrentSession();
+    if (!currentSession || !this._view) return;
+
+    const messages = await this.conversationManager.getSessionMessagesCompat(currentSession.id);
+    if (messages.length > 0) {
       // Notify webview of loaded session (for SessionActor)
       this._view.webview.postMessage({
         type: 'sessionLoaded',
@@ -3812,25 +3957,19 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
 
       this._view.webview.postMessage({
         type: 'loadHistory',
-        history: currentSession.messages.map(msg => ({
+        history: messages.map((msg: { role: string; content: string }) => ({
           role: msg.role,
-          content: msg.content,
-          reasoning_content: msg.reasoning_content,
-          reasoning_iterations: msg.reasoning_iterations,
-          content_iterations: msg.content_iterations,
-          toolCalls: msg.toolCalls,
-          fileChanges: msg.fileChanges,
-          editMode: msg.editMode
+          content: msg.content
         }))
       });
     }
   }
 
   public async loadSession(sessionId: string) {
-    const session = await this.chatHistoryManager.getSession(sessionId);
+    const session = await this.conversationManager.getSession(sessionId);
     if (session && this._view) {
       this.currentSessionId = session.id;
-      await this.chatHistoryManager.switchToSession(sessionId);
+      await this.conversationManager.switchToSession(sessionId);
       logger.sessionSwitch(sessionId);
 
       // Don't switch to session's model - keep user's current model selection
@@ -3845,17 +3984,12 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
       });
 
       // Load session messages via loadHistory (clears and loads)
+      const messages = await this.conversationManager.getSessionMessagesCompat(sessionId);
       this._view.webview.postMessage({
         type: 'loadHistory',
-        history: session.messages.map(msg => ({
+        history: messages.map((msg: { role: string; content: string }) => ({
           role: msg.role,
-          content: msg.content,
-          reasoning_content: msg.reasoning_content,
-          reasoning_iterations: msg.reasoning_iterations,
-          content_iterations: msg.content_iterations,
-          toolCalls: msg.toolCalls,
-          fileChanges: msg.fileChanges,
-          editMode: msg.editMode
+          content: msg.content
         }))
       });
     }

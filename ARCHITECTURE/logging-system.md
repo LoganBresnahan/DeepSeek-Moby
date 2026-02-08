@@ -72,7 +72,7 @@ type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR' | 'OFF';
 | `src/tools/reasonerShellExecutor.ts` | 4 | Shell execution |
 | `src/extension.ts` | 3 | Activation, show/dispose |
 | `src/deepseekClient.ts` | 5 | API errors |
-| `src/chatHistory/ChatStorage.ts` | 2 | Storage errors |
+| `src/events/ConversationManager.ts` | 2 | Database/storage errors |
 | `src/providers/completionProvider.ts` | 1 | Completion errors |
 | `src/utils/formatting.ts` | 1 | Formatter warnings |
 
@@ -148,7 +148,7 @@ All extension-side `console.*` calls have been migrated to use the logger:
 | `src/deepseekClient.ts` | ✅ Fixed | 5 `console.error` → `logger.apiError()` |
 | `src/extension.ts` | ✅ Fixed | `console.log` → `logger.info()` |
 | `src/providers/completionProvider.ts` | ✅ Fixed | `console.error` → `logger.error()` |
-| `src/chatHistory/ChatStorage.ts` | ✅ Fixed | 2 `console.error` → `logger.error()` |
+| `src/events/ConversationManager.ts` | ✅ Fixed | Database errors use proper logging |
 | `src/utils/formatting.ts` | ✅ Fixed | `console.warn` → `logger.warn()` |
 
 **Total: 10 console calls migrated to logger ✅**

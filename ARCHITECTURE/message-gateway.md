@@ -292,6 +292,66 @@ The MessageGatewayActor combines aspects of all these patterns to create a clean
 
 ---
 
+## Content Batching Rules
+
+The gateway merges consecutive same-type content into single UI containers. Different content types create visual separation.
+
+### The Rule
+
+**Consecutive same-type content → MERGE into one dropdown**
+**Different content type in between → SEPARATE dropdowns**
+
+### Example Flow
+
+```
+Backend sends:
+  toolCallsStart (read_file)       ─┐
+  toolCallsEnd                      │ These merge into
+  toolCallsStart (apply_code_edit) ─┘ [Used 2 tools]
+  diffListChanged                   → [Modified Files 1 pending]
+  toolCallsEnd
+  toolCallsStart (read_file)       ─┐ These merge into
+  toolCallsEnd                      │ [Used 2 tools]
+  toolCallsStart (apply_code_edit) ─┘
+  diffListChanged                   → [Modified Files 1 pending]
+  toolCallsEnd
+  toolCallsStart (read_file)        → [Used 1 tool]
+  toolCallsEnd
+
+UI displays:
+  [Used 2 tools] read_file, apply_code_edit
+  [Modified Files] wow.rb
+  [Used 2 tools] read_file, apply_code_edit
+  [Modified Files] wow.rb
+  [Used 1 tool] read_file
+```
+
+### Implementation
+
+**Backend (chatProvider.ts):**
+- Accumulates tools across iterations until a file modification happens
+- When `apply_code_edit` succeeds in auto mode, closes the current tool batch
+- Sends `toolCallsEnd` followed by `diffListChanged`
+- Next iteration starts a fresh tool batch
+
+**Frontend (VirtualMessageGatewayActor.ts):**
+- `toolCallsStart` creates a new tools container
+- `toolCallsUpdate` adds tools to the existing container
+- `toolCallsEnd` marks the batch complete
+- `diffListChanged` creates/updates the pending files container
+
+### Content Types and Separation
+
+| Content Type | Creates New Batch When |
+|--------------|----------------------|
+| Tools (`toolCallsStart`) | After different content type |
+| Modified Files (`diffListChanged`) | After different content type |
+| Shell Commands (`shellExecuting`) | After different content type |
+| Text (`streamToken`) | After different content type |
+| Thinking (`thinkingStart`) | After different content type |
+
+---
+
 ## File Location
 
 ```

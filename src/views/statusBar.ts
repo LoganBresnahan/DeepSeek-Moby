@@ -1,20 +1,20 @@
 import * as vscode from 'vscode';
 import { DeepSeekClient } from '../deepseekClient';
 import { ConfigManager } from '../utils/config';
-import { ChatHistoryManager } from '../chatHistory/ChatHistoryManager';
+import { ConversationManager } from '../events';
 
 export class StatusBar {
   private statusBarItem: vscode.StatusBarItem;
   private deepSeekClient: DeepSeekClient;
-  private chatHistoryManager: ChatHistoryManager;
+  private conversationManager: ConversationManager;
   private config: ConfigManager;
   private context: vscode.ExtensionContext;
   private totalTokens: number = 0;
 
-  constructor(context: vscode.ExtensionContext, deepSeekClient: DeepSeekClient, chatHistoryManager: ChatHistoryManager) {
+  constructor(context: vscode.ExtensionContext, deepSeekClient: DeepSeekClient, conversationManager: ConversationManager) {
     this.context = context;
     this.deepSeekClient = deepSeekClient;
-    this.chatHistoryManager = chatHistoryManager;
+    this.conversationManager = conversationManager;
     this.config = ConfigManager.getInstance();
     
     this.statusBarItem = vscode.window.createStatusBarItem(
@@ -39,7 +39,7 @@ export class StatusBar {
     const model = this.config.get<string>('model') || 'deepseek-chat';
     
     // Get stats from chat history
-    const stats = await this.chatHistoryManager.getSessionStats();
+    const stats = await this.conversationManager.getSessionStats();
     this.totalTokens = stats.totalTokens;
     
     this.statusBarItem.text = `$(robot) DeepSeek Moby ${model} | $(pulse) ${this.totalTokens.toLocaleString()} tokens`;
@@ -52,7 +52,7 @@ export class StatusBar {
 
   async updateLastResponse() {
     // Update stats from chat history
-    const stats = await this.chatHistoryManager.getSessionStats();
+    const stats = await this.conversationManager.getSessionStats();
     this.totalTokens = stats.totalTokens;
     this.saveTokenCount();
     await this.update();

@@ -5,7 +5,7 @@ import { CompletionProvider } from './providers/completionProvider';
 import { CommandProvider } from './providers/commandProvider';
 import { StatusBar } from './views/statusBar';
 import { ConfigManager } from './utils/config';
-import { ChatHistoryManager } from './chatHistory/ChatHistoryManager';
+import { ConversationManager } from './events';
 import { TavilyClient } from './clients/tavilyClient';
 import { logger } from './utils/logger';
 
@@ -14,7 +14,7 @@ let completionProvider: CompletionProvider;
 let commandProvider: CommandProvider;
 let statusBar: StatusBar;
 let deepSeekClient: DeepSeekClient;
-let chatHistoryManager: ChatHistoryManager;
+let conversationManager: ConversationManager;
 let tavilyClient: TavilyClient;
 
 export async function activate(context: vscode.ExtensionContext) {
@@ -26,11 +26,11 @@ export async function activate(context: vscode.ExtensionContext) {
   // Initialize DeepSeek client
   deepSeekClient = new DeepSeekClient(context);
   
-  // Initialize chat history manager
-  chatHistoryManager = new ChatHistoryManager(context);
-  
+  // Initialize conversation manager (event sourcing)
+  conversationManager = new ConversationManager(context);
+
   // Initialize status bar
-  statusBar = new StatusBar(context, deepSeekClient, chatHistoryManager);
+  statusBar = new StatusBar(context, deepSeekClient, conversationManager);
 
   // Initialize Tavily client for web search
   tavilyClient = new TavilyClient(context);
@@ -40,7 +40,7 @@ export async function activate(context: vscode.ExtensionContext) {
     context.extensionUri,
     deepSeekClient,
     statusBar,
-    chatHistoryManager,
+    conversationManager,
     tavilyClient
   );
 
@@ -48,7 +48,7 @@ export async function activate(context: vscode.ExtensionContext) {
   completionProvider = new CompletionProvider(deepSeekClient);
   
   // Initialize command provider (code actions)
-  commandProvider = new CommandProvider(deepSeekClient, statusBar, chatHistoryManager);
+  commandProvider = new CommandProvider(deepSeekClient, statusBar, conversationManager);
 
   // Register providers
   context.subscriptions.push(

@@ -71,16 +71,16 @@ async handleUserMessage(message: string) {
   const selectedFiles = this.getSelectedFilesContext();
   const modifiedFiles = this.getModifiedFilesContext();
 
-  // 2. Add user message to history
-  await this.chatHistoryManager.addMessage({
-    role: 'user',
-    content: message
-  });
+  // 2. Record user message as event (Event Sourcing)
+  await this.conversationManager.recordUserMessage(message, attachments);
 
-  // 3. Build API request
-  const messages = this.buildMessages(context, message);
+  // 3. Get conversation history for API
+  const sessionMessages = await this.conversationManager.getSessionMessagesCompat();
 
-  // 4. Start streaming
+  // 4. Build API request
+  const messages = this.buildMessages(context, sessionMessages);
+
+  // 5. Start streaming
   this.streamResponse(messages);
 }
 ```
@@ -111,25 +111,86 @@ ChatProvider                           DeepSeek API
 
 ### Token Processing
 
+The DeepSeek API returns two separate content streams:
+
+```typescript
+// SSE chunk structure
+{
+  choices: [{
+    delta: {
+      reasoning_content: "...",  // Thinking (R1 reasoner only)
+      content: "..."             // Regular response content
+    }
+  }]
+}
+```
+
+These take **different paths** through the backend:
+
+```
+DeepSeek API
+     │
+     ├─── reasoning_content ───→ sendStreamReasoning() ───→ 'streamReasoning'
+     │    (R1 thinking)           NO buffer, direct to webview
+     │
+     └─── content ─────────────→ ContentTransformBuffer ───→ 'streamToken'
+          (regular response)      Filters <shell> tags
+                                  Debounces partial patterns
+```
+
 ```typescript
 // For each SSE chunk
 for await (const chunk of stream) {
   const delta = chunk.choices[0]?.delta;
 
   if (delta.reasoning_content) {
-    // Reasoner model thinking
+    // Reasoner model thinking - direct path, no buffering
     this.sendStreamReasoning(delta.reasoning_content);
   }
 
   if (delta.content) {
-    // Regular content
-    this.sendStreamToken(delta.content);
-
-    // Check for tool patterns
-    this.detectAndExecuteTools(delta.content);
+    // Regular content - goes through ContentTransformBuffer
+    this.contentBuffer.append(delta.content);
   }
 }
 ```
+
+### ContentTransformBuffer
+
+**Location**: Backend ([src/utils/ContentTransformBuffer.ts](../src/utils/ContentTransformBuffer.ts))
+
+The buffer prevents jarring UI transitions when special tags appear mid-stream:
+
+```
+Without buffer:
+  Token: "Here's how to <shell>git status"  ← Raw tag briefly visible!
+  Token: "</shell> shows your changes"
+
+With buffer:
+  Token: "Here's how to <shell>git status"  ← Held back (incomplete tag)
+  Token: "</shell> shows your changes"      ← Complete! Extract & emit separately
+  Emit: "Here's how to " (text)
+  Emit: {type: 'shell', commands: ['git status']} (structured)
+  Emit: " shows your changes" (text)
+```
+
+**Key design choices:**
+
+| Choice | Rationale |
+|--------|-----------|
+| Lookahead pattern | Emit safe content immediately, only buffer potential tag starts like `<s` |
+| 150ms fallback timer | Release held content if stream pauses (partial `<` that never completes) |
+| Code blocks NOT filtered | ` ``` ` flows through to frontend markdown renderer |
+| `<think>` tags filtered | Legacy pattern for non-R1 models; R1 uses `reasoning_content` instead |
+
+**Why code blocks render inside thinking dropdowns:**
+
+1. Thinking content arrives via `streamReasoning` (bypasses ContentTransformBuffer)
+2. Frontend receives raw thinking text including ` ``` ` fences
+3. ThinkingShadowActor passes content to markdown renderer
+4. Markdown renderer handles code block syntax highlighting
+
+This is **content-level mitigation**, not pub/sub optimization. It operates before tokens enter the actor system. See [REMINDER.md](../REMINDER.md#scalability--mitigations) for pub/sub level optimizations.
 
 ## Phase 3: Webview Message Handling
 

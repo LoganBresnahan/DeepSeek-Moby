@@ -432,7 +432,7 @@ ${this._files.map((file, i, arr) => this.renderFile(file, i === arr.length - 1))
 
     let actionsHtml = '';
     if (this._editMode === 'auto') {
-      actionsHtml = `<span class="label">Auto Applied</span>`;
+      actionsHtml = `<span class="label auto-applied">Auto Applied</span>`;
     } else if (file.status === 'applied') {
       actionsHtml = `<span class="label">Accepted</span>`;
     } else if (file.status === 'rejected') {

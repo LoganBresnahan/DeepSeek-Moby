@@ -26,6 +26,10 @@ export type { EditMode } from './edit-mode';
 export { MessageGatewayActor } from './message-gateway';
 export type { ActorRefs, GatewayPhase } from './message-gateway';
 
+// Virtual Message Gateway (1B architecture - uses VirtualListActor)
+export { VirtualMessageGatewayActor } from './message-gateway';
+export type { VirtualActorRefs } from './message-gateway';
+
 // Message
 export { MessageShadowActor } from './message/MessageShadowActor';
 export type { Message, MessageState } from './message/MessageShadowActor';
@@ -92,6 +96,15 @@ export type { ModelOption, ModelSettings, ModelChangeHandler as ModelSelectHandl
 // Settings (settings dropdown)
 export { SettingsShadowActor } from './settings';
 export type { SettingsValues, DefaultPrompt } from './settings';
+
+// MessageTurnActor (1B Architecture - one actor per conversation turn)
+export { MessageTurnActor, type MessageTurnActorConfig } from './turn';
+export type { TurnRole, TurnData as TurnMetadata, EditMode as TurnEditMode } from './turn/types';
+export { turnActorStyles } from './turn';
+
+// VirtualListActor (virtual rendering with actor pooling)
+export { VirtualListActor } from './virtual-list';
+export type { TurnData, PoolStats, VisibleRange, VirtualListConfig } from './virtual-list/types';
 
 // Inspector - Dev-only tool, not exported from production actors
 // Access via: import { InspectorShadowActor } from './dev/inspector'

@@ -2,6 +2,115 @@
 
 This document details the file modification system, including edit modes, diff creation, storage, and the pending changes workflow.
 
+## Search/Replace Format
+
+The LLM uses an Aider-style search/replace format for precise code modifications. This format ensures reliable parsing even when the model output contains code with similar markers.
+
+### Format Specification
+
+```
+<<<<<<< SEARCH
+exact code to find (copied verbatim from file)
+======= AND
+replacement code
+>>>>>>> REPLACE
+```
+
+**Key elements:**
+- `<<<<<<< SEARCH` - Opens the search section (5-9 `<` characters)
+- `======= AND` - Separates search from replace (5-9 `=` characters + ` AND`)
+- `>>>>>>> REPLACE` - Closes the block (5-9 `>` characters)
+
+The ` AND` keyword after the equals signs makes the middle marker distinctive, preventing false positives when code contains sequences of equals signs (e.g., markdown tables, ASCII art, comparison operators).
+
+### File Header
+
+Each edit block should be preceded by a file header:
+
+```
+# File: path/to/file.ts
+<<<<<<< SEARCH
+original code
+======= AND
+new code
+>>>>>>> REPLACE
+```
+
+### Examples
+
+**Editing existing code:**
+```typescript
+# File: src/utils/helper.ts
+<<<<<<< SEARCH
+export function calculate(x: number): number {
+  return x + 1;
+}
+======= AND
+export function calculate(x: number): number {
+  return x * 2;
+}
+>>>>>>> REPLACE
+```
+
+**Creating a new file (empty SEARCH):**
+```typescript
+# File: src/utils/newFile.ts
+<<<<<<< SEARCH
+======= AND
+export function newHelper(): string {
+  return "hello";
+}
+>>>>>>> REPLACE
+```
+
+**Adding code after existing code:**
+```typescript
+# File: src/services/api.ts
+<<<<<<< SEARCH
+  async fetchUser(id: string): Promise<User> {
+    return this.get(`/users/${id}`);
+  }
+======= AND
+  async fetchUser(id: string): Promise<User> {
+    return this.get(`/users/${id}`);
+  }
+
+  async createUser(data: UserData): Promise<User> {
+    return this.post('/users', data);
+  }
+>>>>>>> REPLACE
+```
+
+### Parsing Implementation
+
+The regex pattern in `src/utils/diff.ts`:
+
+```typescript
+const regex = /<{5,9}\s*SEARCH\s*\n([\s\S]*?)(?:\n)?={5,9}\s*AND\s*\n([\s\S]*?)(?:\n)?>{5,9}\s*REPLACE/g;
+```
+
+### Sanitization
+
+Both SEARCH and REPLACE sections are sanitized to remove lines that are just conflict markers (`=======`, `<<<<<<`, `>>>>>>>`). These are format artifacts from model confusion, not actual code.
+
+After sanitization:
+- If SEARCH is empty → prepend REPLACE to file (or create new file)
+- If SEARCH has content → find it in file and replace with REPLACE
+- If SEARCH can't be found → fallback strategies or edit fails
+
+### Fallback Strategies
+
+When exact search match fails, the DiffEngine tries these strategies in order:
+
+1. **Exact match** - Direct string search for the SEARCH content
+2. **Fuzzy whitespace match** - Normalize whitespace, preserve indentation
+3. **Patch-based match** - Use jsdiff with fuzzFactor for context line mismatches
+4. **Location-based match** - Find anchor lines and use similarity scoring
+
+See `DiffEngine.applySearchReplace()` for implementation details.
+
+---
+
 ## Overview
 
 ```
