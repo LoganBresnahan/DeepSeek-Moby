@@ -155,7 +155,9 @@ describe('ModelSelectorShadowActor', () => {
       const reasonerOption = element.shadowRoot?.querySelector('.model-option[data-model="deepseek-reasoner"]') as HTMLElement;
       reasonerOption?.click();
 
-      expect(reasonerOption?.classList.contains('selected')).toBe(true);
+      // Re-query after click because selectModel() re-renders the popup content
+      const updatedReasonerOption = element.shadowRoot?.querySelector('.model-option[data-model="deepseek-reasoner"]');
+      expect(updatedReasonerOption?.classList.contains('selected')).toBe(true);
 
       const chatOption = element.shadowRoot?.querySelector('.model-option[data-model="deepseek-chat"]');
       expect(chatOption?.classList.contains('selected')).toBe(false);

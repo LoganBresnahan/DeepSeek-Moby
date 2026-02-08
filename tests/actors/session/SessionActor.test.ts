@@ -102,16 +102,12 @@ describe('SessionActor', () => {
 
   describe('clearSession', () => {
     it('resets session state', () => {
-      // Simulate loaded session first
-      const event = new MessageEvent('message', {
-        data: {
-          type: 'sessionLoaded',
-          sessionId: 'session-123',
-          title: 'Test Session',
-          model: 'deepseek-chat'
-        }
+      // Simulate loaded session first via handler method
+      actor.handleSessionLoaded({
+        sessionId: 'session-123',
+        title: 'Test Session',
+        model: 'deepseek-chat'
       });
-      window.dispatchEvent(event);
 
       actor.clearSession();
 
@@ -136,16 +132,12 @@ describe('SessionActor', () => {
     });
 
     it('updates title and posts message', () => {
-      // Load a session first
-      const event = new MessageEvent('message', {
-        data: {
-          type: 'sessionLoaded',
-          sessionId: 'session-123',
-          title: 'Old Title',
-          model: 'deepseek-chat'
-        }
+      // Load a session first via handler method
+      actor.handleSessionLoaded({
+        sessionId: 'session-123',
+        title: 'Old Title',
+        model: 'deepseek-chat'
       });
-      window.dispatchEvent(event);
 
       actor.renameSession('New Title');
 
@@ -189,17 +181,13 @@ describe('SessionActor', () => {
     });
   });
 
-  describe('VS Code message handling', () => {
-    it('handles sessionLoaded message', () => {
-      const event = new MessageEvent('message', {
-        data: {
-          type: 'sessionLoaded',
-          sessionId: 'session-456',
-          title: 'Loaded Session',
-          model: 'deepseek-reasoner'
-        }
+  describe('handler methods (called by MessageGatewayActor)', () => {
+    it('handleSessionLoaded updates state', () => {
+      actor.handleSessionLoaded({
+        sessionId: 'session-456',
+        title: 'Loaded Session',
+        model: 'deepseek-reasoner'
       });
-      window.dispatchEvent(event);
 
       expect(actor.sessionId).toBe('session-456');
       expect(actor.title).toBe('Loaded Session');
@@ -207,56 +195,41 @@ describe('SessionActor', () => {
       expect(actor.isLoading).toBe(false);
     });
 
-    it('handles sessionCreated message', () => {
-      const event = new MessageEvent('message', {
-        data: {
-          type: 'sessionCreated',
-          sessionId: 'new-session-789',
-          model: 'deepseek-chat'
-        }
+    it('handleSessionCreated updates state', () => {
+      actor.handleSessionCreated({
+        sessionId: 'new-session-789',
+        model: 'deepseek-chat'
       });
-      window.dispatchEvent(event);
 
       expect(actor.sessionId).toBe('new-session-789');
       expect(actor.title).toBe('New Chat');
       expect(actor.isLoading).toBe(false);
     });
 
-    it('handles sessionError message', () => {
+    it('handleSessionError clears loading and sets error', () => {
       actor.loadSession('bad-session');
 
-      const event = new MessageEvent('message', {
-        data: {
-          type: 'sessionError',
-          error: 'Session not found'
-        }
+      actor.handleSessionError({
+        error: 'Session not found'
       });
-      window.dispatchEvent(event);
 
       expect(actor.isLoading).toBe(false);
       expect(actor.error).toBe('Session not found');
     });
 
-    it('handles modelChanged message', () => {
-      const event = new MessageEvent('message', {
-        data: {
-          type: 'modelChanged',
-          model: 'deepseek-reasoner'
-        }
+    it('handleModelChanged updates model', () => {
+      actor.handleModelChanged({
+        model: 'deepseek-reasoner'
       });
-      window.dispatchEvent(event);
 
       expect(actor.model).toBe('deepseek-reasoner');
     });
 
-    it('handles loadHistory message (sets loading false)', () => {
+    it('handleLoadHistory sets loading false', () => {
       actor.loadSession('session-123');
       expect(actor.isLoading).toBe(true);
 
-      const event = new MessageEvent('message', {
-        data: { type: 'loadHistory', messages: [] }
-      });
-      window.dispatchEvent(event);
+      actor.handleLoadHistory();
 
       expect(actor.isLoading).toBe(false);
     });
@@ -270,16 +243,12 @@ describe('SessionActor', () => {
     });
 
     it('posts deleteSession and clears state', () => {
-      // Load session first
-      const event = new MessageEvent('message', {
-        data: {
-          type: 'sessionLoaded',
-          sessionId: 'to-delete',
-          title: 'Delete Me',
-          model: 'deepseek-chat'
-        }
+      // Load session first via handler method
+      actor.handleSessionLoaded({
+        sessionId: 'to-delete',
+        title: 'Delete Me',
+        model: 'deepseek-chat'
       });
-      window.dispatchEvent(event);
 
       actor.deleteSession();
 
@@ -299,16 +268,12 @@ describe('SessionActor', () => {
     });
 
     it('posts exportSession message', () => {
-      // Load session first
-      const event = new MessageEvent('message', {
-        data: {
-          type: 'sessionLoaded',
-          sessionId: 'export-me',
-          title: 'Export Session',
-          model: 'deepseek-chat'
-        }
+      // Load session first via handler method
+      actor.handleSessionLoaded({
+        sessionId: 'export-me',
+        title: 'Export Session',
+        model: 'deepseek-chat'
       });
-      window.dispatchEvent(event);
 
       actor.exportSession('markdown');
 

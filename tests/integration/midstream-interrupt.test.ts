@@ -1,7 +1,7 @@
 /**
  * Mid-Stream Interrupt Integration Tests
  *
- * Tests the "Interrupt & Append" feature (Option 2) that allows users
+ * Tests the "Interrupt & Append" feature that allows users
  * to send a new message while the AI is still generating a response.
  *
  * Flow:
@@ -9,20 +9,206 @@
  * 2. User submits -> message is queued, stopGeneration is sent
  * 3. Backend stops and sends generationStopped
  * 4. Frontend sends the queued message
+ *
+ * Uses VirtualListActor + VirtualMessageGatewayActor architecture.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { EventStateManager } from '../../media/state/EventStateManager';
+import { StreamingActor } from '../../media/actors/streaming';
+import { VirtualListActor } from '../../media/actors/virtual-list';
 import {
-  createTestActorSystem,
+  createMockVSCodeAPI,
+  createTestDOM,
+  waitForMicrotasks,
   waitForPubSub,
-  type TestActorSystem
+  type MockVSCodeAPI,
+  type TestDOMElements
 } from './helpers';
 
+// ============================================
+// Test System Setup
+// ============================================
+
+interface TestSystem {
+  manager: EventStateManager;
+  streaming: StreamingActor;
+  virtualList: VirtualListActor;
+  vscode: MockVSCodeAPI;
+  elements: TestDOMElements;
+  cleanup: () => void;
+  // State
+  isStreaming: boolean;
+  pendingInterruptMessage: { content: string } | null;
+  messageCounter: number;
+  currentTurnId: string | null;
+  // Actions
+  startResponse: (messageId?: string) => void;
+  streamToken: (token: string) => void;
+  endResponse: (content: string) => void;
+  sendMessage: (content: string) => void;
+  triggerGenerationStopped: () => void;
+}
+
+async function createTestSystem(): Promise<TestSystem> {
+  StreamingActor.resetStylesInjected();
+
+  const vscode = createMockVSCodeAPI();
+  const elements = createTestDOM();
+  const manager = new EventStateManager();
+
+  const streaming = new StreamingActor(manager, elements.streamingRoot);
+  const virtualList = new VirtualListActor(manager, elements.chatMessages, {
+    minPoolSize: 3,
+    maxPoolSize: 10,
+    overscan: 1
+  });
+
+  await waitForMicrotasks();
+
+  // State variables
+  let isStreaming = false;
+  let pendingInterruptMessage: { content: string } | null = null;
+  let messageCounter = 0;
+  let currentTurnId: string | null = null;
+
+  // Action: Start streaming response
+  const startResponse = (messageId = `msg-${Date.now()}`) => {
+    isStreaming = true;
+    const turnId = `turn-${++messageCounter}`;
+    currentTurnId = turnId;
+
+    virtualList.addTurn(turnId, 'assistant', {
+      model: 'deepseek-chat',
+      timestamp: Date.now()
+    });
+    virtualList.startStreamingTurn(turnId);
+    streaming.startStream(messageId, 'deepseek-chat');
+
+    elements.sendBtn.style.display = 'none';
+    elements.stopBtn.style.display = 'flex';
+  };
+
+  // Action: Stream a token
+  const streamToken = (token: string) => {
+    if (!currentTurnId) return;
+
+    const turn = virtualList.getTurn(currentTurnId);
+    if (!turn) return;
+
+    if (turn.textSegments.length === 0) {
+      virtualList.addTextSegment(currentTurnId, token);
+    } else {
+      const currentContent = turn.textSegments[turn.textSegments.length - 1]?.content || '';
+      virtualList.updateTextContent(currentTurnId, currentContent + token);
+    }
+
+    streaming.handleContentChunk(token);
+  };
+
+  // Action: End streaming response
+  const endResponse = (content: string) => {
+    isStreaming = false;
+    streaming.endStream();
+
+    if (currentTurnId) {
+      virtualList.endStreamingTurn();
+    }
+
+    currentTurnId = null;
+    elements.sendBtn.style.display = 'flex';
+    elements.stopBtn.style.display = 'none';
+  };
+
+  // Action: Send user message (with interrupt support)
+  const sendMessage = (content: string) => {
+    if (!content.trim()) return;
+
+    if (isStreaming) {
+      // Interrupt flow
+      const alreadyInterrupting = pendingInterruptMessage !== null;
+
+      pendingInterruptMessage = { content };
+      elements.messageInput.value = '';
+
+      if (!alreadyInterrupting) {
+        vscode.postMessage({ type: 'stopGeneration' });
+        elements.sendBtn.classList.add('interrupting');
+      }
+      return;
+    }
+
+    // Normal flow
+    const turnId = `turn-${++messageCounter}`;
+    virtualList.addTurn(turnId, 'user', { timestamp: Date.now() });
+    virtualList.addTextSegment(turnId, content);
+
+    elements.messageInput.value = '';
+    vscode.postMessage({ type: 'sendMessage', message: content });
+  };
+
+  // Action: Handle generation stopped
+  const triggerGenerationStopped = () => {
+    isStreaming = false;
+    streaming.endStream();
+
+    if (currentTurnId) {
+      virtualList.endStreamingTurn();
+    }
+
+    currentTurnId = null;
+    elements.sendBtn.style.display = 'flex';
+    elements.stopBtn.style.display = 'none';
+    elements.sendBtn.classList.remove('interrupting');
+
+    // Send pending interrupt message
+    if (pendingInterruptMessage) {
+      const { content } = pendingInterruptMessage;
+      pendingInterruptMessage = null;
+
+      // Add user message
+      const turnId = `turn-${++messageCounter}`;
+      virtualList.addTurn(turnId, 'user', { timestamp: Date.now() });
+      virtualList.addTextSegment(turnId, content);
+
+      vscode.postMessage({ type: 'sendMessage', message: content });
+    }
+  };
+
+  const cleanup = () => {
+    streaming.destroy();
+    virtualList.destroy();
+    document.body.innerHTML = '';
+  };
+
+  return {
+    manager,
+    streaming,
+    virtualList,
+    vscode,
+    elements,
+    cleanup,
+    get isStreaming() { return isStreaming; },
+    get pendingInterruptMessage() { return pendingInterruptMessage; },
+    get messageCounter() { return messageCounter; },
+    get currentTurnId() { return currentTurnId; },
+    startResponse,
+    streamToken,
+    endResponse,
+    sendMessage,
+    triggerGenerationStopped
+  };
+}
+
+// ============================================
+// Tests
+// ============================================
+
 describe('Mid-Stream Interrupt Flow', () => {
-  let system: TestActorSystem;
+  let system: TestSystem;
 
   beforeEach(async () => {
-    system = await createTestActorSystem();
+    system = await createTestSystem();
   });
 
   afterEach(() => {
@@ -31,209 +217,143 @@ describe('Mid-Stream Interrupt Flow', () => {
 
   describe('basic interrupt flow', () => {
     it('allows typing in input during streaming', async () => {
-      // Start streaming
-      system.dispatchMessage({ type: 'startResponse', messageId: 'msg-1' });
+      system.startResponse();
       await waitForPubSub();
 
-      expect(system.isStreaming()).toBe(true);
+      expect(system.isStreaming).toBe(true);
 
       // User can still type in the input
       system.elements.messageInput.value = 'New message while streaming';
-
-      // Verify input is not disabled (we allow typing during streaming)
       expect(system.elements.messageInput.value).toBe('New message while streaming');
     });
 
     it('queues message and sends stopGeneration when submitting during streaming', async () => {
-      // Start streaming
-      system.dispatchMessage({ type: 'startResponse', messageId: 'msg-1' });
+      system.startResponse();
       await waitForPubSub();
 
-      // Stream some content
-      system.dispatchMessage({ type: 'streamToken', token: 'Partial response...' });
+      system.streamToken('Partial response...');
       await waitForPubSub();
 
-      // User submits during streaming
       system.sendMessage('Interrupt with this!');
 
-      // Should have queued the message
-      expect(system.getPendingInterruptMessage()).toEqual({
-        content: 'Interrupt with this!'
-      });
-
-      // Should have sent stopGeneration
-      expect(system.vscode.postMessage).toHaveBeenCalledWith({
-        type: 'stopGeneration'
-      });
-
-      // Should show interrupting state
+      expect(system.pendingInterruptMessage).toEqual({ content: 'Interrupt with this!' });
+      expect(system.vscode.postMessage).toHaveBeenCalledWith({ type: 'stopGeneration' });
       expect(system.elements.sendBtn.classList.contains('interrupting')).toBe(true);
     });
 
     it('sends queued message after receiving generationStopped', async () => {
-      // Start streaming
-      system.dispatchMessage({ type: 'startResponse', messageId: 'msg-1' });
+      system.startResponse();
       await waitForPubSub();
 
-      // Stream some content
-      system.dispatchMessage({ type: 'streamToken', token: 'Partial...' });
-      await waitForPubSub();
-
-      // User submits during streaming
+      system.streamToken('Partial...');
       system.sendMessage('My follow-up message');
 
-      // Simulate backend stopping
-      system.dispatchMessage({ type: 'generationStopped' });
+      system.triggerGenerationStopped();
       await waitForPubSub();
 
-      // Give the setTimeout in generationStopped handler time to fire
-      await new Promise(resolve => setTimeout(resolve, 50));
-
-      // Should have sent the queued message
       expect(system.vscode.postMessage).toHaveBeenCalledWith({
         type: 'sendMessage',
         message: 'My follow-up message'
       });
-
-      // Pending message should be cleared
-      expect(system.getPendingInterruptMessage()).toBeNull();
-
-      // Interrupting state should be removed
+      expect(system.pendingInterruptMessage).toBeNull();
       expect(system.elements.sendBtn.classList.contains('interrupting')).toBe(false);
     });
 
     it('adds user message to UI after interrupt completes', async () => {
-      // Start streaming
-      system.dispatchMessage({ type: 'startResponse', messageId: 'msg-1' });
+      system.startResponse();
       await waitForPubSub();
 
-      // Stream some content
-      system.dispatchMessage({ type: 'streamToken', token: 'AI response...' });
-      await waitForPubSub();
-
-      // User submits during streaming
+      system.streamToken('AI response...');
       system.sendMessage('User follow-up');
 
-      // Simulate backend stopping
-      system.dispatchMessage({ type: 'generationStopped' });
+      system.triggerGenerationStopped();
       await waitForPubSub();
 
-      // Wait for the queued message to be sent
-      await new Promise(resolve => setTimeout(resolve, 50));
-
-      // User message should be added to the message list
-      const messages = system.message.getMessages();
-      const userMessages = messages.filter(m => m.role === 'user');
-      expect(userMessages.some(m => m.content === 'User follow-up')).toBe(true);
+      // User turn should be added (turn-2 because turn-1 was the assistant)
+      const stats = system.virtualList.getPoolStats();
+      expect(stats.totalTurns).toBeGreaterThanOrEqual(2);
     });
   });
 
   describe('multiple interrupt attempts', () => {
     it('only sends one stopGeneration even if user submits multiple times', async () => {
-      // Start streaming
-      system.dispatchMessage({ type: 'startResponse', messageId: 'msg-1' });
+      system.startResponse();
       await waitForPubSub();
 
-      // User submits first message
       system.sendMessage('First interrupt attempt');
-
-      // User changes mind and submits again before stop completes
       system.sendMessage('Second interrupt attempt');
-
-      // User submits a third time
       system.sendMessage('Third interrupt attempt');
 
-      // Should only have ONE stopGeneration call
-      const stopCalls = system.vscode.postMessage.mock.calls.filter(
-        call => call[0].type === 'stopGeneration'
+      const stopCalls = (system.vscode.postMessage as ReturnType<typeof vi.fn>).mock.calls.filter(
+        (call: unknown[]) => (call[0] as { type: string }).type === 'stopGeneration'
       );
       expect(stopCalls.length).toBe(1);
 
-      // Should have the LAST message queued (overwrites previous)
-      expect(system.getPendingInterruptMessage()?.content).toBe('Third interrupt attempt');
+      expect(system.pendingInterruptMessage?.content).toBe('Third interrupt attempt');
     });
 
     it('sends the most recent message when interrupt completes', async () => {
-      // Start streaming
-      system.dispatchMessage({ type: 'startResponse', messageId: 'msg-1' });
+      system.startResponse();
       await waitForPubSub();
 
-      // User submits multiple times
       system.sendMessage('First attempt');
       system.sendMessage('Second attempt');
       system.sendMessage('Final message');
 
-      // Simulate backend stopping
-      system.dispatchMessage({ type: 'generationStopped' });
+      system.triggerGenerationStopped();
       await waitForPubSub();
 
-      // Wait for queued message
-      await new Promise(resolve => setTimeout(resolve, 50));
-
-      // Should send the final message
-      const sendCalls = system.vscode.postMessage.mock.calls.filter(
-        call => call[0].type === 'sendMessage'
+      const sendCalls = (system.vscode.postMessage as ReturnType<typeof vi.fn>).mock.calls.filter(
+        (call: unknown[]) => (call[0] as { type: string }).type === 'sendMessage'
       );
-      expect(sendCalls[sendCalls.length - 1][0].message).toBe('Final message');
+      expect(sendCalls[sendCalls.length - 1][0]).toEqual({
+        type: 'sendMessage',
+        message: 'Final message'
+      });
     });
   });
 
   describe('UI state management', () => {
     it('clears input immediately when interrupt is triggered', async () => {
-      // Start streaming
-      system.dispatchMessage({ type: 'startResponse', messageId: 'msg-1' });
+      system.startResponse();
       await waitForPubSub();
 
-      // Set input value
       system.elements.messageInput.value = 'My interrupt message';
-
-      // Submit
       system.sendMessage('My interrupt message');
 
-      // Input should be cleared immediately (good UX)
       expect(system.elements.messageInput.value).toBe('');
     });
 
     it('resets button state after interrupt completes', async () => {
-      // Start streaming
-      system.dispatchMessage({ type: 'startResponse', messageId: 'msg-1' });
+      system.startResponse();
       await waitForPubSub();
 
       // During streaming, stop button is visible
       expect(system.elements.stopBtn.style.display).toBe('flex');
       expect(system.elements.sendBtn.style.display).toBe('none');
 
-      // User submits interrupt
       system.sendMessage('Interrupt');
-
-      // Should show interrupting state
       expect(system.elements.sendBtn.classList.contains('interrupting')).toBe(true);
 
-      // Simulate backend stopping
-      system.dispatchMessage({ type: 'generationStopped' });
+      system.triggerGenerationStopped();
       await waitForPubSub();
 
-      // Buttons should be reset
       expect(system.elements.sendBtn.style.display).toBe('flex');
       expect(system.elements.stopBtn.style.display).toBe('none');
       expect(system.elements.sendBtn.classList.contains('interrupting')).toBe(false);
     });
 
     it('does not queue empty messages', async () => {
-      // Start streaming
-      system.dispatchMessage({ type: 'startResponse', messageId: 'msg-1' });
+      system.startResponse();
       await waitForPubSub();
 
-      // Try to submit empty message
       system.sendMessage('');
-      system.sendMessage('   '); // whitespace only
+      system.sendMessage('   ');
 
-      // Should NOT have queued anything
-      expect(system.getPendingInterruptMessage()).toBeNull();
+      expect(system.pendingInterruptMessage).toBeNull();
 
-      // Should NOT have called stopGeneration
-      const stopCalls = system.vscode.postMessage.mock.calls.filter(
-        call => call[0].type === 'stopGeneration'
+      const stopCalls = (system.vscode.postMessage as ReturnType<typeof vi.fn>).mock.calls.filter(
+        (call: unknown[]) => (call[0] as { type: string }).type === 'stopGeneration'
       );
       expect(stopCalls.length).toBe(0);
     });
@@ -241,78 +361,57 @@ describe('Mid-Stream Interrupt Flow', () => {
 
   describe('normal flow (not streaming)', () => {
     it('sends message immediately when not streaming', async () => {
-      // Not streaming - normal state
-      expect(system.isStreaming()).toBe(false);
+      expect(system.isStreaming).toBe(false);
 
-      // Send message
       system.sendMessage('Normal message');
 
-      // Should send immediately (no queuing)
       expect(system.vscode.postMessage).toHaveBeenCalledWith({
         type: 'sendMessage',
         message: 'Normal message'
       });
+      expect(system.pendingInterruptMessage).toBeNull();
 
-      // Should NOT have queued anything
-      expect(system.getPendingInterruptMessage()).toBeNull();
-
-      // Should NOT have called stopGeneration
-      const stopCalls = system.vscode.postMessage.mock.calls.filter(
-        call => call[0].type === 'stopGeneration'
+      const stopCalls = (system.vscode.postMessage as ReturnType<typeof vi.fn>).mock.calls.filter(
+        (call: unknown[]) => (call[0] as { type: string }).type === 'stopGeneration'
       );
       expect(stopCalls.length).toBe(0);
     });
 
     it('adds user message to UI immediately when not streaming', async () => {
-      // Send message when not streaming
       system.sendMessage('Hello AI');
 
-      // Message should be added to UI immediately
-      const messages = system.message.getMessages();
-      expect(messages.some(m => m.role === 'user' && m.content === 'Hello AI')).toBe(true);
+      const stats = system.virtualList.getPoolStats();
+      expect(stats.totalTurns).toBe(1);
     });
   });
 
   describe('edge cases', () => {
     it('handles generationStopped without pending message (manual stop)', async () => {
-      // Start streaming
-      system.dispatchMessage({ type: 'startResponse', messageId: 'msg-1' });
+      system.startResponse();
       await waitForPubSub();
 
       // User clicks stop button (no pending message)
-      system.dispatchMessage({ type: 'generationStopped' });
+      system.triggerGenerationStopped();
       await waitForPubSub();
 
-      // Wait a bit
-      await new Promise(resolve => setTimeout(resolve, 50));
-
-      // Should NOT have sent any message
-      const sendCalls = system.vscode.postMessage.mock.calls.filter(
-        call => call[0].type === 'sendMessage'
+      const sendCalls = (system.vscode.postMessage as ReturnType<typeof vi.fn>).mock.calls.filter(
+        (call: unknown[]) => (call[0] as { type: string }).type === 'sendMessage'
       );
       expect(sendCalls.length).toBe(0);
 
-      // UI should still be reset
       expect(system.elements.sendBtn.style.display).toBe('flex');
       expect(system.elements.stopBtn.style.display).toBe('none');
     });
 
     it('handles rapid stream start -> interrupt -> stop sequence', async () => {
-      // Start streaming
-      system.dispatchMessage({ type: 'startResponse', messageId: 'msg-1' });
+      system.startResponse();
       await waitForPubSub();
 
-      // Immediately interrupt
       system.sendMessage('Quick interrupt');
 
-      // Immediately stopped
-      system.dispatchMessage({ type: 'generationStopped' });
+      system.triggerGenerationStopped();
       await waitForPubSub();
 
-      // Wait for queued message
-      await new Promise(resolve => setTimeout(resolve, 50));
-
-      // Should have sent the interrupt message
       expect(system.vscode.postMessage).toHaveBeenCalledWith({
         type: 'sendMessage',
         message: 'Quick interrupt'

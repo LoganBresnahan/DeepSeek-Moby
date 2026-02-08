@@ -545,7 +545,12 @@ export class VirtualListActor extends EventStateActor {
    */
   startToolBatch(turnId: string, tools: Array<{ name: string; detail: string }>): string | null {
     const turn = this._turnMap.get(turnId);
-    if (!turn) return null;
+    if (!turn) {
+      console.warn(`[VirtualList] startToolBatch: turn ${turnId} not found`);
+      return null;
+    }
+
+    console.log(`[VirtualList] startToolBatch: creating batch with ${tools.length} tools for ${turnId}`);
 
     const batchIndex = turn.toolBatches.length;
     const batchId = `${turnId}-tools-${batchIndex + 1}`;
@@ -566,7 +571,10 @@ export class VirtualListActor extends EventStateActor {
 
     const bound = this._boundActors.get(turnId);
     if (bound) {
+      console.log(`[VirtualList] startToolBatch: actor bound, delegating to MessageTurnActor`);
       bound.actor.startToolBatch(tools);
+    } else {
+      console.warn(`[VirtualList] startToolBatch: actor NOT bound for ${turnId} - batch will be stored but not rendered`);
     }
 
     return batchId;
@@ -642,7 +650,10 @@ export class VirtualListActor extends EventStateActor {
    */
   createShellSegment(turnId: string, commands: Array<{ command: string; cwd?: string }>): string | null {
     const turn = this._turnMap.get(turnId);
-    if (!turn) return null;
+    if (!turn) {
+      console.warn(`[VirtualList] createShellSegment: turn ${turnId} not found`);
+      return null;
+    }
 
     const segmentIndex = turn.shellSegments.length;
     const segmentId = `${turnId}-shell-${segmentIndex + 1}`;
@@ -660,11 +671,17 @@ export class VirtualListActor extends EventStateActor {
     turn.shellSegments.push(segment);
     turn.contentOrder.push({ type: 'shell', index: segmentIndex });
 
+    console.log(`[VirtualList] createShellSegment: created ${segmentId} with ${commands.length} commands`);
+
     // If actor is bound, create in actor and store its internal ID
     const bound = this._boundActors.get(turnId);
     if (bound) {
+      console.log(`[VirtualList] createShellSegment: actor bound, delegating to MessageTurnActor`);
       const actorSegmentId = bound.actor.createShellSegment(commands);
       segment.actorSegmentId = actorSegmentId;
+      console.log(`[VirtualList] createShellSegment: actor segment ID = ${actorSegmentId}`);
+    } else {
+      console.warn(`[VirtualList] createShellSegment: actor NOT bound for ${turnId} - segment will be stored but not rendered`);
     }
 
     return segmentId;
@@ -722,7 +739,12 @@ export class VirtualListActor extends EventStateActor {
    */
   addPendingFile(turnId: string, file: { filePath: string; diffId?: string; status?: 'pending' | 'applied' | 'rejected' | 'superseded' | 'error' }): string | null {
     const turn = this._turnMap.get(turnId);
-    if (!turn) return null;
+    if (!turn) {
+      console.warn(`[VirtualList] addPendingFile: turn ${turnId} not found`);
+      return null;
+    }
+
+    console.log(`[VirtualList] addPendingFile: adding ${file.filePath} to ${turnId}`);
 
     const fileName = file.filePath.split('/').pop() ?? file.filePath;
     const fileIndex = turn.pendingFiles.length;

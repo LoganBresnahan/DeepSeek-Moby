@@ -429,8 +429,11 @@ which I already edited - would you like me to update it?"
         case 'openFile':
           await this.openFile(data.filePath);
           break;
-        // case 'rejectAllDiffs': ...
-        // case 'focusDiff': ...
+        case 'focusFile':
+          // Try to focus the diff first, fall back to opening the file directly
+          // This handles the case where a file was auto-applied and the diff is closed
+          await this.focusFileOrDiff(data.diffId, data.filePath);
+          break;
         case 'getOpenFiles':
           await this.sendOpenFiles();
           break;
@@ -3115,6 +3118,40 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
     );
 
     logger.info(`[ChatProvider] Focused diff: ${diffId} (${metadata.targetFilePath})`);
+  }
+
+  /**
+   * Focus a file - tries to focus the diff view first, falls back to opening the file directly.
+   * This handles the case where a file was auto-applied and the diff is no longer available.
+   */
+  private async focusFileOrDiff(diffId: string | undefined, filePath: string | undefined) {
+    // Try to focus the diff if we have a diffId and it exists
+    if (diffId) {
+      const metadata = Array.from(this.activeDiffs.values())
+        .find(m => m.diffId === diffId);
+
+      if (metadata) {
+        // Diff exists, focus it
+        const iterationLabel = metadata.iteration > 1 ? ` (${metadata.iteration})` : '';
+        await vscode.commands.executeCommand('vscode.diff',
+          metadata.originalUri,
+          metadata.proposedUri,
+          `${metadata.targetFilePath}${iterationLabel} ↔ With Changes`
+        );
+        logger.info(`[ChatProvider] Focused diff: ${diffId} (${metadata.targetFilePath})`);
+        return;
+      }
+
+      // Diff not found - might have been applied already
+      logger.info(`[ChatProvider] Diff ${diffId} not found (may have been applied), falling back to file`);
+    }
+
+    // Fall back to opening the file directly
+    if (filePath) {
+      await this.openFile(filePath);
+    } else {
+      logger.warn('[ChatProvider] focusFileOrDiff: no diffId or filePath provided');
+    }
   }
 
   /**

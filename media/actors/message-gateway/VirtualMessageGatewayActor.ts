@@ -79,6 +79,9 @@ export class VirtualMessageGatewayActor extends EventStateActor {
   /** Current turn ID during streaming */
   private _currentTurnId: string | null = null;
 
+  /** Last streaming turn ID - used for late-arriving messages like diffListChanged */
+  private _lastStreamingTurnId: string | null = null;
+
   /** Message counter for generating turn IDs */
   private _messageCounter = 0;
 
@@ -473,6 +476,9 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       virtualList.endStreamingTurn();
     }
 
+    // Save last streaming turn ID for late-arriving messages (diffListChanged, codeApplied)
+    this._lastStreamingTurnId = this._currentTurnId;
+
     // Reset coordination state
     this._segmentContent = '';
     this._hasInterleaved = false;
@@ -620,20 +626,22 @@ export class VirtualMessageGatewayActor extends EventStateActor {
     const { virtualList } = this._actors;
     const diffs = msg.diffs as Array<{ filePath: string; status: string; diffId?: string; iteration?: number; superseded?: boolean }>;
 
-    if (!this._currentTurnId || !diffs || !Array.isArray(diffs)) return;
+    // Use current turn or fall back to last streaming turn (for late-arriving messages after endResponse)
+    const turnId = this._currentTurnId || this._lastStreamingTurnId;
+    if (!turnId || !diffs || !Array.isArray(diffs)) return;
 
-    console.log(`[VirtualGateway] diffListChanged: ${diffs.length} diffs`);
+    console.log(`[VirtualGateway] diffListChanged: ${diffs.length} diffs for turn ${turnId}`);
 
-    // Finalize text segment if needed
-    if (!this._hasInterleaved && diffs.length > 0) {
-      const finalized = virtualList.finalizeCurrentSegment(this._currentTurnId);
+    // Only finalize text segment if still streaming (don't do it for late-arriving messages)
+    if (this._currentTurnId && !this._hasInterleaved && diffs.length > 0) {
+      const finalized = virtualList.finalizeCurrentSegment(turnId);
       if (finalized) {
         this._hasInterleaved = true;
       }
     }
 
     // Get current pending files for this turn
-    const turn = virtualList.getTurn(this._currentTurnId);
+    const turn = virtualList.getTurn(turnId);
     if (!turn) return;
 
     const currentDiffIds = new Map(turn.pendingFiles.map(f => [f.diffId, f]));
@@ -642,14 +650,14 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       const existingFile = diff.diffId ? currentDiffIds.get(diff.diffId) : undefined;
 
       if (!existingFile) {
-        virtualList.addPendingFile(this._currentTurnId, {
+        virtualList.addPendingFile(turnId, {
           filePath: diff.filePath,
           diffId: diff.diffId,
           status: diff.status as 'pending' | 'applied' | 'rejected' | 'superseded' | 'error'
         });
       } else if (existingFile.status !== diff.status) {
         virtualList.updatePendingStatus(
-          this._currentTurnId,
+          turnId,
           existingFile.id,
           diff.status as 'pending' | 'applied' | 'rejected' | 'superseded' | 'error'
         );

@@ -329,87 +329,62 @@ Superseded by `VirtualMessageGatewayActor` which:
 
 ---
 
-## Category 3: Experimental UI Framework (Unused)
+## Category 3: Experimental UI Framework ✅ REMOVED
 
 ### 3.1 UIActor Base Class
 
 | Property | Value |
 |----------|-------|
-| **Files** | `media/ui/UIActor.ts`, `render.ts`, `types.ts`, `builders.ts`, `index.ts` |
-| **Lines** | ~800 lines total |
+| **Files** | ~~`media/ui/UIActor.ts`, `render.ts`, `types.ts`, `builders.ts`, `index.ts`~~ |
+| **Lines** | ~800 lines removed |
+| **Status** | ✅ Deleted |
 
-**Why it exists:**
+**Why it existed:**
 
-Experimental declarative UI framework:
-```typescript
-class MyActor extends UIActor {
-  getView(): UINode {
-    return ui.dropdown(
-      ui.header('My Component'),
-      ui.list(this.state.items.map(i => ui.text(i)))
-    );
-  }
-}
-```
+Experimental declarative UI framework inspired by React's component model. Never adopted because the imperative approach (InterleavedShadowActor with innerHTML) was simpler for streaming updates.
 
-Inspired by React's component model but simpler. Framework would diff and patch DOM.
-
-**Why it was never used:**
-
-The direct imperative approach (InterleavedShadowActor with innerHTML) was:
-- More straightforward for streaming updates
-- No virtual DOM overhead
-- Easier to debug
-
-The only implementation is `ExampleToolsActor` in `media/ui/examples/` which is itself never instantiated.
-
-**Counterpart:** None - different paradigm, never adopted
-
-**Safe to remove:** Keep for reference or move to branch
+**Removed:** 2026-02-08 - confirmed not used by built-in inspector or any other code
 
 ---
 
 ## Cleanup Phases
 
-### Phase 1: Safe Immediate Removal
+### Phase 1: Safe Immediate Removal ✅ COMPLETE
 
-Delete completely dead code with zero runtime risk:
+| Action | Files | Lines | Status |
+|--------|-------|-------|--------|
+| Delete | `media/actors/codeblock/` | ~700 | ✅ Done |
+| Delete | `media/actors/diff/` | ~650 | ✅ Done |
+| Delete | `media/state/InterleavedContentActor.ts` | ~265 | ✅ Done |
+| Delete | `tests/actors/codeblock/` | ~329 | ✅ Done |
+| Delete | `tests/actors/diff/` | ~327 | ✅ Done |
+| Delete | `tests/unit/state/InterleavedContentActor.test.ts` | ~492 | ✅ Done (2026-02-08) |
+| Update | `media/actors/index.ts` | Remove exports | ✅ Done |
+| Update | `media/state/index.ts` | Remove export | ✅ Done |
 
-| Action | Files | Lines |
-|--------|-------|-------|
-| Delete | `media/actors/codeblock/` | ~700 |
-| Delete | `media/actors/diff/` | ~650 |
-| Delete | `media/state/InterleavedContentActor.ts` | ~265 |
-| Delete | `tests/actors/codeblock/` | ~329 |
-| Delete | `tests/actors/diff/` | ~327 |
-| Update | `media/actors/index.ts` | Remove exports |
-| Update | `media/state/index.ts` | Remove export |
+**Total: ~2,760 lines removed**
 
-**Total: ~2,270 lines**
+### Phase 2: Legacy Mode Removal ✅ COMPLETE
 
-### Phase 2: Legacy Mode Removal (After Testing)
+| Action | Files | Lines | Status |
+|--------|-------|-------|--------|
+| Delete | `media/actors/message/` | ~920 | ✅ Done |
+| Delete | `media/actors/thinking/` | ~460 | ✅ Done |
+| Delete | `media/actors/tools/` | ~550 | ✅ Done |
+| Delete | `media/actors/shell/` | ~550 | ✅ Done |
+| Delete | `media/actors/pending/` | ~680 | ✅ Done |
+| Delete | `MessageGatewayActor.ts` | ~795 | ✅ Done |
+| Remove | `USE_VIRTUAL_RENDERING` flag from `chat.ts` | ~200 | ✅ Done |
+| Update | `media/actors/index.ts` | Remove legacy exports | ✅ Done |
+| Delete | Related test files | ~2,000+ | ✅ Done |
 
-Remove `USE_VIRTUAL_RENDERING` flag and all legacy code:
+**Total: ~6,000+ lines removed**
 
-| Action | Files | Lines |
-|--------|-------|-------|
-| Delete | `media/actors/message/` | ~920 |
-| Delete | `media/actors/thinking/` | ~460 |
-| Delete | `media/actors/tools/` | ~550 |
-| Delete | `media/actors/shell/` | ~550 |
-| Delete | `media/actors/pending/` | ~680 |
-| Delete | `MessageGatewayActor.ts` | ~795 |
-| Modify | `chat.ts` | Remove ~200 lines of legacy branches |
-| Update | `media/actors/index.ts` | Remove legacy exports |
-| Delete | Related test files | ~2,000+ |
+### Phase 3: UI Framework Removal ✅ COMPLETE
 
-**Total: ~6,000+ lines**
-
-### Phase 3: UI Framework Removal (Optional)
-
-| Action | Files | Lines |
-|--------|-------|-------|
-| Delete | `media/ui/` | ~800 |
+| Action | Files | Lines | Status |
+|--------|-------|-------|--------|
+| Delete | `media/ui/` | ~800 | ✅ Done |
 
 ---
 

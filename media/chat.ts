@@ -4,11 +4,8 @@
  * All UI is managed by Shadow DOM actors that own their DOM elements.
  * This provides complete style isolation and cleaner architecture.
  *
- * Supports two rendering modes:
- * - Legacy: Individual interleaved actors (MessageShadowActor, ThinkingShadowActor, etc.)
- * - Virtual: 1B architecture with VirtualListActor for pooled rendering
- *
- * Set USE_VIRTUAL_RENDERING to true to enable virtual rendering mode.
+ * Uses the 1B virtual rendering architecture with VirtualListActor
+ * for pooled rendering and better performance with many messages.
  */
 
 import { EventStateManager } from './state/EventStateManager';
@@ -18,37 +15,20 @@ import {
   SessionActor,
   HeaderActor,
   EditModeActor,
-  MessageGatewayActor,
   VirtualMessageGatewayActor,
   VirtualListActor,
-  // Shadow DOM actors - own their DOM (legacy mode)
-  MessageShadowActor,
-  ShellShadowActor,
-  ToolCallsShadowActor,
-  ThinkingShadowActor,
-  PendingChangesShadowActor,
   InputAreaShadowActor,
   StatusPanelShadowActor,
   ToolbarShadowActor,
   HistoryShadowActor,
-  // New modal/popup actors
   FilesShadowActor,
   CommandsShadowActor,
   ModelSelectorShadowActor,
   SettingsShadowActor
-  // Note: DropdownFocusActor removed - see media/actors/dropdown-focus/UNUSED.txt
 } from './actors';
 // Dev-only actor - not included in production bundle
 import { InspectorShadowActor } from './dev/inspector';
 import { AnimationHelper } from './utils';
-
-// ============================================
-// Feature Flag: Virtual Rendering
-// ============================================
-// Set to true to use the 1B virtual rendering architecture.
-// This uses VirtualListActor + VirtualMessageGatewayActor instead of
-// individual interleaved actors for better performance with many messages.
-const USE_VIRTUAL_RENDERING = true;
 
 // ============================================
 // VS Code API Types
@@ -66,7 +46,7 @@ declare function acquireVsCodeApi(): VSCodeAPI;
 // Global State
 // ============================================
 
-// All coordination state is now managed by MessageGatewayActor:
+// All coordination state is managed by VirtualMessageGatewayActor:
 // - Streaming state: gateway.segmentContent, gateway.interleaved, gateway.phase
 // - Shell segment tracking: internal to gateway
 // - Edit mode: EditModeActor
@@ -149,79 +129,35 @@ function initializeActorSystem(): void {
   const editModeActor = new EditModeActor(manager, editModeHost);
 
   // ============================================
-  // Content Actors (mode-dependent)
+  // VirtualListActor (1B Architecture)
   // ============================================
-  // Two rendering modes are supported:
-  // - Legacy: Individual InterleavedShadowActors (message, shell, toolCalls, thinking, pending)
-  // - Virtual: VirtualListActor with pooled MessageTurnActors
-  //
-  // Virtual mode provides better performance for conversations with 100+ messages.
+  // Uses VirtualListActor with pooled MessageTurnActors for efficient
+  // rendering of conversations with many messages.
 
-  // Legacy actors (only created if not using virtual rendering)
-  let message: MessageShadowActor | null = null;
-  let shell: ShellShadowActor | null = null;
-  let toolCalls: ToolCallsShadowActor | null = null;
-  let thinking: ThinkingShadowActor | null = null;
-  let pending: PendingChangesShadowActor | null = null;
+  console.log('[ActorSystem] Using virtual rendering mode (1B architecture)');
 
-  // Virtual list actor (only created if using virtual rendering)
-  let virtualList: VirtualListActor | null = null;
-
-  if (USE_VIRTUAL_RENDERING) {
-    // Virtual rendering mode - uses VirtualListActor for pooled turn management
-    console.log('[ActorSystem] Using virtual rendering mode (1B architecture)');
-
-    virtualList = new VirtualListActor(manager, chatMessages, {
-      config: {
-        minPoolSize: 5,
-        maxPoolSize: 20,
-        overscan: 2,
-        defaultTurnHeight: 150
-      },
-      postMessage: (msg) => vscode.postMessage(msg),
-      onPendingFileAction: (action, fileId, diffId, filePath) => {
-        if (action === 'accept' && diffId) {
-          vscode.postMessage({ type: 'acceptSpecificDiff', diffId });
-        } else if (action === 'reject' && diffId) {
-          vscode.postMessage({ type: 'rejectSpecificDiff', diffId });
-        } else if (action === 'focus') {
-          // For applied files without a diff, open the file directly
-          if (diffId) {
-            vscode.postMessage({ type: 'focusDiff', diffId });
-          } else if (filePath) {
-            vscode.postMessage({ type: 'openFile', filePath });
-          }
-        }
+  const virtualList = new VirtualListActor(manager, chatMessages, {
+    config: {
+      minPoolSize: 5,
+      maxPoolSize: 20,
+      overscan: 2,
+      defaultTurnHeight: 150
+    },
+    postMessage: (msg) => vscode.postMessage(msg),
+    onPendingFileAction: (action, _fileId, diffId, filePath) => {
+      if (action === 'accept' && diffId) {
+        vscode.postMessage({ type: 'acceptSpecificDiff', diffId });
+      } else if (action === 'reject' && diffId) {
+        vscode.postMessage({ type: 'rejectSpecificDiff', diffId });
+      } else if (action === 'focus') {
+        // Focus the file - send both diffId and filePath so extension can fall back
+        // to opening the file directly if the diff was already applied/closed
+        vscode.postMessage({ type: 'focusFile', diffId, filePath });
       }
-    });
+    }
+  });
 
-    console.log('[ActorSystem] VirtualListActor initialized');
-  } else {
-    // Legacy mode - individual interleaved actors
-    // Each creates its own shadow-encapsulated containers as siblings in chatMessages.
-    // This allows proper interleaving: DOM order = visual order.
-    //
-    // Example DOM structure during streaming:
-    //   <div id="chatMessages">
-    //     <div data-actor="message">user message 1</div>
-    //     <div data-actor="message">assistant segment 1</div>
-    //     <div data-actor="thinking">thinking iteration 1</div>
-    //     <div data-actor="message">assistant continuation</div>
-    //     <div data-actor="shell">shell commands</div>
-    //     <div data-actor="message">user message 2</div>
-    //     <div data-actor="thinking">thinking iteration 2</div>
-    //   </div>
-
-    message = new MessageShadowActor(manager, chatMessages);
-    shell = new ShellShadowActor(manager, chatMessages);
-    toolCalls = new ToolCallsShadowActor(manager, chatMessages);
-    thinking = new ThinkingShadowActor(manager, chatMessages);
-    pending = new PendingChangesShadowActor(manager, chatMessages);
-
-    // Debug: Verify chatMessages is NOT a shadow host (critical for interleaving)
-    console.log('[ActorSystem] Using legacy rendering mode. chatMessages.shadowRoot:', chatMessages.shadowRoot,
-      'children:', chatMessages.children.length);
-  }
+  console.log('[ActorSystem] VirtualListActor initialized');
 
   // InputAreaShadowActor - owns its DOM, renders into inputAreaContainer
   const inputArea = new InputAreaShadowActor(manager, inputAreaContainer, vscode);
@@ -321,22 +257,15 @@ function initializeActorSystem(): void {
 
   // Set up InputAreaActor handlers
   inputArea.onSend((content, attachments) => {
-    // Add user message to UI immediately
-    // File attachments come from InputAreaActor, selected files handled by FilesShadowActor
+    // Add user message to UI immediately via VirtualListActor
     const fileNames = attachments?.map(a => a.name) || [];
 
-    if (USE_VIRTUAL_RENDERING && virtualList) {
-      // Virtual mode: add turn via VirtualListActor
-      const turnId = `turn-user-${Date.now()}`;
-      virtualList.addTurn(turnId, 'user', {
-        files: fileNames.length > 0 ? fileNames : undefined,
-        timestamp: Date.now()
-      });
-      virtualList.addTextSegment(turnId, content);
-    } else if (message) {
-      // Legacy mode: use MessageShadowActor
-      message.addUserMessage(content, fileNames.length > 0 ? fileNames : undefined);
-    }
+    const turnId = `turn-user-${Date.now()}`;
+    virtualList.addTurn(turnId, 'user', {
+      files: fileNames.length > 0 ? fileNames : undefined,
+      timestamp: Date.now()
+    });
+    virtualList.addTextSegment(turnId, content);
 
     // Send to backend
     vscode.postMessage({
@@ -353,12 +282,7 @@ function initializeActorSystem(): void {
   // Set up ToolbarActor handlers
   toolbar.onEditModeChange((mode) => {
     editModeActor.setMode(mode);
-    if (USE_VIRTUAL_RENDERING && virtualList) {
-      virtualList.setEditMode(mode);
-    } else {
-      pending?.setEditMode(mode);
-      message?.setEditMode(mode);
-    }
+    virtualList.setEditMode(mode);
   });
 
   toolbar.onFilesOpen(() => {
@@ -379,37 +303,15 @@ function initializeActorSystem(): void {
     inputArea.triggerAttach();
   });
 
-  // Set up pending files action handler (legacy mode only)
-  // In virtual mode, this is handled by VirtualListActor's onPendingFileAction callback
-  if (!USE_VIRTUAL_RENDERING && pending) {
-    pending.onAction((fileId, action) => {
-      const file = pending.getFiles().find(f => f.id === fileId);
-      if (!file) return;
-
-      if (action === 'accept' && file.diffId) {
-        vscode.postMessage({ type: 'acceptSpecificDiff', diffId: file.diffId });
-      } else if (action === 'reject' && file.diffId) {
-        vscode.postMessage({ type: 'rejectSpecificDiff', diffId: file.diffId });
-      } else if (action === 'focus' && file.diffId) {
-        vscode.postMessage({ type: 'focusDiff', diffId: file.diffId });
-      }
-    });
-  }
-
   // Sync initial edit mode
   const initialEditMode = editModeActor.getMode();
   toolbar.setEditMode(initialEditMode);
-  if (USE_VIRTUAL_RENDERING && virtualList) {
-    virtualList.setEditMode(initialEditMode);
-  } else {
-    pending?.setEditMode(initialEditMode);
-    message?.setEditMode(initialEditMode);
-  }
+  virtualList.setEditMode(initialEditMode);
 
   // ============================================
   // Message Gateway Actor
   // ============================================
-  // The MessageGatewayActor is the boundary between the VS Code extension
+  // The VirtualMessageGatewayActor is the boundary between the VS Code extension
   // and the internal actor system. It handles all message routing and
   // coordination state. See ARCHITECTURE/message-gateway.md for details.
 
@@ -418,46 +320,21 @@ function initializeActorSystem(): void {
   gatewayHost.style.display = 'none';
   document.body.appendChild(gatewayHost);
 
-  // Create the appropriate gateway based on rendering mode
-  let gateway: MessageGatewayActor | VirtualMessageGatewayActor;
-
-  if (USE_VIRTUAL_RENDERING && virtualList) {
-    // Virtual rendering mode - use VirtualMessageGatewayActor
-    gateway = new VirtualMessageGatewayActor(manager, gatewayHost, vscode, {
-      streaming,
-      session,
-      editMode: editModeActor,
-      virtualList,
-      inputArea,
-      statusPanel,
-      toolbar,
-      history,
-    });
-    console.log('[ActorSystem] Initialized with VirtualMessageGatewayActor (virtual mode)');
-  } else {
-    // Legacy mode - use MessageGatewayActor with individual actors
-    gateway = new MessageGatewayActor(manager, gatewayHost, vscode, {
-      streaming,
-      session,
-      editMode: editModeActor,
-      message: message!,
-      shell: shell!,
-      toolCalls: toolCalls!,
-      thinking: thinking!,
-      pending: pending!,
-      inputArea,
-      statusPanel,
-      toolbar,
-      history,
-    });
-    console.log('[ActorSystem] Initialized with MessageGatewayActor (legacy mode)');
-  }
+  const gateway = new VirtualMessageGatewayActor(manager, gatewayHost, vscode, {
+    streaming,
+    session,
+    editMode: editModeActor,
+    virtualList,
+    inputArea,
+    statusPanel,
+    toolbar,
+    history,
+  });
+  console.log('[ActorSystem] Initialized with VirtualMessageGatewayActor');
 
   // ============================================
   // Model Dropdown Handlers
   // ============================================
-  // Legacy UI helper functions removed (updateModelDisplay, updateTemperatureDisplay,
-  // updateToolLimitDisplay, updateTokenLimitDisplay) - actors handle their own display
 
   // Wire up model dropdown (uses ModelSelectorShadowActor)
   const modelBtn = getElementOrNull<HTMLButtonElement>('modelBtn');
@@ -473,7 +350,7 @@ function initializeActorSystem(): void {
   // ============================================
   // Settings & Model Selection - Handled by Shadow Actors
   // ============================================
-  // Legacy settings handlers removed - SettingsShadowActor handles:
+  // SettingsShadowActor handles:
   // - Log level, colors, allow all commands
   // - System prompt (save, reset, show default)
   // - Web search settings (depth, searches per prompt, cache)
@@ -499,7 +376,7 @@ function initializeActorSystem(): void {
   // ============================================
   // File Selection - Handled by FilesShadowActor
   // ============================================
-  // Legacy file modal code removed - FilesShadowActor handles:
+  // FilesShadowActor handles:
   // - Opening/closing modal via 'files.modal.open' subscription
   // - Displaying open files via 'files.openFiles' subscription
   // - Search via 'files.searchResults' subscription
@@ -534,13 +411,7 @@ function initializeActorSystem(): void {
     modelSelector,
     settings,
     inspector,
-    // Mode-dependent actors
-    virtualList,       // Only set in virtual mode
-    message,           // Only set in legacy mode
-    shell,             // Only set in legacy mode
-    toolCalls,         // Only set in legacy mode
-    thinking,          // Only set in legacy mode
-    pending,           // Only set in legacy mode
+    virtualList,
   };
 
   // Dev tools are loaded separately via <script> tag injection by the extension

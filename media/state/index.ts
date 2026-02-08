@@ -7,8 +7,6 @@
 
 export { EventStateManager } from './EventStateManager';
 export { EventStateActor } from './EventStateActor';
-export { InterleavedContentActor } from './InterleavedContentActor';
-export type { InterleavedContainer, InterleavedContentConfig } from './InterleavedContentActor';
 
 // Shadow DOM enabled actors
 export { ShadowActor } from './ShadowActor';

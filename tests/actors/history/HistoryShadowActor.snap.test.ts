@@ -207,12 +207,14 @@ describe('HistoryShadowActor Snapshots', () => {
       actor.open();
 
       const today = new Date();
-      const lastWeek = new Date(today);
-      lastWeek.setDate(lastWeek.getDate() - 5);
+      // Use a date from last month to ensure it falls into "This Year" category
+      // (or "This Month" if we're at the start of the year)
+      const lastMonth = new Date(today);
+      lastMonth.setMonth(lastMonth.getMonth() - 2);
 
       const sessions = [
         createTestSession({ id: 'sess1', title: 'Today Session', updatedAt: today }),
-        createTestSession({ id: 'sess2', title: 'Last Week Session', updatedAt: lastWeek })
+        createTestSession({ id: 'sess2', title: 'Older Session', updatedAt: lastMonth })
       ];
       manager.publishDirect('history.sessions', sessions);
       await waitForRegistration();

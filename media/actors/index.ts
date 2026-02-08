@@ -21,49 +21,14 @@ export type { SessionData, SessionState, VSCodeAPI } from './session';
 export { EditModeActor } from './edit-mode';
 export type { EditMode } from './edit-mode';
 
-// Message Gateway (boundary between VS Code extension and internal actor system)
-// See ARCHITECTURE/message-gateway.md for detailed documentation
-export { MessageGatewayActor } from './message-gateway';
-export type { ActorRefs, GatewayPhase } from './message-gateway';
-
 // Virtual Message Gateway (1B architecture - uses VirtualListActor)
+// See ARCHITECTURE/message-gateway.md for detailed documentation
 export { VirtualMessageGatewayActor } from './message-gateway';
-export type { VirtualActorRefs } from './message-gateway';
-
-// Message
-export { MessageShadowActor } from './message/MessageShadowActor';
-export type { Message, MessageState } from './message/MessageShadowActor';
+export type { VirtualActorRefs, GatewayPhase } from './message-gateway';
 
 // Header (minimal version - just updates model name display, uses light DOM)
 export { HeaderActor } from './header/HeaderActor';
 export type { HeaderState, HeaderElements } from './header/HeaderActor';
-
-// Sidebar - DELETED (was never used, different UI design)
-// See ARCHITECTURE/actor-diagram.md for details
-
-// Shell
-export { ShellShadowActor } from './shell/ShellShadowActor';
-export type { ShellCommand, ShellSegment, ShellState, ShellExecuteHandler } from './shell/ShellShadowActor';
-
-// Tool Calls
-export { ToolCallsShadowActor } from './tools/ToolCallsShadowActor';
-export type { ToolCall, ToolCallsState } from './tools/ToolCallsShadowActor';
-
-// Pending Changes
-export { PendingChangesShadowActor } from './pending/PendingChangesShadowActor';
-export type { FileStatus, EditMode, PendingFile, PendingChangesState, FileActionHandler } from './pending/PendingChangesShadowActor';
-
-// Thinking
-export { ThinkingShadowActor } from './thinking/ThinkingShadowActor';
-export type { ThinkingIteration, ThinkingState } from './thinking/ThinkingShadowActor';
-
-// Code Block
-export { CodeBlockShadowActor } from './codeblock/CodeBlockShadowActor';
-export type { CodeBlock, CodeBlockState, CodeActionHandler } from './codeblock/CodeBlockShadowActor';
-
-// Diff
-export { DiffShadowActor } from './diff/DiffShadowActor';
-export type { DiffLine, DiffData, DiffState, DiffActionHandler } from './diff/DiffShadowActor';
 
 // Input Area
 export { InputAreaShadowActor } from './input-area/InputAreaShadowActor';

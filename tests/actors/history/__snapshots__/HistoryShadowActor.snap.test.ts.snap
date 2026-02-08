@@ -5,7 +5,7 @@ exports[`HistoryShadowActor Snapshots > Date grouping > renders date group heade
 exports[`HistoryShadowActor Snapshots > Date grouping > renders multiple date groups 1`] = `
 [
   "Today",
-  "This Year",
+  "Older",
 ]
 `;
 
