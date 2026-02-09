@@ -438,6 +438,10 @@ export class CommandProvider {
     let totalDuration = 0;
     let durationCount = 0;
 
+    // Time alignment diagnostics
+    const extensionEvents = events.filter(e => e.source === 'extension');
+    const webviewEvents = events.filter(e => e.source === 'webview');
+
     for (const event of events) {
       // Category breakdown
       const cat = event.category.split('.')[0];
@@ -458,6 +462,21 @@ export class CommandProvider {
       }
     }
 
+    // Calculate timestamp ranges for time alignment diagnostics
+    const getTimeRange = (evts: typeof events) => {
+      if (evts.length === 0) return null;
+      const sorted = [...evts].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+      return {
+        first: sorted[0].timestamp,
+        last: sorted[sorted.length - 1].timestamp,
+        firstMs: new Date(sorted[0].timestamp).getTime(),
+        lastMs: new Date(sorted[sorted.length - 1].timestamp).getTime()
+      };
+    };
+
+    const extRange = getTimeRange(extensionEvents);
+    const webRange = getTimeRange(webviewEvents);
+
     // Format stats
     const lines: string[] = [
       `Total Events: ${events.length}`,
@@ -471,8 +490,59 @@ export class CommandProvider {
       '',
       'By Source:',
       ...Array.from(sourceCount.entries())
-        .map(([src, count]) => `  ${src}: ${count}`)
+        .map(([src, count]) => `  ${src}: ${count}`),
+      '',
+      '=== TIME ALIGNMENT DIAGNOSTICS ===',
+      `Current Extension Time: ${new Date().toISOString()}`,
+      ''
     ];
+
+    if (extRange) {
+      lines.push(
+        'Extension Events:',
+        `  First: ${extRange.first}`,
+        `  Last:  ${extRange.last}`,
+        `  Span:  ${((extRange.lastMs - extRange.firstMs) / 1000).toFixed(2)}s`
+      );
+    } else {
+      lines.push('Extension Events: None');
+    }
+
+    if (webRange) {
+      lines.push(
+        '',
+        'Webview Events:',
+        `  First: ${webRange.first}`,
+        `  Last:  ${webRange.last}`,
+        `  Span:  ${((webRange.lastMs - webRange.firstMs) / 1000).toFixed(2)}s`
+      );
+    } else {
+      lines.push('', 'Webview Events: None');
+    }
+
+    // Calculate gap between extension and webview events
+    if (extRange && webRange) {
+      const gapMs = webRange.firstMs - extRange.lastMs;
+      const gapSeconds = gapMs / 1000;
+      const gapMinutes = gapSeconds / 60;
+      lines.push(
+        '',
+        'Cross-Boundary Gap:',
+        `  Gap: ${gapMs}ms (${gapMinutes.toFixed(2)} minutes)`,
+        `  (Extension last -> Webview first)`
+      );
+
+      if (Math.abs(gapMinutes) > 1) {
+        lines.push(
+          '',
+          '*** WARNING: Large time gap detected! ***',
+          'This may indicate:',
+          '  1. Webview was hidden/recreated after extension events',
+          '  2. Clock synchronization issue',
+          '  3. Long delay between extension and webview initialization'
+        );
+      }
+    }
 
     const doc = await vscode.workspace.openTextDocument({
       content: lines.join('\n'),

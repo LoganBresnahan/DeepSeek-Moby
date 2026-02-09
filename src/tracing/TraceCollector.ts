@@ -51,6 +51,7 @@ export class TraceCollector {
   private subscribers: TraceSubscriber[] = [];
   private spanStack = new Map<string, TraceEvent>();
   private startTime: number;
+  private startWallClock: number;  // Wall-clock time at tracer start for importing webview events
 
   private config: TraceCollectorConfig = {
     maxBufferSize: 10000,
@@ -68,6 +69,7 @@ export class TraceCollector {
 
   private constructor() {
     this.startTime = performance.now();
+    this.startWallClock = Date.now();
   }
 
   /**
@@ -360,16 +362,10 @@ export class TraceCollector {
     // Generate new ID but preserve reference to original
     const id = generateId('imported');
 
-    // Parse the original timestamp to get a comparable relativeTime
-    // We use the original timestamp's time relative to the first event
+    // Calculate relativeTime from the tracer's start wall-clock time
+    // This aligns webview events with extension events on the same timeline
     const originalTimestamp = new Date(options.timestamp).getTime();
-    const firstEventTime = this.buffer.length > 0
-      ? new Date(this.buffer[0].timestamp).getTime()
-      : originalTimestamp;
-
-    // Calculate a synthetic relativeTime based on the time difference
-    // from the first event (or 0 if this is the first event)
-    const relativeTime = originalTimestamp - firstEventTime;
+    const relativeTime = originalTimestamp - this.startWallClock;
 
     const event: TraceEvent = {
       id,
@@ -506,56 +502,103 @@ export class TraceCollector {
 
   /**
    * Export traces in the specified format.
-   * Times are normalized so the first event starts at 0ms.
+   * Events are sorted chronologically by timestamp.
+   * relativeTime is recalculated so the earliest event starts at 0ms.
    */
   export(format: ExportFormat = 'json'): string {
     if (this.buffer.length === 0) {
       return format === 'json' ? '[]' : '';
     }
 
-    // Calculate base time for normalization (first event's relativeTime)
-    const baseTime = this.buffer[0].relativeTime;
+    // Sort events chronologically by ISO timestamp
+    const sorted = [...this.buffer].sort((a, b) =>
+      a.timestamp.localeCompare(b.timestamp)
+    );
+
+    // Find the earliest timestamp as base for relativeTime normalization
+    const earliestTime = new Date(sorted[0].timestamp).getTime();
+
+    // Recalculate relativeTime for all events based on the earliest event
+    const normalized = sorted.map(e => ({
+      ...e,
+      relativeTime: new Date(e.timestamp).getTime() - earliestTime
+    }));
 
     switch (format) {
       case 'json':
-        // Normalize relativeTime in JSON export
-        const normalizedBuffer = this.buffer.map(e => ({
-          ...e,
-          relativeTime: e.relativeTime - baseTime
-        }));
-        return JSON.stringify(normalizedBuffer, null, 2);
+        return JSON.stringify(normalized, null, 2);
 
       case 'jsonl':
-        return this.buffer.map(e => JSON.stringify({
-          ...e,
-          relativeTime: e.relativeTime - baseTime
-        })).join('\n');
+        return normalized.map(e => JSON.stringify(e)).join('\n');
 
       case 'pretty':
-        return this.buffer.map(e => this.formatEventPretty(e, baseTime)).join('\n');
+        return this.formatPrettyAggregated(normalized);
 
       default:
-        const normalized = this.buffer.map(e => ({
-          ...e,
-          relativeTime: e.relativeTime - baseTime
-        }));
         return JSON.stringify(normalized, null, 2);
     }
   }
 
   /**
-   * Format a single event for pretty printing.
-   * @param baseTime - The relativeTime of the first event (for normalization)
+   * Format events with aggregation for human readability.
+   * Consecutive events with the same category are collapsed.
    */
-  private formatEventPretty(event: TraceEvent, baseTime: number = 0): string {
-    const normalizedTime = event.relativeTime - baseTime;
+  private formatPrettyAggregated(events: TraceEvent[]): string {
+    if (events.length === 0) return '';
+
+    const lines: string[] = [];
+    let i = 0;
+
+    while (i < events.length) {
+      const current = events[i];
+
+      // Find consecutive events with the same category
+      let groupEnd = i + 1;
+      while (groupEnd < events.length && events[groupEnd].category === current.category) {
+        groupEnd++;
+      }
+
+      const groupSize = groupEnd - i;
+
+      if (groupSize <= 2) {
+        // Small group: show all events
+        for (let j = i; j < groupEnd; j++) {
+          lines.push(this.formatEventPretty(events[j]));
+        }
+      } else {
+        // Large group: show first, summary, last
+        const first = events[i];
+        const last = events[groupEnd - 1];
+        const collapsedCount = groupSize - 2;
+
+        lines.push(this.formatEventPretty(first));
+
+        // Add collapse indicator (ASCII-safe for cross-platform compatibility)
+        const startTime = first.relativeTime.toFixed(1);
+        const endTime = last.relativeTime.toFixed(1);
+        const indent = '          '; // Match time column width
+        lines.push(`${indent} ... ${collapsedCount} similar ${current.category} events (${startTime}-${endTime}ms) - see JSONL for full data`);
+
+        lines.push(this.formatEventPretty(last));
+      }
+
+      i = groupEnd;
+    }
+
+    return lines.join('\n');
+  }
+
+  /**
+   * Format a single event for pretty printing.
+   */
+  private formatEventPretty(event: TraceEvent): string {
     const statusIcon = event.status === 'started' ? '>' :
                        event.status === 'completed' ? '<' :
                        event.status === 'failed' ? '!' : ' ';
     const duration = event.duration ? ` (${event.duration.toFixed(1)}ms)` : '';
     const error = event.error ? ` ERROR: ${event.error}` : '';
     const data = event.data ? ` ${JSON.stringify(event.data)}` : '';
-    const timeStr = `${normalizedTime.toFixed(1)}ms`.padStart(10);
+    const timeStr = `${event.relativeTime.toFixed(1)}ms`.padStart(10);
 
     return `${timeStr} ${event.timestamp} ${statusIcon} [${event.source}] [${event.category}] ${event.operation}${duration}${error}${data}`;
   }

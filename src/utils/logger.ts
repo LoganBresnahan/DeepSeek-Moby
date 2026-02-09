@@ -472,6 +472,14 @@ class Logger {
     tracer.trace('api.response', 'cacheCleared');
   }
 
+  /**
+   * Get the current API correlation ID for cross-boundary tracing.
+   * Returns null if no API request is in progress.
+   */
+  public getCurrentCorrelationId(): string | null {
+    return this.currentApiCorrelationId || null;
+  }
+
   // Show the output channel
   public show() {
     this.outputChannel.show(true);

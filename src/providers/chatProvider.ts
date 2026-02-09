@@ -316,6 +316,14 @@ which I already edited - would you like me to update it?"
     context: vscode.WebviewViewResolveContext,
     _token: vscode.CancellationToken
   ) {
+    // Trace webview lifecycle - critical for debugging timing issues
+    const resolveInfo = {
+      previousViewExists: this._view !== undefined,
+      hasState: context.state !== undefined
+    };
+    tracer.trace('webview.resolve' as TraceCategory, 'chatPanel', { data: resolveInfo });
+    logger.info('[ChatProvider] Webview resolving', JSON.stringify(resolveInfo));
+
     this._view = webviewView;
 
     webviewView.webview.options = {
@@ -497,13 +505,57 @@ which I already edited - would you like me to update it?"
           break;
         // Webview trace events - merge into extension trace collector
         case 'traceEvents':
+          // Log time alignment diagnostic if webview sent sync time
+          if (data.webviewSyncTime) {
+            const extensionNow = new Date().toISOString();
+            const webviewTime = data.webviewSyncTime as string;
+            const diffMs = new Date(extensionNow).getTime() - new Date(webviewTime).getTime();
+            if (Math.abs(diffMs) > 1000) {
+              logger.warn(`[Trace] Time drift detected: extension=${extensionNow} webview=${webviewTime} diff=${diffMs}ms`);
+            }
+          }
           this.handleWebviewTraceEvents(data.events);
+          // Send acknowledgment so webview knows it's safe to clear buffer
+          this._view?.webview.postMessage({ type: 'traceSyncAck', count: data.events?.length || 0 });
+          break;
+        // Webview ready - send calibration data and request immediate trace sync
+        case 'webviewReady':
+          this.sendTraceCalibration();
           break;
       }
     });
 
+    // Handle visibility changes - request trace sync when webview becomes visible/hidden
+    webviewView.onDidChangeVisibility(() => {
+      tracer.trace('webview.visible' as TraceCategory, webviewView.visible ? 'shown' : 'hidden');
+      if (webviewView.visible) {
+        // Webview became visible - send calibration in case it was recreated
+        this.sendTraceCalibration();
+      }
+      // Always request trace sync on visibility change (capture events before potential destruction)
+      this._view?.webview.postMessage({ type: 'requestTraceSync' });
+    });
+
     // Load conversation history for current session
     this.loadCurrentSessionHistory();
+  }
+
+  /**
+   * Send trace calibration data to webview for timeline alignment.
+   * Includes the extension's base timestamp so relativeTime can be synchronized.
+   */
+  private sendTraceCalibration(): void {
+    if (!this._view) return;
+
+    // Get the current correlation ID from the logger (if an API request is in progress)
+    const correlationId = logger.getCurrentCorrelationId();
+
+    // Send the extension's start time and current correlation ID (if any)
+    this._view.webview.postMessage({
+      type: 'traceCalibration',
+      extensionStartTime: new Date().toISOString(),
+      correlationId: correlationId || undefined
+    });
   }
 
   public reveal() {
@@ -1472,9 +1524,13 @@ ${webSearchContext}
     this.abortController = new AbortController();
     const signal = this.abortController.signal;
 
+    // Get the current correlation ID for cross-boundary tracing
+    const correlationId = logger.getCurrentCorrelationId();
+
     this._view.webview.postMessage({
       type: 'startResponse',
-      isReasoner: isReasonerModel
+      isReasoner: isReasonerModel,
+      correlationId: correlationId || undefined
     });
 
     // Initialize content transform buffer for debounced streaming

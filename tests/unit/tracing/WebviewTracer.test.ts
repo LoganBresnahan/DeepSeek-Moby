@@ -305,19 +305,25 @@ describe('WebviewTracer', () => {
       };
 
       tracer.initialize(mockVscode);
+      // Note: initialize now sends a 'webviewReady' message
+      expect(mockVscode.postMessage).toHaveBeenCalledWith({ type: 'webviewReady' });
+
       tracer.trace('user.input', 'test1');
       tracer.trace('user.input', 'test2');
 
       tracer.syncToExtension();
 
-      expect(mockVscode.postMessage).toHaveBeenCalledTimes(1);
-      expect(mockVscode.postMessage).toHaveBeenCalledWith({
-        type: 'traceEvents',
-        events: expect.arrayContaining([
-          expect.objectContaining({ operation: 'test1' }),
-          expect.objectContaining({ operation: 'test2' })
-        ])
-      });
+      // 2 calls total: webviewReady + traceEvents
+      expect(mockVscode.postMessage).toHaveBeenCalledTimes(2);
+      expect(mockVscode.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'traceEvents',
+          events: expect.arrayContaining([
+            expect.objectContaining({ operation: 'test1' }),
+            expect.objectContaining({ operation: 'test2' })
+          ])
+        })
+      );
     });
 
     it('clears buffer after sync', () => {
@@ -342,6 +348,34 @@ describe('WebviewTracer', () => {
       expect(() => tracer.syncToExtension()).not.toThrow();
       expect(tracer.size).toBe(1); // Buffer not cleared
     });
+
+    it('includes time drift diagnostic fields in sync message', () => {
+      const mockVscode = {
+        postMessage: vi.fn(),
+        getState: vi.fn(),
+        setState: vi.fn()
+      };
+
+      tracer.initialize(mockVscode);
+      mockVscode.postMessage.mockClear();
+
+      tracer.trace('user.input', 'test');
+      tracer.syncToExtension();
+
+      // Verify sync message includes diagnostic fields for clock drift detection
+      expect(mockVscode.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'traceEvents',
+          webviewSyncTime: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
+          webviewRelativeTime: expect.any(Number)
+        })
+      );
+
+      // Verify webviewRelativeTime is reasonable (should be small, not negative)
+      const call = mockVscode.postMessage.mock.calls[0][0];
+      expect(call.webviewRelativeTime).toBeGreaterThanOrEqual(0);
+      expect(call.webviewRelativeTime).toBeLessThan(10000); // Less than 10 seconds
+    });
   });
 
   describe('dispose', () => {
@@ -353,6 +387,10 @@ describe('WebviewTracer', () => {
       };
 
       tracer.initialize(mockVscode);
+      // Note: initialize sends a 'webviewReady' message
+      expect(mockVscode.postMessage).toHaveBeenCalledWith({ type: 'webviewReady' });
+      mockVscode.postMessage.mockClear(); // Reset call count
+
       tracer.trace('user.input', 'test');
 
       tracer.dispose();
@@ -362,6 +400,75 @@ describe('WebviewTracer', () => {
       tracer.trace('user.input', 'after-dispose');
       tracer.syncToExtension();
       expect(mockVscode.postMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('cross-boundary correlation', () => {
+    it('uses extension correlationId when set', () => {
+      tracer.setExtensionCorrelationId('flow-123');
+
+      tracer.trace('actor.bind', 'TestActor');
+
+      const events = tracer.getAll();
+      expect(events[0].correlationId).toBe('flow-123');
+    });
+
+    it('falls back to standalone when no extension correlationId', () => {
+      tracer.setExtensionCorrelationId(null);
+
+      tracer.trace('actor.bind', 'TestActor');
+
+      const events = tracer.getAll();
+      expect(events[0].correlationId).toBe('standalone');
+    });
+
+    it('handles calibration data', () => {
+      const timestamp = '2026-02-09T03:00:00.000Z';
+      tracer.handleCalibration(timestamp, 'flow-456');
+
+      expect(tracer.getExtensionCorrelationId()).toBe('flow-456');
+
+      // Events should use the calibrated correlationId
+      tracer.trace('actor.create', 'TestActor');
+      const events = tracer.getAll();
+      expect(events[0].correlationId).toBe('flow-456');
+    });
+
+    it('handles sync acknowledgment', () => {
+      // Should not throw
+      expect(() => tracer.handleSyncAck(5)).not.toThrow();
+    });
+
+    it('forces sync on request', () => {
+      const mockVscode = {
+        postMessage: vi.fn(),
+        getState: vi.fn(),
+        setState: vi.fn()
+      };
+
+      tracer.initialize(mockVscode);
+      mockVscode.postMessage.mockClear(); // Clear webviewReady call
+
+      tracer.trace('actor.bind', 'TestActor');
+      tracer.forceSync();
+
+      expect(mockVscode.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'traceEvents',
+          events: expect.arrayContaining([
+            expect.objectContaining({ operation: 'TestActor' })
+          ])
+        })
+      );
+    });
+
+    it('propagates correlationId to startSpan', () => {
+      tracer.setExtensionCorrelationId('flow-789');
+
+      const spanId = tracer.startSpan('api.request', 'fetch');
+
+      const events = tracer.getAll();
+      expect(events[0].correlationId).toBe('flow-789');
     });
   });
 });

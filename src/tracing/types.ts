@@ -50,6 +50,11 @@ export type TraceCategory =
   | 'session.load'
   | 'session.switch'
 
+  // Webview Lifecycle
+  | 'webview.resolve'  // Webview view resolved (created/recreated)
+  | 'webview.visible'  // Webview visibility changed
+  | 'webview.dispose'  // Webview disposed
+
   // Files
   | 'file.read'
   | 'file.write'

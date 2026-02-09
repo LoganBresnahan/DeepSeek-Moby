@@ -45,6 +45,13 @@ export class WebviewTracer {
   private vscode: VSCodeAPI | null = null;
   private syncTimer: ReturnType<typeof setInterval> | null = null;
 
+  // Cross-boundary correlation
+  private extensionCorrelationId: string | null = null;
+  private extensionStartTime: string | null = null;
+
+  // Pending sync tracking (events sent but not yet acknowledged)
+  private pendingSyncCount: number = 0;
+
   private config: WebviewTracerConfig = {
     enabled: true,
     minLevel: 'info',
@@ -76,6 +83,43 @@ export class WebviewTracer {
     if (this.config.syncIntervalMs > 0) {
       this.startSyncTimer();
     }
+
+    // Notify extension that webview is ready - triggers calibration and initial sync
+    this.vscode.postMessage({ type: 'webviewReady' });
+  }
+
+  /**
+   * Handle calibration data from the extension.
+   * This aligns the webview's timeline with the extension's timeline.
+   */
+  handleCalibration(extensionStartTime: string, correlationId?: string): void {
+    this.extensionStartTime = extensionStartTime;
+    if (correlationId) {
+      this.extensionCorrelationId = correlationId;
+    }
+  }
+
+  /**
+   * Handle acknowledgment of trace sync from extension.
+   * This confirms the extension received our events.
+   */
+  handleSyncAck(count: number): void {
+    // Events were successfully received, reduce pending count
+    this.pendingSyncCount = Math.max(0, this.pendingSyncCount - count);
+  }
+
+  /**
+   * Get the current extension correlation ID for cross-boundary tracing.
+   */
+  getExtensionCorrelationId(): string | null {
+    return this.extensionCorrelationId;
+  }
+
+  /**
+   * Set the extension correlation ID (e.g., when a new API request starts).
+   */
+  setExtensionCorrelationId(correlationId: string | null): void {
+    this.extensionCorrelationId = correlationId;
   }
 
   /**
@@ -142,9 +186,14 @@ export class WebviewTracer {
     }
 
     const id = generateId('wv-span');
+    // Use provided correlationId, fall back to extension's correlationId, then generate new one
+    const correlationId = options.correlationId ||
+                          this.extensionCorrelationId ||
+                          this.startFlow();
+
     const event: WebviewTraceEvent = {
       id,
-      correlationId: options.correlationId || this.startFlow(),
+      correlationId,
       parentId: options.parentId,
       timestamp: new Date().toISOString(),
       relativeTime: performance.now() - this.startTime,
@@ -204,9 +253,14 @@ export class WebviewTracer {
     }
 
     const id = generateId('wv-evt');
+    // Use provided correlationId, fall back to extension's correlationId, then 'standalone'
+    const correlationId = options.correlationId ||
+                          this.extensionCorrelationId ||
+                          'standalone';
+
     const event: WebviewTraceEvent = {
       id,
-      correlationId: options.correlationId || 'standalone',
+      correlationId,
       timestamp: new Date().toISOString(),
       relativeTime: performance.now() - this.startTime,
       source: 'webview',
@@ -259,18 +313,36 @@ export class WebviewTracer {
 
   /**
    * Sync buffered events to the extension.
+   * @param clearBuffer - Whether to clear the buffer after sync (default: true)
    */
-  syncToExtension(): void {
+  syncToExtension(clearBuffer: boolean = true): void {
     if (!this.vscode || this.buffer.length === 0) return;
 
-    // Send events to extension
+    const eventCount = this.buffer.length;
+
+    // Send events to extension with diagnostic info for time alignment debugging
     this.vscode.postMessage({
       type: 'traceEvents',
-      events: this.buffer
+      events: this.buffer,
+      // Diagnostic: webview's current time at sync moment
+      webviewSyncTime: new Date().toISOString(),
+      webviewRelativeTime: performance.now() - this.startTime
     });
 
-    // Clear buffer after sync
-    this.buffer = [];
+    // Track pending sync count (for acknowledgment tracking)
+    this.pendingSyncCount += eventCount;
+
+    // Clear buffer after sync (extension will acknowledge receipt)
+    if (clearBuffer) {
+      this.buffer = [];
+    }
+  }
+
+  /**
+   * Force immediate sync (called when extension requests it, e.g., on visibility change).
+   */
+  forceSync(): void {
+    this.syncToExtension();
   }
 
   /**

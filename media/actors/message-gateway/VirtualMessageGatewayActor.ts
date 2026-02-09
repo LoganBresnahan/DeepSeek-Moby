@@ -18,6 +18,7 @@
 import { EventStateActor } from '../../state/EventStateActor';
 import { EventStateManager } from '../../state/EventStateManager';
 import type { ActorConfig } from '../../state/types';
+import { webviewTracer } from '../../tracing';
 
 // Import actor types for type safety
 import type { StreamingActor } from '../streaming';
@@ -339,6 +340,25 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         this.handleCodeApplied(msg);
         break;
 
+      // ---- Trace Messages ----
+      case 'traceCalibration':
+        // Receive calibration data from extension for timeline alignment
+        webviewTracer.handleCalibration(
+          msg.extensionStartTime as string,
+          msg.correlationId as string | undefined
+        );
+        break;
+
+      case 'requestTraceSync':
+        // Extension requests immediate trace sync (e.g., on visibility change)
+        webviewTracer.forceSync();
+        break;
+
+      case 'traceSyncAck':
+        // Extension acknowledges receipt of trace events
+        webviewTracer.handleSyncAck(msg.count as number);
+        break;
+
       default:
         console.log('[VirtualGateway] Unhandled message type:', msg.type);
     }
@@ -352,6 +372,11 @@ export class VirtualMessageGatewayActor extends EventStateActor {
     const { streaming, session, virtualList } = this._actors;
 
     console.log('[VirtualGateway] startResponse: beginning new stream');
+
+    // Set the correlation ID for cross-boundary tracing (if provided)
+    if (msg.correlationId) {
+      webviewTracer.setExtensionCorrelationId(msg.correlationId as string);
+    }
 
     // Reset coordination state
     this._segmentContent = '';
@@ -484,6 +509,12 @@ export class VirtualMessageGatewayActor extends EventStateActor {
     this._hasInterleaved = false;
     this._phase = 'idle';
     this._currentTurnId = null;
+
+    // Clear the correlation ID now that the flow is complete
+    webviewTracer.setExtensionCorrelationId(null);
+
+    // Force sync traces to extension at end of response
+    webviewTracer.forceSync();
 
     this.publishCoordinationState();
   }

@@ -264,6 +264,167 @@ describe('TraceCollector', () => {
       expect(exported).toContain('[api.request]');
       expect(exported).toContain('test2');
     });
+
+    it('returns empty for empty buffer', () => {
+      collector.clear();
+      expect(collector.export('json')).toBe('[]');
+      expect(collector.export('jsonl')).toBe('');
+      expect(collector.export('pretty')).toBe('');
+    });
+  });
+
+  describe('chronological export', () => {
+    it('sorts events by timestamp regardless of insertion order', () => {
+      collector.clear();
+
+      // Insert events with out-of-order timestamps via importEvent
+      const t2 = '2026-02-09T02:50:00.000Z';
+      const t1 = '2026-02-09T02:49:00.000Z'; // Earlier than t2
+      const t3 = '2026-02-09T02:51:00.000Z';
+
+      collector.importEvent('user.click', 'second', {
+        originalId: 'evt-2',
+        timestamp: t2
+      });
+      collector.importEvent('user.input', 'first', {
+        originalId: 'evt-1',
+        timestamp: t1
+      });
+      collector.importEvent('api.request', 'third', {
+        originalId: 'evt-3',
+        timestamp: t3
+      });
+
+      const exported = collector.export('json');
+      const parsed = JSON.parse(exported);
+
+      // Should be sorted chronologically
+      expect(parsed[0].operation).toBe('first');
+      expect(parsed[1].operation).toBe('second');
+      expect(parsed[2].operation).toBe('third');
+    });
+
+    it('recalculates relativeTime from earliest event', () => {
+      collector.clear();
+
+      const t1 = '2026-02-09T02:49:00.000Z';
+      const t2 = '2026-02-09T02:49:30.000Z'; // 30 seconds later
+      const t3 = '2026-02-09T02:50:00.000Z'; // 60 seconds later
+
+      // Insert in reverse chronological order
+      collector.importEvent('api.request', 'third', {
+        originalId: 'evt-3',
+        timestamp: t3
+      });
+      collector.importEvent('user.input', 'first', {
+        originalId: 'evt-1',
+        timestamp: t1
+      });
+      collector.importEvent('user.click', 'second', {
+        originalId: 'evt-2',
+        timestamp: t2
+      });
+
+      const exported = collector.export('json');
+      const parsed = JSON.parse(exported);
+
+      // First event should have relativeTime 0
+      expect(parsed[0].relativeTime).toBe(0);
+      expect(parsed[0].operation).toBe('first');
+
+      // Second event should be 30 seconds (30000ms) from first
+      expect(parsed[1].relativeTime).toBe(30000);
+      expect(parsed[1].operation).toBe('second');
+
+      // Third event should be 60 seconds (60000ms) from first
+      expect(parsed[2].relativeTime).toBe(60000);
+      expect(parsed[2].operation).toBe('third');
+    });
+
+    it('produces unified timeline with mixed extension and webview events', () => {
+      collector.clear();
+
+      // Simulate: extension event, then webview event with EARLIER timestamp
+      // This mimics the real scenario where webview events are imported later
+      // but actually happened earlier
+      const extensionTime = '2026-02-09T02:50:00.000Z';
+      const webviewTime = '2026-02-09T02:49:55.000Z'; // 5 seconds BEFORE extension
+
+      // Extension event added first (but happened later)
+      collector.trace('api.request', 'extension-event', {
+        data: { source: 'extension' }
+      });
+
+      // Manually set timestamp for testing (normally trace uses current time)
+      const events = collector.getAll();
+      (events[0] as any).timestamp = extensionTime;
+
+      // Import webview event (happened earlier but received later)
+      collector.importEvent('actor.create', 'webview-event', {
+        originalId: 'wv-evt-123',
+        timestamp: webviewTime,
+        data: { source: 'webview' }
+      });
+
+      const exported = collector.export('json');
+      const parsed = JSON.parse(exported);
+
+      // Webview event should come first despite being added second
+      expect(parsed[0].operation).toBe('webview-event');
+      expect(parsed[0].source).toBe('webview');
+      expect(parsed[0].relativeTime).toBe(0);
+
+      // Extension event should come second
+      expect(parsed[1].operation).toBe('extension-event');
+      expect(parsed[1].source).toBe('extension');
+      expect(parsed[1].relativeTime).toBe(5000); // 5 seconds after webview event
+    });
+
+    it('handles JSONL format with chronological order', () => {
+      collector.clear();
+
+      const t2 = '2026-02-09T02:50:00.000Z';
+      const t1 = '2026-02-09T02:49:00.000Z';
+
+      collector.importEvent('api.request', 'second', {
+        originalId: 'evt-2',
+        timestamp: t2
+      });
+      collector.importEvent('user.input', 'first', {
+        originalId: 'evt-1',
+        timestamp: t1
+      });
+
+      const exported = collector.export('jsonl');
+      const lines = exported.split('\n');
+
+      expect(JSON.parse(lines[0]).operation).toBe('first');
+      expect(JSON.parse(lines[1]).operation).toBe('second');
+    });
+
+    it('handles pretty format with chronological order', () => {
+      collector.clear();
+
+      const t2 = '2026-02-09T02:50:00.000Z';
+      const t1 = '2026-02-09T02:49:00.000Z';
+
+      collector.importEvent('api.request', 'second', {
+        originalId: 'evt-2',
+        timestamp: t2
+      });
+      collector.importEvent('user.input', 'first', {
+        originalId: 'evt-1',
+        timestamp: t1
+      });
+
+      const exported = collector.export('pretty');
+      const lines = exported.split('\n');
+
+      // First line should contain 'first' operation
+      expect(lines[0]).toContain('first');
+      // Second line should contain 'second' operation
+      expect(lines[1]).toContain('second');
+    });
   });
 
   describe('buffer management', () => {
@@ -542,6 +703,179 @@ describe('TraceCollector', () => {
 
       const events = collector.getAll();
       expect(events[0].status).toBe('started');
+    });
+  });
+
+  describe('pretty format aggregation', () => {
+    it('shows all events when group size is 1-2', () => {
+      collector.clear();
+
+      collector.importEvent('user.input', 'event1', {
+        originalId: 'evt-1',
+        timestamp: '2026-02-09T03:00:00.000Z'
+      });
+      collector.importEvent('user.input', 'event2', {
+        originalId: 'evt-2',
+        timestamp: '2026-02-09T03:00:01.000Z'
+      });
+
+      const exported = collector.export('pretty');
+      const lines = exported.split('\n');
+
+      // Both events should be shown (no aggregation)
+      expect(lines).toHaveLength(2);
+      expect(lines[0]).toContain('event1');
+      expect(lines[1]).toContain('event2');
+      expect(exported).not.toContain('similar');
+    });
+
+    it('collapses consecutive events with same category when 3+', () => {
+      collector.clear();
+
+      // Add 5 events with the same category
+      for (let i = 1; i <= 5; i++) {
+        collector.importEvent('actor.bind', `event${i}`, {
+          originalId: `evt-${i}`,
+          timestamp: `2026-02-09T03:00:0${i}.000Z`
+        });
+      }
+
+      const exported = collector.export('pretty');
+      const lines = exported.split('\n');
+
+      // Should have: first event, collapse indicator, last event = 3 lines
+      expect(lines).toHaveLength(3);
+
+      // First line should show first event
+      expect(lines[0]).toContain('event1');
+
+      // Second line should be the collapse indicator
+      expect(lines[1]).toContain('3 similar');
+      expect(lines[1]).toContain('actor.bind');
+      expect(lines[1]).toContain('see JSONL for full data');
+
+      // Third line should show last event
+      expect(lines[2]).toContain('event5');
+    });
+
+    it('shows time range in collapse indicator', () => {
+      collector.clear();
+
+      collector.importEvent('state.publish', 'start', {
+        originalId: 'evt-1',
+        timestamp: '2026-02-09T03:00:00.000Z'
+      });
+      collector.importEvent('state.publish', 'middle1', {
+        originalId: 'evt-2',
+        timestamp: '2026-02-09T03:00:00.100Z'
+      });
+      collector.importEvent('state.publish', 'middle2', {
+        originalId: 'evt-3',
+        timestamp: '2026-02-09T03:00:00.200Z'
+      });
+      collector.importEvent('state.publish', 'end', {
+        originalId: 'evt-4',
+        timestamp: '2026-02-09T03:00:00.500Z'
+      });
+
+      const exported = collector.export('pretty');
+
+      // Should contain time range (0.0ms to 500.0ms)
+      expect(exported).toContain('0.0-500.0ms');
+    });
+
+    it('creates separate groups for different categories', () => {
+      collector.clear();
+
+      // First group: 3 actor.bind events
+      for (let i = 1; i <= 3; i++) {
+        collector.importEvent('actor.bind', `bind${i}`, {
+          originalId: `bind-${i}`,
+          timestamp: `2026-02-09T03:00:0${i}.000Z`
+        });
+      }
+
+      // Second group: 1 api.request event
+      collector.importEvent('api.request', 'request1', {
+        originalId: 'req-1',
+        timestamp: '2026-02-09T03:00:04.000Z'
+      });
+
+      // Third group: 3 state.publish events
+      for (let i = 1; i <= 3; i++) {
+        collector.importEvent('state.publish', `pub${i}`, {
+          originalId: `pub-${i}`,
+          timestamp: `2026-02-09T03:00:0${4 + i}.000Z`
+        });
+      }
+
+      const exported = collector.export('pretty');
+      const lines = exported.split('\n');
+
+      // Group 1: first, collapse, last = 3 lines
+      // Group 2: single event = 1 line
+      // Group 3: first, collapse, last = 3 lines
+      // Total = 7 lines
+      expect(lines).toHaveLength(7);
+
+      // Verify group 1 (actor.bind)
+      expect(lines[0]).toContain('bind1');
+      expect(lines[1]).toContain('1 similar');
+      expect(lines[1]).toContain('actor.bind');
+      expect(lines[2]).toContain('bind3');
+
+      // Verify group 2 (api.request) - not collapsed
+      expect(lines[3]).toContain('request1');
+
+      // Verify group 3 (state.publish)
+      expect(lines[4]).toContain('pub1');
+      expect(lines[5]).toContain('1 similar');
+      expect(lines[5]).toContain('state.publish');
+      expect(lines[6]).toContain('pub3');
+    });
+
+    it('preserves full data in JSON export', () => {
+      collector.clear();
+
+      // Add 5 events that would be collapsed in pretty
+      for (let i = 1; i <= 5; i++) {
+        collector.importEvent('actor.bind', `event${i}`, {
+          originalId: `evt-${i}`,
+          timestamp: `2026-02-09T03:00:0${i}.000Z`,
+          data: { turnId: `turn-${i}` }
+        });
+      }
+
+      const json = collector.export('json');
+      const parsed = JSON.parse(json);
+
+      // JSON should have all 5 events
+      expect(parsed).toHaveLength(5);
+      expect(parsed.map((e: any) => e.operation)).toEqual([
+        'event1', 'event2', 'event3', 'event4', 'event5'
+      ]);
+    });
+
+    it('handles single event', () => {
+      collector.clear();
+
+      collector.importEvent('user.click', 'single', {
+        originalId: 'evt-1',
+        timestamp: '2026-02-09T03:00:00.000Z'
+      });
+
+      const exported = collector.export('pretty');
+      const lines = exported.split('\n');
+
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('single');
+    });
+
+    it('handles empty buffer', () => {
+      collector.clear();
+
+      const exported = collector.export('pretty');
+      expect(exported).toBe('');
     });
   });
 });

@@ -822,6 +822,155 @@ The tracing system provides the **observability** needed for AI-agent debugging,
 
 ---
 
+## Architecture (Implemented)
+
+### System Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                              VS Code Extension Host                              │
+│                                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────────┐    │
+│  │                         TraceCollector (Singleton)                       │    │
+│  │                                                                          │    │
+│  │  • Ring buffer (max 10,000 events)                                       │    │
+│  │  • Correlation registry (correlationId → event IDs)                      │    │
+│  │  • Span stack (for async operation tracking)                             │    │
+│  │  • Memory monitoring (estimateMemoryBytes, warnAtMemoryMB)               │    │
+│  │  • Export formats: JSON, JSONL, Pretty                                   │    │
+│  └─────────────────────────────────────────────────────────────────────────┘    │
+│                          ▲                                                       │
+│                          │ mergeWebviewEvents()                                  │
+│                          │                                                       │
+│  ┌─────────────────────────────────────────────────────────────────────────┐    │
+│  │                         chatProvider.ts                                  │    │
+│  │                                                                          │    │
+│  │  • Handles traceEvents messages from webview                             │    │
+│  │  • Sends traceCalibration on webviewReady                                │    │
+│  │  • Sends requestTraceSync on visibility change                           │    │
+│  │  • Sends traceSyncAck after receiving events                             │    │
+│  │  • Passes correlationId in startResponse message                         │    │
+│  └─────────────────────────────────────────────────────────────────────────┘    │
+│                          ▲                                                       │
+│                          │ postMessage                                           │
+└──────────────────────────┼──────────────────────────────────────────────────────┘
+                           │
+┌──────────────────────────┼──────────────────────────────────────────────────────┐
+│                          ▼                        Webview (Browser)              │
+│  ┌─────────────────────────────────────────────────────────────────────────┐    │
+│  │                         WebviewTracer (Singleton)                        │    │
+│  │                                                                          │    │
+│  │  • Local event buffer (syncs to extension periodically)                  │    │
+│  │  • Receives correlationId from extension for cross-boundary linking      │    │
+│  │  • Receives calibration data for time alignment                          │    │
+│  │  • Tracks pending sync count for acknowledgment                          │    │
+│  │  • Auto-sync on init, visibility change, and 5-second interval           │    │
+│  └─────────────────────────────────────────────────────────────────────────┘    │
+│                          ▲                                                       │
+│                          │ setTracer()                                           │
+│                          │                                                       │
+│  ┌─────────────────────────────────────────────────────────────────────────┐    │
+│  │                       EventStateManager                                  │    │
+│  │                                                                          │    │
+│  │  • Calls tracer on: register, unregister, handleStateChange, broadcast   │    │
+│  └─────────────────────────────────────────────────────────────────────────┘    │
+│                          ▲                                                       │
+│                          │                                                       │
+│  ┌─────────────────────────────────────────────────────────────────────────┐    │
+│  │                    VirtualMessageGatewayActor                            │    │
+│  │                                                                          │    │
+│  │  • Sets correlationId on WebviewTracer when startResponse received       │    │
+│  │  • Traces actor bind/unbind events via VirtualListActor                  │    │
+│  └─────────────────────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| [src/tracing/types.ts](../../src/tracing/types.ts) | TraceEvent, TraceCategory, TraceCollectorConfig types |
+| [src/tracing/TraceCollector.ts](../../src/tracing/TraceCollector.ts) | Extension-side singleton tracer with ring buffer |
+| [src/utils/logger.ts](../../src/utils/logger.ts) | Enhanced logger that emits traces for API, tool, shell, session events |
+| [src/providers/chatProvider.ts](../../src/providers/chatProvider.ts) | Bridge between extension and webview traces |
+| [media/tracing/types.ts](../../media/tracing/types.ts) | WebviewTraceEvent, WebviewTraceCategory types |
+| [media/tracing/WebviewTracer.ts](../../media/tracing/WebviewTracer.ts) | Webview-side singleton tracer |
+| [media/state/EventStateManager.ts](../../media/state/EventStateManager.ts) | Pub/sub manager with tracer integration |
+
+### Message Flow (Extension ↔ Webview)
+
+```
+Extension                              Webview
+    │                                      │
+    │  ◄────── webviewReady ──────────────│  (webview initialized)
+    │                                      │
+    │  ─────── traceCalibration ─────────►│  (extensionStartTime, correlationId)
+    │                                      │
+    │  ─────── startResponse ────────────►│  (includes correlationId)
+    │                                      │
+    │         ... streaming ...            │
+    │                                      │
+    │  ◄────── traceEvents ───────────────│  (batched webview events)
+    │                                      │
+    │  ─────── traceSyncAck ─────────────►│  (confirms receipt)
+    │                                      │
+    │  ─────── requestTraceSync ─────────►│  (on visibility change)
+    │                                      │
+    │  ◄────── traceEvents ───────────────│  (immediate sync)
+    │                                      │
+```
+
+### Cross-Boundary Correlation
+
+Events from both extension and webview share correlation IDs for unified timeline:
+
+1. **Extension starts API flow** → generates `correlationId` via `tracer.startFlow()`
+2. **Extension sends `startResponse`** → includes `correlationId` in message
+3. **Webview receives `startResponse`** → `VirtualMessageGatewayActor` sets `correlationId` on `WebviewTracer`
+4. **Webview emits events** → uses extension's `correlationId` as fallback
+5. **Webview syncs to extension** → `TraceCollector.mergeWebviewEvents()` aligns timestamps
+6. **Export trace** → chronologically sorted events from both sources
+
+### Time Alignment
+
+The extension and webview have independent `performance.now()` baselines. To align:
+
+1. Extension sends `traceCalibration` with its current timestamp
+2. Webview stores calibration data
+3. On merge, extension adjusts webview event timestamps relative to calibration point
+4. Exported traces show unified wall-clock timestamps
+
+### Trace Categories
+
+| Category | Source | Description |
+|----------|--------|-------------|
+| `api.request` | Extension | Outbound API call started |
+| `api.stream` | Extension | Streaming token/chunk received |
+| `api.response` | Extension | API call completed |
+| `tool.call` | Extension | Tool execution started |
+| `tool.result` | Extension | Tool execution completed |
+| `shell.execute` | Extension | Shell command started |
+| `shell.result` | Extension | Shell command completed |
+| `state.publish` | Webview | Pub/sub state published |
+| `state.subscribe` | Webview | Subscription handler triggered |
+| `actor.create` | Webview | Actor instantiated |
+| `actor.bind` | Webview | Pool actor bound to turn |
+| `actor.unbind` | Webview | Pool actor released |
+| `bridge.send` | Both | postMessage sent |
+| `bridge.receive` | Both | postMessage received |
+| `render.turn` | Webview | Turn rendered |
+| `session.create` | Extension | New session created |
+| `session.load` | Extension | Session loaded from history |
+
+### Test Coverage
+
+| Test File | Tests | Coverage |
+|-----------|-------|----------|
+| [tests/unit/tracing/TraceCollector.test.ts](../../tests/unit/tracing/TraceCollector.test.ts) | 50 | Ring buffer, spans, correlation, export, memory |
+| [tests/unit/tracing/WebviewTracer.test.ts](../../tests/unit/tracing/WebviewTracer.test.ts) | 36 | Sync, calibration, correlation propagation |
+
+---
+
 ## Review: Performance & Memory Considerations
 
 ### Current Implementation
@@ -933,13 +1082,13 @@ A typical user session might generate:
 
 ### Open Questions
 
-1. **Should tracing be off by default?** Currently enabled. Users may not know it's running.
+1. **Should tracing be off by default?** Currently enabled. Users may not know it's running. See REMINDER.md M3.
 
-2. **Should we persist traces across VS Code restarts?** Currently lost on restart. Could write to disk for crash debugging.
+2. ~~**Should we persist traces across VS Code restarts?**~~ **DEFERRED:** See REMINDER.md M1. Low priority since traces are useful primarily during active debugging.
 
-3. **Should webview traces sync to extension?** Plan mentions this but not implemented. Would double memory usage.
+3. ~~**Should webview traces sync to extension?**~~ **RESOLVED:** Yes, implemented in Phase 2. Webview traces sync on init, visibility change, and 5-second interval. Extension acknowledges receipt before webview clears buffer.
 
-4. ~~**What about correlation map cleanup?** Currently grows unbounded. Should we evict old correlation IDs?~~ **RESOLVED:** Correlation map is now cleaned up when events are evicted.
+4. ~~**What about correlation map cleanup?**~~ **RESOLVED:** Correlation map is now cleaned up when events are evicted.
 
 ### Log Volume & Human Readability
 
@@ -983,3 +1132,98 @@ A typical user session might generate:
 | Future | Disk persistence for crash debugging | Large | Pending |
 
 For now, the current implementation is safe for typical usage. Monitor real-world usage patterns before adding complexity.
+
+### Timeline Alignment Issues (Discovered 2026-02-09)
+
+**Problem:** Webview events appear with large time gaps from extension events in exported traces, even when they occurred during the same user interaction. In one trace, extension API events ended at `03:24:25` but webview events started at `03:33:46` - a 9-minute gap that doesn't reflect reality.
+
+**Root Causes Identified:**
+
+| Issue | Location | Impact |
+|-------|----------|--------|
+| **Independent startTime** | `WebviewTracer` line 56 | Each tracer has its own `performance.now()` baseline. Webview's `relativeTime` can't be compared to extension's. |
+| **Webview lifecycle not handled** | `chatProvider.ts` | No `onDidChangeVisibility` handler. When webview is recreated, tracer reinitializes with fresh `startTime`, losing continuity. |
+| **5-second sync interval** | `WebviewTracer` line 52 | Events between last sync and webview reload are lost. |
+| **No correlation propagation** | `chatProvider.ts`, `chat.ts` | Extension's `correlationId` is not passed to webview, so events can't be linked. |
+| **Buffer cleared after sync** | `WebviewTracer` line 273 | If postMessage fails silently, events are lost. |
+
+**Evidence from traces:**
+- Webview events have `_originalRelativeTime` values near 0 (12ms, 73ms)
+- This indicates the webview tracer was freshly initialized around `03:33:46`
+- Extension events during streaming (`03:21` - `03:24`) have no corresponding webview events
+- The webview was likely reloaded/refreshed, losing all earlier traces
+
+**Fix Plan:**
+
+| Priority | Fix | Description | Files | Status |
+|----------|-----|-------------|-------|--------|
+| **P0** | Sync on visibility change | Add `onDidChangeVisibility` handler to immediately sync traces | `chatProvider.ts` | ✅ Done |
+| **P0** | Immediate sync on init | Send buffered traces immediately when webview initializes | `WebviewTracer.ts` | ✅ Done |
+| **P1** | Propagate correlationId | Pass extension's flow ID to webview for cross-boundary correlation | `chatProvider.ts`, `VirtualMessageGatewayActor.ts` | ✅ Done |
+| **P1** | Time calibration message | Send extension's base timestamp to webview so `relativeTime` can be aligned | `chatProvider.ts`, `WebviewTracer.ts` | ✅ Done |
+| **P2** | Sync acknowledgment | Only clear buffer after extension confirms receipt | `WebviewTracer.ts`, `chatProvider.ts` | ✅ Done |
+| **P2** | ~~Persist webview traces~~ | ~~Write to disk periodically to survive reloads~~ | — | Deferred (see REMINDER.md M1) - webview traces now sync to extension, so persistence is less critical |
+
+**Implementation Details (2026-02-09):**
+- Added `webviewReady` message sent when WebviewTracer initializes → triggers immediate calibration
+- Added `onDidChangeVisibility` handler in chatProvider to request trace sync on visibility changes
+- Added `traceCalibration` message with `extensionStartTime` and `correlationId` from active API flow
+- Added `requestTraceSync` message for extension to request immediate sync
+- Added `traceSyncAck` message for extension to acknowledge receipt
+- Extension's `correlationId` is passed to webview in `startResponse` message
+- WebviewTracer now uses extension's correlationId as fallback for trace/startSpan events
+- Added `forceSync()` method for immediate sync on response end
+- Added 6 new tests for cross-boundary correlation in WebviewTracer.test.ts
+
+**Test Scenarios to Add:**
+
+1. **Streaming with visible webview**: Start API call, watch streaming complete, export trace
+   - Expected: Interleaved extension and webview events with correct chronological order
+
+2. **Webview hidden during streaming**: Start API call, switch to another VS Code tab, switch back, export
+   - Expected: No gaps in webview trace, events from hidden period captured
+
+3. **Long sync interval**: Start API call, wait >5 seconds, verify all events synced
+   - Expected: Complete trace even if webview sync timer fires mid-stream
+
+4. **Webview reload**: Reload webview (F5 or command), export trace
+   - Expected: Pre-reload events preserved or warning about data loss
+
+5. **Rapid scroll**: Scroll chat rapidly, export trace
+   - Expected: All bind/unbind events captured, no missing events
+
+### WSL2 Clock Drift Discovery (2026-02-09)
+
+**Root Cause Found:** The 12-minute time gaps were caused by **WSL2 clock drift**, not code bugs.
+
+**Environment:**
+- Extension host runs in WSL2 (Linux)
+- Webview iframe runs in Windows/Chromium
+- WSL2's system clock can drift from the Windows host clock, especially after sleep/hibernate
+
+**Symptoms:**
+```
+[WARN] [Trace] Time drift detected: extension=2026-02-09T05:39:27.790Z webview=2026-02-09T05:52:02.771Z diff=-754981ms
+```
+- Webview's `new Date()` returns time ~12 minutes ahead of extension's `new Date()`
+- This happens immediately at startup, before any user interaction
+- The drift is consistent (~12 minutes in this case)
+
+**Time Drift Detection Added:**
+1. WebviewTracer now sends `webviewSyncTime` with each sync (current time when sync happens)
+2. Extension compares its time with webview's time and logs warning if drift > 1 second
+3. "Moby: Trace Stats" command shows time alignment diagnostics
+
+**Fix for Users:**
+```bash
+# Sync WSL2 clock with Windows host
+sudo hwclock -s
+
+# Or sync with NTP server
+sudo ntpdate time.windows.com
+
+# Permanent fix
+sudo timedatectl set-ntp true
+```
+
+**Key Insight:** The code was correct all along. The timestamps were being generated correctly by `new Date().toISOString()`, but the two environments (WSL2 Linux and Windows Chromium) had different system clocks. This is a known WSL2 issue, not a VS Code extension bug.
