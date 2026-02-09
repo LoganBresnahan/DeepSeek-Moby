@@ -474,6 +474,242 @@ public apiRequest(model: string, messageCount: number, hasImages: boolean = fals
 
 ---
 
+## Part 1B: Webview Console Logging
+
+### Overview
+
+The webview (frontend) needs a logging strategy that:
+1. **Complements** the extension logger and tracing system
+2. **Minimizes production overhead** (console.log is synchronous and blocks rendering)
+3. **Supports AI-agent debugging** through structured, consistent output
+4. **Provides developer visibility** during development
+
+### Performance Considerations
+
+Research on `console.log` performance in browsers reveals significant concerns:
+
+| Issue | Impact | Mitigation |
+|-------|--------|------------|
+| **Synchronous I/O** | Blocks rendering pipeline | Use sparingly, batch if possible |
+| **Serialization overhead** | Complex objects slow to stringify | Avoid logging large objects |
+| **GC pressure** | String creation causes garbage | Minimize in hot paths |
+| **Devtools open** | 10-100x slower when devtools open | Filter levels in production |
+
+Sources: [Console.log Slow Down](https://arunangshudas.com/blog/why-is-console-log-so-slow/), [Hidden Cost of console.log](https://medium.com/@harshitkishor2/the-hidden-cost-of-console-log-inside-loops-how-it-impacts-performance-83149c5a29ad), [Frontend Performance Checklist](https://crystallize.com/blog/frontend-performance-checklist)
+
+**Key insight:** `console.debug` can be filtered out in browser devtools, making it nearly zero-cost when not actively debugging.
+
+### Current State
+
+| Component | Location | Purpose | Overhead |
+|-----------|----------|---------|----------|
+| **WebviewTracer** | `media/tracing/WebviewTracer.ts` | Structured traces → extension | Low (batched postMessage) |
+| **EventStateLogger** | `media/state/EventStateLogger.ts` | Pub/sub debugging | Medium (console.debug) |
+| **Ad-hoc console.log** | Scattered in actors | Development debugging | Variable (inconsistent) |
+
+### Three-Tier Logging Strategy
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                           Webview Logging Architecture                           │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│  Tier 1: WebviewTracer (Structured Events → Extension)                          │
+│  ─────────────────────────────────────────────────────                          │
+│  • Cross-boundary correlation (user action → API → render)                       │
+│  • Actor lifecycle (bind, unbind, create, destroy)                               │
+│  • Key state transitions                                                         │
+│  • Syncs to extension every 5s or on force                                       │
+│  • Exportable via "Moby: Export Traces"                                          │
+│                                                                                  │
+│  Tier 2: Console Logging (Development Visibility)                                │
+│  ────────────────────────────────────────────────                                │
+│  • console.debug - Verbose development info (filtered by default)                │
+│  • console.warn - Issues that should surface                                     │
+│  • console.error - Errors requiring attention                                    │
+│  • Standard prefix: [ComponentName]                                              │
+│  • Zero postMessage overhead (stays in webview)                                  │
+│                                                                                  │
+│  Tier 3: EventStateLogger (Pub/Sub System Only)                                  │
+│  ───────────────────────────────────────────────                                 │
+│  • Actor registration, state changes, subscriptions                              │
+│  • Chain depth warnings, circular dependency detection                           │
+│  • Already has log levels, groups, timestamps                                    │
+│                                                                                  │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### When to Use Each Tier
+
+| Scenario | Tier 1 (Tracer) | Tier 2 (Console) | Tier 3 (EventState) |
+|----------|-----------------|------------------|---------------------|
+| User clicks button | ✅ `traceUserClick()` | — | — |
+| Actor binds to turn | ✅ `traceActorBind()` | `console.debug` | — |
+| Pool stats (development) | — | `console.debug` | — |
+| Pool exhaustion warning | ✅ via postMessage | `console.warn` | — |
+| State publication | — | — | ✅ `stateChangeFlow()` |
+| Subscription error | ✅ trace with error | `console.error` | ✅ `subscriptionError()` |
+| Render performance | — | `console.debug` | — |
+
+### Console Logging Standards
+
+#### Prefix Format
+
+All console logs should use a consistent prefix:
+
+```typescript
+// Good - consistent, searchable
+console.debug('[VirtualList] Binding actor to turn:', turnId);
+console.warn('[VirtualList] Actor not bound for turn:', turnId);
+
+// Bad - inconsistent
+console.log('binding actor...', turnId);
+console.log('VirtualList - actor bound');
+```
+
+#### Level Usage
+
+```typescript
+// DEBUG: Verbose development info (filtered in production devtools)
+console.debug('[Pool] Stats:', { turns: 50, visible: 8, pool: 12, created: 20 });
+
+// WARN: Issues that should surface but aren't errors
+console.warn('[VirtualList] Actor not bound - content will render on scroll');
+
+// ERROR: Actual errors requiring attention
+console.error('[VirtualList] Failed to create actor:', error);
+```
+
+#### Avoid in Hot Paths
+
+```typescript
+// BAD - logs on every scroll event
+private handleScroll(): void {
+  console.debug('[VirtualList] Scroll:', this._scrollContainer.scrollTop);  // DON'T
+  this.updateVisibility();
+}
+
+// GOOD - log only on significant changes
+private handleScroll(): void {
+  this.updateVisibility();
+  if (this._visibleRangeChanged) {
+    console.debug('[VirtualList] Visible range changed:', this._visibleRange);
+  }
+}
+```
+
+#### Avoid Serializing Large Objects
+
+```typescript
+// BAD - serializes entire turn data
+console.debug('[VirtualList] Turn data:', turn);  // turn has nested arrays
+
+// GOOD - log relevant summary
+console.debug('[VirtualList] Turn:', turn.turnId, 'role:', turn.role, 'segments:', turn.textSegments.length);
+```
+
+### Production Mode
+
+In production, minimize logging overhead:
+
+1. **Build-time stripping**: `console.debug`, `console.log`, `console.info` are removed by esbuild
+2. **Browser devtools filtering**: Any remaining calls filtered when "Verbose" is unchecked
+3. **EventStateLogger level**: Set to WARN or ERROR
+4. **WebviewTracer**: Keep enabled (low overhead, valuable for debugging)
+
+```typescript
+// Production configuration
+eventStateLogger.setLogLevel(LogLevel.WARN);
+
+// Development configuration
+eventStateLogger.setLogLevel(LogLevel.DEBUG);
+eventStateLogger.enableDebug();  // Also shows global state tables
+```
+
+### Build-Time Console Stripping
+
+The webview build (`scripts/build-media.js`) uses esbuild's `pure` option to remove verbose console calls in production:
+
+```javascript
+esbuild.buildSync({
+  // ...
+  pure: isProduction ? ['console.debug', 'console.log', 'console.info'] : []
+});
+```
+
+This provides **true zero-cost** logging in production:
+- ✅ `console.debug`, `console.log`, `console.info` → **removed entirely**
+- ✅ `console.warn`, `console.error` → **kept** (important for issue detection)
+- ✅ No runtime overhead (code doesn't exist in production bundle)
+
+### Pool Stats Example
+
+Applying this strategy to the object pooling observability discussed earlier:
+
+```typescript
+// In VirtualListActor
+
+// Development: console.debug for regular stats (zero production overhead)
+private logPoolStats(): void {
+  if (process.env.NODE_ENV === 'development') {
+    const stats = this.getPoolStats();
+    console.debug('[Pool] Stats:', {
+      turns: stats.totalTurns,
+      visible: stats.visibleTurns,
+      pool: stats.actorsInPool,
+      created: stats.totalActorsCreated
+    });
+  }
+}
+
+// Production: Only warn on anomalies (sent to extension for logging)
+private checkPoolHealth(): void {
+  const stats = this.getPoolStats();
+
+  // Pool exhaustion: creating more actors than pool can hold
+  if (stats.totalActorsCreated > this.config.maxPoolSize * 2) {
+    console.warn('[Pool] Potential pool exhaustion:', stats);
+
+    // Also send to extension for persistent logging
+    this._postMessage?.({
+      type: 'poolWarning',
+      message: 'Pool exhaustion detected',
+      stats
+    });
+  }
+}
+```
+
+### Filtering Logs in DevTools
+
+Chrome/Edge DevTools allows filtering console output:
+
+1. Open DevTools → Console tab
+2. Click "Default levels" dropdown
+3. Toggle "Verbose" to show/hide `console.debug` output
+4. Use filter box to search: `[VirtualList]` shows only VirtualList logs
+
+This makes `console.debug` effectively "free" in production when devtools isn't open with Verbose enabled.
+
+### Implementation Status
+
+| Item | Status |
+|------|--------|
+| WebviewTracer (Tier 1) | ✅ Implemented |
+| EventStateLogger (Tier 3) | ✅ Implemented |
+| Console logging standards (Tier 2) | 📝 Documented (this section) |
+| Build-time console stripping | ✅ Implemented (`scripts/build-media.js`) |
+| Standardize existing ad-hoc logs | ⏳ Pending (apply [Component] prefix) |
+| Pool stats logging | ⏳ Pending |
+
+### Files
+
+- [media/tracing/WebviewTracer.ts](../../media/tracing/WebviewTracer.ts) - Tier 1 structured tracing
+- [media/state/EventStateLogger.ts](../../media/state/EventStateLogger.ts) - Tier 3 pub/sub logging
+- Various actors - Tier 2 console logging (to be standardized)
+
+---
+
 ## Part 2: Automated UI Testing Tool
 
 ### Goal

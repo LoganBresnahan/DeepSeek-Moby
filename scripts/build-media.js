@@ -34,7 +34,9 @@ if (usesActorSystem) {
       },
       define: {
         'process.env.NODE_ENV': JSON.stringify(isProduction ? 'production' : 'development')
-      }
+      },
+      // Strip verbose console calls in production (keeps warn/error)
+      pure: isProduction ? ['console.debug', 'console.log', 'console.info'] : []
     });
 
     const outputPath = path.join(outDir, 'chat.js');
@@ -141,7 +143,9 @@ if (fs.existsSync(devTsPath)) {
       minify: isProduction,
       loader: {
         '.css': 'text'
-      }
+      },
+      // Strip verbose console calls in production (keeps warn/error)
+      pure: isProduction ? ['console.debug', 'console.log', 'console.info'] : []
     });
 
     const devOutputPath = path.join(outDir, 'dev.js');
