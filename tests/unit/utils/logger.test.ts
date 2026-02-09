@@ -149,12 +149,12 @@ describe('Logger', () => {
       expect(logLine).not.toContain('with images');
     });
 
-    it('apiResponse logs token count and duration', () => {
-      logger.apiResponse(500, 2500);
+    it('apiResponse logs token count', () => {
+      logger.apiResponse(500);
       const logLine = (mockOutputChannel.info as Mock).mock.calls[0][0];
       expect(logLine).toContain('Response');
       expect(logLine).toContain('500');
-      expect(logLine).toContain('2.50s');
+      // Duration is now tracked internally by tracer, not logged
     });
 
     it('apiError logs error message', () => {

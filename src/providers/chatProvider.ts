@@ -1612,11 +1612,16 @@ Now provide your final response based on what you learned. Do NOT attempt to use
         if (isReasonerModel) {
           logger.info(`[R1-Shell] Starting iteration ${shellIteration + 1}, messages in context: ${currentHistoryMessages.length}`);
           logger.info(`[Timing] Iteration ${shellIteration + 1} started at ${new Date().toISOString()}`);
+          // Set iteration for trace context (1-indexed)
+          logger.setIteration(shellIteration + 1);
           // Notify frontend of new iteration for per-iteration thinking dropdowns
           this._view?.webview.postMessage({
             type: 'iterationStart',
             iteration: shellIteration + 1  // 1-indexed for display
           });
+        } else {
+          // Non-reasoner models: single iteration
+          logger.setIteration(1);
         }
 
         const _response = await this.deepSeekClient.streamChat(
@@ -1630,7 +1635,18 @@ Now provide your final response based on what you learned. Do NOT attempt to use
                 ? firstContentTokenTime - firstReasoningTokenTime
                 : 0;
               logger.info(`[Timing] First content token after ${waitTime}ms (${afterReasoning}ms after reasoning started)`);
+              // For non-reasoner models, this is the first token
+              if (!isReasonerModel) {
+                logger.apiStreamProgress('first-token');
+              } else if (firstReasoningTokenTime) {
+                // For reasoner models: emit thinking-end before content-start
+                logger.apiStreamProgress('thinking-end');
+              }
+              logger.apiStreamProgress('content-start');
             }
+
+            // Log streaming chunk for trace
+            logger.apiStreamChunk(token.length, 'text');
 
             iterationResponse += token;
             accumulatedResponse += token;
@@ -1701,7 +1717,13 @@ Now provide your final response based on what you learned. Do NOT attempt to use
               firstReasoningTokenTime = Date.now();
               const waitTime = firstReasoningTokenTime - iterationStartTime;
               logger.info(`[Timing] First reasoning token after ${waitTime}ms`);
+              logger.apiStreamProgress('first-token');
+              logger.apiStreamProgress('thinking-start');
             }
+
+            // Log streaming chunk for trace
+            logger.apiStreamChunk(reasoningToken.length, 'thinking');
+
             fullReasoning += reasoningToken;
             currentIterationReasoning += reasoningToken;  // Track per-iteration
             this._view?.webview.postMessage({

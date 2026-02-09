@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { tracer, type TraceLevel } from '../tracing';
 
 export type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR' | 'OFF';
 
@@ -48,6 +49,23 @@ class Logger {
         this.loadSettings();
       }
     });
+
+    // Set up tracer log output callback
+    tracer.setLogOutput((level: TraceLevel, message: string, details?: string) => {
+      this.log(this.traceLevelToLogLevel(level), message, details);
+    });
+  }
+
+  /**
+   * Convert trace level to log level.
+   */
+  private traceLevelToLogLevel(level: TraceLevel): LogLevel {
+    switch (level) {
+      case 'debug': return 'DEBUG';
+      case 'info': return 'INFO';
+      case 'warn': return 'WARN';
+      case 'error': return 'ERROR';
+    }
   }
 
   private loadSettings(): void {
@@ -142,33 +160,178 @@ class Logger {
   // Session events
   public sessionStart(sessionId: string, title: string) {
     this.log('INFO', `Session started: ${sessionId}`, `Title: ${title}`, 'session');
+    tracer.trace('session.create', 'start', {
+      data: { sessionId, title }
+    });
   }
 
   public sessionSwitch(sessionId: string) {
     this.log('INFO', `Session switched: ${sessionId}`, undefined, 'session');
+    tracer.trace('session.switch', 'switch', {
+      data: { sessionId }
+    });
   }
 
   public sessionClear() {
     this.log('INFO', 'Session cleared', undefined, 'session');
+    tracer.trace('session.switch', 'clear');
   }
 
   // API events
-  public apiRequest(model: string, messageCount: number, hasImages: boolean = false) {
+  private currentApiSpan: string = '';
+  private currentApiCorrelationId: string = '';
+  private streamingChunkCount: number = 0;
+  private streamingTokenCount: number = 0;
+  private currentIteration: number = 0;
+  private iterationChunkCount: number = 0;
+  private iterationTokenCount: number = 0;
+
+  public apiRequest(model: string, messageCount: number, hasImages: boolean = false): string {
     const imageInfo = hasImages ? ' (with images)' : '';
     this.log('INFO', `→ Request: ${messageCount} messages${imageInfo}`, `Model: ${model}`, 'api');
+
+    // Generate correlation ID for this request flow
+    this.currentApiCorrelationId = tracer.startFlow();
+    this.streamingChunkCount = 0;
+    this.streamingTokenCount = 0;
+    this.currentIteration = 0;
+    this.iterationChunkCount = 0;
+    this.iterationTokenCount = 0;
+
+    // Start a span for the API request (async operation)
+    this.currentApiSpan = tracer.startSpan('api.request', 'chat', {
+      correlationId: this.currentApiCorrelationId,
+      executionMode: 'async',
+      data: { model, messageCount, hasImages }
+    });
+    return this.currentApiSpan;
   }
 
-  public apiResponse(tokenCount: number, durationMs: number) {
-    const duration = (durationMs / 1000).toFixed(2);
-    this.log('INFO', `← Response: ${tokenCount.toLocaleString()} tokens in ${duration}s`, undefined, 'api');
+  /**
+   * Log a streaming chunk (called frequently during response streaming).
+   * Traces are batched to avoid overwhelming the buffer.
+   */
+  public apiStreamChunk(chunkSize: number, contentType: 'text' | 'thinking' | 'tool' = 'text') {
+    this.streamingChunkCount++;
+    this.streamingTokenCount += chunkSize;
+    this.iterationChunkCount++;
+    this.iterationTokenCount += chunkSize;
+
+    // Only trace every 10th chunk to reduce noise, or on significant chunks
+    if (this.streamingChunkCount % 10 === 1 || chunkSize > 100) {
+      tracer.trace('api.stream', 'chunk', {
+        correlationId: this.currentApiCorrelationId,
+        executionMode: 'callback',
+        level: 'debug',
+        data: {
+          iteration: this.currentIteration,
+          chunkNumber: this.iterationChunkCount,
+          chunkSize,
+          contentType,
+          totalChunks: this.streamingChunkCount,
+          totalTokens: this.streamingTokenCount
+        }
+      });
+    }
+  }
+
+  /**
+   * Log streaming progress at key milestones.
+   */
+  public apiStreamProgress(milestone: 'first-token' | 'thinking-start' | 'thinking-end' | 'content-start') {
+    tracer.trace('api.stream', milestone, {
+      correlationId: this.currentApiCorrelationId,
+      executionMode: 'callback',
+      level: 'info',
+      data: {
+        iteration: this.currentIteration,
+        iterationChunks: this.iterationChunkCount,
+        iterationTokens: this.iterationTokenCount,
+        totalChunks: this.streamingChunkCount,
+        totalTokens: this.streamingTokenCount
+      }
+    });
+
+    if (milestone === 'first-token') {
+      this.log('DEBUG', 'First token received', undefined, 'api');
+    }
+  }
+
+  public apiResponse(tokenCount: number, _durationMs?: number) {
+    // Note: durationMs parameter is deprecated - we use the span's internal timing
+    // for consistency. Kept for backward compatibility but ignored.
+    this.log('INFO', `← Response: ${tokenCount.toLocaleString()} tokens`, undefined, 'api');
+
+    // End the API span - the tracer calculates duration from relativeTime
+    if (this.currentApiSpan) {
+      tracer.endSpan(this.currentApiSpan, {
+        status: 'completed',
+        data: {
+          tokenCount,
+          streamChunks: this.streamingChunkCount,
+          streamTokens: this.streamingTokenCount
+        }
+      });
+      this.currentApiSpan = '';
+      this.currentApiCorrelationId = '';
+    }
   }
 
   public apiError(error: string, details?: string) {
     this.log('ERROR', `API error: ${error}`, details, 'api');
+
+    // End the API span with failure
+    if (this.currentApiSpan) {
+      tracer.endSpan(this.currentApiSpan, {
+        status: 'failed',
+        error,
+        data: { details }
+      });
+      this.currentApiSpan = '';
+      this.currentApiCorrelationId = '';
+    }
   }
 
   public apiAborted() {
     this.log('INFO', 'Request aborted by user', undefined, 'api');
+
+    // End the API span as completed (abort is intentional)
+    if (this.currentApiSpan) {
+      tracer.endSpan(this.currentApiSpan, {
+        status: 'completed',
+        data: {
+          aborted: true,
+          streamChunks: this.streamingChunkCount,
+          streamTokens: this.streamingTokenCount
+        }
+      });
+      this.currentApiSpan = '';
+      this.currentApiCorrelationId = '';
+    }
+  }
+
+  /**
+   * Get the current API correlation ID (for child operations).
+   */
+  public getCurrentApiCorrelationId(): string {
+    return this.currentApiCorrelationId;
+  }
+
+  /**
+   * Set the current iteration number (for R1 multi-iteration flows).
+   * Call this at the start of each iteration.
+   */
+  public setIteration(iteration: number): void {
+    this.currentIteration = iteration;
+    this.iterationChunkCount = 0;
+    this.iterationTokenCount = 0;
+  }
+
+  /**
+   * Get the current iteration number.
+   */
+  public getCurrentIteration(): number {
+    return this.currentIteration;
   }
 
   // Settings events
@@ -181,8 +344,17 @@ class Logger {
   }
 
   // Tool events
-  public toolCall(toolName: string) {
+  private currentToolSpan: string = '';
+
+  public toolCall(toolName: string): string {
     this.log('INFO', `Tool call: ${toolName}`, undefined, 'tool');
+
+    // Start a span for the tool call
+    this.currentToolSpan = tracer.startSpan('tool.call', toolName, {
+      executionMode: 'async',
+      data: { toolName }
+    });
+    return this.currentToolSpan;
   }
 
   public toolResult(toolName: string, success: boolean) {
@@ -191,11 +363,29 @@ class Logger {
     } else {
       this.log('WARN', `Tool result: ${toolName} failed`, undefined, 'tool');
     }
+
+    // End the tool span
+    if (this.currentToolSpan) {
+      tracer.endSpan(this.currentToolSpan, {
+        status: success ? 'completed' : 'failed',
+        data: { toolName, success }
+      });
+      this.currentToolSpan = '';
+    }
   }
 
   // Shell events (R1 reasoner)
-  public shellExecuting(command: string) {
+  private currentShellSpan: string = '';
+
+  public shellExecuting(command: string): string {
     this.log('INFO', `Shell executing: ${command}`, undefined, 'shell');
+
+    // Start a span for the shell command
+    this.currentShellSpan = tracer.startSpan('shell.execute', 'run', {
+      executionMode: 'async',
+      data: { command }
+    });
+    return this.currentShellSpan;
   }
 
   public shellResult(command: string, success: boolean, output?: string) {
@@ -203,6 +393,15 @@ class Logger {
       this.log('INFO', `Shell completed: ${command}`, output?.substring(0, 200), 'shell');
     } else {
       this.log('WARN', `Shell failed: ${command}`, output?.substring(0, 200), 'shell');
+    }
+
+    // End the shell span
+    if (this.currentShellSpan) {
+      tracer.endSpan(this.currentShellSpan, {
+        status: success ? 'completed' : 'failed',
+        data: { command, success, outputLength: output?.length }
+      });
+      this.currentShellSpan = '';
     }
   }
 
@@ -220,25 +419,57 @@ class Logger {
   }
 
   // Web search events (Tavily)
-  public webSearchRequest(query: string, searchDepth: string) {
+  private currentWebSearchSpan: string = '';
+
+  public webSearchRequest(query: string, searchDepth: string): string {
     this.log('INFO', `🌐 Web search: "${query}"`, `Depth: ${searchDepth}`, 'web');
+
+    // Start a span for the web search
+    this.currentWebSearchSpan = tracer.startSpan('api.request', 'webSearch', {
+      executionMode: 'async',
+      data: { query, searchDepth }
+    });
+    return this.currentWebSearchSpan;
   }
 
   public webSearchResult(resultCount: number, durationMs: number) {
     const duration = (durationMs / 1000).toFixed(2);
     this.log('INFO', `🌐 Web search complete: ${resultCount} results in ${duration}s`, undefined, 'web');
+
+    // End the web search span
+    if (this.currentWebSearchSpan) {
+      tracer.endSpan(this.currentWebSearchSpan, {
+        status: 'completed',
+        data: { resultCount, durationMs }
+      });
+      this.currentWebSearchSpan = '';
+    }
   }
 
   public webSearchCached(query: string) {
     this.log('DEBUG', `🌐 Web search (cached): "${query}"`, undefined, 'web');
+    tracer.trace('api.response', 'webSearchCached', {
+      level: 'debug',
+      data: { query, cached: true }
+    });
   }
 
   public webSearchError(error: string) {
     this.log('ERROR', `🌐 Web search failed: ${error}`, undefined, 'web');
+
+    // End the web search span with failure
+    if (this.currentWebSearchSpan) {
+      tracer.endSpan(this.currentWebSearchSpan, {
+        status: 'failed',
+        error
+      });
+      this.currentWebSearchSpan = '';
+    }
   }
 
   public webSearchCacheCleared() {
     this.log('INFO', '🌐 Web search cache cleared', undefined, 'web');
+    tracer.trace('api.response', 'cacheCleared');
   }
 
   // Show the output channel

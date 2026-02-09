@@ -716,14 +716,36 @@ npm run test:ui -- --mode=human --visual --trace=./test-trace.json
 4. ✅ Change default `showTimestamps: true` and `useWallClock: true`
 5. ✅ Use `console.debug/info/warn/error` instead of just `console.log`
 6. ✅ Add tests for new behavior (34 tests passing)
-7. **Commit checkpoint** - Ready for commit
+7. ✅ Updated Extension Logger format: `:vscode | Moby: ISO_TIMESTAMP [LEVEL] message`
+8. ✅ Committed
 
-### Phase 1: Tracing Foundation
+### Phase 1: Tracing Foundation ✅ COMPLETE
 
-1. Create `src/tracing/TraceCollector.ts`
-2. Create `src/tracing/types.ts` (TraceEvent, TraceCategory)
-3. Integrate with existing `logger.ts`
-4. Add trace emission to key operations in `chatProvider.ts`
+**Core Implementation:**
+1. ✅ Create `src/tracing/types.ts` (TraceEvent, TraceCategory, TraceBufferStats)
+2. ✅ Create `src/tracing/TraceCollector.ts` (38 tests)
+3. ✅ Integrate with existing `logger.ts` (logger now emits traces for API, tool, shell, session, web search)
+4. ✅ Key operations in `chatProvider.ts` traced via logger integration
+
+**Memory & Performance Features:**
+5. ✅ Ring buffer with configurable `maxBufferSize` (default: 10,000 events)
+6. ✅ Time-based eviction with `maxAgeMs` config option
+7. ✅ Payload truncation with `maxPayloadSize` (default: 1KB) to prevent large payloads
+8. ✅ Memory estimation with `estimateMemoryBytes()` and `warnAtMemoryMB` threshold
+9. ✅ Correlation map cleanup when events are evicted
+
+**Streaming Traces:**
+10. ✅ Added streaming chunk traces (`api.stream` category)
+11. ✅ Added streaming progress milestones (`first-token`, `thinking-start`, `content-start`)
+12. ✅ Batched chunk traces (every 10th chunk) to reduce noise
+
+**Export Commands:**
+13. ✅ Commands dropdown with Export Trace, Copy Trace, View Trace, Trace Stats, Clear Trace
+14. ✅ Export formats: JSON, JSONL, Pretty
+15. ✅ `getStats()` method for buffer statistics
+
+**Duration Fix:**
+16. ✅ Removed `durationMs` from data payload - now using tracer's internal timing consistently
 
 ### Phase 2: Webview Tracing
 
@@ -793,3 +815,139 @@ This trace shows:
 | **Feature Tests** | Catalog of UI scenarios to validate |
 
 The tracing system provides the **observability** needed for AI-agent debugging, while the UI testing tool uses that infrastructure to validate all features systematically.
+
+---
+
+## Review: Performance & Memory Considerations
+
+### Current Implementation
+
+The TraceCollector uses a **ring buffer** with a fixed maximum size:
+
+```typescript
+private config: TraceCollectorConfig = {
+  maxBufferSize: 10000,  // Max events before oldest are dropped
+  // ...
+};
+```
+
+When the buffer exceeds `maxBufferSize`, the oldest event is removed (`shift()`).
+
+### Memory Analysis
+
+**Per-event memory estimate:**
+
+| Field | Typical Size |
+|-------|-------------|
+| `id` (string) | ~30 bytes |
+| `correlationId` (string) | ~30 bytes |
+| `timestamp` (ISO string) | ~24 bytes |
+| `relativeTime` (number) | 8 bytes |
+| `duration` (number, optional) | 8 bytes |
+| `source`, `category`, `operation` (strings) | ~50 bytes |
+| `executionMode`, `level`, `status` (strings) | ~20 bytes |
+| `data` (object, varies) | 0-500 bytes |
+| Object overhead | ~50 bytes |
+| **Total per event** | **~220-720 bytes** |
+
+**Buffer memory at capacity:**
+
+| Events | Min Memory | Max Memory (with data) |
+|--------|------------|------------------------|
+| 1,000 | ~220 KB | ~720 KB |
+| 10,000 (default) | ~2.2 MB | ~7.2 MB |
+| 50,000 | ~11 MB | ~36 MB |
+| 100,000 | ~22 MB | ~72 MB |
+
+### Risk Assessment
+
+**Is 10,000 events realistic?**
+
+A typical user session might generate:
+- 1 API request = ~5-10 trace events (request start, stream tokens, response end)
+- 1 tool execution = ~3-5 events
+- State changes = 2-5 per user action
+
+**Rough estimates:**
+- Light session (10 messages): ~100-200 events
+- Medium session (50 messages with tools): ~500-1000 events
+- Heavy session (100+ messages, many tools): ~2000-5000 events
+
+**Conclusion:** 10,000 events is a reasonable default that covers most sessions without memory pressure.
+
+### Will This Crash VS Code?
+
+**Unlikely with current settings.** VS Code extensions typically have access to the Node.js heap (default ~1.5GB). A 7MB trace buffer is negligible.
+
+**However, risks exist if:**
+1. `maxBufferSize` is increased significantly (>100,000)
+2. `data` payloads are large (e.g., full file contents, base64 images)
+3. Correlation map grows unbounded (not currently an issue - cleared with buffer)
+4. Subscribers have memory leaks
+
+### Should We Auto-Remove Old Entries?
+
+**Current behavior:** Yes, via ring buffer. Oldest events are automatically dropped when buffer is full.
+
+**Potential improvements:**
+
+| Strategy | Pros | Cons |
+|----------|------|------|
+| **Time-based eviction** | Removes stale data even if buffer not full | Loses context for long debugging sessions |
+| **Category-based limits** | Prevent one category (e.g., `state.publish`) from dominating | More complex, may lose important events |
+| **Importance-based retention** | Keep errors/warnings longer than debug | Requires priority system |
+| **Session-scoped buffers** | Clear on new chat session | Loses cross-session debugging |
+| **Lazy export** | Write to disk periodically, keep only recent in memory | Adds I/O, file management complexity |
+
+### Recommendations (All Implemented ✅)
+
+1. ✅ **Keep current ring buffer** - Simple, effective, proven pattern
+
+2. ✅ **Time-based eviction** - Added `maxAgeMs` config option:
+   ```typescript
+   tracer.configure({ maxAgeMs: 30 * 60 * 1000 }); // 30 minutes
+   ```
+
+3. ✅ **Payload size limit** - Added `maxPayloadSize` config (default: 1000 bytes):
+   ```typescript
+   // Payloads larger than maxPayloadSize are auto-truncated
+   tracer.configure({ maxPayloadSize: 1000 });
+   // Results in: { _truncated: true, _originalSize: 5000, preview: "..." }
+   ```
+
+4. ✅ **Memory monitoring** - Added `warnAtMemoryMB` config and `estimateMemoryBytes()`:
+   ```typescript
+   tracer.configure({ warnAtMemoryMB: 50 }); // Warn at 50MB
+   const stats = tracer.getStats(); // Get buffer statistics
+   ```
+
+5. **Default to disabled in production** - Still pending (low priority):
+   ```typescript
+   // Could add to settings
+   tracer.configure({ enabled: isDevelopment });
+   ```
+
+### Open Questions
+
+1. **Should tracing be off by default?** Currently enabled. Users may not know it's running.
+
+2. **Should we persist traces across VS Code restarts?** Currently lost on restart. Could write to disk for crash debugging.
+
+3. **Should webview traces sync to extension?** Plan mentions this but not implemented. Would double memory usage.
+
+4. ~~**What about correlation map cleanup?** Currently grows unbounded. Should we evict old correlation IDs?~~ **RESOLVED:** Correlation map is now cleaned up when events are evicted.
+
+### Action Items (If Needed)
+
+| Priority | Item | Effort | Status |
+|----------|------|--------|--------|
+| ~~Low~~ | ~~Add `maxAgeMs` config option~~ | ~~Small~~ | ✅ Done |
+| ~~Low~~ | ~~Add data payload truncation~~ | ~~Small~~ | ✅ Done |
+| ~~Medium~~ | ~~Add memory usage warning~~ | ~~Small~~ | ✅ Done |
+| ~~Low~~ | ~~Correlation map cleanup~~ | ~~Medium~~ | ✅ Done |
+| Medium | Add memory usage warning | Small |
+| Medium | Add "enabled by default" setting | Small |
+| Low | Correlation map cleanup | Medium |
+| Future | Disk persistence for crash debugging | Large |
+
+For now, the current implementation is safe for typical usage. Monitor real-world usage patterns before adding complexity.

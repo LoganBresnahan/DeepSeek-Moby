@@ -42,7 +42,13 @@ const DEFAULT_COMMANDS: CommandItem[] = [
   // History section
   { id: 'deepseek.showChatHistory', name: 'Show History', description: 'View chat history', icon: '📚', section: 'History' },
   { id: 'deepseek.exportChatHistory', name: 'Export History', description: 'Export all chats', icon: '📤', section: 'History' },
-  { id: 'deepseek.searchChatHistory', name: 'Search History', description: 'Search past chats', icon: '🔍', section: 'History' }
+  { id: 'deepseek.searchChatHistory', name: 'Search History', description: 'Search past chats', icon: '🔍', section: 'History' },
+  // Trace section
+  { id: 'deepseek.exportTrace', name: 'Export Trace', description: 'Save trace to file', icon: '💾', section: 'Trace' },
+  { id: 'deepseek.copyTrace', name: 'Copy Trace', description: 'Copy trace to clipboard', icon: '📋', section: 'Trace' },
+  { id: 'deepseek.viewTrace', name: 'View Trace', description: 'Show in output panel', icon: '👁️', section: 'Trace' },
+  { id: 'deepseek.traceStats', name: 'Trace Stats', description: 'View trace statistics', icon: '📊', section: 'Trace' },
+  { id: 'deepseek.clearTrace', name: 'Clear Trace', description: 'Clear trace buffer', icon: '🗑️', section: 'Trace' }
 ];
 
 // ============================================

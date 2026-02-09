@@ -103,6 +103,13 @@ function registerCommands(context: vscode.ExtensionContext) {
     { name: 'showStats', handler: () => chatProvider.showStats() },
     { name: 'showLogs', handler: () => logger.show() },
 
+    // Trace Export Commands
+    { name: 'exportTrace', handler: () => commandProvider.exportTraceToFile() },
+    { name: 'copyTrace', handler: () => commandProvider.copyTraceToClipboard() },
+    { name: 'viewTrace', handler: () => commandProvider.viewTraceInOutput() },
+    { name: 'clearTrace', handler: () => commandProvider.clearTraces() },
+    { name: 'traceStats', handler: () => commandProvider.showTraceStats() },
+
     // Diff quick pick command
     { name: 'showDiffQuickPick', handler: async () => {
       await chatProvider.showDiffQuickPick();

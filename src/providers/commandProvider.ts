@@ -3,6 +3,7 @@ import { DeepSeekClient } from '../deepseekClient';
 import { StatusBar } from '../views/statusBar';
 import { ConfigManager } from '../utils/config';
 import { ConversationManager } from '../events';
+import { tracer } from '../tracing';
 
 export class CommandProvider {
   private deepSeekClient: DeepSeekClient;
@@ -287,30 +288,198 @@ export class CommandProvider {
       prompt: 'Search chat history',
       placeHolder: 'Enter search keywords'
     });
-    
+
     if (!query) return;
-    
+
     const sessions = await this.conversationManager.searchHistory(query);
-    
+
     if (sessions.length === 0) {
       vscode.window.showInformationMessage('No matching chat sessions found');
       return;
     }
-    
+
     const items = sessions.map(session => ({
       label: session.title,
       description: `${session.eventCount} events`,
       detail: session.lastActivityPreview || session.firstUserMessage || '',
       session
     }));
-    
+
     const selected = await vscode.window.showQuickPick(items, {
       placeHolder: 'Select a chat session to open'
     });
-    
+
     if (selected) {
       vscode.commands.executeCommand('deepseek.showChatHistory');
     }
+  }
+
+  // ============================================
+  // Trace Export Commands
+  // ============================================
+
+  async exportTraceToFile() {
+    const events = tracer.getAll();
+
+    if (events.length === 0) {
+      vscode.window.showInformationMessage('No trace events to export');
+      return;
+    }
+
+    const format = await vscode.window.showQuickPick(
+      [
+        { label: 'JSON', description: 'Structured data for programmatic analysis', value: 'json' as const },
+        { label: 'JSON Lines', description: 'One event per line, good for streaming/logs', value: 'jsonl' as const },
+        { label: 'Pretty', description: 'Human-readable formatted text', value: 'pretty' as const }
+      ],
+      { placeHolder: 'Select export format' }
+    );
+
+    if (!format) return;
+
+    const content = tracer.export(format.value);
+    const extension = format.value === 'json' ? 'json' : format.value === 'jsonl' ? 'jsonl' : 'txt';
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const defaultFilename = `moby-trace-${timestamp}.${extension}`;
+
+    const uri = await vscode.window.showSaveDialog({
+      defaultUri: vscode.Uri.file(defaultFilename),
+      filters: {
+        'Trace Files': [extension],
+        'All Files': ['*']
+      },
+      saveLabel: 'Export Trace'
+    });
+
+    if (!uri) return;
+
+    await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf8'));
+    vscode.window.showInformationMessage(`Trace exported: ${events.length} events to ${uri.fsPath}`);
+  }
+
+  async copyTraceToClipboard() {
+    const events = tracer.getAll();
+
+    if (events.length === 0) {
+      vscode.window.showInformationMessage('No trace events to copy');
+      return;
+    }
+
+    // Use pretty format for clipboard - more human-readable
+    const content = tracer.export('pretty');
+    await vscode.env.clipboard.writeText(content);
+    vscode.window.showInformationMessage(`Copied ${events.length} trace events to clipboard`);
+  }
+
+  async viewTraceInOutput() {
+    const events = tracer.getAll();
+
+    if (events.length === 0) {
+      vscode.window.showInformationMessage('No trace events to display');
+      return;
+    }
+
+    // Create or get output channel for traces
+    const outputChannel = vscode.window.createOutputChannel('Moby Trace', 'log');
+    outputChannel.clear();
+
+    // Header
+    outputChannel.appendLine('═══════════════════════════════════════════════════════════════');
+    outputChannel.appendLine(`  MOBY TRACE EXPORT - ${new Date().toISOString()}`);
+    outputChannel.appendLine(`  Events: ${events.length}`);
+    outputChannel.appendLine('═══════════════════════════════════════════════════════════════');
+    outputChannel.appendLine('');
+
+    // Content
+    const content = tracer.export('pretty');
+    outputChannel.appendLine(content);
+
+    outputChannel.appendLine('');
+    outputChannel.appendLine('═══════════════════════════════════════════════════════════════');
+    outputChannel.appendLine('  END OF TRACE');
+    outputChannel.appendLine('═══════════════════════════════════════════════════════════════');
+
+    outputChannel.show();
+  }
+
+  async clearTraces() {
+    const eventCount = tracer.size;
+
+    if (eventCount === 0) {
+      vscode.window.showInformationMessage('Trace buffer is already empty');
+      return;
+    }
+
+    const result = await vscode.window.showWarningMessage(
+      `Clear ${eventCount} trace events? This cannot be undone.`,
+      { modal: true },
+      'Clear',
+      'Cancel'
+    );
+
+    if (result === 'Clear') {
+      tracer.clear();
+      vscode.window.showInformationMessage('Trace buffer cleared');
+    }
+  }
+
+  async showTraceStats() {
+    const events = tracer.getAll();
+
+    if (events.length === 0) {
+      vscode.window.showInformationMessage('No trace events recorded');
+      return;
+    }
+
+    // Collect stats
+    const categoryCount = new Map<string, number>();
+    const sourceCount = new Map<string, number>();
+    let errorCount = 0;
+    let totalDuration = 0;
+    let durationCount = 0;
+
+    for (const event of events) {
+      // Category breakdown
+      const cat = event.category.split('.')[0];
+      categoryCount.set(cat, (categoryCount.get(cat) || 0) + 1);
+
+      // Source breakdown
+      sourceCount.set(event.source, (sourceCount.get(event.source) || 0) + 1);
+
+      // Errors
+      if (event.status === 'failed' || event.error) {
+        errorCount++;
+      }
+
+      // Duration
+      if (event.duration !== undefined) {
+        totalDuration += event.duration;
+        durationCount++;
+      }
+    }
+
+    // Format stats
+    const lines: string[] = [
+      `Total Events: ${events.length}`,
+      `Errors: ${errorCount}`,
+      `Avg Duration: ${durationCount > 0 ? (totalDuration / durationCount).toFixed(2) + 'ms' : 'N/A'}`,
+      '',
+      'By Category:',
+      ...Array.from(categoryCount.entries())
+        .sort((a, b) => b[1] - a[1])
+        .map(([cat, count]) => `  ${cat}: ${count}`),
+      '',
+      'By Source:',
+      ...Array.from(sourceCount.entries())
+        .map(([src, count]) => `  ${src}: ${count}`)
+    ];
+
+    const doc = await vscode.workspace.openTextDocument({
+      content: lines.join('\n'),
+      language: 'plaintext'
+    });
+
+    await vscode.window.showTextDocument(doc, { preview: true });
   }
 
   async exportCurrentSession() {
