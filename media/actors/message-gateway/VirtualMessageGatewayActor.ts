@@ -19,6 +19,7 @@ import { EventStateActor } from '../../state/EventStateActor';
 import { EventStateManager } from '../../state/EventStateManager';
 import type { ActorConfig } from '../../state/types';
 import { webviewTracer } from '../../tracing';
+import { createLogger, setLogLevel, LogLevel } from '../../logging';
 
 // Import actor types for type safety
 import type { StreamingActor } from '../streaming';
@@ -30,6 +31,8 @@ import type { ToolbarShadowActor } from '../toolbar/ToolbarShadowActor';
 import type { HistoryShadowActor } from '../history';
 import type { VirtualListActor } from '../virtual-list';
 import type { EditMode } from '../turn/types';
+
+const log = createLogger('VirtualGateway');
 
 export type GatewayPhase = 'idle' | 'streaming' | 'waiting-for-results';
 
@@ -128,7 +131,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       const msg = event.data;
       if (!msg || !msg.type) return;
 
-      console.log('[VirtualGateway] Received:', msg.type);
+      log.debug('Received:', msg.type);
       this.handleMessage(msg);
     };
 
@@ -149,7 +152,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       'pendingFileAdd', 'diffListChanged', 'iterationStart'
     ];
     if (importantTypes.includes(msg.type)) {
-      console.log(`[VirtualGateway] ${new Date().toISOString()} RECEIVED: ${msg.type}`, msg);
+      log.debug(`${new Date().toISOString()} RECEIVED: ${msg.type}`, msg);
     }
 
     switch (msg.type) {
@@ -360,7 +363,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         break;
 
       default:
-        console.log('[VirtualGateway] Unhandled message type:', msg.type);
+        log.debug('Unhandled message type:', msg.type);
     }
   }
 
@@ -371,7 +374,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
   private handleStartResponse(msg: { type: string; [key: string]: unknown }): void {
     const { streaming, session, virtualList } = this._actors;
 
-    console.log('[VirtualGateway] startResponse: beginning new stream');
+    log.debug('startResponse: beginning new stream');
 
     // Set the correlation ID for cross-boundary tracing (if provided)
     if (msg.correlationId) {
@@ -417,7 +420,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
     // Check if we need to create a new segment after interleaving
     const boundActor = virtualList.getBoundActor(this._currentTurnId);
     if (boundActor?.needsNewSegment()) {
-      console.log('[VirtualGateway] streamToken: resuming with new segment after interleave');
+      log.debug('streamToken: resuming with new segment after interleave');
       virtualList.resumeWithNewSegment(this._currentTurnId);
       this._segmentContent = '';
       this._hasInterleaved = false;
@@ -475,7 +478,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
 
     if (!this._currentTurnId) return;
 
-    console.log(`[VirtualGateway] iterationStart: iteration=${msg.iteration}`);
+    log.debug(`iterationStart: iteration=${msg.iteration}`);
 
     // Finalize text segment before thinking
     if (!this._hasInterleaved) {
@@ -492,7 +495,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
   private handleEndResponse(msg: { type: string; [key: string]: unknown }): void {
     const { streaming, virtualList } = this._actors;
 
-    console.log(`[VirtualGateway] endResponse: ending stream`);
+    log.debug(`endResponse: ending stream`);
 
     // End streaming
     streaming.endStream();
@@ -527,18 +530,18 @@ export class VirtualMessageGatewayActor extends EventStateActor {
     const { virtualList } = this._actors;
     const commands = msg.commands as Array<{ command: string; description?: string }>;
 
-    console.log(`[VirtualGateway] shellExecuting: raw commands:`, commands);
+    log.debug(`shellExecuting: raw commands:`, commands);
 
     if (!this._currentTurnId) {
-      console.warn(`[VirtualGateway] shellExecuting: NO CURRENT TURN ID - dropping message!`);
+      log.warn(`shellExecuting: NO CURRENT TURN ID - dropping message!`);
       return;
     }
     if (!commands || !Array.isArray(commands)) {
-      console.warn(`[VirtualGateway] shellExecuting: invalid commands array:`, commands);
+      log.warn(`shellExecuting: invalid commands array:`, commands);
       return;
     }
 
-    console.log(`[VirtualGateway] shellExecuting: ${commands.length} commands for turn ${this._currentTurnId}`);
+    log.debug(`shellExecuting: ${commands.length} commands for turn ${this._currentTurnId}`);
 
     // Finalize text segment before shell
     if (!this._hasInterleaved) {
@@ -592,7 +595,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
 
     if (!this._currentTurnId || !tools || !Array.isArray(tools)) return;
 
-    console.log(`[VirtualGateway] toolCallsStart: ${tools.length} tools`);
+    log.debug(`toolCallsStart: ${tools.length} tools`);
 
     // Finalize text segment before tools
     if (!this._hasInterleaved) {
@@ -661,7 +664,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
     const turnId = this._currentTurnId || this._lastStreamingTurnId;
     if (!turnId || !diffs || !Array.isArray(diffs)) return;
 
-    console.log(`[VirtualGateway] diffListChanged: ${diffs.length} diffs for turn ${turnId}`);
+    log.debug(`diffListChanged: ${diffs.length} diffs for turn ${turnId}`);
 
     // Only finalize text segment if still streaming (don't do it for late-arriving messages)
     if (this._currentTurnId && !this._hasInterleaved && diffs.length > 0) {
@@ -713,7 +716,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
 
     // Only handle failures - success is already handled by diffListChanged
     if (!success && filePath) {
-      console.log(`[VirtualGateway] codeApplied failed for: ${filePath}`);
+      log.debug(`codeApplied failed for: ${filePath}`);
       virtualList.updatePendingFileStatusByPath(filePath, 'error');
     }
   }
@@ -824,9 +827,30 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       });
     }
 
+    // Apply webview log level to global log level
+    if (msg.webviewLogLevel !== undefined) {
+      const levelMap: Record<string, number> = {
+        'DEBUG': LogLevel.DEBUG,
+        'INFO': LogLevel.INFO,
+        'WARN': LogLevel.WARN,
+        'ERROR': LogLevel.ERROR
+      };
+      const level = levelMap[msg.webviewLogLevel as string] ?? LogLevel.WARN;
+      setLogLevel(level);
+      log.debug('Webview log level set to:', msg.webviewLogLevel);
+    }
+
+    // Apply tracing enabled/disabled
+    if (msg.tracingEnabled !== undefined) {
+      webviewTracer.enabled = msg.tracingEnabled as boolean;
+      log.debug('Tracing enabled:', msg.tracingEnabled);
+    }
+
     const webSearch = msg.webSearch as { searchDepth?: number; searchesPerPrompt?: number; cacheDuration?: number } | undefined;
     this._manager.publishDirect('settings.values', {
       logLevel: msg.logLevel,
+      webviewLogLevel: msg.webviewLogLevel,
+      tracingEnabled: msg.tracingEnabled,
       logColors: msg.logColors,
       allowAllCommands: msg.allowAllCommands,
       systemPrompt: msg.systemPrompt,

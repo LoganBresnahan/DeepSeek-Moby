@@ -1,17 +1,32 @@
 /**
  * EventStateLogger
  *
- * Centralized logging system for the Event State Management system.
- * Provides log level control with optional runtime debugging.
+ * Logging system for the Event State Management framework.
+ * Uses the global log level from the logging module for consistency
+ * with other webview components.
+ *
+ * Specialized methods for pub/sub debugging:
+ * - actorRegister/actorUnregister
+ * - stateChangeFlow/broadcastToActor
+ * - circularDependency/longChainWarning
  */
 
-import { LogLevel, type LoggerConfig } from './types';
+import {
+  LogLevel,
+  shouldLog as globalShouldLog,
+  setLogLevel as globalSetLogLevel,
+  enableDebugMode,
+  disableDebugMode
+} from '../logging';
+import type { LoggerConfig } from './types';
+
+// Re-export LogLevel for backward compatibility
+export { LogLevel } from '../logging';
 
 export class EventStateLogger {
-  private config: LoggerConfig = {
-    logLevel: LogLevel.ERROR,
-    showTimestamps: true,      // Changed: enabled by default for debugging
-    useWallClock: true,        // New: wall clock for cross-boundary correlation
+  private config: Omit<LoggerConfig, 'logLevel'> = {
+    showTimestamps: true,
+    useWallClock: true,
     useGroups: true,
     flatMode: false,
     logGlobalState: false
@@ -21,12 +36,16 @@ export class EventStateLogger {
   private componentName = 'EventState';
 
   /**
-   * Configure the logger.
+   * Configure the logger options (not log level - use setLogLevel for that).
    * Note: Does NOT reset startTime - use resetTimer() for that.
    */
   configure(options: Partial<LoggerConfig>): void {
-    this.config = { ...this.config, ...options };
-    // Intentionally NOT resetting startTime here - that was a bug
+    // Extract logLevel and set globally if provided
+    const { logLevel, ...rest } = options;
+    if (logLevel !== undefined) {
+      globalSetLogLevel(logLevel);
+    }
+    this.config = { ...this.config, ...rest };
   }
 
   /**
@@ -38,35 +57,39 @@ export class EventStateLogger {
   }
 
   /**
-   * Set log level
+   * Set log level (delegates to global log level).
+   * This affects ALL webview loggers, not just EventStateLogger.
    */
   setLogLevel(level: LogLevel): void {
-    this.config.logLevel = level;
+    globalSetLogLevel(level);
   }
 
   /**
-   * Enable debug mode
+   * Enable debug mode - sets global level to DEBUG.
+   * Also enables global state logging for this logger.
    */
   enableDebug(): void {
-    this.config.logLevel = LogLevel.DEBUG;
+    enableDebugMode();
     this.config.logGlobalState = true;
-    console.log('🔍 EventState: Debug logging enabled');
+    console.info('[EventState] Debug logging enabled');
   }
 
   /**
-   * Disable debug mode
+   * Disable debug mode - sets global level back to WARN.
+   * Also disables global state logging.
    */
   disableDebug(): void {
-    this.config.logLevel = LogLevel.ERROR;
+    disableDebugMode();
     this.config.logGlobalState = false;
-    console.log('🔇 EventState: Debug logging disabled');
+    console.info('[EventState] Debug logging disabled');
   }
 
   /**
-   * Check if a message at given level should be logged
+   * Check if a message at given level should be logged.
+   * Uses global log level for consistency with other components.
    */
   private shouldLog(level: LogLevel): boolean {
-    return level >= this.config.logLevel;
+    return globalShouldLog(level);
   }
 
   /**
@@ -89,13 +112,14 @@ export class EventStateLogger {
 
   /**
    * Internal log method.
-   * Uses appropriate console methods for proper devtools filtering.
+   * Uses consistent [Component] prefix format.
    */
   private log(level: LogLevel, icon: string, message: string, ...args: unknown[]): void {
     if (!this.shouldLog(level)) return;
 
     const timestamp = this.getTimestamp();
-    const prefix = `${timestamp}${icon} ${this.componentName}:`;
+    // Consistent prefix format: [timestamp] [Component] icon message
+    const prefix = `${timestamp}[${this.componentName}] ${icon}`;
 
     // Use appropriate console method for devtools filtering
     const logArgs = args.length > 0 ? [prefix, message, ...args] : [prefix, message];
@@ -130,7 +154,7 @@ export class EventStateLogger {
     if (!this.config.useGroups) return;
 
     const timestamp = this.getTimestamp();
-    const prefix = `${timestamp}${icon} ${this.componentName}:`;
+    const prefix = `${timestamp}[${this.componentName}] ${icon}`;
 
     if (style) {
       console.group(`%c${prefix} ${message}`, style);
@@ -226,7 +250,7 @@ export class EventStateLogger {
    */
   circularDependency(chain: string[]): void {
     console.error(
-      `🔴 ${this.componentName}: CIRCULAR DEPENDENCY DETECTED!\n` +
+      `🔴 [${this.componentName}] CIRCULAR DEPENDENCY DETECTED!\n` +
       `   Chain: ${chain.join(' → ')}\n` +
       `   Dropping state to prevent infinite loop`
     );
@@ -237,7 +261,7 @@ export class EventStateLogger {
    */
   longChainWarning(depth: number, chain: string[]): void {
     console.warn(
-      `⚠️ ${this.componentName}: Publication chain too long (depth ${depth})\n` +
+      `⚠️ [${this.componentName}] Publication chain too long (depth ${depth})\n` +
       `   Chain: ${chain.join(' → ')}\n` +
       `   Consider refactoring to reduce cascading updates`
     );
@@ -247,14 +271,14 @@ export class EventStateLogger {
    * Log subscription handler error
    */
   subscriptionError(actorId: string, key: string, error: unknown): void {
-    console.error(`❌ ${this.componentName}: Actor [${actorId}] error in subscription "${key}":`, error);
+    console.error(`❌ [${this.componentName}] Actor [${actorId}] error in subscription "${key}":`, error);
   }
 
   /**
    * Log publication getter error
    */
   publicationError(actorId: string, key: string, error: unknown): void {
-    console.error(`❌ ${this.componentName}: Actor [${actorId}] error reading "${key}":`, error);
+    console.error(`❌ [${this.componentName}] Actor [${actorId}] error reading "${key}":`, error);
   }
 
   /**
@@ -262,7 +286,7 @@ export class EventStateLogger {
    */
   unauthorizedPublication(actorId: string, keys: string[]): void {
     console.error(
-      `❌ ${this.componentName}: Actor [${actorId}] attempted to publish unauthorized keys:\n` +
+      `❌ [${this.componentName}] Actor [${actorId}] attempted to publish unauthorized keys:\n` +
       `   Keys: [${keys.join(', ')}]`
     );
   }
@@ -272,7 +296,7 @@ export class EventStateLogger {
    */
   publishInsideGetter(actorId: string): void {
     console.error(
-      `🔴 ${this.componentName}: Actor [${actorId}] cannot publish from inside a publication getter!\n` +
+      `🔴 [${this.componentName}] Actor [${actorId}] cannot publish from inside a publication getter!\n` +
       `   Publication getters should be PURE FUNCTIONS that only read state.`
     );
   }
@@ -284,7 +308,7 @@ export class EventStateLogger {
     if (!this.shouldLog(LogLevel.DEBUG)) return;
     if (!this.config.logGlobalState) return;
 
-    console.group(`📊 ${this.componentName}: ${label}`);
+    console.group(`📊 [${this.componentName}] ${label}`);
     console.table(state);
     console.groupEnd();
   }

@@ -20,5 +20,5 @@ export type { ModalConfig } from './ModalShadowActor';
 export { PopupShadowActor, popupBaseStyles } from './PopupShadowActor';
 export type { PopupConfig, PopupPosition } from './PopupShadowActor';
 
-export { EventStateLogger, logger } from './EventStateLogger';
+export { EventStateLogger, logger, LogLevel } from './EventStateLogger';
 export * from './types';

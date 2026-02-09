@@ -18,6 +18,9 @@ import { EventStateActor } from '../../state/EventStateActor';
 import { EventStateManager } from '../../state/EventStateManager';
 import type { ActorConfig } from '../../state/types';
 import { streamingStyles as styles } from './styles';
+import { createLogger } from '../../logging';
+
+const log = createLogger('StreamingActor');
 
 export interface StreamingState {
   active: boolean;
@@ -95,13 +98,13 @@ export class StreamingActor extends EventStateActor {
    */
   handleThinkingChunk(chunk: string): void {
     if (!this._active) {
-      console.warn('[StreamingActor] handleThinkingChunk called but stream not active');
+      log.warn('handleThinkingChunk called but stream not active');
       return;
     }
 
     this._thinking += chunk;
 
-    console.log('[StreamingActor] Publishing streaming.thinking, length:', this._thinking.length);
+    log.debug('Publishing streaming.thinking, length:', this._thinking.length);
     this.publish({
       'streaming.thinking': this._thinking
     });

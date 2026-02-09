@@ -14,6 +14,9 @@
 import { EventStateActor } from '../../state/EventStateActor';
 import { EventStateManager } from '../../state/EventStateManager';
 import type { ActorConfig } from '../../state/types';
+import { createLogger } from '../../logging';
+
+const log = createLogger('EditModeActor');
 
 export type EditMode = 'manual' | 'ask' | 'auto';
 
@@ -60,7 +63,7 @@ export class EditModeActor extends EventStateActor {
    */
   setMode(mode: EditMode): void {
     if (!this.isValidMode(mode)) {
-      console.warn(`[EditModeActor] Invalid mode: ${mode}`);
+      log.warn(`Invalid mode: ${mode}`);
       return;
     }
 

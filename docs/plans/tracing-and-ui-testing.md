@@ -514,6 +514,13 @@ Sources: [Console.log Slow Down](https://arunangshudas.com/blog/why-is-console-l
 │                           Webview Logging Architecture                           │
 ├─────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────────┐    │
+│  │  Global Log Level (media/logging/logLevel.ts)                           │    │
+│  │  • setLogLevel(LogLevel.WARN) - Production default                      │    │
+│  │  • Affects Tier 2 (createLogger) and Tier 3 (EventStateLogger)          │    │
+│  │  • Does NOT affect Tier 1 (WebviewTracer captures everything)           │    │
+│  └─────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                  │
 │  Tier 1: WebviewTracer (Structured Events → Extension)                          │
 │  ─────────────────────────────────────────────────────                          │
 │  • Cross-boundary correlation (user action → API → render)                       │
@@ -521,63 +528,78 @@ Sources: [Console.log Slow Down](https://arunangshudas.com/blog/why-is-console-l
 │  • Key state transitions                                                         │
 │  • Syncs to extension every 5s or on force                                       │
 │  • Exportable via "Moby: Export Traces"                                          │
+│  • NOT affected by log level (always captures for AI analysis)                   │
 │                                                                                  │
-│  Tier 2: Console Logging (Development Visibility)                                │
+│  Tier 2: createLogger (Component Console Logging)                                │
 │  ────────────────────────────────────────────────                                │
-│  • console.debug - Verbose development info (filtered by default)                │
-│  • console.warn - Issues that should surface                                     │
-│  • console.error - Errors requiring attention                                    │
-│  • Standard prefix: [ComponentName]                                              │
+│  • const log = createLogger('VirtualList')                                       │
+│  • log.debug/info/warn/error with [Component] prefix                             │
+│  • Respects global log level                                                     │
 │  • Zero postMessage overhead (stays in webview)                                  │
+│  • debug/info stripped in production builds                                      │
 │                                                                                  │
 │  Tier 3: EventStateLogger (Pub/Sub System Only)                                  │
 │  ───────────────────────────────────────────────                                 │
 │  • Actor registration, state changes, subscriptions                              │
 │  • Chain depth warnings, circular dependency detection                           │
-│  • Already has log levels, groups, timestamps                                    │
+│  • Uses global log level, adds timestamps and groups                             │
+│  • [EventState] prefix with icons                                                │
 │                                                                                  │
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### When to Use Each Tier
 
-| Scenario | Tier 1 (Tracer) | Tier 2 (Console) | Tier 3 (EventState) |
-|----------|-----------------|------------------|---------------------|
+| Scenario | Tier 1 (Tracer) | Tier 2 (createLogger) | Tier 3 (EventState) |
+|----------|-----------------|----------------------|---------------------|
 | User clicks button | ✅ `traceUserClick()` | — | — |
-| Actor binds to turn | ✅ `traceActorBind()` | `console.debug` | — |
-| Pool stats (development) | — | `console.debug` | — |
-| Pool exhaustion warning | ✅ via postMessage | `console.warn` | — |
+| Actor binds to turn | ✅ `traceActorBind()` | `log.debug(...)` | — |
+| Pool stats (development) | — | `log.debug(...)` | — |
+| Pool exhaustion warning | ✅ via postMessage | `log.warn(...)` | — |
 | State publication | — | — | ✅ `stateChangeFlow()` |
-| Subscription error | ✅ trace with error | `console.error` | ✅ `subscriptionError()` |
-| Render performance | — | `console.debug` | — |
+| Subscription error | ✅ trace with error | `log.error(...)` | ✅ `subscriptionError()` |
+| Render performance | — | `log.debug(...)` | — |
+| Component initialization | — | `log.info(...)` | — |
 
 ### Console Logging Standards
 
-#### Prefix Format
+#### Using createLogger
 
-All console logs should use a consistent prefix:
+All components should use the `createLogger` factory for consistent logging:
 
 ```typescript
-// Good - consistent, searchable
-console.debug('[VirtualList] Binding actor to turn:', turnId);
-console.warn('[VirtualList] Actor not bound for turn:', turnId);
+import { createLogger } from '../logging';
 
-// Bad - inconsistent
-console.log('binding actor...', turnId);
-console.log('VirtualList - actor bound');
+// Create logger at module level
+const log = createLogger('VirtualList');
+
+// In methods
+log.debug('Binding actor to turn:', turnId);
+log.warn('Actor not bound for turn:', turnId);
+log.error('Failed to create actor:', error);
 ```
+
+**Benefits over raw console:**
+- Automatic `[Component]` prefix
+- Respects global log level
+- Consistent interface
 
 #### Level Usage
 
 ```typescript
-// DEBUG: Verbose development info (filtered in production devtools)
-console.debug('[Pool] Stats:', { turns: 50, visible: 8, pool: 12, created: 20 });
+const log = createLogger('Pool');
+
+// DEBUG: Verbose development info (stripped in production)
+log.debug('Stats:', { turns: 50, visible: 8, pool: 12, created: 20 });
+
+// INFO: Notable events (stripped in production)
+log.info('Pool initialized with', poolSize, 'actors');
 
 // WARN: Issues that should surface but aren't errors
-console.warn('[VirtualList] Actor not bound - content will render on scroll');
+log.warn('Pool exhaustion detected - creating new actors');
 
 // ERROR: Actual errors requiring attention
-console.error('[VirtualList] Failed to create actor:', error);
+log.error('Failed to create actor:', error);
 ```
 
 #### Avoid in Hot Paths
@@ -585,7 +607,7 @@ console.error('[VirtualList] Failed to create actor:', error);
 ```typescript
 // BAD - logs on every scroll event
 private handleScroll(): void {
-  console.debug('[VirtualList] Scroll:', this._scrollContainer.scrollTop);  // DON'T
+  log.debug('Scroll:', this._scrollContainer.scrollTop);  // DON'T
   this.updateVisibility();
 }
 
@@ -593,7 +615,7 @@ private handleScroll(): void {
 private handleScroll(): void {
   this.updateVisibility();
   if (this._visibleRangeChanged) {
-    console.debug('[VirtualList] Visible range changed:', this._visibleRange);
+    log.debug('Visible range changed:', this._visibleRange);
   }
 }
 ```
@@ -602,28 +624,35 @@ private handleScroll(): void {
 
 ```typescript
 // BAD - serializes entire turn data
-console.debug('[VirtualList] Turn data:', turn);  // turn has nested arrays
+log.debug('Turn data:', turn);  // turn has nested arrays
 
 // GOOD - log relevant summary
-console.debug('[VirtualList] Turn:', turn.turnId, 'role:', turn.role, 'segments:', turn.textSegments.length);
+log.debug('Turn:', turn.turnId, 'role:', turn.role, 'segments:', turn.textSegments.length);
 ```
 
 ### Production Mode
 
 In production, minimize logging overhead:
 
-1. **Build-time stripping**: `console.debug`, `console.log`, `console.info` are removed by esbuild
-2. **Browser devtools filtering**: Any remaining calls filtered when "Verbose" is unchecked
-3. **EventStateLogger level**: Set to WARN or ERROR
+1. **Global log level WARN**: Default is `LogLevel.WARN` - only warnings and errors log
+2. **Build-time stripping**: `console.debug`, `console.log`, `console.info` are removed by esbuild
+3. **Browser devtools filtering**: Any remaining calls filtered when "Verbose" is unchecked
 4. **WebviewTracer**: Keep enabled (low overhead, valuable for debugging)
 
 ```typescript
-// Production configuration
-eventStateLogger.setLogLevel(LogLevel.WARN);
+import { setLogLevel, LogLevel, enableDebugMode } from './logging';
 
-// Development configuration
-eventStateLogger.setLogLevel(LogLevel.DEBUG);
-eventStateLogger.enableDebug();  // Also shows global state tables
+// Production default (already set, but can be explicit)
+setLogLevel(LogLevel.WARN);
+
+// Development: enable debug for all webview loggers
+setLogLevel(LogLevel.DEBUG);
+// Or use convenience function:
+enableDebugMode();
+
+// For EventStateLogger-specific features (global state tables):
+import { logger } from './state';
+logger.enableDebug();  // Sets DEBUG globally + enables logGlobalState
 ```
 
 ### Build-Time Console Stripping
@@ -648,27 +677,28 @@ Applying this strategy to the object pooling observability discussed earlier:
 
 ```typescript
 // In VirtualListActor
+import { createLogger } from '../logging';
 
-// Development: console.debug for regular stats (zero production overhead)
+const log = createLogger('Pool');
+
+// Development: log.debug for regular stats (stripped in production)
 private logPoolStats(): void {
-  if (process.env.NODE_ENV === 'development') {
-    const stats = this.getPoolStats();
-    console.debug('[Pool] Stats:', {
-      turns: stats.totalTurns,
-      visible: stats.visibleTurns,
-      pool: stats.actorsInPool,
-      created: stats.totalActorsCreated
-    });
-  }
+  const stats = this.getPoolStats();
+  log.debug('Stats:', {
+    turns: stats.totalTurns,
+    visible: stats.visibleTurns,
+    pool: stats.actorsInPool,
+    created: stats.totalActorsCreated
+  });
 }
 
-// Production: Only warn on anomalies (sent to extension for logging)
+// Production: Only warn on anomalies (kept in production builds)
 private checkPoolHealth(): void {
   const stats = this.getPoolStats();
 
   // Pool exhaustion: creating more actors than pool can hold
   if (stats.totalActorsCreated > this.config.maxPoolSize * 2) {
-    console.warn('[Pool] Potential pool exhaustion:', stats);
+    log.warn('Potential pool exhaustion:', stats);
 
     // Also send to extension for persistent logging
     this._postMessage?.({
@@ -696,17 +726,47 @@ This makes `console.debug` effectively "free" in production when devtools isn't 
 | Item | Status |
 |------|--------|
 | WebviewTracer (Tier 1) | ✅ Implemented |
-| EventStateLogger (Tier 3) | ✅ Implemented |
-| Console logging standards (Tier 2) | 📝 Documented (this section) |
+| EventStateLogger (Tier 3) | ✅ Implemented (uses global log level) |
+| Global log level control | ✅ Implemented (`media/logging/logLevel.ts`) |
+| createLogger factory (Tier 2) | ✅ Implemented (`media/logging/createLogger.ts`) |
+| Console logging standards (Tier 2) | ✅ Documented + Implemented |
 | Build-time console stripping | ✅ Implemented (`scripts/build-media.js`) |
 | Standardize existing ad-hoc logs | ⏳ Pending (apply [Component] prefix) |
 | Pool stats logging | ⏳ Pending |
 
+### Unified Log Level Control
+
+All webview loggers share a global log level:
+
+```typescript
+import { setLogLevel, LogLevel, createLogger } from './logging';
+
+// Production default: WARN (only warnings and errors)
+setLogLevel(LogLevel.WARN);
+
+// For debugging: enable all levels
+setLogLevel(LogLevel.DEBUG);
+
+// Create component logger
+const log = createLogger('VirtualList');
+log.debug('Binding actor:', turnId);  // Only shows if DEBUG
+log.warn('Pool exhaustion');           // Shows in WARN or DEBUG
+log.error('Failed:', error);           // Always shows
+```
+
+**Key points:**
+- Production default is `LogLevel.WARN` - only warnings and errors
+- `setLogLevel()` affects ALL webview loggers (createLogger, EventStateLogger)
+- EventStateLogger's `setLogLevel()` delegates to global level
+- WebviewTracer is NOT affected (captures all events for machine analysis)
+
 ### Files
 
+- [media/logging/logLevel.ts](../../media/logging/logLevel.ts) - Global log level singleton
+- [media/logging/createLogger.ts](../../media/logging/createLogger.ts) - Component logger factory
+- [media/logging/index.ts](../../media/logging/index.ts) - Module exports
 - [media/tracing/WebviewTracer.ts](../../media/tracing/WebviewTracer.ts) - Tier 1 structured tracing
-- [media/state/EventStateLogger.ts](../../media/state/EventStateLogger.ts) - Tier 3 pub/sub logging
-- Various actors - Tier 2 console logging (to be standardized)
+- [media/state/EventStateLogger.ts](../../media/state/EventStateLogger.ts) - Tier 3 pub/sub logging (uses global level)
 
 ---
 

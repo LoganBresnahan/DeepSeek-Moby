@@ -26,6 +26,9 @@ import {
   STYLE_CATEGORIES,
   getAllStyleProperties
 } from './types';
+import { createLogger } from '../../logging';
+
+const log = createLogger('Inspector');
 
 export class InspectorShadowActor extends EventStateActor {
   // Shadow DOM for inspector UI
@@ -117,7 +120,7 @@ export class InspectorShadowActor extends EventStateActor {
     // Set up document-level event listeners
     this.bindGlobalEvents();
 
-    console.log('[InspectorShadowActor] Ready');
+    log.info('Ready');
   }
 
   // ============================================
@@ -352,8 +355,7 @@ export class InspectorShadowActor extends EventStateActor {
     // Prevent native context menu
     e.preventDefault();
 
-    // Debug: log what we're selecting
-    console.log('[Inspector] Right-click selecting:', this._hoveredElement.tagName.toLowerCase() +
+    log.debug('Right-click selecting:', this._hoveredElement.tagName.toLowerCase() +
       (this._hoveredElement.className ? '.' + this._hoveredElement.className.split(' ')[0] : ''));
 
     this.selectElement(this._hoveredElement);
@@ -504,7 +506,7 @@ export class InspectorShadowActor extends EventStateActor {
       'inspector.hasSelection': true
     });
 
-    console.log('[InspectorShadowActor] Selected:', this._selectedElement.path,
+    log.debug('Selected:', this._selectedElement.path,
       'inShadow:', shadowInfo.inShadow,
       'classes:', Array.from(target.classList),
       'styles:', Object.fromEntries(this._selectedElement.computedStyles));
@@ -1278,7 +1280,7 @@ export class InspectorShadowActor extends EventStateActor {
   private refocusHistoryElement(idx: number): void {
     const entry = this._changeHistory[idx];
     if (!entry || !entry.element.isConnected) {
-      console.warn('[Inspector] History element no longer in DOM');
+      log.warn('History element no longer in DOM');
       return;
     }
 
@@ -1512,7 +1514,7 @@ export class InspectorShadowActor extends EventStateActor {
       this._siblingOverlays.push(overlay);
     });
 
-    console.log(`[Inspector] Found ${this._matchingElements.length} matching elements`);
+    log.debug(`Found ${this._matchingElements.length} matching elements`);
   }
 
   private clearSiblingOverlays(): void {

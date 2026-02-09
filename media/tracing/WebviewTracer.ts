@@ -16,6 +16,9 @@ import type {
   TraceLevel
 } from './types';
 import type { VSCodeAPI } from '../state/types';
+import { createLogger } from '../logging';
+
+const log = createLogger('WebviewTracer');
 
 /** Level priority for filtering */
 const LEVEL_PRIORITY: Record<TraceLevel, number> = {
@@ -219,7 +222,7 @@ export class WebviewTracer {
 
     const startEvent = this.spanStack.get(spanId);
     if (!startEvent) {
-      console.warn(`[WebviewTracer] Attempted to end unknown span: ${spanId}`);
+      log.warn(`Attempted to end unknown span: ${spanId}`);
       return;
     }
 
@@ -293,7 +296,7 @@ export class WebviewTracer {
       try {
         subscriber(event);
       } catch (err) {
-        console.error('[WebviewTracer] Subscriber error:', err);
+        log.error('Subscriber error:', err);
       }
     }
   }

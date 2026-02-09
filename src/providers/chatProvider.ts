@@ -383,6 +383,14 @@ which I already edited - would you like me to update it?"
           // Handle log colors toggle
           await this.updateLogSettings({ logColors: data.enabled });
           break;
+        case 'setWebviewLogLevel':
+          // Handle webview log level change - save to config, then send settings back for live update
+          await this.updateWebviewLogSettings({ webviewLogLevel: data.logLevel });
+          break;
+        case 'setTracingEnabled':
+          // Handle tracing toggle
+          await this.updateTracingSettings({ enabled: data.enabled });
+          break;
         case 'openLogs':
           // Show the DeepSeek output channel
           logger.show();
@@ -733,6 +741,28 @@ which I already edited - would you like me to update it?"
     }
   }
 
+  private async updateWebviewLogSettings(settings: { webviewLogLevel?: string }) {
+    const config = vscode.workspace.getConfiguration('deepseek');
+
+    if (settings.webviewLogLevel !== undefined) {
+      await config.update('webviewLogLevel', settings.webviewLogLevel, vscode.ConfigurationTarget.Global);
+      logger.settingsChanged('webviewLogLevel', settings.webviewLogLevel);
+      // Send settings back to webview so it applies the new log level immediately
+      this.sendCurrentSettings();
+    }
+  }
+
+  private async updateTracingSettings(settings: { enabled?: boolean }) {
+    const config = vscode.workspace.getConfiguration('deepseek');
+
+    if (settings.enabled !== undefined) {
+      await config.update('tracing.enabled', settings.enabled, vscode.ConfigurationTarget.Global);
+      logger.settingsChanged('tracing.enabled', settings.enabled);
+      // Also update the tracer directly
+      tracer.enabled = settings.enabled;
+    }
+  }
+
   private async updateReasonerSettings(settings: { allowAllCommands?: boolean }) {
     const config = vscode.workspace.getConfiguration('deepseek');
 
@@ -811,7 +841,9 @@ Always:
     const maxToolCalls = config.get<number>('maxToolCalls') ?? 25;
     const maxTokens = config.get<number>('maxTokens') ?? 8192;
     const editMode = config.get<string>('editMode') || 'manual';
-    const logLevel = config.get<string>('logLevel') || 'INFO';
+    const logLevel = config.get<string>('logLevel') || 'WARN';
+    const webviewLogLevel = config.get<string>('webviewLogLevel') || 'WARN';
+    const tracingEnabled = config.get<boolean>('tracing.enabled') ?? true;
     const logColors = config.get<boolean>('logColors') ?? true;
     const systemPrompt = config.get<string>('systemPrompt') || '';
     const autoSaveHistory = config.get<boolean>('autoSaveHistory') ?? true;
@@ -821,6 +853,9 @@ Always:
     // Sync internal state with config
     this.editMode = editMode as 'manual' | 'ask' | 'auto';
 
+    // Sync tracer enabled state
+    tracer.enabled = tracingEnabled;
+
     if (this._view) {
       this._view.webview.postMessage({
         type: 'settings',
@@ -829,6 +864,8 @@ Always:
         maxToolCalls,
         maxTokens,
         logLevel,
+        webviewLogLevel,
+        tracingEnabled,
         logColors,
         systemPrompt,
         autoSaveHistory,
@@ -1068,6 +1105,8 @@ Always:
 
       // Reset all settings to defaults
       await config.update('logLevel', undefined, vscode.ConfigurationTarget.Global);
+      await config.update('webviewLogLevel', undefined, vscode.ConfigurationTarget.Global);
+      await config.update('tracing.enabled', undefined, vscode.ConfigurationTarget.Global);
       await config.update('logColors', undefined, vscode.ConfigurationTarget.Global);
       await config.update('systemPrompt', undefined, vscode.ConfigurationTarget.Global);
       await config.update('maxTokens', undefined, vscode.ConfigurationTarget.Global);
@@ -1075,6 +1114,9 @@ Always:
       await config.update('editMode', undefined, vscode.ConfigurationTarget.Global);
       await config.update('autoSaveHistory', undefined, vscode.ConfigurationTarget.Global);
       await config.update('maxSessions', undefined, vscode.ConfigurationTarget.Global);
+
+      // Reset tracer to enabled
+      tracer.enabled = true;
 
       // Reset in-memory settings
       this.webSearchSettings = {

@@ -1,39 +1,56 @@
 /**
  * Tests for EventStateLogger
+ *
+ * Note: EventStateLogger now uses the global log level from the logging module.
+ * Tests reset the global level in beforeEach/afterEach for isolation.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { EventStateLogger, logger } from '../../../media/state/EventStateLogger';
-import { LogLevel } from '../../../media/state/types';
+import { EventStateLogger, logger, LogLevel } from '../../../media/state/EventStateLogger';
+import { setLogLevel } from '../../../media/logging';
 
 describe('EventStateLogger', () => {
   let testLogger: EventStateLogger;
 
   beforeEach(() => {
     testLogger = new EventStateLogger();
+    // Reset to WARN (production default) before each test
+    setLogLevel(LogLevel.WARN);
+    vi.restoreAllMocks();
+  });
+
+  afterEach(() => {
+    // Reset to WARN after each test for isolation
+    setLogLevel(LogLevel.WARN);
   });
 
   describe('configuration', () => {
-    it('has default configuration', () => {
-      // Default is ERROR level, so debug/info/warn should not log
+    it('has default configuration (WARN level)', () => {
+      // Default is WARN level, so debug/info should not log
       const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
       const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
       testLogger.debug('test message');
       testLogger.info('test message');
-      testLogger.warn('test message');
 
       expect(debugSpy).not.toHaveBeenCalled();
       expect(infoSpy).not.toHaveBeenCalled();
-      expect(warnSpy).not.toHaveBeenCalled();
 
       debugSpy.mockRestore();
       infoSpy.mockRestore();
+    });
+
+    it('allows warn at default WARN level', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      testLogger.warn('test message');
+
+      expect(warnSpy).toHaveBeenCalled();
+
       warnSpy.mockRestore();
     });
 
-    it('configure updates settings', () => {
+    it('configure updates settings including log level', () => {
       const consoleSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
 
       testLogger.configure({ logLevel: LogLevel.DEBUG });
@@ -44,7 +61,7 @@ describe('EventStateLogger', () => {
       consoleSpy.mockRestore();
     });
 
-    it('setLogLevel changes log level', () => {
+    it('setLogLevel changes global log level', () => {
       const consoleSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
 
       testLogger.setLogLevel(LogLevel.INFO);
@@ -58,24 +75,24 @@ describe('EventStateLogger', () => {
 
   describe('enableDebug / disableDebug', () => {
     it('enableDebug sets debug level and logs enabled message', () => {
-      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
 
       testLogger.enableDebug();
 
-      expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Debug logging enabled'));
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Debug logging enabled'));
 
-      consoleSpy.mockRestore();
+      infoSpy.mockRestore();
     });
 
-    it('disableDebug sets error level and logs disabled message', () => {
-      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    it('disableDebug sets warn level and logs disabled message', () => {
+      const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
 
       testLogger.enableDebug();
       testLogger.disableDebug();
 
-      expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Debug logging disabled'));
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Debug logging disabled'));
 
-      consoleSpy.mockRestore();
+      infoSpy.mockRestore();
     });
   });
 
@@ -146,6 +163,19 @@ describe('EventStateLogger', () => {
         'test',
         { data: 'value' },
         123
+      );
+
+      consoleSpy.mockRestore();
+    });
+
+    it('uses [EventState] prefix format', () => {
+      const consoleSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
+
+      testLogger.debug('test message');
+
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining('[EventState]'),
+        'test message'
       );
 
       consoleSpy.mockRestore();
@@ -555,6 +585,26 @@ describe('EventStateLogger', () => {
   describe('singleton logger', () => {
     it('exports singleton instance', () => {
       expect(logger).toBeInstanceOf(EventStateLogger);
+    });
+  });
+
+  describe('global level integration', () => {
+    it('setLogLevel affects global level', () => {
+      const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
+
+      // Create two loggers
+      const logger1 = new EventStateLogger();
+      const logger2 = new EventStateLogger();
+
+      // Set level on first logger
+      logger1.setLogLevel(LogLevel.DEBUG);
+
+      // Second logger should also log debug (global level changed)
+      logger2.debug('from logger2');
+
+      expect(debugSpy).toHaveBeenCalled();
+
+      debugSpy.mockRestore();
     });
   });
 });

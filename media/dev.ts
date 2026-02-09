@@ -12,10 +12,13 @@
 
 import { EventStateManager } from './state/EventStateManager';
 import { InspectorShadowActor } from './dev/inspector/InspectorShadowActor';
+import { createLogger } from './logging';
+
+const log = createLogger('DevTools');
 
 // Initialize immediately when loaded
 (function initDevTools() {
-  console.log('[DevTools] Initializing actor-based dev tools...');
+  log.info('Initializing actor-based dev tools...');
 
   // Create a dedicated manager for dev tools
   // (Separate from main app since this is a standalone bundle)
@@ -54,5 +57,5 @@ import { InspectorShadowActor } from './dev/inspector/InspectorShadowActor';
     manager: devManager
   };
 
-  console.log('[DevTools] Ready! Access via: window.devTools.inspector or window.devTools.toggle()');
+  log.info('Ready! Access via: window.devTools.inspector or window.devTools.toggle()');
 })();

@@ -25,6 +25,8 @@ import { settingsShadowStyles } from './shadowStyles';
 
 export interface SettingsValues {
   logLevel: string;
+  webviewLogLevel: string;
+  tracingEnabled: boolean;
   logColors: boolean;
   allowAllCommands: boolean;
   systemPrompt: string;
@@ -46,7 +48,9 @@ export interface DefaultPrompt {
 
 export class SettingsShadowActor extends PopupShadowActor {
   // Settings state
-  private _logLevel = 'INFO';
+  private _logLevel = 'WARN';
+  private _webviewLogLevel = 'WARN';
+  private _tracingEnabled = true;
   private _logColors = true;
   private _allowAllCommands = false;
   private _systemPrompt = '';
@@ -93,14 +97,30 @@ export class SettingsShadowActor extends PopupShadowActor {
       <div class="settings-section">
         <div class="settings-section-title">Logging</div>
         <div class="settings-control">
-          <label>Log Level</label>
+          <label>Extension Output</label>
           <select class="settings-select" data-setting="logLevel">
-            <option value="DEBUG" ${this._logLevel === 'DEBUG' ? 'selected' : ''}>Debug (verbose)</option>
-            <option value="INFO" ${this._logLevel === 'INFO' ? 'selected' : ''}>Info (default)</option>
-            <option value="WARN" ${this._logLevel === 'WARN' ? 'selected' : ''}>Warnings only</option>
+            <option value="DEBUG" ${this._logLevel === 'DEBUG' ? 'selected' : ''}>Debug (all messages)</option>
+            <option value="INFO" ${this._logLevel === 'INFO' ? 'selected' : ''}>Info and above</option>
+            <option value="WARN" ${this._logLevel === 'WARN' ? 'selected' : ''}>Warn and above (default)</option>
             <option value="ERROR" ${this._logLevel === 'ERROR' ? 'selected' : ''}>Errors only</option>
             <option value="OFF" ${this._logLevel === 'OFF' ? 'selected' : ''}>Off</option>
           </select>
+        </div>
+        <div class="settings-control">
+          <label>Webview Console</label>
+          <select class="settings-select" data-setting="webviewLogLevel">
+            <option value="DEBUG" ${this._webviewLogLevel === 'DEBUG' ? 'selected' : ''}>Debug (all messages)</option>
+            <option value="INFO" ${this._webviewLogLevel === 'INFO' ? 'selected' : ''}>Info and above</option>
+            <option value="WARN" ${this._webviewLogLevel === 'WARN' ? 'selected' : ''}>Warn and above (default)</option>
+            <option value="ERROR" ${this._webviewLogLevel === 'ERROR' ? 'selected' : ''}>Errors only</option>
+          </select>
+        </div>
+        <div class="settings-control">
+          <label>
+            <input type="checkbox" data-setting="tracingEnabled" ${this._tracingEnabled ? 'checked' : ''}>
+            Trace Collection
+          </label>
+          <div class="settings-hint">Collect structured traces for debugging</div>
         </div>
         <div class="settings-control">
           <label>
@@ -276,6 +296,14 @@ export class SettingsShadowActor extends PopupShadowActor {
       this._logLevel = settings.logLevel;
       changed = true;
     }
+    if (settings.webviewLogLevel !== undefined && settings.webviewLogLevel !== this._webviewLogLevel) {
+      this._webviewLogLevel = settings.webviewLogLevel;
+      changed = true;
+    }
+    if (settings.tracingEnabled !== undefined && settings.tracingEnabled !== this._tracingEnabled) {
+      this._tracingEnabled = settings.tracingEnabled;
+      changed = true;
+    }
     if (settings.logColors !== undefined && settings.logColors !== this._logColors) {
       this._logColors = settings.logColors;
       changed = true;
@@ -334,6 +362,14 @@ export class SettingsShadowActor extends PopupShadowActor {
       case 'logLevel':
         this._logLevel = value as string;
         this._vscode.postMessage({ type: 'setLogLevel', logLevel: value });
+        break;
+      case 'webviewLogLevel':
+        this._webviewLogLevel = value as string;
+        this._vscode.postMessage({ type: 'setWebviewLogLevel', logLevel: value });
+        break;
+      case 'tracingEnabled':
+        this._tracingEnabled = value as boolean;
+        this._vscode.postMessage({ type: 'setTracingEnabled', enabled: value });
         break;
       case 'logColors':
         this._logColors = value as boolean;
@@ -458,6 +494,8 @@ export class SettingsShadowActor extends PopupShadowActor {
   getSettings(): SettingsValues {
     return {
       logLevel: this._logLevel,
+      webviewLogLevel: this._webviewLogLevel,
+      tracingEnabled: this._tracingEnabled,
       logColors: this._logColors,
       allowAllCommands: this._allowAllCommands,
       systemPrompt: this._systemPrompt,

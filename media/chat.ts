@@ -30,6 +30,9 @@ import {
 import { InspectorShadowActor } from './dev/inspector';
 import { AnimationHelper } from './utils';
 import { webviewTracer } from './tracing';
+import { createLogger } from './logging';
+
+const log = createLogger('ActorSystem');
 
 // ============================================
 // VS Code API Types
@@ -139,7 +142,7 @@ function initializeActorSystem(): void {
   // Uses VirtualListActor with pooled MessageTurnActors for efficient
   // rendering of conversations with many messages.
 
-  console.log('[ActorSystem] Using virtual rendering mode (1B architecture)');
+  log.info('Using virtual rendering mode (1B architecture)');
 
   const virtualList = new VirtualListActor(manager, chatMessages, {
     config: {
@@ -162,7 +165,7 @@ function initializeActorSystem(): void {
     }
   });
 
-  console.log('[ActorSystem] VirtualListActor initialized');
+  log.info('VirtualListActor initialized');
 
   // InputAreaShadowActor - owns its DOM, renders into inputAreaContainer
   const inputArea = new InputAreaShadowActor(manager, inputAreaContainer, vscode);
@@ -335,7 +338,7 @@ function initializeActorSystem(): void {
     toolbar,
     history,
   });
-  console.log('[ActorSystem] Initialized with VirtualMessageGatewayActor');
+  log.info('Initialized with VirtualMessageGatewayActor');
 
   // ============================================
   // Model Dropdown Handlers

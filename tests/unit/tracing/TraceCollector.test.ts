@@ -878,4 +878,137 @@ describe('TraceCollector', () => {
       expect(exported).toBe('');
     });
   });
+
+  describe('export format validation', () => {
+    it('JSONL produces valid JSON on each line', () => {
+      collector.clear();
+
+      // Add events with various data types and special characters
+      collector.importEvent('user.input', 'message with "quotes"', {
+        originalId: 'evt-1',
+        timestamp: '2026-02-09T03:00:00.000Z',
+        data: { content: 'Hello\nWorld', special: '<>&"' }
+      });
+      collector.importEvent('api.request', 'request', {
+        originalId: 'evt-2',
+        timestamp: '2026-02-09T03:00:01.000Z',
+        data: { nested: { a: 1, b: [1, 2, 3] } }
+      });
+      collector.importEvent('actor.bind', 'unicode-test', {
+        originalId: 'evt-3',
+        timestamp: '2026-02-09T03:00:02.000Z',
+        data: { emoji: '🎉', chinese: '中文' }
+      });
+
+      const exported = collector.export('jsonl');
+      const lines = exported.split('\n');
+
+      expect(lines).toHaveLength(3);
+
+      // Each line should be valid JSON
+      for (let i = 0; i < lines.length; i++) {
+        expect(() => JSON.parse(lines[i])).not.toThrow();
+        const parsed = JSON.parse(lines[i]);
+        expect(parsed).toHaveProperty('id');
+        expect(parsed).toHaveProperty('timestamp');
+        expect(parsed).toHaveProperty('category');
+      }
+    });
+
+    it('JSONL handles events with no data payload', () => {
+      collector.clear();
+
+      collector.importEvent('user.click', 'button', {
+        originalId: 'evt-1',
+        timestamp: '2026-02-09T03:00:00.000Z'
+        // No data field
+      });
+
+      const exported = collector.export('jsonl');
+      const parsed = JSON.parse(exported);
+
+      expect(parsed.data).toHaveProperty('_importedFrom', 'webview');
+    });
+
+    it('JSON produces valid parseable array', () => {
+      collector.clear();
+
+      for (let i = 0; i < 5; i++) {
+        collector.importEvent('actor.bind', `event-${i}`, {
+          originalId: `evt-${i}`,
+          timestamp: `2026-02-09T03:00:0${i}.000Z`
+        });
+      }
+
+      const exported = collector.export('json');
+
+      // Should be valid JSON array
+      expect(() => JSON.parse(exported)).not.toThrow();
+      const parsed = JSON.parse(exported);
+      expect(Array.isArray(parsed)).toBe(true);
+      expect(parsed).toHaveLength(5);
+    });
+
+    it('pretty format includes all required fields', () => {
+      collector.clear();
+
+      collector.importEvent('api.request', 'test-op', {
+        originalId: 'evt-1',
+        timestamp: '2026-02-09T03:00:00.000Z',
+        data: { key: 'value' }
+      });
+
+      const exported = collector.export('pretty');
+
+      // Should contain timestamp
+      expect(exported).toContain('2026-02-09T03:00:00.000Z');
+      // Should contain source
+      expect(exported).toContain('[webview]');
+      // Should contain category
+      expect(exported).toContain('[api.request]');
+      // Should contain operation
+      expect(exported).toContain('test-op');
+      // Should contain relativeTime
+      expect(exported).toMatch(/\d+\.\d+ms/);
+    });
+
+    it('pretty format shows status indicators', () => {
+      collector.clear();
+
+      // Started event
+      const spanId = collector.startSpan('api.request', 'started-op');
+      // Completed event
+      collector.endSpan(spanId, { status: 'completed' });
+
+      // Failed event (create a separate span for this)
+      const failSpanId = collector.startSpan('tool.call', 'failed-op');
+      collector.endSpan(failSpanId, { status: 'failed', error: 'Test error' });
+
+      const exported = collector.export('pretty');
+      const lines = exported.split('\n');
+
+      // Find lines with status indicators
+      const startedLine = lines.find(l => l.includes('started-op') && l.includes('>'));
+      const completedLine = lines.find(l => l.includes('started-op') && l.includes('<'));
+      const failedLine = lines.find(l => l.includes('failed-op') && l.includes('!'));
+
+      expect(startedLine).toBeDefined();
+      expect(completedLine).toBeDefined();
+      expect(failedLine).toBeDefined();
+      expect(failedLine).toContain('ERROR: Test error');
+    });
+
+    it('pretty format shows duration for completed spans', () => {
+      collector.clear();
+
+      const spanId = collector.startSpan('api.request', 'timed-op');
+      // Small delay to ensure duration > 0
+      collector.endSpan(spanId, { status: 'completed' });
+
+      const exported = collector.export('pretty');
+
+      // Should contain duration in parentheses
+      expect(exported).toMatch(/\(\d+\.\d+ms\)/);
+    });
+  });
 });

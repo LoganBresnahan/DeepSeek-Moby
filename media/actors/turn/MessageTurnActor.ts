@@ -24,6 +24,7 @@
 import { InterleavedShadowActor, ShadowContainer } from '../../state/InterleavedShadowActor';
 import { EventStateManager } from '../../state/EventStateManager';
 import { turnActorStyles } from './styles';
+import { createLogger } from '../../logging';
 import type {
   TurnRole,
   TurnData,
@@ -39,6 +40,8 @@ import type {
   PendingFile,
   PendingFileStatus
 } from './types';
+
+const log = createLogger('MessageTurnActor');
 
 // ============================================
 // Configuration
@@ -604,14 +607,14 @@ export class MessageTurnActor extends InterleavedShadowActor {
    * Create a shell segment.
    */
   createShellSegment(commands: Array<{ command: string; cwd?: string }>): string {
-    console.log(`[MessageTurnActor] createShellSegment: creating with ${commands.length} commands`);
+    log.debug(`createShellSegment: creating with ${commands.length} commands`);
 
     const container = this.createContainer('message', {
       hostClasses: ['shell-container'],
       dataAttributes: { 'turn-id': this._turnId ?? '' }
     });
 
-    console.log(`[MessageTurnActor] createShellSegment: container created with id ${container.id}`);
+    log.debug(`createShellSegment: container created with id ${container.id}`);
 
     const shellCommands: ShellCommand[] = commands.map(cmd => ({
       command: cmd.command,
@@ -632,7 +635,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
     this.renderShellSegment(segment.id);
     this.setupShellHandlers(container.id);
 
-    console.log(`[MessageTurnActor] createShellSegment: rendered and setup handlers for ${segment.id}`);
+    log.debug(`createShellSegment: rendered and setup handlers for ${segment.id}`);
 
     this.publish({ 'turn.shellSegmentCount': this._shellSegments.size });
 

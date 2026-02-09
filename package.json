@@ -117,7 +117,7 @@
         },
         "deepseek.logLevel": {
           "type": "string",
-          "default": "INFO",
+          "default": "WARN",
           "enum": [
             "DEBUG",
             "INFO",
@@ -127,12 +127,34 @@
           ],
           "enumDescriptions": [
             "Show all messages including debug info",
-            "Show info, warnings and errors (default)",
-            "Show warnings and errors only",
+            "Show info, warnings and errors",
+            "Show warnings and errors (default)",
             "Show errors only",
             "Disable logging"
           ],
-          "description": "Minimum log level to display in Output channel"
+          "description": "Extension Output: Minimum log level to display in Output channel"
+        },
+        "deepseek.webviewLogLevel": {
+          "type": "string",
+          "default": "WARN",
+          "enum": [
+            "DEBUG",
+            "INFO",
+            "WARN",
+            "ERROR"
+          ],
+          "enumDescriptions": [
+            "Show all messages including debug info",
+            "Show info, warnings and errors",
+            "Show warnings and errors only (default)",
+            "Show errors only"
+          ],
+          "description": "Webview Console: Minimum log level for browser console logging"
+        },
+        "deepseek.tracing.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable trace collection for debugging and AI-agent observability"
         },
         "deepseek.logColors": {
           "type": "boolean",
