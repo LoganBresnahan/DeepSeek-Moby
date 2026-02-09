@@ -12,6 +12,7 @@ import {
   SpanOptions,
   SpanResult,
   TraceOptions,
+  ImportEventOptions,
   ExportFormat,
   TraceCollectorConfig,
   TraceLevel,
@@ -336,6 +337,57 @@ export class TraceCollector {
       level,
       status: 'completed',
       data: options.data
+    };
+
+    this.emit(event);
+    return id;
+  }
+
+  /**
+   * Import an external trace event (e.g., from webview).
+   * Preserves the original timestamp for accurate chronological ordering.
+   */
+  importEvent(
+    category: TraceCategory,
+    operation: string,
+    options: ImportEventOptions
+  ): string {
+    const level = options.level || 'info';
+    if (!this.shouldTrace(level)) {
+      return '';
+    }
+
+    // Generate new ID but preserve reference to original
+    const id = generateId('imported');
+
+    // Parse the original timestamp to get a comparable relativeTime
+    // We use the original timestamp's time relative to the first event
+    const originalTimestamp = new Date(options.timestamp).getTime();
+    const firstEventTime = this.buffer.length > 0
+      ? new Date(this.buffer[0].timestamp).getTime()
+      : originalTimestamp;
+
+    // Calculate a synthetic relativeTime based on the time difference
+    // from the first event (or 0 if this is the first event)
+    const relativeTime = originalTimestamp - firstEventTime;
+
+    const event: TraceEvent = {
+      id,
+      correlationId: options.correlationId || 'standalone',
+      timestamp: options.timestamp, // Use original timestamp!
+      relativeTime,
+      source: 'webview',
+      category,
+      operation,
+      executionMode: options.executionMode || 'sync',
+      level,
+      status: options.status || 'completed',
+      data: {
+        ...options.data,
+        _importedFrom: 'webview',
+        _originalId: options.originalId,
+        _originalRelativeTime: options.originalRelativeTime
+      }
     };
 
     this.emit(event);

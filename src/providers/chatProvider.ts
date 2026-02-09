@@ -7,6 +7,7 @@ import { StatusBar } from '../views/statusBar';
 import { ConversationManager } from '../events';
 import { DiffEngine } from '../utils/diff';
 import { logger } from '../utils/logger';
+import { tracer, type TraceCategory } from '../tracing';
 import { workspaceTools, applyCodeEditTool, executeToolCall } from '../tools/workspaceTools';
 import { parseDSMLToolCalls, stripDSML } from '../utils/dsmlParser';
 import { TavilyClient, TavilySearchResponse } from '../clients/tavilyClient';
@@ -494,6 +495,10 @@ which I already edited - would you like me to update it?"
         case 'exportAllHistory':
           await this.exportAllHistoryToFile(data.format);
           break;
+        // Webview trace events - merge into extension trace collector
+        case 'traceEvents':
+          this.handleWebviewTraceEvents(data.events);
+          break;
       }
     });
 
@@ -972,6 +977,36 @@ Always:
     } catch (error) {
       logger.error(`[ChatProvider] Failed to export history: ${error}`);
       vscode.window.showErrorMessage('Failed to export history');
+    }
+  }
+
+  /**
+   * Handle trace events received from the webview.
+   * Merges webview traces into the extension trace collector for unified timeline.
+   */
+  private handleWebviewTraceEvents(events: unknown[]): void {
+    if (!Array.isArray(events)) return;
+
+    for (const event of events) {
+      // Validate event structure
+      if (!event || typeof event !== 'object') continue;
+
+      const e = event as Record<string, unknown>;
+      if (!e.category || !e.operation || !e.timestamp) continue;
+
+      // Import webview trace into extension tracer
+      // Use importEvent() to preserve the original webview timestamp
+      // This ensures chronological ordering in the unified timeline
+      tracer.importEvent(e.category as TraceCategory, e.operation as string, {
+        originalId: e.id as string,
+        timestamp: e.timestamp as string, // Preserve original timestamp!
+        originalRelativeTime: e.relativeTime as number | undefined,
+        correlationId: e.correlationId as string | undefined,
+        executionMode: (e.executionMode as 'sync' | 'async' | 'callback') || 'sync',
+        level: (e.level as 'debug' | 'info' | 'warn' | 'error') || 'info',
+        status: (e.status as 'started' | 'completed' | 'failed') || 'completed',
+        data: e.data as Record<string, unknown> || {}
+      });
     }
   }
 

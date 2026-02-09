@@ -29,6 +29,7 @@ import {
 // Dev-only actor - not included in production bundle
 import { InspectorShadowActor } from './dev/inspector';
 import { AnimationHelper } from './utils';
+import { webviewTracer } from './tracing';
 
 // ============================================
 // VS Code API Types
@@ -83,6 +84,10 @@ function initializeActorSystem(): void {
 
   // Create the event state manager
   const manager = new EventStateManager();
+
+  // Initialize webview tracer for unified observability
+  webviewTracer.initialize(vscode as any);
+  manager.setTracer(webviewTracer);
 
   // Get container elements for Shadow actors
   const inputAreaContainer = getElement<HTMLDivElement>('inputAreaContainer');

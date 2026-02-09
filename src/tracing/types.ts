@@ -155,6 +155,29 @@ export interface TraceOptions {
 }
 
 /**
+ * Options for importing an external event (e.g., from webview).
+ * Allows preserving the original timestamp and ID.
+ */
+export interface ImportEventOptions {
+  /** Original event ID (will be prefixed with 'imported-') */
+  originalId: string;
+  /** Original ISO timestamp to preserve chronological order */
+  timestamp: string;
+  /** Original relative time from the source */
+  originalRelativeTime?: number;
+  /** Correlation ID to link with other events */
+  correlationId?: string;
+  /** Execution mode (defaults to 'sync') */
+  executionMode?: ExecutionMode;
+  /** Log level (defaults to 'info') */
+  level?: TraceLevel;
+  /** Additional data */
+  data?: Record<string, unknown>;
+  /** Operation status */
+  status?: TraceStatus;
+}
+
+/**
  * Result when ending a span.
  */
 export interface SpanResult {

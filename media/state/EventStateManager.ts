@@ -9,6 +9,7 @@ import { deepEqual, deepClone, wildcardMatch } from '../utils';
 import { EventStateLogger } from './EventStateLogger';
 import type { ActorRegistration, StateChangeEvent, GlobalState } from './types';
 import { shadowBaseStyles, interleavedBaseStyles } from './sharedStyles';
+import type { WebviewTracer } from '../tracing';
 
 export class EventStateManager {
   /** Global state store */
@@ -40,9 +41,27 @@ export class EventStateManager {
   private _shadowBaseSheet: CSSStyleSheet | null = null;
   private _interleavedBaseSheet: CSSStyleSheet | null = null;
 
+  /** Optional tracer for unified observability */
+  private tracer: WebviewTracer | null = null;
+
   constructor() {
     this.logger = new EventStateLogger();
     this.logger.managerInit();
+  }
+
+  /**
+   * Set the tracer for unified observability.
+   * Enables trace events for actor lifecycle and state changes.
+   */
+  setTracer(tracer: WebviewTracer | null): void {
+    this.tracer = tracer;
+  }
+
+  /**
+   * Get the current tracer (if set).
+   */
+  getTracer(): WebviewTracer | null {
+    return this.tracer;
   }
 
   /**
@@ -213,6 +232,9 @@ export class EventStateManager {
       actor.subscriptionKeys
     );
 
+    // Trace actor creation
+    this.tracer?.traceActorCreate(actor.actorId, 'actor');
+
     // Process initial state
     const changedKeys = this.updateGlobalState(initialState);
     if (changedKeys.length > 0) {
@@ -248,6 +270,9 @@ export class EventStateManager {
 
     this.actors.delete(actorId);
     this.logger.actorUnregister(actorId, this.actors.size);
+
+    // Trace actor destruction
+    this.tracer?.traceActorDestroy(actorId);
   }
 
   /**
@@ -287,6 +312,10 @@ export class EventStateManager {
 
     if (changedKeys.length > 0) {
       this.logger.stateChangeFlow(source, changedKeys, publicationChain.length);
+
+      // Trace publication
+      this.tracer?.tracePublish(source, changedKeys, publicationChain.length);
+
       this.broadcast(source, changedKeys, publicationChain);
     }
   }
@@ -390,6 +419,12 @@ export class EventStateManager {
 
       const relevantKeys = Array.from(keysSet);
       this.logger.broadcastToActor(actorId, relevantKeys);
+
+      // Trace subscription handler calls
+      for (const key of relevantKeys) {
+        this.tracer?.traceSubscribe(actorId, key);
+      }
+
       this.dispatchToActor(actor, {
         source,
         state: this.getStateForKeys(relevantKeys),

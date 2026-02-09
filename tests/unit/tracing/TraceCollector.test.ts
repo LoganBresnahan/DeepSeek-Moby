@@ -447,4 +447,101 @@ describe('TraceCollector', () => {
       expect(collector.size).toBe(1);
     });
   });
+
+  describe('importEvent', () => {
+    it('preserves original timestamp from webview', () => {
+      const originalTimestamp = '2026-02-09T02:49:10.409Z';
+
+      collector.importEvent('actor.create', 'TestActor', {
+        originalId: 'wv-evt-123',
+        timestamp: originalTimestamp,
+        data: { type: 'actor' }
+      });
+
+      const events = collector.getAll();
+      expect(events).toHaveLength(1);
+      expect(events[0].timestamp).toBe(originalTimestamp);
+      expect(events[0].source).toBe('webview');
+      expect(events[0].category).toBe('actor.create');
+      expect(events[0].operation).toBe('TestActor');
+    });
+
+    it('includes metadata about the imported event', () => {
+      collector.importEvent('actor.bind', 'TestActor', {
+        originalId: 'wv-evt-456',
+        timestamp: '2026-02-09T02:50:00.000Z',
+        originalRelativeTime: 1234.5,
+        data: { turnId: 'turn-1' }
+      });
+
+      const events = collector.getAll();
+      expect(events[0].data).toEqual({
+        turnId: 'turn-1',
+        _importedFrom: 'webview',
+        _originalId: 'wv-evt-456',
+        _originalRelativeTime: 1234.5
+      });
+    });
+
+    it('generates imported- prefixed ID', () => {
+      collector.importEvent('state.publish', 'keys', {
+        originalId: 'wv-evt-789',
+        timestamp: '2026-02-09T02:51:00.000Z'
+      });
+
+      const events = collector.getAll();
+      expect(events[0].id).toMatch(/^imported-\d+-[a-z0-9]+$/);
+    });
+
+    it('calculates relativeTime from first event', () => {
+      // First, add an extension event
+      collector.trace('user.input', 'local-event');
+
+      const events1 = collector.getAll();
+      const firstTimestamp = events1[0].timestamp;
+
+      // Import a webview event 5 seconds later
+      const laterTimestamp = new Date(new Date(firstTimestamp).getTime() + 5000).toISOString();
+      collector.importEvent('actor.create', 'WebviewActor', {
+        originalId: 'wv-evt-abc',
+        timestamp: laterTimestamp
+      });
+
+      const events = collector.getAll();
+      expect(events).toHaveLength(2);
+      // The imported event's relativeTime should be ~5000ms after first event
+      expect(events[1].relativeTime).toBeCloseTo(5000, -2); // Within 100ms tolerance
+    });
+
+    it('respects minLevel filter', () => {
+      collector.configure({ minLevel: 'warn' });
+
+      collector.importEvent('actor.create', 'TestActor', {
+        originalId: 'wv-evt-debug',
+        timestamp: '2026-02-09T02:52:00.000Z',
+        level: 'debug'
+      });
+
+      expect(collector.size).toBe(0);
+
+      collector.importEvent('actor.create', 'TestActor', {
+        originalId: 'wv-evt-warn',
+        timestamp: '2026-02-09T02:52:01.000Z',
+        level: 'warn'
+      });
+
+      expect(collector.size).toBe(1);
+    });
+
+    it('preserves status from webview event', () => {
+      collector.importEvent('actor.bind', 'TestActor', {
+        originalId: 'wv-evt-started',
+        timestamp: '2026-02-09T02:53:00.000Z',
+        status: 'started'
+      });
+
+      const events = collector.getAll();
+      expect(events[0].status).toBe('started');
+    });
+  });
 });

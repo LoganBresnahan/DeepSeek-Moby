@@ -747,12 +747,16 @@ npm run test:ui -- --mode=human --visual --trace=./test-trace.json
 **Duration Fix:**
 16. ✅ Removed `durationMs` from data payload - now using tracer's internal timing consistently
 
-### Phase 2: Webview Tracing
+### Phase 2: Webview Tracing ✅ COMPLETE
 
-1. Create `media/tracing/WebviewTracer.ts`
-2. Integrate with `EventStateManager`
-3. Add trace emission to `VirtualListActor` and `VirtualMessageGatewayActor`
-4. Add bridge for webview → extension trace sync
+1. ✅ Created `media/tracing/WebviewTracer.ts` - Singleton tracer with startSpan/endSpan/trace methods
+2. ✅ Created `media/tracing/types.ts` - WebviewTraceEvent, WebviewTraceCategory, and config types
+3. ✅ Created `media/tracing/index.ts` - Module exports
+4. ✅ Integrated with `EventStateManager` - setTracer/getTracer, traces for register/unregister/handleStateChange/broadcast
+5. ✅ Added trace emission to `VirtualListActor` - bind/unbind traces in bindActorToTurn(), updateVisibility(), clear()
+6. ✅ Added bridge for webview → extension trace sync - postMessage handler in chatProvider.ts
+7. ✅ Added convenience methods: tracePublish, traceSubscribe, traceActorCreate, traceActorBind, traceActorUnbind, traceBridgeSend, traceRenderTurn, traceUserClick
+8. ✅ Added comprehensive tests for WebviewTracer (30 tests passing)
 
 ### Phase 3: Mock LLM Client
 
@@ -937,6 +941,33 @@ A typical user session might generate:
 
 4. ~~**What about correlation map cleanup?** Currently grows unbounded. Should we evict old correlation IDs?~~ **RESOLVED:** Correlation map is now cleaned up when events are evicted.
 
+### Log Volume & Human Readability
+
+**Problem:** At the `info` level, trace output generates an overwhelming number of entries. A single API request with streaming can produce 100+ events (actor bind/unbind, state publishes, stream chunks). This is far too much for a human to read through when debugging.
+
+**Observations from real traces:**
+- Actor bind/unbind events fire rapidly during scroll (dozens per second)
+- State publish events fire for every keystroke and UI interaction
+- Webview → extension sync batches events but still creates many entries
+- A 6-minute streaming response generated 41,000+ tokens across 11,000+ chunks
+
+**Potential solutions:**
+
+| Approach | Description | Trade-offs |
+|----------|-------------|------------|
+| **Batched summaries** | Collapse repeated events into "N events of type X in Yms" | Loses individual timing, simpler to read |
+| **Sampling** | Only log every Nth event of high-frequency types | May miss important events |
+| **Hierarchical logs** | Summarize at request level, expand on demand | Requires viewer tooling |
+| **Smarter filtering** | Only log state *changes*, not all publishes | Reduces noise significantly |
+| **Category budgets** | Limit events per category per time window | Prevents any category from dominating |
+| **Human-focused export** | Separate "pretty" format that aggregates | Keep detailed JSONL, summarized text |
+
+**Recommended next steps:**
+1. Add aggregation to `pretty` export format (e.g., "47 actor.bind events" instead of 47 lines)
+2. Consider `minLevel: 'warn'` as default, with explicit enable for debugging
+3. Add category-specific sampling (e.g., `state.publish` only logs on actual value change)
+4. Explore a "trace viewer" UI that can collapse/expand event groups
+
 ### Action Items (If Needed)
 
 | Priority | Item | Effort | Status |
@@ -945,9 +976,10 @@ A typical user session might generate:
 | ~~Low~~ | ~~Add data payload truncation~~ | ~~Small~~ | ✅ Done |
 | ~~Medium~~ | ~~Add memory usage warning~~ | ~~Small~~ | ✅ Done |
 | ~~Low~~ | ~~Correlation map cleanup~~ | ~~Medium~~ | ✅ Done |
-| Medium | Add memory usage warning | Small |
-| Medium | Add "enabled by default" setting | Small |
-| Low | Correlation map cleanup | Medium |
-| Future | Disk persistence for crash debugging | Large |
+| Medium | Add "tracing enabled" user setting | Small | Pending |
+| Medium | Aggregated pretty export format | Medium | Pending |
+| Low | Category-specific sampling/filtering | Medium | Pending |
+| Future | Trace viewer UI with collapsible groups | Large | Pending |
+| Future | Disk persistence for crash debugging | Large | Pending |
 
 For now, the current implementation is safe for typical usage. Monitor real-world usage patterns before adding complexity.

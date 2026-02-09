@@ -874,6 +874,8 @@ export class VirtualListActor extends EventStateActor {
     // Release actors for turns no longer visible
     for (const [turnId, bound] of this._boundActors) {
       if (!shouldBeVisible.has(turnId)) {
+        // Trace actor unbind
+        this.manager.getTracer()?.traceActorUnbind(bound.actor.actorId, turnId);
         bound.resizeObserver.disconnect();
         this.releaseActor(bound.actor);
         this._boundActors.delete(turnId);
@@ -943,6 +945,9 @@ export class VirtualListActor extends EventStateActor {
       element: actor.element,
       resizeObserver
     });
+
+    // Trace actor bind
+    this.manager.getTracer()?.traceActorBind(actor.actorId, turn.turnId);
 
     // Measure height after render
     requestAnimationFrame(() => {
@@ -1129,7 +1134,9 @@ export class VirtualListActor extends EventStateActor {
 
   clear(): void {
     // Release all bound actors
-    for (const bound of this._boundActors.values()) {
+    for (const [turnId, bound] of this._boundActors) {
+      // Trace actor unbind
+      this.manager.getTracer()?.traceActorUnbind(bound.actor.actorId, turnId);
       bound.resizeObserver.disconnect();
       this.releaseActor(bound.actor);
     }
