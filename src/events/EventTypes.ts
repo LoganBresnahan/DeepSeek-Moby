@@ -62,6 +62,7 @@ export interface AssistantMessageEvent extends BaseEvent {
     promptTokens: number;
     completionTokens: number;
   };
+  contentIterations?: string[];
 }
 
 /**

@@ -79,6 +79,7 @@ function createMockVirtualListActor() {
       if (turn) turn.thinkingIterations.push({ content: '', complete: false });
     }),
     updateThinkingContent: vi.fn(),
+    completeThinkingIteration: vi.fn(),
     createShellSegment: vi.fn(() => 'shell-segment-1'),
     startShellSegment: vi.fn(),
     setShellResults: vi.fn(),
@@ -489,6 +490,174 @@ describe('VirtualMessageGatewayActor', () => {
       expect(mockActors.virtualList.endStreamingTurn).toHaveBeenCalled();
       expect(gateway.phase).toBe('idle');
       expect(gateway.currentTurnId).toBe(null);
+    });
+  });
+
+  describe('loadHistory restore', () => {
+    it('restores a simple user + assistant conversation', () => {
+      dispatchMessage({
+        type: 'loadHistory',
+        history: [
+          { role: 'user', content: 'Hello', timestamp: 1000 },
+          { role: 'assistant', content: 'Hi there!', model: 'deepseek-chat', timestamp: 2000 }
+        ]
+      });
+
+      expect(mockActors.session.handleLoadHistory).toHaveBeenCalled();
+      expect(mockActors.virtualList.clear).toHaveBeenCalled();
+      expect(mockActors.virtualList.addTurn).toHaveBeenCalledTimes(2);
+      expect(mockActors.virtualList.addTextSegment).toHaveBeenCalledWith('turn-1', 'Hello');
+      expect(mockActors.virtualList.addTextSegment).toHaveBeenCalledWith('turn-2', 'Hi there!');
+    });
+
+    it('restores Reasoner conversation with interleaved thinking + shell', () => {
+      dispatchMessage({
+        type: 'loadHistory',
+        history: [
+          { role: 'user', content: 'Run a command', timestamp: 1000 },
+          {
+            role: 'assistant',
+            content: 'Here are the results.',
+            model: 'deepseek-reasoner',
+            reasoning_iterations: ['Let me think...', 'Now I understand.'],
+            shellResults: [{ command: 'ls -la', output: 'file1.txt', success: true }],
+            contentIterations: ['Let me check', 'Here are the results.'],
+            timestamp: 2000
+          }
+        ]
+      });
+
+      // 2 thinking iterations
+      expect(mockActors.virtualList.startThinkingIteration).toHaveBeenCalledTimes(2);
+      expect(mockActors.virtualList.updateThinkingContent).toHaveBeenCalledWith('turn-2', 'Let me think...');
+      expect(mockActors.virtualList.updateThinkingContent).toHaveBeenCalledWith('turn-2', 'Now I understand.');
+      expect(mockActors.virtualList.completeThinkingIteration).toHaveBeenCalledTimes(2);
+
+      // 1 shell segment
+      expect(mockActors.virtualList.createShellSegment).toHaveBeenCalledWith(
+        'turn-2',
+        [{ command: 'ls -la' }]
+      );
+      expect(mockActors.virtualList.setShellResults).toHaveBeenCalledWith(
+        'turn-2',
+        'shell-segment-1',
+        [{ output: 'file1.txt', success: true }]
+      );
+
+      // Content: iteration 0's text (inline before shell) + iteration 1's text (remaining after shell)
+      expect(mockActors.virtualList.addTextSegment).toHaveBeenCalledWith('turn-2', 'Let me check');
+      expect(mockActors.virtualList.addTextSegment).toHaveBeenCalledWith('turn-2', 'Here are the results.');
+    });
+
+    it('restores Chat conversation with tools before text', () => {
+      dispatchMessage({
+        type: 'loadHistory',
+        history: [
+          { role: 'user', content: 'Fix the bug', timestamp: 1000 },
+          {
+            role: 'assistant',
+            content: 'Fixed it.',
+            model: 'deepseek-chat',
+            toolCalls: [
+              { name: 'read_file', detail: 'src/app.ts', status: 'done' },
+              { name: 'apply_code_edit', detail: 'fixing bug', status: 'done' }
+            ],
+            filesModified: ['src/app.ts'],
+            timestamp: 2000
+          }
+        ]
+      });
+
+      // Tools rendered
+      expect(mockActors.virtualList.startToolBatch).toHaveBeenCalledWith('turn-2', [
+        { name: 'read_file', detail: 'src/app.ts' },
+        { name: 'apply_code_edit', detail: 'fixing bug' }
+      ]);
+      expect(mockActors.virtualList.updateTool).toHaveBeenCalledWith('turn-2', 0, 'done');
+      expect(mockActors.virtualList.updateTool).toHaveBeenCalledWith('turn-2', 1, 'done');
+      expect(mockActors.virtualList.completeToolBatch).toHaveBeenCalledWith('turn-2');
+
+      // File modifications rendered
+      expect(mockActors.virtualList.addPendingFile).toHaveBeenCalledWith('turn-2', {
+        filePath: 'src/app.ts',
+        status: 'applied'
+      });
+
+      // Text content rendered
+      expect(mockActors.virtualList.addTextSegment).toHaveBeenCalledWith('turn-2', 'Fixed it.');
+
+      // Order verification: tools first, then files, then text
+      const toolCall = mockActors.virtualList.startToolBatch.mock.invocationCallOrder[0];
+      const fileCall = mockActors.virtualList.addPendingFile.mock.invocationCallOrder[0];
+      const textCall = (mockActors.virtualList.addTextSegment as ReturnType<typeof vi.fn>).mock.invocationCallOrder[1]; // [1] = assistant text (user is [0])
+      expect(toolCall).toBeLessThan(fileCall);
+      expect(fileCall).toBeLessThan(textCall);
+    });
+
+    it('restores Reasoner with files after shells but before final text', () => {
+      // 2 reasoning iterations, 1 shell (after first), 2 content iterations
+      // Order: thinking[0] → content[0] (inline) → shell[0] → thinking[1] → files → content[1] (final)
+      dispatchMessage({
+        type: 'loadHistory',
+        history: [
+          { role: 'user', content: 'Edit file', timestamp: 1000 },
+          {
+            role: 'assistant',
+            content: 'Added animals.',
+            model: 'deepseek-reasoner',
+            reasoning_iterations: ['Checking file...', 'Now editing...'],
+            shellResults: [{ command: 'cat test.txt', output: 'contents', success: true }],
+            contentIterations: ['Let me check first', 'Added animals.'],
+            filesModified: ['test.txt'],
+            timestamp: 2000
+          }
+        ]
+      });
+
+      // Files rendered
+      expect(mockActors.virtualList.addPendingFile).toHaveBeenCalledWith('turn-2', {
+        filePath: 'test.txt',
+        status: 'applied'
+      });
+
+      // Order: shell before files, files before final text
+      const shellCall = mockActors.virtualList.createShellSegment.mock.invocationCallOrder[0];
+      const fileCall = mockActors.virtualList.addPendingFile.mock.invocationCallOrder[0];
+      // Final text is addTextSegment call [2]: [0]=user text, [1]=inline content[0], [2]=remaining content[1]
+      const textCalls = (mockActors.virtualList.addTextSegment as ReturnType<typeof vi.fn>).mock.invocationCallOrder;
+      const finalTextCall = textCalls[textCalls.length - 1]; // last addTextSegment call
+      expect(shellCall).toBeLessThan(fileCall);
+      expect(fileCall).toBeLessThan(finalTextCall);
+    });
+
+    it('falls back to full content when contentIterations is missing (legacy data)', () => {
+      dispatchMessage({
+        type: 'loadHistory',
+        history: [
+          { role: 'user', content: 'Hello', timestamp: 1000 },
+          {
+            role: 'assistant',
+            content: 'Full accumulated text',
+            model: 'deepseek-reasoner',
+            reasoning_iterations: ['Thinking...'],
+            timestamp: 2000
+          }
+        ]
+      });
+
+      // Should fall back to m.content since no contentIterations
+      expect(mockActors.virtualList.addTextSegment).toHaveBeenCalledWith('turn-2', 'Full accumulated text');
+    });
+
+    it('handles empty history gracefully', () => {
+      dispatchMessage({
+        type: 'loadHistory',
+        history: []
+      });
+
+      expect(mockActors.session.handleLoadHistory).toHaveBeenCalled();
+      expect(mockActors.virtualList.clear).toHaveBeenCalled();
+      expect(mockActors.virtualList.addTurn).not.toHaveBeenCalled();
     });
   });
 

@@ -57,14 +57,17 @@ export async function initializeSqlJs(): Promise<void> {
 class StatementWrapper {
   private db: SqlJsDatabase;
   private sql: string;
+  private onMutate: (() => void) | null;
 
-  constructor(db: SqlJsDatabase, sql: string) {
+  constructor(db: SqlJsDatabase, sql: string, onMutate?: () => void) {
     this.db = db;
     this.sql = sql;
+    this.onMutate = onMutate || null;
   }
 
   run(...params: unknown[]): void {
     this.db.run(this.sql, params as any[]);
+    if (this.onMutate) this.onMutate();
   }
 
   get(...params: unknown[]): Record<string, unknown> | undefined {
@@ -145,7 +148,7 @@ export class Database {
    * Prepare a statement for repeated execution.
    */
   prepare(sql: string): StatementWrapper {
-    return new StatementWrapper(this.db, sql);
+    return new StatementWrapper(this.db, sql, () => this.scheduleSave());
   }
 
   /**

@@ -545,6 +545,24 @@ export class VirtualListActor extends EventStateActor {
   }
 
   /**
+   * Mark the current thinking iteration as complete.
+   */
+  completeThinkingIteration(turnId: string): void {
+    const turn = this._turnMap.get(turnId);
+    if (!turn) return;
+
+    const lastIteration = turn.thinkingIterations[turn.thinkingIterations.length - 1];
+    if (lastIteration) {
+      lastIteration.complete = true;
+    }
+
+    const bound = this._boundActors.get(turnId);
+    if (bound) {
+      bound.actor.completeThinkingIteration();
+    }
+  }
+
+  /**
    * Start a tool batch.
    */
   startToolBatch(turnId: string, tools: Array<{ name: string; detail: string }>): string | null {

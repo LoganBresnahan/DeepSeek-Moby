@@ -752,36 +752,145 @@ export class VirtualMessageGatewayActor extends EventStateActor {
     }
   }
 
+  /**
+   * Restore a previously saved conversation from RichHistoryTurn[] data.
+   *
+   * Clears the virtual list and re-renders all turns using the VirtualListActor API.
+   * The rendering order differs by model to match the live streaming experience:
+   *
+   * **Reasoner model** (has reasoning_iterations):
+   *   thinking[0] → content[0] → shell[0] → thinking[1] → content[1] → shell[1] →
+   *   ... → filesModified → remaining content (the "real" response text)
+   *
+   * **Chat model** (no reasoning):
+   *   toolCalls (badges) → filesModified → text content
+   *
+   * **Live vs restored differences:**
+   * - Restored tool badges are static (no progress animation)
+   * - Restored file modifications show as 'applied' (no pending/accept/reject actions)
+   * - Shell results show completed output (no streaming indicator)
+   * - Thinking iterations are immediately complete (no typing animation)
+   *
+   * If `contentIterations` is not available (older data), falls back to the full
+   * accumulated `content` field placed after all thinking/shells.
+   */
   private handleLoadHistory(msg: { type: string; [key: string]: unknown }): void {
     const { session, virtualList } = this._actors;
-    const history = msg.history as Array<{ role: string; content: string; files?: string[]; reasoning_content?: string }>;
+    const history = msg.history as Array<{
+      role: string;
+      content: string;
+      files?: string[];
+      reasoning_iterations?: string[];
+      contentIterations?: string[];
+      toolCalls?: Array<{ name: string; detail: string; status: string }>;
+      shellResults?: Array<{ command: string; output: string; success: boolean }>;
+      filesModified?: string[];
+      model?: string;
+      timestamp?: number;
+    }>;
+
+    log.debug(`[VirtualGateway] handleLoadHistory: ${history?.length ?? 0} turns`);
 
     session.handleLoadHistory();
     virtualList.clear();
     this._messageCounter = 0;
 
     if (history && Array.isArray(history)) {
-      history.forEach(m => {
-        const turnId = `turn-${++this._messageCounter}`;
+      try {
+        history.forEach(m => {
+          const turnId = `turn-${++this._messageCounter}`;
 
-        if (m.role === 'user') {
-          virtualList.addTurn(turnId, 'user', {
-            files: m.files,
-            timestamp: Date.now()
-          });
-          virtualList.addTextSegment(turnId, m.content);
-        } else if (m.role === 'assistant') {
-          virtualList.addTurn(turnId, 'assistant', {
-            timestamp: Date.now()
-          });
-          virtualList.addTextSegment(turnId, m.content);
+          if (m.role === 'user') {
+            virtualList.addTurn(turnId, 'user', {
+              files: m.files,
+              timestamp: m.timestamp || Date.now()
+            });
+            virtualList.addTextSegment(turnId, m.content);
+          } else if (m.role === 'assistant') {
+            virtualList.addTurn(turnId, 'assistant', {
+              model: m.model,
+              timestamp: m.timestamp || Date.now()
+            });
 
-          if (m.reasoning_content) {
-            virtualList.startThinkingIteration(turnId);
-            virtualList.updateThinkingContent(turnId, m.reasoning_content);
+            const reasoning = m.reasoning_iterations || [];
+            const contentIts = m.contentIterations || [];
+            const shells = m.shellResults || [];
+            const tools = m.toolCalls || [];
+
+            log.debug(`[VirtualGateway] restore turn ${turnId}: reasoning=${reasoning.length}, contentIts=${contentIts.length}, shells=${shells.length}, tools=${tools.length}, files=${m.filesModified?.length || 0}`);
+
+            if (reasoning.length > 0) {
+              // ── Reasoner model restore ──
+              // Interleave: thinking[i] → content[i] → shell[i] → files → ... → final text
+              let contentUsedInline = 0;
+
+              for (let i = 0; i < reasoning.length; i++) {
+                virtualList.startThinkingIteration(turnId);
+                virtualList.updateThinkingContent(turnId, reasoning[i]);
+                virtualList.completeThinkingIteration(turnId);
+
+                // Content text from this iteration (appears between thinking and shell)
+                if (i < contentIts.length && contentIts[i] && i < shells.length) {
+                  virtualList.addTextSegment(turnId, contentIts[i]);
+                  contentUsedInline++;
+                }
+
+                // Shell command from this iteration
+                if (i < shells.length) {
+                  const sr = shells[i];
+                  const segmentId = virtualList.createShellSegment(turnId, [{ command: sr.command }]);
+                  if (segmentId) {
+                    virtualList.setShellResults(turnId, segmentId, [{ output: sr.output, success: sr.success }]);
+                  }
+                }
+              }
+
+              // File modifications (appear after shells, before final text)
+              if (m.filesModified && m.filesModified.length > 0) {
+                for (const filePath of m.filesModified) {
+                  virtualList.addPendingFile(turnId, { filePath, status: 'applied' });
+                }
+              }
+
+              // Remaining content iterations (after the last shell) — the "real" response text
+              if (contentIts.length > contentUsedInline) {
+                for (let i = contentUsedInline; i < contentIts.length; i++) {
+                  if (contentIts[i]) {
+                    virtualList.addTextSegment(turnId, contentIts[i]);
+                  }
+                }
+              } else if (contentIts.length === 0 && m.content) {
+                virtualList.addTextSegment(turnId, m.content);
+              }
+            } else {
+              // ── Chat model restore ──
+              // Order matches live streaming: tools → files → text content
+              if (tools.length > 0) {
+                virtualList.startToolBatch(turnId, tools.map(tc => ({
+                  name: tc.name,
+                  detail: tc.detail
+                })));
+                tools.forEach((tc, i) => {
+                  virtualList.updateTool(turnId, i, tc.status as 'done' | 'error');
+                });
+                virtualList.completeToolBatch(turnId);
+              }
+
+              if (m.filesModified && m.filesModified.length > 0) {
+                for (const filePath of m.filesModified) {
+                  virtualList.addPendingFile(turnId, { filePath, status: 'applied' });
+                }
+              }
+
+              if (m.content) {
+                virtualList.addTextSegment(turnId, m.content);
+              }
+            }
           }
-        }
-      });
+        });
+      } catch (error) {
+        log.warn(`[VirtualGateway] handleLoadHistory ERROR: ${error}`);
+      }
     }
   }
 

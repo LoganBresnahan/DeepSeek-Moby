@@ -22,9 +22,33 @@ import { ContextBuilder, LLMContext, LLMMessage } from './ContextBuilder';
 import {
   ConversationEvent,
   Attachment,
+  UserMessageEvent,
+  AssistantMessageEvent,
+  AssistantReasoningEvent,
+  ToolCallEvent,
+  ToolResultEvent,
   isUserMessageEvent,
   isAssistantMessageEvent
 } from './EventTypes';
+
+/**
+ * A rich history turn for restoring conversations with full fidelity.
+ * Contains all segment types (reasoning, tools, shell) not just text.
+ */
+export interface RichHistoryTurn {
+  role: 'user' | 'assistant';
+  content: string;
+  // Assistant-only fields:
+  reasoning_iterations?: string[];
+  contentIterations?: string[];
+  toolCalls?: Array<{ name: string; detail: string; status: string }>;
+  shellResults?: Array<{ command: string; output: string; success: boolean }>;
+  filesModified?: string[];
+  model?: string;
+  // User-only fields:
+  files?: string[];
+  timestamp: number;
+}
 
 // Statement interface for our wrapper
 interface Statement {
@@ -378,13 +402,26 @@ export class ConversationManager {
   }
 
   /**
-   * Record an assistant message (after streaming completes).
+   * Record an assistant message after streaming completes.
+   *
+   * This is the final event in an assistant turn's save pipeline. It should be called
+   * AFTER all reasoning iterations, tool calls, tool results, and file modification
+   * markers have been recorded (those events attach to the turn via sequence ordering).
+   *
+   * @param content - The cleaned response text (shell tags and DSML stripped)
+   * @param model - The actual model used (e.g., 'deepseek-chat', 'deepseek-reasoner')
+   * @param finishReason - Why streaming ended ('stop', 'length' for partial, 'error')
+   * @param usage - Optional token usage stats
+   * @param contentIterations - Per-iteration content text for Reasoner model. Each entry
+   *   is the cleaned text output from one shell iteration, enabling correct interleaving
+   *   during restore (thinking[i] → content[i] → shell[i]). Omit for Chat model.
    */
   async recordAssistantMessage(
     content: string,
     model: string,
     finishReason: 'stop' | 'tool_calls' | 'length' | 'error',
-    usage?: { promptTokens: number; completionTokens: number }
+    usage?: { promptTokens: number; completionTokens: number },
+    contentIterations?: string[]
   ): Promise<ConversationEvent> {
     await this.ensureInitialized();
     const session = this.ensureCurrentSession();
@@ -396,7 +433,8 @@ export class ConversationManager {
       content,
       model,
       finishReason,
-      usage
+      usage,
+      contentIterations: contentIterations && contentIterations.length > 0 ? contentIterations : undefined
     });
 
     // Update session metadata
@@ -693,6 +731,201 @@ export class ConversationManager {
       content: (e as any).content,
       timestamp: new Date(e.timestamp)
     }));
+  }
+
+  /**
+   * Get rich history for a session, reconstructing full-fidelity turns from events.
+   *
+   * Queries all event types (user_message, assistant_message, assistant_reasoning,
+   * tool_call, tool_result) and groups them into {@link RichHistoryTurn} objects
+   * suitable for UI restore via `handleLoadHistory()` in the webview.
+   *
+   * **Turn grouping algorithm:**
+   * - `user_message` → creates a new user turn (finalizes any open assistant turn)
+   * - `assistant_reasoning` → starts/continues an assistant turn, appends to reasoning_iterations
+   * - `tool_call` → routes by toolName:
+   *   - `'shell'` → appends to shellResults (with placeholder output)
+   *   - `'_file_modified'` → appends filePath to filesModified
+   *   - other → appends to toolCalls
+   * - `tool_result` → matches by toolCallId to update output/status on the correct entry
+   * - `assistant_message` → finalizes the assistant turn with content, model, and optional
+   *   contentIterations (per-iteration text for correct restore interleaving)
+   *
+   * **Content iterations:** For the Reasoner model, each shell iteration produces
+   * separate content text. `contentIterations` preserves per-iteration text so the
+   * webview can interleave thinking[i] → content[i] → shell[i] during restore,
+   * matching the live streaming order. Without this, all text would appear at the end.
+   *
+   * Empty arrays are cleaned up before returning (e.g., no reasoning_iterations
+   * field if there were none) to keep the payload lean.
+   */
+  async getSessionRichHistory(sessionId: string): Promise<RichHistoryTurn[]> {
+    await this.ensureInitialized();
+    const events = this.eventStore.getEventsByType(
+      sessionId,
+      ['user_message', 'assistant_message', 'assistant_reasoning', 'tool_call', 'tool_result']
+    );
+
+    // Diagnostic logging for history restore debugging
+    const typeCounts: Record<string, number> = {};
+    for (const e of events) {
+      typeCounts[e.type] = (typeCounts[e.type] || 0) + 1;
+    }
+    console.log(`[RichHistory] Session ${sessionId}: ${events.length} events`, JSON.stringify(typeCounts));
+
+    const turns: RichHistoryTurn[] = [];
+    let currentAssistantTurn: RichHistoryTurn | null = null;
+    // Map toolCallId → index in current turn's toolCalls/shellResults for pairing with results
+    let toolCallMap = new Map<string, { name: string; index: number }>();
+
+    for (const event of events) {
+      switch (event.type) {
+        case 'user_message': {
+          // Finalize any pending assistant turn
+          if (currentAssistantTurn) {
+            turns.push(currentAssistantTurn);
+            currentAssistantTurn = null;
+            toolCallMap = new Map();
+          }
+          const userEvent = event as UserMessageEvent;
+          turns.push({
+            role: 'user',
+            content: userEvent.content,
+            files: userEvent.attachments?.map(a => a.name),
+            timestamp: userEvent.timestamp
+          });
+          break;
+        }
+
+        case 'assistant_reasoning': {
+          // Start assistant turn if not already started
+          if (!currentAssistantTurn) {
+            currentAssistantTurn = {
+              role: 'assistant',
+              content: '',
+              reasoning_iterations: [],
+              toolCalls: [],
+              shellResults: [],
+              timestamp: event.timestamp
+            };
+          }
+          const reasoningEvent = event as AssistantReasoningEvent;
+          currentAssistantTurn.reasoning_iterations!.push(reasoningEvent.content);
+          break;
+        }
+
+        case 'tool_call': {
+          // Start assistant turn if not already started
+          if (!currentAssistantTurn) {
+            currentAssistantTurn = {
+              role: 'assistant',
+              content: '',
+              reasoning_iterations: [],
+              toolCalls: [],
+              shellResults: [],
+              timestamp: event.timestamp
+            };
+          }
+          const toolEvent = event as ToolCallEvent;
+          if (toolEvent.toolName === 'shell') {
+            const command = (toolEvent.arguments as any)?.command || '';
+            const idx = currentAssistantTurn.shellResults!.length;
+            currentAssistantTurn.shellResults!.push({
+              command,
+              output: '',
+              success: true
+            });
+            toolCallMap.set(toolEvent.toolCallId, { name: 'shell', index: idx });
+          } else if (toolEvent.toolName === '_file_modified') {
+            // File modification marker — extract file path
+            const filePath = (toolEvent.arguments as any)?.filePath || '';
+            if (filePath) {
+              if (!currentAssistantTurn.filesModified) {
+                currentAssistantTurn.filesModified = [];
+              }
+              currentAssistantTurn.filesModified.push(filePath);
+            }
+            toolCallMap.set(toolEvent.toolCallId, { name: '_file_modified', index: -1 });
+          } else {
+            const detail = (toolEvent.arguments as any)?.detail || toolEvent.toolName;
+            const idx = currentAssistantTurn.toolCalls!.length;
+            currentAssistantTurn.toolCalls!.push({
+              name: toolEvent.toolName,
+              detail,
+              status: 'done'
+            });
+            toolCallMap.set(toolEvent.toolCallId, { name: toolEvent.toolName, index: idx });
+          }
+          break;
+        }
+
+        case 'tool_result': {
+          const resultEvent = event as ToolResultEvent;
+          const mapping = toolCallMap.get(resultEvent.toolCallId);
+          if (mapping && currentAssistantTurn) {
+            if (mapping.name === 'shell') {
+              const shell = currentAssistantTurn.shellResults![mapping.index];
+              shell.output = resultEvent.result;
+              shell.success = resultEvent.success;
+            } else if (mapping.name !== '_file_modified') {
+              const tool = currentAssistantTurn.toolCalls![mapping.index];
+              tool.status = resultEvent.success ? 'done' : 'error';
+            }
+          }
+          break;
+        }
+
+        case 'assistant_message': {
+          // Start assistant turn if not already started
+          if (!currentAssistantTurn) {
+            currentAssistantTurn = {
+              role: 'assistant',
+              content: '',
+              reasoning_iterations: [],
+              toolCalls: [],
+              shellResults: [],
+              timestamp: event.timestamp
+            };
+          }
+          const assistantEvent = event as AssistantMessageEvent;
+          currentAssistantTurn.content = assistantEvent.content;
+          currentAssistantTurn.model = assistantEvent.model;
+          // Extract per-iteration content text (for correct interleaving during restore)
+          if (assistantEvent.contentIterations && assistantEvent.contentIterations.length > 0) {
+            currentAssistantTurn.contentIterations = assistantEvent.contentIterations;
+          }
+          // Finalize this assistant turn
+          turns.push(currentAssistantTurn);
+          currentAssistantTurn = null;
+          toolCallMap = new Map();
+          break;
+        }
+      }
+    }
+
+    // Finalize any trailing assistant turn (e.g., partial/interrupted)
+    if (currentAssistantTurn) {
+      turns.push(currentAssistantTurn);
+    }
+
+    // Clean up empty arrays for cleaner output
+    for (const turn of turns) {
+      if (turn.reasoning_iterations?.length === 0) delete turn.reasoning_iterations;
+      if (turn.contentIterations?.length === 0) delete turn.contentIterations;
+      if (turn.toolCalls?.length === 0) delete turn.toolCalls;
+      if (turn.shellResults?.length === 0) delete turn.shellResults;
+      if (turn.filesModified?.length === 0) delete turn.filesModified;
+      if (turn.files?.length === 0) delete turn.files;
+    }
+
+    // Diagnostic logging for history restore
+    const turnSummary = turns.map((t, i) => {
+      if (t.role === 'user') return `turn[${i}]: user (${t.content.length} chars)`;
+      return `turn[${i}]: assistant (${t.content.length} chars, reasoning=${t.reasoning_iterations?.length || 0}, tools=${t.toolCalls?.length || 0}, shells=${t.shellResults?.length || 0}, files=${t.filesModified?.length || 0}, model=${t.model})`;
+    });
+    console.log(`[RichHistory] Returning ${turns.length} turns:`, turnSummary);
+
+    return turns;
   }
 
   /**

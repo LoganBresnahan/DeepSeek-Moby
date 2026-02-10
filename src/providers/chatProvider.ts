@@ -1843,6 +1843,11 @@ Now provide your final response based on what you learned. Do NOT attempt to use
                   const filePath = fileHeaderMatch[1].trim();
                   const codeWithoutHeader = code.replace(/^#\s*File:.*\n/i, '');
                   logger.info(`[ChatProvider] Auto-applying code block for: ${filePath}`);
+                  // Track file modification synchronously before the async apply
+                  // This ensures it's available at save time even though apply is fire-and-forget
+                  if (!this.currentResponseFileChanges.some(f => f.filePath === filePath)) {
+                    this.currentResponseFileChanges.push({ filePath, status: 'applied', iteration: 0 });
+                  }
                   this.applyCodeDirectlyForAutoMode(filePath, codeWithoutHeader, 'Auto-applied from code block');
                 }
               }
@@ -2117,17 +2122,70 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
       }));
       const allToolCalls = [...toolCallsForHistory, ...shellToolCalls];
 
-      // Save assistant message to history (with clean response)
+      // ── History Save Pipeline ──
+      // Records all aspects of the assistant response as granular events for full-fidelity restore.
+      // Order matters: reasoning → tool calls → shell results → file modifications → assistant message.
+      // The final recordAssistantMessage() call seals the turn — getSessionRichHistory() uses
+      // event sequence order to group everything between the last user_message and this event.
+      //
+      // For Reasoner model, contentIterations captures per-iteration text (cleaned of shell tags)
+      // so that restore can interleave thinking[i] → content[i] → shell[i] matching live streaming.
+      //
+      // File modifications are tracked synchronously at code block detection time (line ~1848)
+      // because applyCodeDirectlyForAutoMode() is fire-and-forget async — the file wouldn't be
+      // in currentResponseFileChanges at save time otherwise.
       const tokenCount = this.deepSeekClient.estimateTokens(cleanResponse + fullReasoning);
       if (this.currentSessionId && (cleanResponse || fullReasoning)) {
-        // Combine reasoning and content for storage
-        const fullContent = fullReasoning
-          ? `<reasoning>\n${fullReasoning}\n</reasoning>\n\n${cleanResponse}`
-          : cleanResponse;
-        await this.conversationManager.addMessageToCurrentSession({
-          role: 'assistant',
-          content: fullContent
-        });
+        logger.info(`[HistorySave] Saving to session=${this.currentSessionId}: reasoning=${reasoningIterations.length}, toolCalls=${toolCallsForHistory.length}, shells=${shellResultsForHistory.length}, content=${cleanResponse.length} chars, model=${model}`);
+
+        try {
+          // 1. Record reasoning iterations
+          for (let i = 0; i < reasoningIterations.length; i++) {
+            this.conversationManager.recordAssistantReasoning(reasoningIterations[i], i);
+            logger.info(`[HistorySave] Recorded reasoning iteration ${i} (${reasoningIterations[i].length} chars)`);
+          }
+
+          // 2. Record non-shell tool calls
+          for (const tc of toolCallsForHistory) {
+            const toolCallId = `tc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            this.conversationManager.recordToolCall(toolCallId, tc.name, { detail: tc.detail });
+            this.conversationManager.recordToolResult(toolCallId, tc.detail, tc.status === 'done');
+            logger.info(`[HistorySave] Recorded tool call: ${tc.name}`);
+          }
+
+          // 3. Record shell results with richer data
+          for (const sr of shellResultsForHistory) {
+            const shellCallId = `sh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            this.conversationManager.recordToolCall(shellCallId, 'shell', { command: sr.command });
+            this.conversationManager.recordToolResult(shellCallId, sr.output, sr.success, sr.executionTimeMs);
+            logger.info(`[HistorySave] Recorded shell: ${sr.command.substring(0, 50)}`);
+          }
+
+          // 4. Record file modifications (for restore of "Modified Files" dropdown)
+          const modifiedFiles = [...new Set(
+            this.currentResponseFileChanges
+              .filter(f => f.status === 'applied')
+              .map(f => f.filePath)
+          )];
+          for (const filePath of modifiedFiles) {
+            const fileCallId = `fm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            this.conversationManager.recordToolCall(fileCallId, '_file_modified', { filePath });
+            this.conversationManager.recordToolResult(fileCallId, filePath, true);
+            logger.info(`[HistorySave] Recorded file modification: ${filePath}`);
+          }
+
+          // 5. Record the assistant message with real model + finishReason
+          // Include per-iteration content text (cleaned) for correct restore ordering
+          const cleanedContentIterations = contentIterations.length > 0
+            ? contentIterations.map(c => stripShellTags(stripDSML(c)).trim()).filter(c => c.length > 0)
+            : undefined;
+          await this.conversationManager.recordAssistantMessage(cleanResponse, model, 'stop', undefined, cleanedContentIterations);
+          logger.info(`[HistorySave] Recorded assistant message (${cleanResponse.length} chars, model=${model}, contentIts=${cleanedContentIterations?.length || 0})`);
+        } catch (saveError: any) {
+          logger.error(`[HistorySave] FAILED to save history: ${saveError.message}`, saveError.stack);
+        }
+      } else {
+        logger.warn(`[HistorySave] Skipped save: sessionId=${this.currentSessionId}, cleanResponse=${!!cleanResponse}, fullReasoning=${!!fullReasoning}`);
       }
 
       // Log successful response
@@ -2143,14 +2201,17 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
         const partialContent = accumulatedResponse || fullResponse;
         if (this.currentSessionId && (partialContent || fullReasoning)) {
           const cleanPartialResponse = stripShellTags(stripDSML(partialContent));
-          // Combine reasoning and partial content for storage
-          const partialFullContent = fullReasoning
-            ? `<reasoning>\n${fullReasoning}\n</reasoning>\n\n${cleanPartialResponse}\n\n*[Generation stopped]*`
-            : `${cleanPartialResponse}\n\n*[Generation stopped]*`;
-          await this.conversationManager.addMessageToCurrentSession({
-            role: 'assistant',
-            content: partialFullContent
-          });
+
+          // Record reasoning iterations that completed
+          for (let i = 0; i < reasoningIterations.length; i++) {
+            this.conversationManager.recordAssistantReasoning(reasoningIterations[i], i);
+          }
+
+          // Record the partial assistant message
+          const partialText = cleanPartialResponse
+            ? `${cleanPartialResponse}\n\n*[Generation stopped]*`
+            : '*[Generation stopped]*';
+          await this.conversationManager.recordAssistantMessage(partialText, model, 'length');
           logger.info(`[ChatProvider] Saved partial response to history`);
         }
         // Don't show error for user-initiated stops - handled by stopGeneration
@@ -4143,8 +4204,8 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
     const currentSession = await this.conversationManager.getCurrentSession();
     if (!currentSession || !this._view) return;
 
-    const messages = await this.conversationManager.getSessionMessagesCompat(currentSession.id);
-    if (messages.length > 0) {
+    const history = await this.conversationManager.getSessionRichHistory(currentSession.id);
+    if (history.length > 0) {
       // Notify webview of loaded session (for SessionActor)
       this._view.webview.postMessage({
         type: 'sessionLoaded',
@@ -4155,16 +4216,14 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
 
       this._view.webview.postMessage({
         type: 'loadHistory',
-        history: messages.map((msg: { role: string; content: string }) => ({
-          role: msg.role,
-          content: msg.content
-        }))
+        history
       });
     }
   }
 
   public async loadSession(sessionId: string) {
     const session = await this.conversationManager.getSession(sessionId);
+    logger.info(`[loadSession] session=${sessionId}, found=${!!session}, view=${!!this._view}`);
     if (session && this._view) {
       this.currentSessionId = session.id;
       await this.conversationManager.switchToSession(sessionId);
@@ -4182,13 +4241,11 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
       });
 
       // Load session messages via loadHistory (clears and loads)
-      const messages = await this.conversationManager.getSessionMessagesCompat(sessionId);
+      const history = await this.conversationManager.getSessionRichHistory(sessionId);
+      logger.info(`[loadSession] Sending loadHistory: ${history.length} turns, contentIts=${history.filter(t => t.contentIterations).length}`);
       this._view.webview.postMessage({
         type: 'loadHistory',
-        history: messages.map((msg: { role: string; content: string }) => ({
-          role: msg.role,
-          content: msg.content
-        }))
+        history
       });
     }
   }

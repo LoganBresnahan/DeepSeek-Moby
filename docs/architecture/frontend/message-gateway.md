@@ -293,3 +293,4 @@ See also:
 - [actor-diagram.md](../overview/actor-diagram.md) - Visual actor map
 - [actor-system.md](actor-system.md) - Unified Turn Architecture details
 - [getter-pattern.md](../reference/getter-pattern.md) - When to use getters vs publications
+- [History Persistence Guide](../../guides/history-persistence.md) - How `handleLoadHistory()` restores conversations

@@ -1,5 +1,7 @@
 # Fix Conversation History Persistence (#14 + #15)
 
+> **Status: IMPLEMENTED** — All steps complete. See [History Persistence Guide](../guides/history-persistence.md) for the current architecture.
+
 ## Context
 
 When restoring a conversation from history, only the raw text content survives. Reasoning (thinking), tool calls, shell executions, and file diffs are all lost. The irony: the infrastructure to store AND render all of this already exists — the problem is just two chokepoints where data is discarded.

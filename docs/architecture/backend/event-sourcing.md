@@ -400,8 +400,17 @@ const forkedSession = await conversationManager.seedFromEvents(
 | **Durability** | SQLite provides ACID guarantees |
 | **Performance** | Prepared statements for fast queries |
 
+## History Restore
+
+Events are replayed into rich conversation turns via `getSessionRichHistory()` in ConversationManager. This method groups events by turn (user message → assistant response) and produces `RichHistoryTurn` objects containing reasoning iterations, tool calls, shell results, file modifications, and per-iteration content text.
+
+The webview's `handleLoadHistory()` renders these turns using the VirtualListActor API, with segment ordering that matches the live streaming experience (e.g., Reasoner: thinking → content → shell; Chat: tools → files → text).
+
+For full details, see the **[History Persistence Guide](../../guides/history-persistence.md)**.
+
 ## Related Documentation
 
 - [Database Layer](database-layer.md) - SQLite implementation details
 - [Backend Architecture](backend-architecture.md) - How ChatProvider uses ConversationManager
 - [Message Bridge](message-bridge.md) - How events flow to/from the webview
+- [History Persistence Guide](../../guides/history-persistence.md) - Full save → restore → render flow
