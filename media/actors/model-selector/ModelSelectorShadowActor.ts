@@ -198,7 +198,8 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
   private handleModelChange(model: string): void {
     if (model && model !== this._selectedModel) {
       this._selectedModel = model;
-      this.updateSelectedVisual();
+      // Re-render popup content (works whether popup is open or closed)
+      this.updateBodyContent(this.renderPopupContent());
       this.publish({ 'model.selected': model });
     }
   }
@@ -262,15 +263,6 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
 
     // Publish state
     this.publish({ 'model.selected': modelId });
-  }
-
-  private updateSelectedVisual(): void {
-    // Update selected class on model options
-    const options = this.queryAll<HTMLElement>('.model-option');
-    options.forEach(option => {
-      const modelId = option.getAttribute('data-model');
-      option.classList.toggle('selected', modelId === this._selectedModel);
-    });
   }
 
   private updateParameter(param: string, value: number): void {

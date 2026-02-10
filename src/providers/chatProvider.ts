@@ -706,6 +706,8 @@ which I already edited - would you like me to update it?"
       if (this._view) {
         this._view.webview.postMessage({ type: 'modelChanged', model: settings.model });
       }
+      // Sync full settings back to webview so token limits, temperature etc. stay in sync
+      this.sendCurrentSettings();
     }
 
     if (settings.temperature !== undefined) {
