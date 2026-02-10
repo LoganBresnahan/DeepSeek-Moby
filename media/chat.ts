@@ -30,7 +30,7 @@ import {
 import { InspectorShadowActor } from './dev/inspector';
 import { AnimationHelper } from './utils';
 import { webviewTracer } from './tracing';
-import { createLogger } from './logging';
+import { createLogger, webviewLogBuffer } from './logging';
 
 const log = createLogger('ActorSystem');
 
@@ -91,6 +91,9 @@ function initializeActorSystem(): void {
   // Initialize webview tracer for unified observability
   webviewTracer.initialize(vscode as any);
   manager.setTracer(webviewTracer);
+
+  // Initialize webview log buffer for log syncing to extension
+  webviewLogBuffer.initialize(vscode as any);
 
   // Get container elements for Shadow actors
   const inputAreaContainer = getElement<HTMLDivElement>('inputAreaContainer');

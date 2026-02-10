@@ -8,6 +8,7 @@ import { ConfigManager } from './utils/config';
 import { ConversationManager } from './events';
 import { TavilyClient } from './clients/tavilyClient';
 import { logger } from './utils/logger';
+import { UnifiedLogExporter } from './logging/UnifiedLogExporter';
 
 let chatProvider: ChatProvider;
 let completionProvider: CompletionProvider;
@@ -109,6 +110,10 @@ function registerCommands(context: vscode.ExtensionContext) {
     { name: 'viewTrace', handler: () => commandProvider.viewTraceInOutput() },
     { name: 'clearTrace', handler: () => commandProvider.clearTraces() },
     { name: 'traceStats', handler: () => commandProvider.showTraceStats() },
+
+    // Unified Log Export Commands
+    { name: 'exportLogsAI', handler: () => UnifiedLogExporter.exportForAI() },
+    { name: 'exportLogsHuman', handler: () => UnifiedLogExporter.exportForHuman() },
 
     // Diff quick pick command
     { name: 'showDiffQuickPick', handler: async () => {

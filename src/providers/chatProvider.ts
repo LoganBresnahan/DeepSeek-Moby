@@ -8,6 +8,7 @@ import { ConversationManager } from '../events';
 import { DiffEngine } from '../utils/diff';
 import { logger } from '../utils/logger';
 import { tracer, type TraceCategory } from '../tracing';
+import { webviewLogStore } from '../logging/WebviewLogStore';
 import { workspaceTools, applyCodeEditTool, executeToolCall } from '../tools/workspaceTools';
 import { parseDSMLToolCalls, stripDSML } from '../utils/dsmlParser';
 import { TavilyClient, TavilySearchResponse } from '../clients/tavilyClient';
@@ -525,6 +526,12 @@ which I already edited - would you like me to update it?"
           this.handleWebviewTraceEvents(data.events);
           // Send acknowledgment so webview knows it's safe to clear buffer
           this._view?.webview.postMessage({ type: 'traceSyncAck', count: data.events?.length || 0 });
+          break;
+        // Webview log entries - store in extension-side buffer
+        case 'webviewLogs':
+          if (data.entries?.length) {
+            webviewLogStore.import(data.entries);
+          }
           break;
         // Webview ready - send calibration data and request immediate trace sync
         case 'webviewReady':
@@ -1579,17 +1586,14 @@ ${webSearchContext}
     // This prevents jarring UI transitions when <shell> tags are detected
     this.contentBuffer = new ContentTransformBuffer({
       debounceMs: 150,
-      debug: true, // Enable extensive debug logging
-      log: (msg) => logger.info(msg), // Route buffer logs through our logger
+      debug: false,
+      log: (msg) => logger.debug(msg), // Route buffer logs through our logger
       onFlush: (segments) => {
-        logger.info(`[Buffer→Frontend] onFlush: ${segments.length} segment(s) to process`);
         for (const segment of segments) {
           switch (segment.type) {
             case 'text':
               // Send regular text to frontend
               const textContent = segment.content as string;
-              const preview = textContent.length > 100 ? textContent.slice(0, 100) + '...' : textContent;
-              logger.info(`[Buffer→Frontend] streamToken: "${preview.replace(/\n/g, '\\n')}" (${textContent.length} chars)`);
               this._view?.webview.postMessage({
                 type: 'streamToken',
                 token: textContent
@@ -1599,13 +1603,13 @@ ${webSearchContext}
             case 'shell':
               // Don't send shell tags as text - they'll be handled by shellExecuting message
               // Just log for debugging
-              logger.info(`[ContentBuffer] Detected shell commands, will be handled after iteration`);
+              logger.debug(`[ContentBuffer] Detected shell commands, will be handled after iteration`);
               break;
 
             case 'thinking':
               // Thinking tags are for R1 reasoner, handled separately via streamReasoning
               // Just skip them here
-              logger.info(`[ContentBuffer] Detected thinking tags, handled separately`);
+              logger.debug(`[ContentBuffer] Detected thinking tags, handled separately`);
               break;
 
             // NOTE: Code blocks are no longer detected by the buffer - they flow through

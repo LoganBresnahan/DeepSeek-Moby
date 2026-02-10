@@ -48,7 +48,10 @@ const DEFAULT_COMMANDS: CommandItem[] = [
   { id: 'deepseek.copyTrace', name: 'Copy Trace', description: 'Copy trace to clipboard', icon: '📋', section: 'Trace' },
   { id: 'deepseek.viewTrace', name: 'View Trace', description: 'Show in output panel', icon: '👁️', section: 'Trace' },
   { id: 'deepseek.traceStats', name: 'Trace Stats', description: 'View trace statistics', icon: '📊', section: 'Trace' },
-  { id: 'deepseek.clearTrace', name: 'Clear Trace', description: 'Clear trace buffer', icon: '🗑️', section: 'Trace' }
+  { id: 'deepseek.clearTrace', name: 'Clear Trace', description: 'Clear trace buffer', icon: '🗑️', section: 'Trace' },
+  // Logs section
+  { id: 'deepseek.exportLogsAI', name: 'Export Logs (AI)', description: 'LLM-optimized log export', icon: '🤖', section: 'Logs' },
+  { id: 'deepseek.exportLogsHuman', name: 'Export Logs (Full)', description: 'Full detail log export', icon: '📝', section: 'Logs' }
 ];
 
 // ============================================

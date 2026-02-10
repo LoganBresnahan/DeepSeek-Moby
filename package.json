@@ -323,6 +323,41 @@
         "title": "Show Pending Diffs",
         "category": "DeepSeek",
         "icon": "$(list-unordered)"
+      },
+      {
+        "command": "deepseek.exportTrace",
+        "title": "DeepSeek Moby: Export Trace",
+        "category": "DeepSeek Moby"
+      },
+      {
+        "command": "deepseek.copyTrace",
+        "title": "DeepSeek Moby: Copy Trace to Clipboard",
+        "category": "DeepSeek Moby"
+      },
+      {
+        "command": "deepseek.viewTrace",
+        "title": "DeepSeek Moby: View Trace in Output",
+        "category": "DeepSeek Moby"
+      },
+      {
+        "command": "deepseek.clearTrace",
+        "title": "DeepSeek Moby: Clear Trace Buffer",
+        "category": "DeepSeek Moby"
+      },
+      {
+        "command": "deepseek.traceStats",
+        "title": "DeepSeek Moby: Trace Statistics",
+        "category": "DeepSeek Moby"
+      },
+      {
+        "command": "deepseek.exportLogsAI",
+        "title": "DeepSeek Moby: Export Logs (AI)",
+        "category": "DeepSeek Moby"
+      },
+      {
+        "command": "deepseek.exportLogsHuman",
+        "title": "DeepSeek Moby: Export Logs (Human)",
+        "category": "DeepSeek Moby"
       }
     ],
     "menus": {

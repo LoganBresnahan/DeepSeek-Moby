@@ -104,7 +104,6 @@ export class StreamingActor extends EventStateActor {
 
     this._thinking += chunk;
 
-    log.debug('Publishing streaming.thinking, length:', this._thinking.length);
     this.publish({
       'streaming.thinking': this._thinking
     });

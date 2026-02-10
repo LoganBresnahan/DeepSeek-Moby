@@ -131,7 +131,6 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       const msg = event.data;
       if (!msg || !msg.type) return;
 
-      log.debug('Received:', msg.type);
       this.handleMessage(msg);
     };
 
@@ -145,14 +144,14 @@ export class VirtualMessageGatewayActor extends EventStateActor {
   private handleMessage(msg: { type: string; [key: string]: unknown }): void {
     const { streaming, session, virtualList, statusPanel, toolbar } = this._actors;
 
-    // Log key messages with timing for debugging
-    const importantTypes = [
-      'startResponse', 'endResponse', 'shellExecuting', 'shellResults',
-      'toolCallsStart', 'toolCallsUpdate', 'toolCallsEnd',
-      'pendingFileAdd', 'diffListChanged', 'iterationStart'
+    // Log key lifecycle messages (not per-chunk streaming messages)
+    const lifecycleTypes = [
+      'startResponse', 'endResponse',
+      'toolCallsStart', 'toolCallsEnd',
+      'iterationStart'
     ];
-    if (importantTypes.includes(msg.type)) {
-      log.debug(`${new Date().toISOString()} RECEIVED: ${msg.type}`, msg);
+    if (lifecycleTypes.includes(msg.type)) {
+      log.debug('Received:', msg.type);
     }
 
     switch (msg.type) {

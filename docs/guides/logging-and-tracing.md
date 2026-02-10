@@ -11,11 +11,12 @@ This guide explains how to use the logging and tracing system in the DeepSeek Mo
 3. [Extension Logger (Tier 1)](#extension-logger-tier-1)
 4. [TraceCollector (Tier 2)](#tracecollector-tier-2)
 5. [Webview Logging (Tier 3)](#webview-logging-tier-3)
-6. [Cross-Boundary Tracing](#cross-boundary-tracing)
-7. [Export Formats](#export-formats)
-8. [Configuration](#configuration)
-9. [Common Patterns](#common-patterns)
-10. [Troubleshooting](#troubleshooting)
+6. [Unified Log Export](#unified-log-export)
+7. [Cross-Boundary Tracing](#cross-boundary-tracing)
+8. [Export Formats](#export-formats)
+9. [Configuration](#configuration)
+10. [Common Patterns](#common-patterns)
+11. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -30,34 +31,47 @@ The logging system has **three tiers** spanning both the VS Code extension (Node
 │  ┌─────────────────────────────────────────────────────────────────────────┐    │
 │  │  Tier 1: Extension Logger (src/utils/logger.ts)                         │    │
 │  │  • Output: VS Code Output Channel ("DeepSeek Moby")                     │    │
-│  │  • Purpose: Human-readable logs for users and developers                │    │
+│  │  • Ring buffer: 5,000 entries (exportable)                              │    │
 │  │  • Also emits traces to TraceCollector                                  │    │
 │  └─────────────────────────────────────────────────────────────────────────┘    │
 │                                                                                  │
 │  ┌─────────────────────────────────────────────────────────────────────────┐    │
 │  │  Tier 2: TraceCollector (src/tracing/TraceCollector.ts)                 │    │
-│  │  • Output: In-memory ring buffer (exportable)                           │    │
+│  │  • Ring buffer: 10,000 events (exportable)                              │    │
 │  │  • Purpose: Structured events for AI debugging and analysis             │    │
 │  │  • Receives events from Extension Logger + Webview                      │    │
 │  └─────────────────────────────────────────────────────────────────────────┘    │
 │                                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────────┐    │
+│  │  WebviewLogStore (src/logging/WebviewLogStore.ts)                        │    │
+│  │  • Ring buffer: 5,000 entries (stores webview logs received via sync)   │    │
+│  └─────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────────┐    │
+│  │  UnifiedLogExporter (src/logging/UnifiedLogExporter.ts)                  │    │
+│  │  • Combines all 3 sources into one export document                      │    │
+│  │  • Two formats: AI (condensed) and Human (full detail)                  │    │
+│  └─────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                  │
 └─────────────────────────────────────────────────────────────────────────────────┘
                                       ▲
-                                      │ postMessage (traceEvents)
-                                      │
+                          ┌───────────┴───────────┐
+                          │ postMessage            │ postMessage
+                          │ (traceEvents @0/5/10s) │ (webviewLogs @2.5/7.5s)
+                          │                        │
 ┌─────────────────────────────────────────────────────────────────────────────────┐
 │                           Webview (Browser)                                      │
 │                                                                                  │
 │  ┌─────────────────────────────────────────────────────────────────────────┐    │
 │  │  Tier 3a: WebviewTracer (media/tracing/WebviewTracer.ts)                │    │
-│  │  • Output: Syncs to TraceCollector every 5 seconds                      │    │
+│  │  • Syncs to TraceCollector every 5s                                     │    │
 │  │  • Purpose: Structured traces for actors, state, rendering              │    │
 │  └─────────────────────────────────────────────────────────────────────────┘    │
 │                                                                                  │
 │  ┌─────────────────────────────────────────────────────────────────────────┐    │
 │  │  Tier 3b: createLogger (media/logging/createLogger.ts)                  │    │
-│  │  • Output: Browser console                                              │    │
-│  │  • Purpose: Component-level debugging during development                │    │
+│  │  • Output: Browser console + WebviewLogBuffer                           │    │
+│  │  • Buffer: 5,000 entries, syncs to WebviewLogStore every 5s (offset)   │    │
 │  └─────────────────────────────────────────────────────────────────────────┘    │
 │                                                                                  │
 │  ┌─────────────────────────────────────────────────────────────────────────┐    │
@@ -178,6 +192,22 @@ logger.settingsChanged(setting: string, value: any);
 logger.modelChanged(model: string);
 ```
 
+### Ring Buffer
+
+The Extension Logger maintains a 5,000-entry ring buffer. All logged messages (that pass the level filter) are captured in the buffer for later export.
+
+```typescript
+// Get buffered entries
+const entries = logger.getLogBuffer();
+// Returns: Array<{ timestamp, level, message, details? }>
+
+// Check count
+logger.logBufferSize; // number
+
+// Clear
+logger.clearLogBuffer();
+```
+
 ### Output Format
 
 ```
@@ -296,7 +326,33 @@ const jsonl = tracer.export('jsonl');
 
 // Export as human-readable with aggregation
 const pretty = tracer.export('pretty');
+
+// Export as AI-optimized summary (concise, structured for LLMs)
+const ai = tracer.export('ai');
 ```
+
+#### AI-Optimized Export
+```typescript
+// Full control with exportForAI()
+const aiExport = tracer.exportForAI({
+  minLevel: 'info',           // Filter by level (debug/info/warn/error)
+  includeCategories: ['api.request', 'tool.call'],  // Include only these
+  excludeCategories: ['state.publish'],             // Exclude these
+  correlationId: 'flow-123',  // Filter by specific flow
+  timeWindowMs: 60000,        // Only events from last 60 seconds
+  maxEvents: 500,             // Limit total events
+  includeData: true,          // Include data summaries
+  groupByFlow: true           // Group by correlation ID (default)
+});
+```
+
+**AI Export Features:**
+- Groups events by correlation ID (request flows)
+- Aggregates noisy categories (state.publish, actor.bind, etc.)
+- Shows errors prominently at the top
+- Extracts key milestones from flows (API requests, tool calls)
+- Formats durations human-readably (ms, seconds, minutes)
+- Produces markdown-formatted output suitable for LLM context
 
 #### Statistics
 ```typescript
@@ -380,18 +436,6 @@ webviewTracer.traceActorUnbind(actorId, turnId);
 // State changes
 webviewTracer.tracePublish(actorId, keys, chainDepth);
 webviewTracer.traceSubscribe(actorId, key, handlerName);
-
-// Bridge messages
-webviewTracer.traceBridgeSend(messageType, data);
-webviewTracer.traceBridgeReceive(messageType, data);
-
-// Rendering
-webviewTracer.traceRenderTurn(turnId, role);
-webviewTracer.traceRenderSegment(segmentId, segmentType);
-
-// User actions
-webviewTracer.traceUserClick(elementId, elementType);
-webviewTracer.traceUserInput(inputType, data);
 ```
 
 #### Raw Trace/Span API
@@ -400,7 +444,7 @@ webviewTracer.traceUserInput(inputType, data);
 const spanId = webviewTracer.startSpan('actor.bind', actorId, { data: { turnId } });
 webviewTracer.endSpan(spanId, { status: 'completed' });
 
-webviewTracer.trace('user.click', 'sendButton', { level: 'info' });
+webviewTracer.trace('state.publish', 'streaming.content', { level: 'debug' });
 ```
 
 #### Cross-Boundary Correlation
@@ -446,9 +490,13 @@ enableDebugMode();   // Sets DEBUG
 disableDebugMode();  // Sets WARN
 ```
 
+#### WebviewLogBuffer Integration
+
+All log calls from `createLogger` also push entries to the `WebviewLogBuffer`, which syncs to the extension every 5 seconds (offset 2.5s from tracer). This means webview logs are available in the unified export.
+
 #### Production Behavior
 
-In production builds, `console.debug`, `console.log`, and `console.info` are **stripped by esbuild**. Only `console.warn` and `console.error` remain.
+In production builds, `console.debug`, `console.log`, and `console.info` are **stripped by esbuild**. Only `console.warn` and `console.error` remain. However, `createLogger`'s `log.debug()` etc. still execute the `shouldLog()` check and buffer push - they just don't call the stripped console methods.
 
 ### 3c. EventStateLogger
 
@@ -463,6 +511,76 @@ import { logger } from '../state';
 
 logger.enableDebug();  // Shows all pub/sub activity in console
 ```
+
+---
+
+## Unified Log Export
+
+The unified export system combines all three log sources (traces, extension logs, webview logs) into a single document.
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `Moby: Export Logs (AI)` | Condensed, LLM-optimized format |
+| `Moby: Export Logs (Human)` | Full detail format |
+
+Both commands open a new editor tab with three clearly separated sections.
+
+### AI Format
+
+The AI format is designed for pasting into an LLM context:
+- **Traces**: Uses `tracer.exportForAI()` - grouped by flow, errors prominent, noise aggregated
+- **Extension Logs**: Only WARN/ERROR entries shown (saves tokens)
+- **Webview Logs**: Only warn/error entries shown
+
+### Human Format
+
+The full format shows everything:
+- **Traces**: Uses `tracer.export('pretty')` - all events with timing and aggregation
+- **Extension Logs**: All buffered entries with timestamps
+- **Webview Logs**: All buffered entries with component names
+
+### Buffer Sizes
+
+| Source | Buffer Size | Location |
+|--------|-------------|----------|
+| Traces | 10,000 events | TraceCollector (extension) |
+| Extension Logs | 5,000 entries | Logger ring buffer (extension) |
+| Webview Logs | 5,000 entries | WebviewLogBuffer → WebviewLogStore |
+
+### Programmatic Access
+
+```typescript
+import { UnifiedLogExporter } from '../logging/UnifiedLogExporter';
+
+// Open AI-optimized export in editor tab
+await UnifiedLogExporter.exportForAI();
+
+// Open full detail export in editor tab
+await UnifiedLogExporter.exportForHuman();
+```
+
+### Extension Logger Ring Buffer
+
+```typescript
+import { logger } from '../utils/logger';
+
+// Get all buffered entries
+const entries = logger.getLogBuffer();
+
+// Check buffer size
+const count = logger.logBufferSize;
+
+// Clear the buffer
+logger.clearLogBuffer();
+```
+
+### Webview Log Sync
+
+The webview log buffer syncs to the extension every 5 seconds, offset by 2.5s from the tracer sync to avoid burst:
+- Tracer syncs at 0s, 5s, 10s, 15s...
+- Log buffer syncs at 2.5s, 7.5s, 12.5s, 17.5s...
 
 ---
 
@@ -527,6 +645,37 @@ If running in WSL2, the extension (Linux) and webview (Windows/Chromium) may hav
   2150.8ms 2026-02-09T14:32:17.273Z   [extension] [api.stream] chunk {"chunkNumber":48}
   2151.2ms 2026-02-09T14:32:17.274Z < [extension] [api.request] chat (2151.2ms) {"tokenCount":342}
 ```
+
+### AI (LLM-Optimized Summary)
+```markdown
+## Trace Summary
+- 156 events across 3 flows
+- Total duration: 6.2s
+- Time: 2026-02-09T14:32:15.123Z to 2026-02-09T14:32:21.323Z
+
+### Flow: API Request with Tools
+- ID: flow-1707484335123-xyz789
+- Duration: 6.1s
+- Events: 152
+- Timeline:
+  - [+0ms] API request started: chat
+  - [+2.1s] API response: 41234 tokens
+  - [+2.2s] Tool: readFile
+  - [+2.5s] Tool completed: readFile
+  - [+6.1s] Tool: writeFile
+  - [+6.1s] Tool completed: writeFile
+
+### Standalone Events
+- 4 events not part of a flow
+- user.click: 2
+- session.switch: 2
+```
+
+**When to use AI format:**
+- Sharing logs with an LLM for debugging help
+- Getting a quick overview of what happened in a session
+- Identifying which flow had errors
+- Understanding the sequence of operations without noise
 
 ---
 
@@ -734,16 +883,20 @@ Or in browser DevTools, uncheck "Verbose" in the Console filter.
 
 ## Summary
 
-| Tier | Component | Output | Use For |
-|------|-----------|--------|---------|
-| 1 | Extension Logger | VS Code Output | Human-readable logs |
-| 2 | TraceCollector | In-memory buffer | AI debugging, export |
-| 3a | WebviewTracer | Syncs to Tier 2 | Actor/state tracing |
-| 3b | createLogger | Browser console | Component debugging |
-| 3c | EventStateLogger | Browser console | Pub/sub debugging |
+| Tier | Component | Output | Buffer | Use For |
+|------|-----------|--------|--------|---------|
+| 1 | Extension Logger | VS Code Output | 5,000 entries | Human-readable logs |
+| 2 | TraceCollector | In-memory buffer | 10,000 events | AI debugging, export |
+| 3a | WebviewTracer | Syncs to Tier 2 | 500 → Tier 2 | Actor/state tracing |
+| 3b | createLogger | Browser console | 5,000 → WebviewLogStore | Component debugging |
+| 3c | EventStateLogger | Browser console | None | Pub/sub debugging |
+| - | UnifiedLogExporter | Editor tab | Combines all 3 | One-click export |
 
 **Key Points:**
 - Extension Logger (Tier 1) automatically emits traces to TraceCollector (Tier 2)
+- Extension Logger also captures entries in a 5,000-entry ring buffer
 - WebviewTracer (Tier 3a) syncs to TraceCollector every 5 seconds
+- createLogger (Tier 3b) pushes to WebviewLogBuffer, which syncs to WebviewLogStore every 5s (offset 2.5s)
 - Use `correlationId` to link events across the extension/webview boundary
+- Use `Moby: Export Logs (AI)` for LLM-optimized export, `Moby: Export Logs (Human)` for full detail
 - Export with `tracer.export('pretty')` for human reading, `tracer.export('jsonl')` for machine analysis

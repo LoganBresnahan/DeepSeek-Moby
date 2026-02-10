@@ -328,9 +328,6 @@ tracer.traceActorBind('turn-1', 'actor-1');
 
 // Trace state changes
 tracer.tracePublish('streaming.content', ['text']);
-
-// Trace user interactions
-tracer.traceUserClick('send-button', { messageLength: 42 });
 ```
 
 ---
@@ -340,7 +337,7 @@ tracer.traceUserClick('send-button', { messageLength: 42 });
 | Test File | Tests | Coverage |
 |-----------|-------|----------|
 | `tests/unit/tracing/TraceCollector.test.ts` | 50+ | Ring buffer, spans, correlation, export, memory |
-| `tests/unit/tracing/WebviewTracer.test.ts` | 37 | Sync, calibration, correlation propagation, time drift diagnostics |
+| `tests/unit/tracing/WebviewTracer.test.ts` | 34 | Sync, calibration, correlation propagation, time drift diagnostics |
 
 ---
 

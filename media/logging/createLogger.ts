@@ -15,6 +15,8 @@
  */
 
 import { LogLevel, shouldLog } from './logLevel';
+import { webviewLogBuffer } from './WebviewLogBuffer';
+import type { WebviewLogEntry } from './WebviewLogBuffer';
 
 /**
  * Logger interface returned by createLogger
@@ -47,28 +49,41 @@ export interface ComponentLogger {
 export function createLogger(component: string): ComponentLogger {
   const prefix = `[${component}]`;
 
+  function pushToBuffer(level: WebviewLogEntry['level'], args: unknown[]): void {
+    webviewLogBuffer.push({
+      timestamp: new Date().toISOString(),
+      level,
+      component,
+      message: args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ')
+    });
+  }
+
   return {
     debug: (...args: unknown[]) => {
       if (shouldLog(LogLevel.DEBUG)) {
         console.debug(prefix, ...args);
+        pushToBuffer('debug', args);
       }
     },
 
     info: (...args: unknown[]) => {
       if (shouldLog(LogLevel.INFO)) {
         console.info(prefix, ...args);
+        pushToBuffer('info', args);
       }
     },
 
     warn: (...args: unknown[]) => {
       if (shouldLog(LogLevel.WARN)) {
         console.warn(prefix, ...args);
+        pushToBuffer('warn', args);
       }
     },
 
     error: (...args: unknown[]) => {
       if (shouldLog(LogLevel.ERROR)) {
         console.error(prefix, ...args);
+        pushToBuffer('error', args);
       }
     }
   };

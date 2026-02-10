@@ -245,6 +245,15 @@ describe('WebviewTracer', () => {
       expect(events[0].data).toEqual({ type: 'MessageTurnActor' });
     });
 
+    it('traceActorDestroy traces actor destruction', () => {
+      tracer.traceActorDestroy('actor-1');
+
+      const events = tracer.getAll();
+      expect(events).toHaveLength(1);
+      expect(events[0].category).toBe('actor.destroy');
+      expect(events[0].operation).toBe('actor-1');
+    });
+
     it('traceActorBind traces actor binding', () => {
       tracer.traceActorBind('actor-1', 'turn-5');
 
@@ -265,35 +274,6 @@ describe('WebviewTracer', () => {
       expect(events[0].data).toEqual({ turnId: 'turn-5' });
     });
 
-    it('traceBridgeSend traces bridge messages', () => {
-      tracer.traceBridgeSend('streamToken', { token: 'Hello' });
-
-      const events = tracer.getAll();
-      expect(events).toHaveLength(1);
-      expect(events[0].category).toBe('bridge.send');
-      expect(events[0].operation).toBe('streamToken');
-      expect(events[0].data).toEqual({ token: 'Hello' });
-    });
-
-    it('traceRenderTurn traces turn renders', () => {
-      tracer.traceRenderTurn('turn-1', 'assistant');
-
-      const events = tracer.getAll();
-      expect(events).toHaveLength(1);
-      expect(events[0].category).toBe('render.turn');
-      expect(events[0].operation).toBe('turn-1');
-      expect(events[0].data).toEqual({ role: 'assistant' });
-    });
-
-    it('traceUserClick traces user clicks', () => {
-      tracer.traceUserClick('sendBtn', 'button');
-
-      const events = tracer.getAll();
-      expect(events).toHaveLength(1);
-      expect(events[0].category).toBe('user.click');
-      expect(events[0].operation).toBe('sendBtn');
-      expect(events[0].data).toEqual({ type: 'button' });
-    });
   });
 
   describe('syncToExtension', () => {

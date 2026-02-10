@@ -3,6 +3,19 @@ import { tracer, type TraceLevel } from '../tracing';
 
 export type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR' | 'OFF';
 
+/**
+ * A single log buffer entry for export.
+ */
+export interface LogBufferEntry {
+  timestamp: string;
+  level: LogLevel;
+  message: string;
+  details?: string;
+}
+
+/** Maximum number of log entries kept in the ring buffer */
+const LOG_BUFFER_MAX_SIZE = 5_000;
+
 // Log level priority (lower = more verbose)
 const LOG_LEVEL_PRIORITY: Record<LogLevel, number> = {
   'DEBUG': 0,
@@ -38,6 +51,9 @@ class Logger {
   // Note: VS Code Output channels do NOT support ANSI colors
   // Colors are disabled by default - the setting is kept for potential future terminal output
   private _useColors: boolean = false;
+  private _logBuffer: LogBufferEntry[] = [];
+  private _logBufferStart: number = 0;
+  private _logBufferCount: number = 0;
 
   private constructor() {
     this.outputChannel = vscode.window.createOutputChannel('DeepSeek Moby', { log: true });
@@ -112,6 +128,10 @@ class Logger {
     if (!this.shouldLog(level)) return;
 
     const timestamp = new Date().toISOString();
+
+    // Push to ring buffer
+    this.pushToBuffer({ timestamp, level, message, details });
+
     const msg = component ? this.colorize(message, component) : message;
 
     // Format: ":vscode | Moby: ISO_TIMESTAMP [LEVEL] message"
@@ -478,6 +498,43 @@ class Logger {
    */
   public getCurrentCorrelationId(): string | null {
     return this.currentApiCorrelationId || null;
+  }
+
+  // --- Ring Buffer ---
+
+  private pushToBuffer(entry: LogBufferEntry): void {
+    if (this._logBufferCount < LOG_BUFFER_MAX_SIZE) {
+      this._logBuffer.push(entry);
+      this._logBufferCount++;
+    } else {
+      // Overwrite oldest entry (ring buffer wrap)
+      this._logBuffer[this._logBufferStart] = entry;
+      this._logBufferStart = (this._logBufferStart + 1) % LOG_BUFFER_MAX_SIZE;
+    }
+  }
+
+  /** Get all buffered log entries in chronological order. */
+  public getLogBuffer(): LogBufferEntry[] {
+    if (this._logBufferCount < LOG_BUFFER_MAX_SIZE) {
+      return this._logBuffer.slice();
+    }
+    // Ring buffer wrapped - return in order: start..end, 0..start
+    return [
+      ...this._logBuffer.slice(this._logBufferStart),
+      ...this._logBuffer.slice(0, this._logBufferStart)
+    ];
+  }
+
+  /** Clear the log buffer. */
+  public clearLogBuffer(): void {
+    this._logBuffer = [];
+    this._logBufferStart = 0;
+    this._logBufferCount = 0;
+  }
+
+  /** Number of entries in the log buffer. */
+  public get logBufferSize(): number {
+    return this._logBufferCount;
   }
 
   // Show the output channel

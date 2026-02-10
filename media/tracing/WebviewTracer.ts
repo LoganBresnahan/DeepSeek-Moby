@@ -463,65 +463,6 @@ export class WebviewTracer {
     });
   }
 
-  /**
-   * Trace bridge message sent to extension.
-   */
-  traceBridgeSend(messageType: string, data?: Record<string, unknown>): void {
-    this.trace('bridge.send', messageType, {
-      level: 'debug',
-      data
-    });
-  }
-
-  /**
-   * Trace bridge message received from extension.
-   */
-  traceBridgeReceive(messageType: string, data?: Record<string, unknown>): void {
-    this.trace('bridge.receive', messageType, {
-      level: 'debug',
-      data
-    });
-  }
-
-  /**
-   * Trace turn render.
-   */
-  traceRenderTurn(turnId: string, role: string): void {
-    this.trace('render.turn', turnId, {
-      level: 'debug',
-      data: { role }
-    });
-  }
-
-  /**
-   * Trace segment update.
-   */
-  traceRenderSegment(segmentId: string, segmentType: string): void {
-    this.trace('render.segment', segmentId, {
-      level: 'debug',
-      data: { type: segmentType }
-    });
-  }
-
-  /**
-   * Trace user click.
-   */
-  traceUserClick(elementId: string, elementType?: string): void {
-    this.trace('user.click', elementId, {
-      level: 'info',
-      data: { type: elementType }
-    });
-  }
-
-  /**
-   * Trace user input.
-   */
-  traceUserInput(inputType: string, data?: Record<string, unknown>): void {
-    this.trace('user.input', inputType, {
-      level: 'info',
-      data
-    });
-  }
 }
 
 // Export singleton instance

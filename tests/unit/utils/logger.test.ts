@@ -371,4 +371,78 @@ describe('Logger', () => {
       expect(mockOutputChannel.error).toHaveBeenCalled();
     });
   });
+
+  describe('log buffer (ring buffer)', () => {
+    beforeEach(() => {
+      logger.clearLogBuffer();
+      logger.minLevel = 'DEBUG';
+    });
+
+    it('captures logged messages in the buffer', () => {
+      logger.info('test message');
+      expect(logger.logBufferSize).toBe(1);
+
+      const entries = logger.getLogBuffer();
+      expect(entries).toHaveLength(1);
+      expect(entries[0].level).toBe('INFO');
+      expect(entries[0].message).toContain('test message');
+      expect(entries[0].timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    });
+
+    it('captures all log levels', () => {
+      logger.debug('debug msg');
+      logger.info('info msg');
+      logger.warn('warn msg');
+      logger.error('error msg');
+
+      expect(logger.logBufferSize).toBe(4);
+      const levels = logger.getLogBuffer().map(e => e.level);
+      expect(levels).toEqual(['DEBUG', 'INFO', 'WARN', 'ERROR']);
+    });
+
+    it('does not buffer filtered messages', () => {
+      logger.minLevel = 'WARN';
+      logger.debug('filtered');
+      logger.info('filtered');
+      logger.warn('kept');
+      logger.error('kept');
+
+      expect(logger.logBufferSize).toBe(2);
+    });
+
+    it('captures details in buffer entries', () => {
+      logger.info('main message', 'extra details');
+      const entries = logger.getLogBuffer();
+      expect(entries[0].details).toBe('extra details');
+    });
+
+    it('clearLogBuffer empties the buffer', () => {
+      logger.info('test');
+      logger.info('test2');
+      expect(logger.logBufferSize).toBe(2);
+
+      logger.clearLogBuffer();
+      expect(logger.logBufferSize).toBe(0);
+      expect(logger.getLogBuffer()).toEqual([]);
+    });
+
+    it('getLogBuffer returns a copy', () => {
+      logger.info('test');
+      const entries = logger.getLogBuffer();
+      entries.push({ timestamp: '', level: 'INFO', message: 'extra' });
+
+      // Original buffer should not be affected
+      expect(logger.logBufferSize).toBe(1);
+    });
+
+    it('structured methods push to buffer', () => {
+      logger.sessionStart('sess-1', 'Test');
+      logger.apiResponse(100);
+
+      expect(logger.logBufferSize).toBe(2);
+      const messages = logger.getLogBuffer().map(e => e.message);
+      expect(messages[0]).toContain('Session started');
+      expect(messages[1]).toContain('Response');
+    });
+  });
 });

@@ -16,7 +16,8 @@ import {
   ExportFormat,
   TraceCollectorConfig,
   TraceLevel,
-  TraceBufferStats
+  TraceBufferStats,
+  AIExportOptions
 } from './types';
 
 /**
@@ -534,9 +535,77 @@ export class TraceCollector {
       case 'pretty':
         return this.formatPrettyAggregated(normalized);
 
+      case 'ai':
+        return this.formatForAI(normalized);
+
       default:
         return JSON.stringify(normalized, null, 2);
     }
+  }
+
+  /**
+   * Export traces in AI-optimized format with filtering options.
+   * Produces a concise, structured summary suitable for LLM context.
+   */
+  exportForAI(options: AIExportOptions = {}): string {
+    const {
+      minLevel = 'info',
+      includeCategories,
+      excludeCategories,
+      correlationId,
+      timeWindowMs,
+      maxEvents = 500,
+      groupByFlow = true
+    } = options;
+
+    // Start with all events
+    let events = [...this.buffer];
+
+    // Apply filters
+    if (minLevel) {
+      const minPriority = LEVEL_PRIORITY[minLevel];
+      events = events.filter(e => LEVEL_PRIORITY[e.level] >= minPriority);
+    }
+
+    if (includeCategories && includeCategories.length > 0) {
+      events = events.filter(e => includeCategories.includes(e.category));
+    }
+
+    if (excludeCategories && excludeCategories.length > 0) {
+      events = events.filter(e => !excludeCategories.includes(e.category));
+    }
+
+    if (correlationId) {
+      events = events.filter(e => e.correlationId === correlationId);
+    }
+
+    if (timeWindowMs && timeWindowMs > 0) {
+      const cutoff = Date.now() - timeWindowMs;
+      events = events.filter(e => new Date(e.timestamp).getTime() >= cutoff);
+    }
+
+    // Sort chronologically
+    events.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+
+    // Limit events
+    if (events.length > maxEvents) {
+      events = events.slice(-maxEvents);
+    }
+
+    if (events.length === 0) {
+      return 'No trace events match the specified filters.';
+    }
+
+    // Normalize relative time
+    const earliestTime = new Date(events[0].timestamp).getTime();
+    const normalized = events.map(e => ({
+      ...e,
+      relativeTime: new Date(e.timestamp).getTime() - earliestTime
+    }));
+
+    return groupByFlow
+      ? this.formatForAIGrouped(normalized, options)
+      : this.formatForAI(normalized, options);
   }
 
   /**
@@ -601,6 +670,310 @@ export class TraceCollector {
     const timeStr = `${event.relativeTime.toFixed(1)}ms`.padStart(10);
 
     return `${timeStr} ${event.timestamp} ${statusIcon} [${event.source}] [${event.category}] ${event.operation}${duration}${error}${data}`;
+  }
+
+  /**
+   * Format events in AI-optimized format (flat list with smart aggregation).
+   */
+  private formatForAI(events: TraceEvent[], options: AIExportOptions = {}): string {
+    if (events.length === 0) return 'No events.';
+
+    const lines: string[] = [];
+    const totalDuration = events[events.length - 1].relativeTime;
+
+    // Header
+    lines.push(`## Trace Summary (${events.length} events, ${this.formatDuration(totalDuration)})`);
+    lines.push('');
+
+    // Quick stats
+    const stats = this.computeAIStats(events);
+    lines.push('### Overview');
+    lines.push(`- Time span: ${events[0].timestamp} to ${events[events.length - 1].timestamp}`);
+    lines.push(`- Sources: ${stats.sources.join(', ')}`);
+    if (stats.errorCount > 0) {
+      lines.push(`- **Errors: ${stats.errorCount}**`);
+    }
+    if (stats.warningCount > 0) {
+      lines.push(`- Warnings: ${stats.warningCount}`);
+    }
+    lines.push('');
+
+    // Category breakdown
+    lines.push('### Event Categories');
+    for (const [category, count] of Object.entries(stats.categoryCounts)) {
+      lines.push(`- ${category}: ${count}`);
+    }
+    lines.push('');
+
+    // Errors first (always show in full)
+    const errors = events.filter(e => e.status === 'failed' || e.level === 'error');
+    if (errors.length > 0) {
+      lines.push('### Errors');
+      for (const e of errors) {
+        lines.push(`- [${this.formatDuration(e.relativeTime)}] ${e.category}.${e.operation}: ${e.error || 'Failed'}`);
+        if (options.includeData && e.data) {
+          lines.push(`  Data: ${JSON.stringify(e.data)}`);
+        }
+      }
+      lines.push('');
+    }
+
+    // Key events (API requests, tool calls, session events)
+    const keyCategories: TraceCategory[] = [
+      'api.request', 'api.response', 'tool.call', 'tool.result',
+      'shell.execute', 'shell.result', 'session.create', 'session.load', 'session.switch'
+    ];
+    const keyEvents = events.filter(e =>
+      keyCategories.includes(e.category) && e.status !== 'started'
+    );
+
+    if (keyEvents.length > 0) {
+      lines.push('### Key Events');
+      for (const e of keyEvents) {
+        const duration = e.duration ? ` (${this.formatDuration(e.duration)})` : '';
+        const status = e.status === 'failed' ? ' FAILED' : '';
+        lines.push(`- [${this.formatDuration(e.relativeTime)}] ${e.category}.${e.operation}${duration}${status}`);
+        if (options.includeData && e.data) {
+          // Show summary of data, not full payload
+          const summary = this.summarizeData(e.data);
+          if (summary) {
+            lines.push(`  ${summary}`);
+          }
+        }
+      }
+      lines.push('');
+    }
+
+    // Aggregated counts for noisy categories
+    const noisyCategories: TraceCategory[] = [
+      'state.publish', 'state.subscribe', 'actor.bind', 'actor.unbind',
+      'render.turn', 'render.segment', 'api.stream'
+    ];
+    const noisyEvents = events.filter(e => noisyCategories.includes(e.category));
+
+    if (noisyEvents.length > 0) {
+      lines.push('### Aggregated Events');
+      const noisyCounts = new Map<TraceCategory, number>();
+      for (const e of noisyEvents) {
+        noisyCounts.set(e.category, (noisyCounts.get(e.category) || 0) + 1);
+      }
+      for (const [cat, count] of noisyCounts) {
+        lines.push(`- ${cat}: ${count} events`);
+      }
+      lines.push('');
+    }
+
+    return lines.join('\n');
+  }
+
+  /**
+   * Format events grouped by correlation ID (request flows).
+   */
+  private formatForAIGrouped(events: TraceEvent[], options: AIExportOptions = {}): string {
+    if (events.length === 0) return 'No events.';
+
+    const lines: string[] = [];
+    const totalDuration = events[events.length - 1].relativeTime;
+
+    // Group by correlation ID
+    const flows = new Map<string, TraceEvent[]>();
+    for (const e of events) {
+      const existing = flows.get(e.correlationId) || [];
+      existing.push(e);
+      flows.set(e.correlationId, existing);
+    }
+
+    // Header
+    lines.push(`## Trace Summary`);
+    lines.push(`- ${events.length} events across ${flows.size} flows`);
+    lines.push(`- Total duration: ${this.formatDuration(totalDuration)}`);
+    lines.push(`- Time: ${events[0].timestamp} to ${events[events.length - 1].timestamp}`);
+
+    // Quick error summary
+    const errors = events.filter(e => e.status === 'failed' || e.level === 'error');
+    if (errors.length > 0) {
+      lines.push(`- **${errors.length} error(s) detected**`);
+    }
+    lines.push('');
+
+    // Format each flow
+    for (const [correlationId, flowEvents] of flows) {
+      if (correlationId === 'standalone') {
+        // Skip standalone events for now, they'll be listed separately
+        continue;
+      }
+
+      const flowDuration = flowEvents[flowEvents.length - 1].relativeTime - flowEvents[0].relativeTime;
+      const flowErrors = flowEvents.filter(e => e.status === 'failed' || e.level === 'error');
+
+      // Determine flow type from first event
+      const firstEvent = flowEvents[0];
+      const flowType = this.categorizeFlow(flowEvents);
+
+      lines.push(`### Flow: ${flowType}`);
+      lines.push(`- ID: ${correlationId}`);
+      lines.push(`- Duration: ${this.formatDuration(flowDuration)}`);
+      lines.push(`- Events: ${flowEvents.length}`);
+
+      if (flowErrors.length > 0) {
+        lines.push(`- **Errors: ${flowErrors.length}**`);
+        for (const e of flowErrors) {
+          lines.push(`  - ${e.category}.${e.operation}: ${e.error || 'Failed'}`);
+        }
+      }
+
+      // Show key milestones in the flow
+      const milestones = this.extractFlowMilestones(flowEvents);
+      if (milestones.length > 0) {
+        lines.push('- Timeline:');
+        for (const m of milestones) {
+          const relTime = m.relativeTime - flowEvents[0].relativeTime;
+          lines.push(`  - [+${this.formatDuration(relTime)}] ${m.description}`);
+        }
+      }
+
+      lines.push('');
+    }
+
+    // Standalone events
+    const standaloneEvents = flows.get('standalone') || [];
+    if (standaloneEvents.length > 0) {
+      lines.push('### Standalone Events');
+      lines.push(`- ${standaloneEvents.length} events not part of a flow`);
+
+      // Group by category
+      const byCat = new Map<string, number>();
+      for (const e of standaloneEvents) {
+        byCat.set(e.category, (byCat.get(e.category) || 0) + 1);
+      }
+      for (const [cat, count] of byCat) {
+        lines.push(`- ${cat}: ${count}`);
+      }
+      lines.push('');
+    }
+
+    return lines.join('\n');
+  }
+
+  /**
+   * Compute statistics for AI summary.
+   */
+  private computeAIStats(events: TraceEvent[]): {
+    sources: string[];
+    errorCount: number;
+    warningCount: number;
+    categoryCounts: Record<string, number>;
+  } {
+    const sources = new Set<string>();
+    let errorCount = 0;
+    let warningCount = 0;
+    const categoryCounts: Record<string, number> = {};
+
+    for (const e of events) {
+      sources.add(e.source);
+      if (e.status === 'failed' || e.level === 'error') {
+        errorCount++;
+      } else if (e.level === 'warn') {
+        warningCount++;
+      }
+      categoryCounts[e.category] = (categoryCounts[e.category] || 0) + 1;
+    }
+
+    return {
+      sources: Array.from(sources),
+      errorCount,
+      warningCount,
+      categoryCounts
+    };
+  }
+
+  /**
+   * Categorize a flow based on its events.
+   */
+  private categorizeFlow(events: TraceEvent[]): string {
+    const categories = new Set(events.map(e => e.category));
+
+    if (categories.has('api.request')) {
+      const hasTools = categories.has('tool.call');
+      const hasShell = categories.has('shell.execute');
+      if (hasTools && hasShell) return 'API Request with Tools & Shell';
+      if (hasTools) return 'API Request with Tools';
+      if (hasShell) return 'API Request with Shell';
+      return 'API Request';
+    }
+    if (categories.has('session.create') || categories.has('session.load')) {
+      return 'Session';
+    }
+    if (categories.has('tool.call')) {
+      return 'Tool Execution';
+    }
+    if (categories.has('user.input')) {
+      return 'User Interaction';
+    }
+
+    return 'General';
+  }
+
+  /**
+   * Extract key milestones from a flow.
+   */
+  private extractFlowMilestones(events: TraceEvent[]): Array<{ relativeTime: number; description: string }> {
+    const milestones: Array<{ relativeTime: number; description: string }> = [];
+
+    for (const e of events) {
+      // Only include meaningful milestones
+      if (e.status === 'started' && e.category === 'api.request') {
+        milestones.push({ relativeTime: e.relativeTime, description: `API request started: ${e.operation}` });
+      } else if (e.status === 'completed' && e.category === 'api.request') {
+        const tokens = e.data?.tokenCount || e.data?.streamTokens || 'unknown';
+        milestones.push({ relativeTime: e.relativeTime, description: `API response: ${tokens} tokens` });
+      } else if (e.category === 'tool.call' && e.status === 'started') {
+        milestones.push({ relativeTime: e.relativeTime, description: `Tool: ${e.operation}` });
+      } else if (e.category === 'tool.result' || (e.category === 'tool.call' && e.status === 'completed')) {
+        const status = e.status === 'failed' ? 'FAILED' : 'completed';
+        milestones.push({ relativeTime: e.relativeTime, description: `Tool ${status}: ${e.operation}` });
+      } else if (e.category === 'shell.execute') {
+        const cmd = e.data?.command || e.operation;
+        milestones.push({ relativeTime: e.relativeTime, description: `Shell: ${cmd}` });
+      } else if (e.category === 'shell.result') {
+        const status = e.status === 'failed' ? 'FAILED' : 'completed';
+        milestones.push({ relativeTime: e.relativeTime, description: `Shell ${status}` });
+      } else if (e.status === 'failed' || e.level === 'error') {
+        milestones.push({ relativeTime: e.relativeTime, description: `ERROR: ${e.error || e.category}` });
+      }
+    }
+
+    return milestones;
+  }
+
+  /**
+   * Format duration in human-readable format.
+   */
+  private formatDuration(ms: number): string {
+    if (ms < 1000) return `${ms.toFixed(0)}ms`;
+    if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+    const minutes = Math.floor(ms / 60000);
+    const seconds = ((ms % 60000) / 1000).toFixed(0);
+    return `${minutes}m ${seconds}s`;
+  }
+
+  /**
+   * Summarize data payload for AI output.
+   */
+  private summarizeData(data: Record<string, unknown>): string {
+    const parts: string[] = [];
+
+    // Extract key fields that are commonly useful
+    if ('model' in data) parts.push(`model: ${data.model}`);
+    if ('tokenCount' in data) parts.push(`tokens: ${data.tokenCount}`);
+    if ('streamTokens' in data) parts.push(`tokens: ${data.streamTokens}`);
+    if ('messageCount' in data) parts.push(`messages: ${data.messageCount}`);
+    if ('toolName' in data) parts.push(`tool: ${data.toolName}`);
+    if ('command' in data) parts.push(`cmd: ${data.command}`);
+    if ('success' in data) parts.push(`success: ${data.success}`);
+    if ('error' in data) parts.push(`error: ${data.error}`);
+
+    return parts.join(', ');
   }
 
   /**

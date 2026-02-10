@@ -474,7 +474,7 @@ public apiRequest(model: string, messageCount: number, hasImages: boolean = fals
 
 ---
 
-## Part 1B: Webview Console Logging
+## Part 1B: Webview Console Logging ✅ COMPLETE
 
 ### Overview
 
@@ -552,7 +552,7 @@ Sources: [Console.log Slow Down](https://arunangshudas.com/blog/why-is-console-l
 
 | Scenario | Tier 1 (Tracer) | Tier 2 (createLogger) | Tier 3 (EventState) |
 |----------|-----------------|----------------------|---------------------|
-| User clicks button | ✅ `traceUserClick()` | — | — |
+| User clicks button | `tracer.trace('user.click', ...)` | — | — |
 | Actor binds to turn | ✅ `traceActorBind()` | `log.debug(...)` | — |
 | Pool stats (development) | — | `log.debug(...)` | — |
 | Pool exhaustion warning | ✅ via postMessage | `log.warn(...)` | — |
@@ -731,8 +731,8 @@ This makes `console.debug` effectively "free" in production when devtools isn't 
 | createLogger factory (Tier 2) | ✅ Implemented (`media/logging/createLogger.ts`) |
 | Console logging standards (Tier 2) | ✅ Documented + Implemented |
 | Build-time console stripping | ✅ Implemented (`scripts/build-media.js`) |
-| Standardize existing ad-hoc logs | ⏳ Pending (apply [Component] prefix) |
-| Pool stats logging | ⏳ Pending |
+| Standardize existing ad-hoc logs | ✅ Done (all webview actors use createLogger) |
+| Pool stats logging | ✅ Done (VirtualListActor uses createLogger) |
 
 ### Unified Log Level Control
 
@@ -1051,8 +1051,8 @@ npm run test:ui -- --mode=human --visual --trace=./test-trace.json
 4. ✅ Integrated with `EventStateManager` - setTracer/getTracer, traces for register/unregister/handleStateChange/broadcast
 5. ✅ Added trace emission to `VirtualListActor` - bind/unbind traces in bindActorToTurn(), updateVisibility(), clear()
 6. ✅ Added bridge for webview → extension trace sync - postMessage handler in chatProvider.ts
-7. ✅ Added convenience methods: tracePublish, traceSubscribe, traceActorCreate, traceActorBind, traceActorUnbind, traceBridgeSend, traceRenderTurn, traceUserClick
-8. ✅ Added comprehensive tests for WebviewTracer (30 tests passing)
+7. ✅ Added convenience methods: tracePublish, traceSubscribe, traceActorCreate, traceActorDestroy, traceActorBind, traceActorUnbind (6 unused methods removed in noise audit: traceBridgeSend, traceBridgeReceive, traceRenderTurn, traceRenderSegment, traceUserClick, traceUserInput)
+8. ✅ Added comprehensive tests for WebviewTracer (34 tests passing)
 
 ### Phase 3: Mock LLM Client
 

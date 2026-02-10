@@ -41,3 +41,6 @@ export {
 
 // Component logger factory
 export { createLogger, type ComponentLogger } from './createLogger';
+
+// Webview log buffer (syncs to extension)
+export { WebviewLogBuffer, webviewLogBuffer, type WebviewLogEntry } from './WebviewLogBuffer';

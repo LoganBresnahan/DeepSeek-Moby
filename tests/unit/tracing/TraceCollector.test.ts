@@ -1011,4 +1011,232 @@ describe('TraceCollector', () => {
       expect(exported).toMatch(/\(\d+\.\d+ms\)/);
     });
   });
+
+  describe('AI export format', () => {
+    it('exports in AI format via export("ai")', () => {
+      collector.clear();
+
+      collector.importEvent('api.request', 'chat', {
+        originalId: 'evt-1',
+        timestamp: '2026-02-09T03:00:00.000Z',
+        status: 'started',
+        data: { model: 'deepseek-chat', messageCount: 5 }
+      });
+      collector.importEvent('api.request', 'chat', {
+        originalId: 'evt-2',
+        timestamp: '2026-02-09T03:00:02.000Z',
+        status: 'completed',
+        data: { tokenCount: 500 }
+      });
+
+      const exported = collector.export('ai');
+
+      expect(exported).toContain('Trace Summary');
+      expect(exported).toContain('api.request');
+    });
+
+    it('shows error count prominently', () => {
+      collector.clear();
+
+      collector.importEvent('api.request', 'chat', {
+        originalId: 'evt-1',
+        timestamp: '2026-02-09T03:00:00.000Z',
+        status: 'failed',
+        level: 'error',
+        error: 'Rate limit exceeded'
+      });
+
+      const exported = collector.export('ai');
+
+      expect(exported).toContain('Errors: 1');
+      // Error is shown in Errors section with category.operation: message format
+      expect(exported).toContain('api.request.chat');
+      expect(exported).toContain('FAILED');
+    });
+
+    it('aggregates noisy categories', () => {
+      collector.clear();
+
+      // Add many state.publish events
+      for (let i = 0; i < 50; i++) {
+        collector.importEvent('state.publish', `key-${i}`, {
+          originalId: `evt-${i}`,
+          timestamp: `2026-02-09T03:00:${String(i).padStart(2, '0')}.000Z`
+        });
+      }
+
+      const exported = collector.export('ai');
+
+      // Should show aggregated count, not 50 individual events
+      expect(exported).toContain('state.publish: 50');
+    });
+
+    it('returns empty message for no events', () => {
+      collector.clear();
+
+      const exported = collector.export('ai');
+
+      expect(exported).toBe('');
+    });
+  });
+
+  describe('exportForAI method', () => {
+    beforeEach(() => {
+      collector.clear();
+
+      // Set up a realistic trace scenario
+      const correlationId = 'flow-test-123';
+
+      collector.importEvent('api.request', 'chat', {
+        originalId: 'evt-1',
+        timestamp: '2026-02-09T03:00:00.000Z',
+        correlationId,
+        status: 'started',
+        data: { model: 'deepseek-chat', messageCount: 5 }
+      });
+
+      // Streaming events
+      for (let i = 0; i < 10; i++) {
+        collector.importEvent('api.stream', 'chunk', {
+          originalId: `stream-${i}`,
+          timestamp: `2026-02-09T03:00:0${i}.100Z`,
+          correlationId,
+          level: 'debug'
+        });
+      }
+
+      collector.importEvent('api.request', 'chat', {
+        originalId: 'evt-2',
+        timestamp: '2026-02-09T03:00:02.000Z',
+        correlationId,
+        status: 'completed',
+        data: { tokenCount: 500 }
+      });
+
+      // Tool call
+      collector.importEvent('tool.call', 'readFile', {
+        originalId: 'evt-3',
+        timestamp: '2026-02-09T03:00:03.000Z',
+        correlationId,
+        status: 'started'
+      });
+
+      collector.importEvent('tool.call', 'readFile', {
+        originalId: 'evt-4',
+        timestamp: '2026-02-09T03:00:03.500Z',
+        correlationId,
+        status: 'completed',
+        data: { success: true }
+      });
+
+      // Standalone event
+      collector.importEvent('user.click', 'button', {
+        originalId: 'evt-5',
+        timestamp: '2026-02-09T03:00:04.000Z'
+      });
+    });
+
+    it('groups events by correlation ID when groupByFlow is true', () => {
+      const exported = collector.exportForAI({ groupByFlow: true });
+
+      expect(exported).toContain('Flow:');
+      expect(exported).toContain('flow-test-123');
+      expect(exported).toContain('Standalone Events');
+    });
+
+    it('filters by minLevel', () => {
+      const exported = collector.exportForAI({ minLevel: 'info' });
+
+      // Should not include debug-level stream events
+      expect(exported).not.toContain('api.stream: 10');
+    });
+
+    it('filters by correlation ID', () => {
+      const exported = collector.exportForAI({ correlationId: 'flow-test-123' });
+
+      expect(exported).toContain('flow-test-123');
+      expect(exported).not.toContain('user.click');
+    });
+
+    it('filters by includeCategories', () => {
+      const exported = collector.exportForAI({
+        includeCategories: ['api.request'],
+        groupByFlow: false
+      });
+
+      expect(exported).toContain('api.request');
+      expect(exported).not.toContain('tool.call');
+    });
+
+    it('filters by excludeCategories', () => {
+      const exported = collector.exportForAI({
+        excludeCategories: ['api.stream'],
+        groupByFlow: false
+      });
+
+      expect(exported).not.toContain('api.stream');
+      expect(exported).toContain('api.request');
+    });
+
+    it('limits events with maxEvents', () => {
+      const exported = collector.exportForAI({ maxEvents: 5, groupByFlow: false });
+
+      // Should still work but with limited events
+      expect(exported).toContain('Trace Summary');
+      expect(exported).toContain('5 events');
+    });
+
+    it('includes data when includeData is true', () => {
+      const exported = collector.exportForAI({
+        includeData: true,
+        groupByFlow: false
+      });
+
+      // Key events shows completed events with data summaries
+      // The completed api.request has tokenCount, the tool.call has success
+      expect(exported).toContain('tokens: 500');
+      expect(exported).toContain('success: true');
+    });
+
+    it('returns message when no events match filters', () => {
+      const exported = collector.exportForAI({
+        correlationId: 'non-existent-flow'
+      });
+
+      expect(exported).toContain('No trace events match');
+    });
+
+    it('categorizes flows correctly', () => {
+      const exported = collector.exportForAI({ groupByFlow: true });
+
+      expect(exported).toContain('API Request with Tools');
+    });
+
+    it('shows flow milestones', () => {
+      const exported = collector.exportForAI({ groupByFlow: true });
+
+      expect(exported).toContain('Timeline:');
+      expect(exported).toContain('API request started');
+      expect(exported).toContain('tokens');
+    });
+
+    it('formats durations correctly', () => {
+      collector.clear();
+
+      // Add events spanning more than a minute
+      collector.importEvent('session.create', 'new', {
+        originalId: 'evt-1',
+        timestamp: '2026-02-09T03:00:00.000Z'
+      });
+      collector.importEvent('session.load', 'complete', {
+        originalId: 'evt-2',
+        timestamp: '2026-02-09T03:01:30.000Z'
+      });
+
+      const exported = collector.exportForAI({ groupByFlow: false });
+
+      // Should format as minutes
+      expect(exported).toMatch(/1m \d+s/);
+    });
+  });
 });

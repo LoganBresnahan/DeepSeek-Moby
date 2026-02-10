@@ -202,7 +202,29 @@ export type TraceSubscriber = (event: TraceEvent) => void;
 /**
  * Export format for traces.
  */
-export type ExportFormat = 'json' | 'jsonl' | 'pretty';
+export type ExportFormat = 'json' | 'jsonl' | 'pretty' | 'ai';
+
+/**
+ * Options for AI-optimized export.
+ */
+export interface AIExportOptions {
+  /** Minimum level to include (default: 'info') */
+  minLevel?: TraceLevel;
+  /** Include only events matching these categories */
+  includeCategories?: TraceCategory[];
+  /** Exclude events matching these categories */
+  excludeCategories?: TraceCategory[];
+  /** Filter by correlation ID */
+  correlationId?: string;
+  /** Filter events within time window (last N milliseconds) */
+  timeWindowMs?: number;
+  /** Maximum number of events to include (default: 500) */
+  maxEvents?: number;
+  /** Include detailed data payloads (default: false - summaries only) */
+  includeData?: boolean;
+  /** Group events by correlation ID (default: true) */
+  groupByFlow?: boolean;
+}
 
 /**
  * Configuration for the TraceCollector.
