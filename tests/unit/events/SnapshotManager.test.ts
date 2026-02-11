@@ -4,8 +4,8 @@
  * Tests snapshot creation, retrieval, and pruning.
  */
 
-import { describe, it, expect, beforeEach, afterEach, beforeAll } from 'vitest';
-import { Database, initializeSqlJs } from '../../../src/events/SqlJsWrapper';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { Database } from '../../../src/events/SqlJsWrapper';
 import { EventStore } from '../../../src/events/EventStore';
 import { SnapshotManager, createExtractSummarizer } from '../../../src/events/SnapshotManager';
 
@@ -13,11 +13,6 @@ describe('SnapshotManager', () => {
   let db: Database;
   let eventStore: EventStore;
   let snapshotManager: SnapshotManager;
-
-  beforeAll(async () => {
-    // Initialize sql.js once for all tests
-    await initializeSqlJs();
-  });
 
   beforeEach(() => {
     db = new Database(':memory:');
@@ -255,13 +250,15 @@ describe('SnapshotManager', () => {
         await snapshotManager.createSnapshot('session-1');
       }
 
-      const snapshots = snapshotManager.getSessionSnapshots('session-1');
+      // Verify pruning by querying DB directly
+      const stmt = db.prepare('SELECT up_to_sequence FROM snapshots WHERE session_id = ? ORDER BY up_to_sequence DESC');
+      const rows = stmt.all('session-1') as any[];
 
-      expect(snapshots).toHaveLength(3);
+      expect(rows).toHaveLength(3);
       // Should keep the most recent ones (sequences 15, 20, 25)
-      expect(snapshots[0].upToSequence).toBe(25);
-      expect(snapshots[1].upToSequence).toBe(20);
-      expect(snapshots[2].upToSequence).toBe(15);
+      expect(rows[0].up_to_sequence).toBe(25);
+      expect(rows[1].up_to_sequence).toBe(20);
+      expect(rows[2].up_to_sequence).toBe(15);
     });
   });
 

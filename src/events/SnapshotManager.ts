@@ -271,23 +271,6 @@ export class SnapshotManager {
   }
 
   /**
-   * Get all snapshots for a specific session.
-   *
-   * @param sessionId - Session to get snapshots for
-   * @returns Array of snapshots in reverse chronological order
-   */
-  getSessionSnapshots(sessionId: string): Snapshot[] {
-    const stmt = this.db.prepare(`
-      SELECT * FROM snapshots
-      WHERE session_id = ?
-      ORDER BY up_to_sequence DESC
-    `);
-
-    const rows = stmt.all(sessionId) as any[];
-    return rows.map(row => this.rowToSnapshot(row));
-  }
-
-  /**
    * Delete all snapshots for a session.
    *
    * @param sessionId - Session to delete snapshots for

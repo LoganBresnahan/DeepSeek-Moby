@@ -52,7 +52,7 @@ DeepSeek Moby is a VS Code extension that provides AI-powered chat and code assi
 |------|-------------|
 | [backend-architecture.md](../backend/backend-architecture.md) | ChatProvider orchestrator, request lifecycle, design patterns |
 | [event-sourcing.md](../backend/event-sourcing.md) | Event Sourcing architecture, ConversationManager, snapshots |
-| [database-layer.md](../backend/database-layer.md) | SQLite persistence with sql.js, schema design |
+| [database-layer.md](../backend/database-layer.md) | SQLite persistence with @signalapp/sqlcipher, schema design |
 | [tool-execution.md](../backend/tool-execution.md) | Tool loop, shell commands, file operations |
 
 ### Frontend (Webview)

@@ -133,26 +133,6 @@ export class EventStore {
   }
 
   /**
-   * Append multiple events in a transaction.
-   * More efficient than appending one at a time.
-   *
-   * @param events - Array of events to append
-   * @returns Array of complete events with ids and sequences assigned
-   */
-  appendBatch(events: NewEvent<ConversationEvent>[]): ConversationEvent[] {
-    const results: ConversationEvent[] = [];
-
-    const transaction = this.db.transaction(() => {
-      for (const event of events) {
-        results.push(this.append(event));
-      }
-    });
-
-    transaction();
-    return results;
-  }
-
-  /**
    * Get all events for a session, optionally starting from a sequence number.
    *
    * @param sessionId - Session to get events for
@@ -198,29 +178,6 @@ export class EventStore {
   getEventById(eventId: string): ConversationEvent | null {
     const row = this.stmtGetEventById.get(eventId) as { data: string } | undefined;
     return row ? JSON.parse(row.data) : null;
-  }
-
-  /**
-   * Get events within a sequence range.
-   *
-   * @param sessionId - Session to get events for
-   * @param fromSequence - Start sequence (exclusive)
-   * @param toSequence - End sequence (inclusive)
-   * @returns Array of events in the range
-   */
-  getEventsInRange(
-    sessionId: string,
-    fromSequence: number,
-    toSequence: number
-  ): ConversationEvent[] {
-    const stmt = this.db.prepare(`
-      SELECT data FROM events
-      WHERE session_id = ? AND sequence > ? AND sequence <= ?
-      ORDER BY sequence ASC
-    `);
-
-    const rows = stmt.all(sessionId, fromSequence, toSequence) as { data: string }[];
-    return rows.map(row => JSON.parse(row.data));
   }
 
   /**
@@ -293,44 +250,4 @@ export class EventStore {
     }
   }
 
-  /**
-   * Get the first user message in a session.
-   * Used for auto-generating session titles.
-   *
-   * @param sessionId - Session to check
-   * @returns First user message content or null
-   */
-  getFirstUserMessage(sessionId: string): string | null {
-    const stmt = this.db.prepare(`
-      SELECT data FROM events
-      WHERE session_id = ? AND type = 'user_message'
-      ORDER BY sequence ASC
-      LIMIT 1
-    `);
-
-    const row = stmt.get(sessionId) as { data: string } | undefined;
-    if (!row) return null;
-
-    const event = JSON.parse(row.data);
-    return event.content;
-  }
-
-  /**
-   * Get the last event in a session.
-   * Used for session metadata updates.
-   *
-   * @param sessionId - Session to check
-   * @returns Last event or null if no events
-   */
-  getLastEvent(sessionId: string): ConversationEvent | null {
-    const stmt = this.db.prepare(`
-      SELECT data FROM events
-      WHERE session_id = ?
-      ORDER BY sequence DESC
-      LIMIT 1
-    `);
-
-    const row = stmt.get(sessionId) as { data: string } | undefined;
-    return row ? JSON.parse(row.data) : null;
-  }
 }

@@ -5,13 +5,13 @@
  * to test the event grouping logic without full initialization.
  */
 
-import { describe, it, expect, beforeEach, afterEach, beforeAll } from 'vitest';
-import { Database, initializeSqlJs } from '../../../src/events/SqlJsWrapper';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { Database } from '../../../src/events/SqlJsWrapper';
 import { EventStore } from '../../../src/events/EventStore';
 import { ConversationManager, RichHistoryTurn } from '../../../src/events/ConversationManager';
 
 // Bind getSessionRichHistory to a lightweight mock that has just the eventStore.
-// This avoids the ConversationManager constructor (which starts async DB init).
+// This avoids the full ConversationManager constructor (which needs vscode context).
 const getSessionRichHistory = ConversationManager.prototype.getSessionRichHistory;
 
 describe('ConversationManager.getSessionRichHistory', () => {
@@ -20,18 +20,13 @@ describe('ConversationManager.getSessionRichHistory', () => {
   let callRichHistory: (sessionId: string) => Promise<RichHistoryTurn[]>;
   const SESSION_ID = 'test-session-1';
 
-  beforeAll(async () => {
-    await initializeSqlJs();
-  });
-
   beforeEach(() => {
     db = new Database(':memory:');
     eventStore = new EventStore(db);
 
     // Create a lightweight mock with just the fields getSessionRichHistory needs
     const mockCm = {
-      eventStore,
-      ensureInitialized: async () => {}
+      eventStore
     };
     callRichHistory = (sessionId: string) => getSessionRichHistory.call(mockCm, sessionId);
   });

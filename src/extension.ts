@@ -9,6 +9,7 @@ import { ConversationManager } from './events';
 import { TavilyClient } from './clients/tavilyClient';
 import { logger } from './utils/logger';
 import { UnifiedLogExporter } from './logging/UnifiedLogExporter';
+import * as crypto from 'crypto';
 
 let chatProvider: ChatProvider;
 let completionProvider: CompletionProvider;
@@ -27,8 +28,18 @@ export async function activate(context: vscode.ExtensionContext) {
   // Initialize DeepSeek client
   deepSeekClient = new DeepSeekClient(context);
   
-  // Initialize conversation manager (event sourcing)
-  conversationManager = new ConversationManager(context);
+  // Initialize conversation manager (event sourcing) with encrypted DB
+  const dbEncryptionKey = await getOrCreateEncryptionKey(context);
+  try {
+    conversationManager = new ConversationManager(context, { encryptionKey: dbEncryptionKey });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(`[Database] Failed to open conversation database: ${msg}`);
+    vscode.window.showErrorMessage(
+      `DeepSeek Moby: Failed to open conversation database. ${msg}`
+    );
+    throw err;
+  }
 
   // Initialize status bar
   statusBar = new StatusBar(context, deepSeekClient, conversationManager);
@@ -127,6 +138,18 @@ function registerCommands(context: vscode.ExtensionContext) {
   });
 }
 
+const DB_KEY_SECRET = 'deepseek-moby.db-encryption-key';
+
+async function getOrCreateEncryptionKey(context: vscode.ExtensionContext): Promise<string> {
+  let key = await context.secrets.get(DB_KEY_SECRET);
+  if (!key) {
+    key = crypto.randomBytes(32).toString('hex');
+    await context.secrets.store(DB_KEY_SECRET, key);
+    logger.info('Generated new database encryption key');
+  }
+  return key;
+}
+
 async function checkApiKey() {
   const config = vscode.workspace.getConfiguration('deepseek');
   const apiKey = config.get<string>('apiKey');
@@ -144,6 +167,9 @@ async function checkApiKey() {
 }
 
 export function deactivate() {
+  if (conversationManager) {
+    conversationManager.dispose();
+  }
   if (statusBar) {
     statusBar.dispose();
   }

@@ -38,7 +38,7 @@ The backend (VS Code extension) follows a **Mediator/Orchestrator pattern** wher
 │                                                         ▼                    │
 │                                            ┌─────────────────────────────┐  │
 │                                            │  SQLite Database            │  │
-│                                            │  (via sql.js WASM)          │  │
+│                                            │  (via SQLCipher)          │  │
 │                                            │                             │  │
 │                                            │  • events table             │  │
 │                                            │  • sessions table           │  │
@@ -136,10 +136,7 @@ ChatProvider.onDidReceiveMessage()
 ```
 handleUserMessage(data)
          │
-         ├─► conversationManager.ensureInitialized()
-         │   // Wait for SQLite/WASM to be ready
-         │
-         ├─► conversationManager.recordUserMessage(content, attachments)
+         ├─► conversationManager.addMessageToCurrentSession('user', content, { attachments })
          │   // Store user message as event
          │
          ├─► extractFileIntent(message)
@@ -156,8 +153,7 @@ handleUserMessage(data)
          ├─► tavilyClient.search(query)  // if web search enabled
          │   // Augment context with web results
          │
-         └─► conversationManager.getSessionMessagesCompat()
-             // Get conversation history for API call
+         └─► Build conversation history for API call
 ```
 
 ### Phase 3: API Call & Streaming
@@ -359,7 +355,7 @@ The conversation state uses **Event Sourcing** - all changes are stored as an ap
 | [src/events/ConversationManager.ts](../src/events/ConversationManager.ts) | Event sourcing, sessions, context |
 | [src/events/EventStore.ts](../src/events/EventStore.ts) | Append-only event storage |
 | [src/events/SnapshotManager.ts](../src/events/SnapshotManager.ts) | Snapshot creation/retrieval |
-| [src/events/SqlJsWrapper.ts](../src/events/SqlJsWrapper.ts) | SQLite via WASM |
+| [src/events/SqlJsWrapper.ts](../src/events/SqlJsWrapper.ts) | SQLite via SQLCipher |
 | [src/tools/workspaceTools.ts](../src/tools/workspaceTools.ts) | Tool definitions & execution |
 | [src/tools/reasonerShellExecutor.ts](../src/tools/reasonerShellExecutor.ts) | R1 shell command handling |
 | [src/utils/ContentTransformBuffer.ts](../src/utils/ContentTransformBuffer.ts) | Streaming tag filter |
@@ -408,7 +404,7 @@ Layer 3: Stream Errors
 └─► Timeout (30s) → Force end stream
 
 Layer 4: Database Errors
-├─► WASM load failure → Clear error message
+├─► Encryption key error → Toast error message
 ├─► Write failure → Retry, then notify
 └─► Corruption → Offer to reset
 
@@ -419,7 +415,7 @@ Layer 5: User Notification
 ## Related Documentation
 
 - [Event Sourcing](event-sourcing.md) - Detailed event sourcing architecture
-- [Database Layer](database-layer.md) - SQLite/sql.js implementation
+- [Database Layer](database-layer.md) - SQLite/@signalapp/sqlcipher implementation
 - [Message Bridge](message-bridge.md) - postMessage protocol details
 - [Tool Execution](tool-execution.md) - Tool loop and shell commands
 - [Chat Streaming](chat-streaming.md) - Token processing and ContentTransformBuffer

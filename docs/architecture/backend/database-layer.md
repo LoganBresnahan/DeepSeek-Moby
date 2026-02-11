@@ -1,18 +1,14 @@
 # Database Layer
 
-The persistence layer uses **SQLite** via **sql.js** (a WebAssembly port of SQLite) to store conversation events, sessions, and snapshots.
+The persistence layer uses **SQLite** via **@signalapp/sqlcipher** (a native N-API addon wrapping SQLCipher) to store conversation events, sessions, and snapshots with encryption at rest.
 
-## Why sql.js?
+## Why @signalapp/sqlcipher?
 
-VS Code extensions run in a Node.js environment, but **native modules** (like `better-sqlite3`) can cause problems:
-- Require compilation for each platform
-- May not match VS Code's Electron version
-- Cause "native binding not found" errors
-
-**sql.js** solves this by compiling SQLite to WebAssembly:
-- Pure JavaScript/WASM - no native bindings
-- Works on any platform without compilation
-- Same SQLite API and behavior
+- **Encryption at rest** — AES-256-CBC encryption via SQLCipher
+- **Native performance** — Direct disk I/O, no WASM memory overhead
+- **Crash safety** — WAL journal mode for crash recovery
+- **Synchronous API** — No async initialization needed
+- **Battle-tested** — Used by Signal Desktop (also an Electron app)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -29,7 +25,7 @@ VS Code extensions run in a Node.js environment, but **native modules** (like `b
 │  │                       SqlJsWrapper                               │        │
 │  │                  (Compatibility Layer)                           │        │
 │  │                                                                  │        │
-│  │   Provides better-sqlite3-like API:                             │        │
+│  │   Adapts spread-args → array for statement params:              │        │
 │  │   • db.exec(sql)                                                 │        │
 │  │   • db.prepare(sql).run/get/all()                               │        │
 │  │   • db.transaction(fn)                                           │        │
@@ -37,12 +33,12 @@ VS Code extensions run in a Node.js environment, but **native modules** (like `b
 │                                   │                                          │
 │                                   ▼                                          │
 │  ┌─────────────────────────────────────────────────────────────────┐        │
-│  │                         sql.js                                   │        │
-│  │                   (SQLite in WASM)                               │        │
+│  │                    @signalapp/sqlcipher                          │        │
+│  │                  (Native N-API SQLCipher)                        │        │
 │  │                                                                  │        │
-│  │   • Loads sql-wasm.wasm binary                                  │        │
-│  │   • In-memory or file-backed databases                          │        │
-│  │   • Full SQL support                                             │        │
+│  │   • Prebuilt binaries for 6 platforms                           │        │
+│  │   • Direct disk I/O (no in-memory copy)                         │        │
+│  │   • AES-256-CBC encryption                                      │        │
 │  └────────────────────────────────┬────────────────────────────────┘        │
 │                                   │                                          │
 │                                   ▼                                          │
@@ -54,73 +50,23 @@ VS Code extensions run in a Node.js environment, but **native modules** (like `b
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## WASM Initialization
+## Encryption
 
-sql.js requires loading the WASM binary before creating databases:
+The database is encrypted using a key stored in VS Code's SecretStorage (OS keychain-backed):
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                        WASM Loading Sequence                                 │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  Extension Activates                                                         │
-│         │                                                                    │
-│         ▼                                                                    │
-│  new ConversationManager(context)                                            │
-│         │                                                                    │
-│         ├──► initPromise = this.initialize()  (async, not awaited)          │
-│         │                                                                    │
-│         ▼                                                                    │
-│  initialize()                                                                │
-│         │                                                                    │
-│         ├──► await initializeSqlJs()                                         │
-│         │         │                                                          │
-│         │         ├──► Search for sql-wasm.wasm file                        │
-│         │         │    • dist/sql-wasm.wasm (runtime)                       │
-│         │         │    • node_modules/sql.js/dist/ (development)            │
-│         │         │                                                          │
-│         │         ├──► fs.readFileSync(wasmPath)                            │
-│         │         │                                                          │
-│         │         ├──► Convert Buffer to ArrayBuffer                        │
-│         │         │                                                          │
-│         │         └──► SQL = await initSqlJs({ wasmBinary })                │
-│         │                                                                    │
-│         ├──► this.db = new Database(dbPath)                                 │
-│         │                                                                    │
-│         └──► this.initialized = true                                         │
-│                                                                              │
-│                                                                              │
-│  Any public method                                                           │
-│         │                                                                    │
-│         └──► await this.ensureInitialized()                                 │
-│                   │                                                          │
-│                   └──► await this.initPromise  (waits for WASM)             │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+```typescript
+// extension.ts — key management
+async function getOrCreateEncryptionKey(context: vscode.ExtensionContext): Promise<string> {
+  let key = await context.secrets.get('deepseek.dbKey');
+  if (!key) {
+    key = crypto.randomBytes(32).toString('hex');
+    await context.secrets.store('deepseek.dbKey', key);
+  }
+  return key;
+}
 
-## Webpack Configuration
-
-The WASM file must be copied to the dist directory, not bundled:
-
-```javascript
-// webpack.config.js
-module.exports = {
-  externals: {
-    vscode: 'commonjs vscode',
-    'sql.js': 'commonjs sql.js'  // Don't bundle - has WASM loading issues
-  },
-  plugins: [
-    new CopyPlugin({
-      patterns: [
-        {
-          from: 'node_modules/sql.js/dist/sql-wasm.wasm',
-          to: 'sql-wasm.wasm'
-        }
-      ]
-    })
-  ]
-};
+// Key is passed to ConversationManager constructor
+conversationManager = new ConversationManager(context, dbKey);
 ```
 
 ## Database Schema
@@ -226,22 +172,22 @@ CREATE INDEX idx_snapshots_session
 
 ## SqlJsWrapper API
 
-The wrapper provides a synchronous API similar to better-sqlite3:
+The wrapper provides a synchronous API that adapts @signalapp/sqlcipher's array-param style to spread-args:
 
 ```typescript
 // Database class
 class Database {
-  constructor(filePath?: string);  // ':memory:' for in-memory
+  constructor(filePath?: string, encryptionKey?: string);
 
   exec(sql: string): void;         // Execute multiple statements
   prepare(sql: string): Statement; // Prepare for repeated use
   pragma(pragma: string): void;    // Set pragmas
   transaction<T>(fn: () => T): () => T;  // Transaction wrapper
-  close(): void;                   // Save and close
+  close(): void;                   // Close connection
 }
 
-// Statement class
-class Statement {
+// StatementWrapper class (adapts spread-args → array)
+class StatementWrapper {
   run(...params: unknown[]): void;
   get(...params: unknown[]): Record<string, unknown> | undefined;
   all(...params: unknown[]): Record<string, unknown>[];
@@ -251,11 +197,8 @@ class Statement {
 ### Usage Examples
 
 ```typescript
-// Initialize
-await initializeSqlJs();
-
-// Create database
-const db = new Database('/path/to/conversations.db');
+// Create database (synchronous — no async init needed)
+const db = new Database('/path/to/conversations.db', encryptionKey);
 
 // Execute schema
 db.exec(`
@@ -286,59 +229,23 @@ const batchInsert = db.transaction(() => {
 });
 batchInsert();  // Atomic - all or nothing
 
-// Close (saves to file)
+// Close
 db.close();
 ```
 
-## Auto-Save Mechanism
+## Webpack Configuration
 
-Changes are automatically saved to disk:
+The native module is externalized (not bundled):
 
+```javascript
+// webpack.config.js
+module.exports = {
+  externals: {
+    vscode: 'commonjs vscode',
+    '@signalapp/sqlcipher': 'commonjs @signalapp/sqlcipher'
+  }
+};
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                          Auto-Save Strategy                                  │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  db.exec('INSERT ...')                                                       │
-│         │                                                                    │
-│         ├──► Execute SQL in-memory                                          │
-│         │                                                                    │
-│         └──► scheduleSave()                                                 │
-│                   │                                                          │
-│                   ├──► if (saveScheduled) return;                           │
-│                   │                                                          │
-│                   ├──► saveScheduled = true;                                │
-│                   │                                                          │
-│                   └──► setImmediate(() => {                                 │
-│                             saveScheduled = false;                          │
-│                             saveToFile();                                   │
-│                        });                                                  │
-│                                                                              │
-│  saveToFile()                                                                │
-│         │                                                                    │
-│         ├──► const data = db.export();  // Get full DB as Uint8Array       │
-│         │                                                                    │
-│         ├──► fs.mkdirSync(dir, { recursive: true });                        │
-│         │                                                                    │
-│         └──► fs.writeFileSync(filePath, Buffer.from(data));                 │
-│                                                                              │
-│                                                                              │
-│  Benefits:                                                                   │
-│  • Debounced - multiple writes → single save                                │
-│  • Non-blocking - uses setImmediate                                         │
-│  • Atomic - full DB written at once                                         │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-## File Locations
-
-| Path | Description |
-|------|-------------|
-| `~/.vscode/extensions/.../globalStorage/conversations.db` | Production database |
-| `dist/sql-wasm.wasm` | WebAssembly binary (copied by webpack) |
-| `src/events/SqlJsWrapper.ts` | Database abstraction layer |
-| `src/events/sql.js.d.ts` | TypeScript declarations for sql.js |
 
 ## Performance Considerations
 
@@ -357,19 +264,6 @@ this.stmtInsertEvent = this.db.prepare(`
 this.stmtInsertEvent.run(id, sessionId, sequence, timestamp, type, data);
 ```
 
-### Batch Operations
-
-Use transactions for bulk inserts:
-
-```typescript
-appendBatch(events: NewEvent[]): ConversationEvent[] {
-  const insertAll = this.db.transaction(() => {
-    return events.map(event => this.appendSingle(event));
-  });
-  return insertAll();  // Single transaction, single disk write
-}
-```
-
 ### Indexes
 
 Strategic indexes for common queries:
@@ -385,19 +279,22 @@ CREATE INDEX idx_events_session_type ON events(session_id, type);
 CREATE INDEX idx_sessions_updated ON sessions(updated_at DESC);
 ```
 
+## File Locations
+
+| Path | Description |
+|------|-------------|
+| `~/.vscode/extensions/.../globalStorage/conversations.db` | Encrypted database |
+| `src/events/SqlJsWrapper.ts` | Database abstraction layer |
+
 ## Testing
 
 For tests, use in-memory databases:
 
 ```typescript
-import { Database, initializeSqlJs } from './SqlJsWrapper';
+import { Database } from './SqlJsWrapper';
 
 describe('EventStore', () => {
   let db: Database;
-
-  beforeAll(async () => {
-    await initializeSqlJs();  // Load WASM once
-  });
 
   beforeEach(() => {
     db = new Database(':memory:');  // Fresh DB each test
@@ -413,69 +310,17 @@ describe('EventStore', () => {
 });
 ```
 
-## Migration from ChatHistoryManager
-
-The old system used JSON files. The migration path:
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                     Old vs New Storage                                       │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  OLD: ChatHistoryManager                                                     │
-│  ┌─────────────────────────────────────────────────────────────┐            │
-│  │  ~/.vscode/.../sessions/                                     │            │
-│  │    ├── session-abc.json  { messages: [...] }                │            │
-│  │    ├── session-def.json  { messages: [...] }                │            │
-│  │    └── ...                                                   │            │
-│  │                                                              │            │
-│  │  Problems:                                                   │            │
-│  │  • Full messages stored (no compression)                    │            │
-│  │  • No event history (mutations lost)                        │            │
-│  │  • File per session (many small files)                      │            │
-│  │  • No transactions (corruption risk)                        │            │
-│  └─────────────────────────────────────────────────────────────┘            │
-│                           │                                                  │
-│                           ▼                                                  │
-│  NEW: ConversationManager + SQLite                                          │
-│  ┌─────────────────────────────────────────────────────────────┐            │
-│  │  ~/.vscode/.../conversations.db                              │            │
-│  │                                                              │            │
-│  │  Benefits:                                                   │            │
-│  │  • Event-based (full history)                               │            │
-│  │  • Snapshots (context compression)                          │            │
-│  │  • Single file (easier backup)                              │            │
-│  │  • ACID transactions                                        │            │
-│  │  • Efficient queries (indexes)                              │            │
-│  └─────────────────────────────────────────────────────────────┘            │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
 ## Troubleshooting
-
-### "Could not find sql-wasm.wasm"
-
-The WASM file isn't in the expected location. Check:
-1. `npm run compile` was run
-2. webpack CopyPlugin copied the file
-3. File exists in `dist/sql-wasm.wasm`
-
-### "sql.js not initialized"
-
-`initializeSqlJs()` wasn't called or awaited:
-```typescript
-await conversationManager.ensureInitialized();
-// or
-await initializeSqlJs();
-const db = new Database();
-```
 
 ### Database corruption
 
 SQLite is robust, but if issues occur:
 1. Delete `conversations.db`
 2. Data is regenerated (but history is lost)
+
+### Encryption key lost
+
+If the OS keychain is cleared, the encryption key is lost and the database cannot be opened. Delete `conversations.db` to start fresh.
 
 ## Related Documentation
 

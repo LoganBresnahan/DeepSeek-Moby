@@ -15,7 +15,7 @@
 
 - [Backend Architecture](architecture/backend/backend-architecture.md) - ChatProvider orchestrator
 - [Event Sourcing](architecture/backend/event-sourcing.md) - ConversationManager, events, snapshots
-- [Database Layer](architecture/backend/database-layer.md) - SQLite with sql.js
+- [Database Layer](architecture/backend/database-layer.md) - SQLite with @signalapp/sqlcipher
 - [Tool Execution](architecture/backend/tool-execution.md) - Tool loop, shell commands
 
 ### Integration

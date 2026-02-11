@@ -5,19 +5,13 @@
  * Uses in-memory database for fast, isolated tests.
  */
 
-import { describe, it, expect, beforeEach, afterEach, beforeAll } from 'vitest';
-import { Database, initializeSqlJs } from '../../../src/events/SqlJsWrapper';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { Database } from '../../../src/events/SqlJsWrapper';
 import { EventStore } from '../../../src/events/EventStore';
-import { ConversationEvent } from '../../../src/events/EventTypes';
 
 describe('EventStore', () => {
   let db: Database;
   let eventStore: EventStore;
-
-  beforeAll(async () => {
-    // Initialize sql.js once for all tests
-    await initializeSqlJs();
-  });
 
   beforeEach(() => {
     // Use in-memory database for each test
@@ -82,31 +76,6 @@ describe('EventStore', () => {
 
       expect(event1.sequence).toBe(1);
       expect(event2.sequence).toBe(1);
-    });
-  });
-
-  describe('appendBatch', () => {
-    it('should append multiple events atomically', () => {
-      const events = eventStore.appendBatch([
-        {
-          sessionId: 'session-1',
-          timestamp: Date.now(),
-          type: 'user_message',
-          content: 'First'
-        },
-        {
-          sessionId: 'session-1',
-          timestamp: Date.now(),
-          type: 'assistant_message',
-          content: 'Response',
-          model: 'deepseek-chat',
-          finishReason: 'stop' as const
-        }
-      ]);
-
-      expect(events).toHaveLength(2);
-      expect(events[0].sequence).toBe(1);
-      expect(events[1].sequence).toBe(2);
     });
   });
 
@@ -251,25 +220,6 @@ describe('EventStore', () => {
     });
   });
 
-  describe('getEventsInRange', () => {
-    it('should return events within sequence range', () => {
-      for (let i = 0; i < 5; i++) {
-        eventStore.append({
-          sessionId: 'session-1',
-          timestamp: Date.now(),
-          type: 'user_message',
-          content: `Message ${i + 1}`
-        });
-      }
-
-      const events = eventStore.getEventsInRange('session-1', 1, 3);
-
-      expect(events).toHaveLength(2);
-      expect(events[0].sequence).toBe(2);
-      expect(events[1].sequence).toBe(3);
-    });
-  });
-
   describe('getLatestSequence', () => {
     it('should return 0 for empty session', () => {
       const seq = eventStore.getLatestSequence('empty-session');
@@ -392,58 +342,4 @@ describe('EventStore', () => {
     });
   });
 
-  describe('getFirstUserMessage', () => {
-    it('should return first user message content', () => {
-      eventStore.append({
-        sessionId: 'session-1',
-        timestamp: Date.now(),
-        type: 'user_message',
-        content: 'First message'
-      });
-      eventStore.append({
-        sessionId: 'session-1',
-        timestamp: Date.now(),
-        type: 'user_message',
-        content: 'Second message'
-      });
-
-      const first = eventStore.getFirstUserMessage('session-1');
-
-      expect(first).toBe('First message');
-    });
-
-    it('should return null for session without user messages', () => {
-      const first = eventStore.getFirstUserMessage('empty-session');
-
-      expect(first).toBeNull();
-    });
-  });
-
-  describe('getLastEvent', () => {
-    it('should return last event in session', () => {
-      eventStore.append({
-        sessionId: 'session-1',
-        timestamp: Date.now(),
-        type: 'user_message',
-        content: 'First'
-      });
-      eventStore.append({
-        sessionId: 'session-1',
-        timestamp: Date.now(),
-        type: 'user_message',
-        content: 'Last'
-      });
-
-      const last = eventStore.getLastEvent('session-1');
-
-      expect(last).not.toBeNull();
-      expect((last as any).content).toBe('Last');
-    });
-
-    it('should return null for empty session', () => {
-      const last = eventStore.getLastEvent('empty-session');
-
-      expect(last).toBeNull();
-    });
-  });
 });

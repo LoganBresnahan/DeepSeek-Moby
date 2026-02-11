@@ -120,18 +120,6 @@ export interface FileReadEvent extends BaseEvent {
   lineCount: number;
 }
 
-/**
- * File write/modification operation.
- */
-export interface FileWriteEvent extends BaseEvent {
-  type: 'file_write';
-  filePath: string;
-  diffId: string;
-  changeType: 'create' | 'modify' | 'delete';
-  linesAdded: number;
-  linesRemoved: number;
-}
-
 // ============================================================================
 // Diff Events
 // ============================================================================
@@ -200,44 +188,6 @@ export interface SessionRenamedEvent extends BaseEvent {
   newTitle: string;
 }
 
-/**
- * Model changed mid-conversation.
- */
-export interface ModelChangedEvent extends BaseEvent {
-  type: 'model_changed';
-  oldModel: string;
-  newModel: string;
-}
-
-// ============================================================================
-// Context Import Events (for conversation forking/seeding)
-// ============================================================================
-
-/**
- * Context imported from a snapshot of another session.
- * Used when user starts a new conversation with prior context.
- */
-export interface ContextImportedEvent extends BaseEvent {
-  type: 'context_imported';
-  sourceSessionId: string;
-  sourceSnapshotId: string;
-  summary: string;
-  keyFacts: string[];
-  filesModified: string[];
-}
-
-/**
- * Specific event cherry-picked from another session.
- * Used when user selects individual events to bring forward.
- */
-export interface ContextImportedEventEvent extends BaseEvent {
-  type: 'context_imported_event';
-  originalEventId: string;
-  originalSessionId: string;
-  /** Copy of the original event data */
-  eventData: ConversationEvent;
-}
-
 // ============================================================================
 // Error Events
 // ============================================================================
@@ -266,16 +216,12 @@ export type ConversationEvent =
   | ToolCallEvent
   | ToolResultEvent
   | FileReadEvent
-  | FileWriteEvent
   | DiffCreatedEvent
   | DiffAcceptedEvent
   | DiffRejectedEvent
   | WebSearchEvent
   | SessionCreatedEvent
   | SessionRenamedEvent
-  | ModelChangedEvent
-  | ContextImportedEvent
-  | ContextImportedEventEvent
   | ErrorEvent;
 
 /**
@@ -290,11 +236,6 @@ export type EventType = ConversationEvent['type'];
 export type NewEvent<T extends ConversationEvent = ConversationEvent> =
   T extends any ? Omit<T, 'id' | 'sequence'> : never;
 
-/**
- * Helper type for creating new events with proper type inference.
- */
-export type NewEventOf<T extends EventType> = NewEvent<Extract<ConversationEvent, { type: T }>>;
-
 // ============================================================================
 // Type Guards
 // ============================================================================
@@ -307,49 +248,6 @@ export function isAssistantMessageEvent(event: ConversationEvent): event is Assi
   return event.type === 'assistant_message';
 }
 
-export function isToolCallEvent(event: ConversationEvent): event is ToolCallEvent {
-  return event.type === 'tool_call';
-}
-
-export function isToolResultEvent(event: ConversationEvent): event is ToolResultEvent {
-  return event.type === 'tool_result';
-}
-
-export function isDiffCreatedEvent(event: ConversationEvent): event is DiffCreatedEvent {
-  return event.type === 'diff_created';
-}
-
 export function isDiffAcceptedEvent(event: ConversationEvent): event is DiffAcceptedEvent {
   return event.type === 'diff_accepted';
-}
-
-export function isDiffRejectedEvent(event: ConversationEvent): event is DiffRejectedEvent {
-  return event.type === 'diff_rejected';
-}
-
-export function isContextImportedEvent(event: ConversationEvent): event is ContextImportedEvent {
-  return event.type === 'context_imported';
-}
-
-/**
- * Events that represent user-visible messages (for UI rendering).
- */
-export function isMessageEvent(
-  event: ConversationEvent
-): event is UserMessageEvent | AssistantMessageEvent {
-  return event.type === 'user_message' || event.type === 'assistant_message';
-}
-
-/**
- * Events that should be included when building LLM context.
- */
-export function isContextRelevantEvent(event: ConversationEvent): boolean {
-  return [
-    'user_message',
-    'assistant_message',
-    'tool_call',
-    'tool_result',
-    'context_imported',
-    'context_imported_event'
-  ].includes(event.type);
 }

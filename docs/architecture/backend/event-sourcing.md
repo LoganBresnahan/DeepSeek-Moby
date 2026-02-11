@@ -40,28 +40,28 @@ Instead of storing mutable state (like a list of messages), we store an append-o
 │  │   recordUserMessage()    recordAssistantMessage()   createSession()  │    │
 │  │   recordToolCall()       recordToolResult()         deleteSession()  │    │
 │  │   recordDiffCreated()    recordDiffAccepted()       switchSession()  │    │
-│  │   buildLLMContext()      getAllSessions()           getSession()     │    │
+│  │   addMessageToCurrentSession()   getAllSessions()   getSession()     │    │
 │  │                                                                      │    │
 │  └──────────────────────────────────┬──────────────────────────────────┘    │
 │                                     │                                        │
-│           ┌─────────────────────────┼─────────────────────────┐              │
-│           │                         │                         │              │
-│           ▼                         ▼                         ▼              │
-│  ┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐      │
-│  │   EventStore    │      │ SnapshotManager │      │ ContextBuilder  │      │
-│  │                 │      │                 │      │                 │      │
-│  │ • append()      │      │ • createSnapshot│      │ • buildForLLM() │      │
-│  │ • getEvents()   │◄─────│ • getLatest()   │      │ • tokenBudget   │      │
-│  │ • getByType()   │      │ • prune()       │      │ • compress()    │      │
-│  └────────┬────────┘      └────────┬────────┘      └────────┬────────┘      │
-│           │                        │                        │                │
-│           └────────────────────────┼────────────────────────┘                │
+│           ┌─────────────────────────┼─────────────────┐                      │
+│           │                         │                                        │
+│           ▼                         ▼                                        │
+│  ┌─────────────────┐      ┌─────────────────┐                                │
+│  │   EventStore    │      │ SnapshotManager │                                │
+│  │                 │      │                 │                                │
+│  │ • append()      │      │ • createSnapshot│                                │
+│  │ • getEvents()   │◄─────│ • getLatest()   │                                │
+│  │ • getByType()   │      │ • prune()       │                                │
+│  └────────┬────────┘      └────────┬────────┘                                │
+│           │                        │                                         │
+│           └────────────────────────┘                                         │
 │                                    │                                         │
 │                                    ▼                                         │
 │                         ┌─────────────────────┐                              │
 │                         │  SQLite Database    │                              │
-│                         │  (via sql.js)       │                              │
-│                         │                     │                              │
+│                         │  (@signalapp/       │                              │
+│                         │   sqlcipher)        │                              │
 │                         │  • events table     │                              │
 │                         │  • sessions table   │                              │
 │                         │  • snapshots table  │                              │
@@ -106,10 +106,6 @@ Events are strongly typed and capture all conversation interactions:
 │  Session Events                                                              │
 │  ├── session_created     { title, model }                                    │
 │  └── session_renamed     { oldTitle, newTitle }                              │
-│                                                                              │
-│  Context Events (for conversation forking)                                   │
-│  ├── context_imported    { sourceSessionId, snapshotId, summary, ... }      │
-│  └── context_imported_event { originalEventId, eventData }                   │
 │                                                                              │
 │  Other                                                                       │
 │  ├── web_search          { query, resultCount, resultsPreview }             │
@@ -190,142 +186,27 @@ const snapshotManager = new SnapshotManager(db, eventStore, summarizer, {
 await snapshotManager.maybeCreateSnapshot(sessionId);
 ```
 
-## Conversation Forking
+## Initialization
 
-One of the key benefits of Event Sourcing is the ability to fork conversations:
+With @signalapp/sqlcipher, initialization is synchronous. The encryption key is retrieved asynchronously in `activate()` and passed to the constructor:
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           Conversation Forking                               │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  Original Session                                                            │
-│  ┌────────────────────────────────────────────────────────────────┐         │
-│  │  E1 ──► E2 ──► E3 ──► E4 ──► E5 ──► E6 ──► E7 ──► E8          │         │
-│  └────────────────────────────────┬───────────────────────────────┘         │
-│                                   │                                          │
-│                          "Fork from E4"                                      │
-│                                   │                                          │
-│                                   ▼                                          │
-│  ┌─────────────────────────────────────────────────────────────────┐        │
-│  │                      New Forked Session                          │        │
-│  │                                                                  │        │
-│  │  ┌────────────────────┐                                         │        │
-│  │  │ context_imported   │  ◄── Summary of E1-E4                   │        │
-│  │  │ (snapshot or       │      OR cherry-picked events            │        │
-│  │  │  selected events)  │                                         │        │
-│  │  └─────────┬──────────┘                                         │        │
-│  │            │                                                     │        │
-│  │            ▼                                                     │        │
-│  │           F1 ──► F2 ──► F3  (new events)                        │        │
-│  │                                                                  │        │
-│  └─────────────────────────────────────────────────────────────────┘        │
-│                                                                              │
-│  Methods:                                                                    │
-│  • seedFromSnapshot(snapshotId) - Use a snapshot as starting context        │
-│  • seedFromEvents(eventIds[]) - Cherry-pick specific events                 │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
+```typescript
+// extension.ts
+const dbKey = await getOrCreateEncryptionKey(context);
+conversationManager = new ConversationManager(context, dbKey);  // fully sync
 ```
 
-## Context Building for LLM
-
-The `ContextBuilder` transforms events into LLM-ready messages:
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                             ContextBuilder Flow                              │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  Input: sessionId, tokenBudget                                               │
-│                                                                              │
-│  Step 1: Check for snapshots                                                 │
-│  ┌────────────────────────────────────────────────────────────────┐         │
-│  │  latestSnapshot = snapshotManager.getLatestSnapshot(sessionId) │         │
-│  └────────────────────────────────────────────────────────────────┘         │
-│                            │                                                 │
-│                            ▼                                                 │
-│  Step 2: Get events after snapshot (or all if no snapshot)                  │
-│  ┌────────────────────────────────────────────────────────────────┐         │
-│  │  events = eventStore.getEvents(sessionId, afterSequence)       │         │
-│  └────────────────────────────────────────────────────────────────┘         │
-│                            │                                                 │
-│                            ▼                                                 │
-│  Step 3: Build messages array                                                │
-│  ┌────────────────────────────────────────────────────────────────┐         │
-│  │  messages = []                                                  │         │
-│  │                                                                 │         │
-│  │  if (snapshot) {                                                │         │
-│  │    messages.push({                                              │         │
-│  │      role: 'system',                                            │         │
-│  │      content: `Previous context:\n${snapshot.summary}`          │         │
-│  │    });                                                          │         │
-│  │  }                                                              │         │
-│  │                                                                 │         │
-│  │  for (event of events) {                                        │         │
-│  │    if (event.type === 'user_message')                           │         │
-│  │      messages.push({ role: 'user', content: event.content })    │         │
-│  │    if (event.type === 'assistant_message')                      │         │
-│  │      messages.push({ role: 'assistant', content: event.content })│        │
-│  │  }                                                              │         │
-│  └────────────────────────────────────────────────────────────────┘         │
-│                            │                                                 │
-│                            ▼                                                 │
-│  Output: LLMContext { messages, totalTokens, hasSnapshot, eventCount }      │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-## Async Initialization
-
-Because sql.js uses WebAssembly, initialization is asynchronous:
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                        Async Initialization Pattern                          │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  constructor()                                                               │
-│       │                                                                      │
-│       ├──► Store initPromise = this.initialize()                            │
-│       │    (Fire and forget - don't await in constructor)                   │
-│       │                                                                      │
-│       ▼                                                                      │
-│  initialize()                                                                │
-│       │                                                                      │
-│       ├──► await initializeSqlJs()   // Load WASM                           │
-│       ├──► this.db = new Database()  // Create DB                           │
-│       ├──► this.eventStore = new EventStore(db)                             │
-│       ├──► this.snapshotManager = new SnapshotManager(...)                  │
-│       ├──► this.initialized = true                                           │
-│       │                                                                      │
-│       ▼                                                                      │
-│  ensureInitialized()  ◄── Called by all public methods                      │
-│       │                                                                      │
-│       └──► await this.initPromise                                           │
-│                                                                              │
-│                                                                              │
-│  Usage in public methods:                                                    │
-│  ┌────────────────────────────────────────────────────────────────┐         │
-│  │  async getAllSessions(): Promise<Session[]> {                   │         │
-│  │    await this.ensureInitialized();  // Wait for DB              │         │
-│  │    return this.stmtGetAllSessions.all().map(rowToSession);      │         │
-│  │  }                                                              │         │
-│  └────────────────────────────────────────────────────────────────┘         │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+The constructor creates the Database, EventStore, SnapshotManager, and prepares all statements synchronously.
 
 ## File Locations
 
 | File | Description |
 |------|-------------|
-| [src/events/ConversationManager.ts](../src/events/ConversationManager.ts) | Main API, session management, compatibility layer |
+| [src/events/ConversationManager.ts](../src/events/ConversationManager.ts) | Main API, session management, history restore |
 | [src/events/EventStore.ts](../src/events/EventStore.ts) | Append-only event storage with SQLite |
 | [src/events/EventTypes.ts](../src/events/EventTypes.ts) | TypeScript types for all events |
 | [src/events/SnapshotManager.ts](../src/events/SnapshotManager.ts) | Snapshot creation and retrieval |
-| [src/events/ContextBuilder.ts](../src/events/ContextBuilder.ts) | Build LLM context from events |
-| [src/events/SqlJsWrapper.ts](../src/events/SqlJsWrapper.ts) | Database abstraction layer |
+| [src/events/SqlJsWrapper.ts](../src/events/SqlJsWrapper.ts) | Database wrapper (@signalapp/sqlcipher) |
 | [src/events/index.ts](../src/events/index.ts) | Public exports |
 
 ## Usage Examples
@@ -333,60 +214,12 @@ Because sql.js uses WebAssembly, initialization is asynchronous:
 ### Recording Messages
 
 ```typescript
-// User sends a message
-conversationManager.recordUserMessage(
-  "Fix the authentication bug",
-  [{ type: 'file', name: 'auth.ts', content: '...' }]
-);
-
-// Assistant responds
-conversationManager.recordAssistantMessage(
-  "I'll help you fix that. Let me read the file first...",
-  "deepseek-chat",
-  "tool_calls"
-);
-
-// Tool executed
-conversationManager.recordToolCall("call_123", "read_file", { path: "auth.ts" });
-conversationManager.recordToolResult("call_123", "file content here", true);
-```
-
-### Building Context for LLM
-
-```typescript
-// Get context with token budget
-const context = await conversationManager.buildLLMContext(16000);
-
-// context = {
-//   messages: [
-//     { role: 'system', content: 'Previous context: User was...' },
-//     { role: 'user', content: 'Fix the authentication bug' },
-//     { role: 'assistant', content: 'I\'ll help you...' }
-//   ],
-//   totalTokens: 1234,
-//   hasSnapshot: true,
-//   eventCount: 15
-// }
-```
-
-### Forking Conversations
-
-```typescript
-// Fork from a snapshot
-const snapshots = conversationManager.getAllSnapshots();
-const selectedSnapshot = snapshots[0];
-const newSession = await conversationManager.seedFromSnapshot(
-  selectedSnapshot.id,
-  "Retry auth fix with different approach"
-);
-
-// Cherry-pick specific events
-const events = conversationManager.getBrowsableEvents(oldSessionId);
-const selectedEventIds = [events[0].id, events[2].id];
-const forkedSession = await conversationManager.seedFromEvents(
-  selectedEventIds,
-  "Partial context fork"
-);
+// Record events via addMessageToCurrentSession
+conversationManager.addMessageToCurrentSession('user', 'Fix the authentication bug');
+conversationManager.addMessageToCurrentSession('assistant', 'I\'ll help you fix that.', {
+  model: 'deepseek-chat',
+  finishReason: 'stop'
+});
 ```
 
 ## Benefits of This Architecture

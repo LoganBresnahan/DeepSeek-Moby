@@ -19,8 +19,8 @@ History persistence captures every segment of a conversation — reasoning bubbl
            │ recordAssistantMessage()
            ▼
 ┌──────────────────────────────┐
-│  EventStore (sql.js)         │  In-memory SQLite (WASM)
-│  Append-only events table    │  Auto-saves to disk via scheduleSave()
+│  EventStore (SQLCipher)       │  Native SQLite (encrypted)
+│  Append-only events table    │  Direct disk I/O
 │  Indexed by session + type   │
 └──────────┬───────────────────┘
            │ getEventsByType()
@@ -166,7 +166,7 @@ If `contentIterations` is not present (older saved data), the full accumulated `
 
 ### No events in DB after conversation
 
-Check that `StatementWrapper.run()` calls `onMutate()` → `scheduleSave()`. The sql.js database operates entirely in-memory; without explicit save triggers, data is lost on extension deactivation.
+Check that events are being appended correctly. The native SQLCipher database writes directly to disk, so data should persist automatically.
 
 ### Restored text appears in wrong order
 
@@ -195,6 +195,6 @@ Check `[loadSession]` logs for `found=true, view=true`. If the session is found 
 | [`ConversationManager.ts`](../../src/events/ConversationManager.ts) | `RichHistoryTurn` type + `getSessionRichHistory()` |
 | [`EventTypes.ts`](../../src/events/EventTypes.ts) | Event type definitions |
 | [`EventStore.ts`](../../src/events/EventStore.ts) | Append-only event storage |
-| [`SqlJsWrapper.ts`](../../src/events/SqlJsWrapper.ts) | Database wrapper with auto-save |
+| [`SqlJsWrapper.ts`](../../src/events/SqlJsWrapper.ts) | Database wrapper (@signalapp/sqlcipher) |
 | [`VirtualMessageGatewayActor.ts`](../../media/actors/message-gateway/VirtualMessageGatewayActor.ts) | `handleLoadHistory()` restore renderer |
 | [`VirtualListActor.ts`](../../media/actors/virtual-list/VirtualListActor.ts) | DOM rendering API |

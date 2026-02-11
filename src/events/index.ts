@@ -13,15 +13,10 @@
  * const manager = new ConversationManager(context);
  *
  * // Create a session
- * await manager.createSession('My Chat');
+ * manager.startNewSession('My Chat', 'deepseek-chat');
  *
  * // Record events
- * manager.recordUserMessage('Hello');
- * manager.recordAssistantMessage('Hi there!', 'deepseek-chat', 'stop');
- *
- * // Build context for LLM
- * const context = manager.buildLLMContext();
- * console.log(context.messages);
+ * manager.addMessageToCurrentSession('user', 'Hello');
  * ```
  */
 
@@ -32,10 +27,6 @@ export type { Session, ConversationManagerOptions } from './ConversationManager'
 // Event types
 export * from './EventTypes';
 
-// Context building
-export { ContextBuilder } from './ContextBuilder';
-export type { LLMContext, LLMMessage } from './ContextBuilder';
-
 // Snapshots
 export { SnapshotManager, createExtractSummarizer } from './SnapshotManager';
 export type { Snapshot, SnapshotContent, SummarizerFn } from './SnapshotManager';
@@ -43,5 +34,5 @@ export type { Snapshot, SnapshotContent, SummarizerFn } from './SnapshotManager'
 // Low-level event store (usually not needed directly)
 export { EventStore } from './EventStore';
 
-// Database wrapper (sql.js based)
-export { Database, initializeSqlJs } from './SqlJsWrapper';
+// Database wrapper (native SQLCipher)
+export { Database } from './SqlJsWrapper';

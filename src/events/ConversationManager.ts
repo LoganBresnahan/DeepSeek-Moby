@@ -6,8 +6,6 @@
  * a clean API for:
  * - Session management (create, switch, delete)
  * - Event recording (messages, tools, diffs)
- * - Context building for LLM calls
- * - Conversation forking/seeding
  */
 
 import * as vscode from 'vscode';
@@ -15,10 +13,9 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 
-import { Database, initializeSqlJs } from './SqlJsWrapper';
+import { Database } from './SqlJsWrapper';
 import { EventStore } from './EventStore';
-import { SnapshotManager, Snapshot, createExtractSummarizer } from './SnapshotManager';
-import { ContextBuilder, LLMContext, LLMMessage } from './ContextBuilder';
+import { SnapshotManager, createExtractSummarizer } from './SnapshotManager';
 import {
   ConversationEvent,
   Attachment,
@@ -78,36 +75,33 @@ export interface Session {
 export interface ConversationManagerOptions {
   /** Database file path (default: extension storage) */
   dbPath?: string;
+  /** Encryption key for SQLCipher (from VS Code SecretStorage) */
+  encryptionKey?: string;
   /** Event interval for auto-snapshot (default: 20) */
   snapshotInterval?: number;
   /** Max snapshots to keep per session (default: 5) */
   maxSnapshotsPerSession?: number;
-  /** Max tokens for LLM context (default: 16000) */
-  maxContextTokens?: number;
 }
 
 export class ConversationManager {
-  private db!: Database;
-  private eventStore!: EventStore;
-  private snapshotManager!: SnapshotManager;
-  private contextBuilder!: ContextBuilder;
+  private db: Database;
+  private eventStore: EventStore;
+  private snapshotManager: SnapshotManager;
 
   private currentSessionId: string | null = null;
   private context: vscode.ExtensionContext;
   private options?: ConversationManagerOptions;
-  private initialized: boolean = false;
-  private initPromise: Promise<void> | null = null;
 
   // Event emitter for UI updates
   private onSessionsChanged: vscode.EventEmitter<void>;
   public readonly onSessionsChangedEvent: vscode.Event<void>;
 
   // Prepared statements for sessions table
-  private stmtInsertSession!: Statement;
-  private stmtGetSession!: Statement;
-  private stmtGetAllSessions!: Statement;
-  private stmtUpdateSession!: Statement;
-  private stmtDeleteSession!: Statement;
+  private stmtInsertSession: Statement;
+  private stmtGetSession: Statement;
+  private stmtGetAllSessions: Statement;
+  private stmtUpdateSession: Statement;
+  private stmtDeleteSession: Statement;
 
   constructor(context: vscode.ExtensionContext, options?: ConversationManagerOptions) {
     this.context = context;
@@ -117,29 +111,15 @@ export class ConversationManager {
     this.onSessionsChanged = new vscode.EventEmitter<void>();
     this.onSessionsChangedEvent = this.onSessionsChanged.event;
 
-    // Initialize database asynchronously - store promise for awaiting
-    this.initPromise = this.initialize();
-  }
-
-  /**
-   * Initialize the database and components asynchronously.
-   * Called from constructor, awaited internally before operations.
-   */
-  private async initialize(): Promise<void> {
-    if (this.initialized) return;
-
-    // Initialize sql.js WASM
-    await initializeSqlJs();
-
     // Setup database path
     const dbPath = this.options?.dbPath ??
       path.join(this.context.globalStorageUri.fsPath, 'conversations.db');
 
-    // Ensure directory exists
-    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+    // Initialize database (synchronous — native SQLCipher, no WASM)
+    this.db = new Database(dbPath, this.options?.encryptionKey);
 
-    // Initialize database
-    this.db = new Database(dbPath);
+    // Create sessions table first — SnapshotManager references it in a LEFT JOIN
+    this.initSessionsSchema();
 
     // Initialize components
     this.eventStore = new EventStore(this.db);
@@ -152,29 +132,29 @@ export class ConversationManager {
         maxSnapshotsPerSession: this.options?.maxSnapshotsPerSession
       }
     );
-    this.contextBuilder = new ContextBuilder(
-      this.eventStore,
-      this.snapshotManager,
-      { maxContextTokens: this.options?.maxContextTokens }
-    );
-
-    // Initialize schema and statements
-    this.initSessionsSchema();
-    this.prepareStatements();
+    // Prepare session statements
+    this.stmtInsertSession = this.db.prepare(`
+      INSERT INTO sessions (id, title, model, created_at, updated_at, event_count, tags)
+      VALUES (?, ?, ?, ?, ?, 0, '[]')
+    `);
+    this.stmtGetSession = this.db.prepare(`
+      SELECT * FROM sessions WHERE id = ?
+    `);
+    this.stmtGetAllSessions = this.db.prepare(`
+      SELECT * FROM sessions ORDER BY updated_at DESC
+    `);
+    this.stmtUpdateSession = this.db.prepare(`
+      UPDATE sessions
+      SET title = ?, updated_at = ?, event_count = ?,
+          first_user_message = ?, last_activity_preview = ?
+      WHERE id = ?
+    `);
+    this.stmtDeleteSession = this.db.prepare(`
+      DELETE FROM sessions WHERE id = ?
+    `);
 
     // Load last active session
     this.loadCurrentSession();
-
-    this.initialized = true;
-  }
-
-  /**
-   * Ensure the database is initialized before operations.
-   */
-  async ensureInitialized(): Promise<void> {
-    if (this.initPromise) {
-      await this.initPromise;
-    }
   }
 
   // ==========================================================================
@@ -201,31 +181,6 @@ export class ConversationManager {
     `);
   }
 
-  private prepareStatements(): void {
-    this.stmtInsertSession = this.db.prepare(`
-      INSERT INTO sessions (id, title, model, created_at, updated_at, event_count, tags)
-      VALUES (?, ?, ?, ?, ?, 0, '[]')
-    `);
-
-    this.stmtGetSession = this.db.prepare(`
-      SELECT * FROM sessions WHERE id = ?
-    `);
-
-    this.stmtGetAllSessions = this.db.prepare(`
-      SELECT * FROM sessions ORDER BY updated_at DESC
-    `);
-
-    this.stmtUpdateSession = this.db.prepare(`
-      UPDATE sessions
-      SET title = ?, updated_at = ?, event_count = ?,
-          first_user_message = ?, last_activity_preview = ?
-      WHERE id = ?
-    `);
-
-    this.stmtDeleteSession = this.db.prepare(`
-      DELETE FROM sessions WHERE id = ?
-    `);
-  }
 
   private loadCurrentSession(): void {
     const savedId = this.context.globalState.get<string>('currentSessionId');
@@ -248,8 +203,6 @@ export class ConversationManager {
    * Create a new conversation session.
    */
   async createSession(title?: string, model: string = 'deepseek-chat'): Promise<Session> {
-    await this.ensureInitialized();
-
     const id = uuidv4();
     const now = Date.now();
 
@@ -275,16 +228,14 @@ export class ConversationManager {
    * Get a session by ID.
    */
   async getSession(id: string): Promise<Session | null> {
-    await this.ensureInitialized();
     const row = this.stmtGetSession.get(id) as any;
     return row ? this.rowToSession(row) : null;
   }
 
   /**
-   * Get a session by ID (sync version - only use after initialization).
+   * Get a session by ID (sync version).
    */
   getSessionSync(id: string): Session | null {
-    if (!this.initialized) return null;
     const row = this.stmtGetSession.get(id) as any;
     return row ? this.rowToSession(row) : null;
   }
@@ -293,7 +244,6 @@ export class ConversationManager {
    * Get the current active session.
    */
   async getCurrentSession(): Promise<Session | null> {
-    await this.ensureInitialized();
     if (!this.currentSessionId) return null;
     return this.getSession(this.currentSessionId);
   }
@@ -302,7 +252,6 @@ export class ConversationManager {
    * Get all sessions, sorted by most recently updated.
    */
   async getAllSessions(): Promise<Session[]> {
-    await this.ensureInitialized();
     const rows = this.stmtGetAllSessions.all() as any[];
     return rows.map(row => this.rowToSession(row));
   }
@@ -323,7 +272,6 @@ export class ConversationManager {
    * Delete a session and all its events.
    */
   async deleteSession(sessionId: string): Promise<void> {
-    await this.ensureInitialized();
     this.eventStore.deleteSessionEvents(sessionId);
     this.snapshotManager.deleteSessionSnapshots(sessionId);
     this.stmtDeleteSession.run(sessionId);
@@ -365,7 +313,6 @@ export class ConversationManager {
    * Clear all sessions.
    */
   async clearAllSessions(): Promise<void> {
-    await this.ensureInitialized();
     this.db.exec('DELETE FROM events');
     this.db.exec('DELETE FROM snapshots');
     this.db.exec('DELETE FROM sessions');
@@ -383,7 +330,6 @@ export class ConversationManager {
    * Record a user message.
    */
   async recordUserMessage(content: string, attachments?: Attachment[]): Promise<ConversationEvent> {
-    await this.ensureInitialized();
     const session = this.ensureCurrentSession();
 
     const event = this.eventStore.append({
@@ -423,7 +369,6 @@ export class ConversationManager {
     usage?: { promptTokens: number; completionTokens: number },
     contentIterations?: string[]
   ): Promise<ConversationEvent> {
-    await this.ensureInitialized();
     const session = this.ensureCurrentSession();
 
     const event = this.eventStore.append({
@@ -501,22 +446,6 @@ export class ConversationManager {
       result,
       success,
       duration
-    });
-  }
-
-  /**
-   * Record a file read operation.
-   */
-  recordFileRead(filePath: string, contentHash: string, lineCount: number): ConversationEvent {
-    const session = this.ensureCurrentSession();
-
-    return this.eventStore.append({
-      sessionId: session.id,
-      timestamp: Date.now(),
-      type: 'file_read',
-      filePath,
-      contentHash,
-      lineCount
     });
   }
 
@@ -606,121 +535,10 @@ export class ConversationManager {
     });
   }
 
-  // ==========================================================================
-  // Context Building
-  // ==========================================================================
-
-  /**
-   * Build LLM context for the current session.
-   */
-  async buildLLMContext(tokenBudget?: number): Promise<LLMContext> {
-    await this.ensureInitialized();
-    const session = this.ensureCurrentSession();
-    return this.contextBuilder.buildForLLM(session.id, tokenBudget);
-  }
-
-  /**
-   * Get messages only (for compatibility).
-   */
-  async getMessages(): Promise<LLMMessage[]> {
-    const session = await this.getCurrentSession();
-    if (!session) return [];
-    return this.contextBuilder.getMessagesOnly(session.id);
-  }
-
-  // ==========================================================================
-  // Conversation Forking / Seeding
-  // ==========================================================================
-
-  /**
-   * Create a new session seeded with a snapshot from another session.
-   */
-  async seedFromSnapshot(snapshotId: string, title?: string): Promise<Session> {
-    const snapshot = this.snapshotManager.getSnapshotById(snapshotId);
-    if (!snapshot) {
-      throw new Error('Snapshot not found');
-    }
-
-    const session = await this.createSession(title);
-
-    // Record the context import
-    this.eventStore.append({
-      sessionId: session.id,
-      timestamp: Date.now(),
-      type: 'context_imported',
-      sourceSessionId: snapshot.sessionId,
-      sourceSnapshotId: snapshot.id,
-      summary: snapshot.summary,
-      keyFacts: snapshot.keyFacts,
-      filesModified: snapshot.filesModified
-    });
-
-    this.onSessionsChanged.fire();
-    return (await this.getSession(session.id))!;
-  }
-
-  /**
-   * Create a new session seeded with specific events from another session.
-   */
-  async seedFromEvents(eventIds: string[], title?: string): Promise<Session> {
-    const session = await this.createSession(title);
-
-    for (const eventId of eventIds) {
-      const originalEvent = this.eventStore.getEventById(eventId);
-      if (!originalEvent) continue;
-
-      this.eventStore.append({
-        sessionId: session.id,
-        timestamp: Date.now(),
-        type: 'context_imported_event',
-        originalEventId: eventId,
-        originalSessionId: originalEvent.sessionId,
-        eventData: originalEvent
-      });
-    }
-
-    this.onSessionsChanged.fire();
-    return (await this.getSession(session.id))!;
-  }
-
-  /**
-   * Get all snapshots across all sessions (for UI picker).
-   */
-  getAllSnapshots(): Array<Snapshot & { sessionTitle: string }> {
-    return this.snapshotManager.getAllSnapshots();
-  }
-
-  /**
-   * Get browsable events from a session (for cherry-picking UI).
-   */
-  getBrowsableEvents(sessionId: string): ConversationEvent[] {
-    return this.eventStore.getEventsByType(sessionId, [
-      'user_message',
-      'assistant_message',
-      'diff_accepted',
-      'diff_rejected'
-    ]);
-  }
-
-  // ==========================================================================
-  // Compatibility Layer (matches ChatHistoryManager API)
-  // ==========================================================================
-
-  /**
-   * Get messages in the old format for backward compatibility.
-   */
-  async getMessagesCompat(): Promise<Array<{ role: 'user' | 'assistant'; content: string; timestamp: Date }>> {
-    const session = await this.getCurrentSession();
-    if (!session) return [];
-
-    return this.getSessionMessagesCompat(session.id);
-  }
-
   /**
    * Get messages for a specific session in the old format.
    */
   async getSessionMessagesCompat(sessionId: string): Promise<Array<{ role: 'user' | 'assistant'; content: string; timestamp: Date }>> {
-    await this.ensureInitialized();
     const events = this.eventStore.getEventsByType(
       sessionId,
       ['user_message', 'assistant_message']
@@ -760,7 +578,6 @@ export class ConversationManager {
    * field if there were none) to keep the payload lean.
    */
   async getSessionRichHistory(sessionId: string): Promise<RichHistoryTurn[]> {
-    await this.ensureInitialized();
     const events = this.eventStore.getEventsByType(
       sessionId,
       ['user_message', 'assistant_message', 'assistant_reasoning', 'tool_call', 'tool_result']
@@ -932,7 +749,6 @@ export class ConversationManager {
    * Add a message to the current session (compatibility method).
    */
   async addMessageToCurrentSession(message: { role: 'user' | 'assistant'; content: string }): Promise<void> {
-    await this.ensureInitialized();
     if (message.role === 'user') {
       await this.recordUserMessage(message.content);
     } else {
@@ -949,7 +765,6 @@ export class ConversationManager {
     language?: string,
     filePath?: string
   ): Promise<Session> {
-    await this.ensureInitialized();
     return this.createSession(initialMessage, model);
   }
 
@@ -963,7 +778,6 @@ export class ConversationManager {
     byModel: Record<string, number>;
     byLanguage: Record<string, number>;
   }> {
-    await this.ensureInitialized();
     const sessions = await this.getAllSessions();
     let totalMessages = 0;
     let totalTokens = 0;
@@ -1048,7 +862,6 @@ export class ConversationManager {
    * Export all sessions.
    */
   async exportAllSessions(format: 'json' | 'markdown' | 'txt' = 'json'): Promise<string> {
-    await this.ensureInitialized();
     const sessions = await this.getAllSessions();
 
     if (format === 'json') {
@@ -1125,20 +938,6 @@ export class ConversationManager {
         ((e as any).content || '').toLowerCase().includes(lowerQuery)
       );
     });
-  }
-
-  /**
-   * Get conversation history (compatibility method).
-   */
-  async getConversationHistory(): Promise<Array<{ role: 'user' | 'assistant'; content: string; timestamp: Date }>> {
-    return await this.getMessagesCompat();
-  }
-
-  /**
-   * Clear conversation history (compatibility - starts new session).
-   */
-  async clearConversationHistory(): Promise<void> {
-    await this.createSession();
   }
 
   /**
