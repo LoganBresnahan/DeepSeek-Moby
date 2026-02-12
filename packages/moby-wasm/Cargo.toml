@@ -1,0 +1,29 @@
+[package]
+name = "deepseek-moby-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "DeepSeek V3 tokenizer compiled to WASM"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+
+# HuggingFace tokenizers with WASM support
+# - `unstable_wasm` swaps C dependencies (onig regex) for pure Rust (fancy-regex)
+# - `default-features = false` disables onig, esaxx_fast (C++ dep), progressbar
+tokenizers = { version = "0.21", default-features = false, features = ["unstable_wasm"] }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[profile.release]
+opt-level = "z"       # Optimize for binary size (not speed)
+lto = true            # Link-time optimization - slower build, smaller binary
+codegen-units = 1     # Single codegen unit - better optimization
+strip = true          # Strip debug symbols from binary
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false      # Bundled wasm-opt is too old for bulk memory ops; Rust already optimizes

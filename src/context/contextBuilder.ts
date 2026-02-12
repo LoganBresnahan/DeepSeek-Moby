@@ -1,0 +1,140 @@
+/**
+ * ContextBuilder - Decides what messages fit in the context window.
+ *
+ * Strategy:
+ * 1. Count system prompt tokens (fixed cost per request)
+ * 2. Remaining budget = total - output_reserve - system - safety
+ * 3. Fill from most recent messages backward until budget exhausted
+ * 4. If oldest messages were dropped, optionally inject a snapshot summary
+ */
+
+import { TokenCounter } from '../services/tokenCounter';
+import { logger } from '../utils/logger';
+import type { Message, MessageContent } from '../deepseekClient';
+
+interface ModelBudget {
+  totalContext: number;
+  maxOutputTokens: number;
+}
+
+const MODEL_BUDGETS: Record<string, ModelBudget> = {
+  'deepseek-chat': {
+    totalContext: 128_000,
+    maxOutputTokens: 8_192,
+  },
+  'deepseek-reasoner': {
+    totalContext: 128_000,
+    maxOutputTokens: 16_384,
+  },
+};
+
+const DEFAULT_BUDGET: ModelBudget = {
+  totalContext: 128_000,
+  maxOutputTokens: 8_192,
+};
+
+/** When using estimation, reserve 10% as safety margin */
+const ESTIMATION_SAFETY_MARGIN = 0.10;
+
+export interface ContextResult {
+  messages: Message[];
+  tokenCount: number;
+  budget: number;
+  truncated: boolean;
+  droppedCount: number;
+  summaryInjected: boolean;
+}
+
+/** Extract plaintext from MessageContent for token counting */
+function extractText(content: MessageContent): string {
+  if (typeof content === 'string') { return content; }
+  return content
+    .map(c => c.type === 'text' ? c.text : '[image]')
+    .join('');
+}
+
+export class ContextBuilder {
+  constructor(private tokenCounter: TokenCounter) {}
+
+  async build(
+    messages: Message[],
+    systemPrompt: string | undefined,
+    model: string,
+    snapshotSummary?: string
+  ): Promise<ContextResult> {
+    const budget = MODEL_BUDGETS[model] ?? DEFAULT_BUDGET;
+
+    const safetyMultiplier = this.tokenCounter.isExact
+      ? 1.0
+      : (1.0 - ESTIMATION_SAFETY_MARGIN);
+
+    // Fixed cost: system prompt
+    const systemTokens = systemPrompt
+      ? this.tokenCounter.countMessage('system', systemPrompt)
+      : 0;
+
+    // Available budget for conversation messages
+    const availableBudget = Math.floor(
+      (budget.totalContext - budget.maxOutputTokens) * safetyMultiplier
+    ) - systemTokens;
+
+    // Count tokens for each message
+    const messageCosts: Array<{ message: Message; tokens: number }> = [];
+    for (const msg of messages) {
+      const text = extractText(msg.content);
+      const tokens = this.tokenCounter.countMessage(msg.role, text);
+      messageCosts.push({ message: msg, tokens });
+    }
+
+    // Fill from newest messages backward
+    let usedTokens = 0;
+    let cutoffIndex = messageCosts.length;
+
+    for (let i = messageCosts.length - 1; i >= 0; i--) {
+      if (usedTokens + messageCosts[i].tokens > availableBudget) {
+        cutoffIndex = i + 1;
+        break;
+      }
+      usedTokens += messageCosts[i].tokens;
+      if (i === 0) { cutoffIndex = 0; }
+    }
+
+    const includedMessages = messageCosts.slice(cutoffIndex).map(mc => mc.message);
+    const droppedCount = cutoffIndex;
+
+    // If messages were dropped, inject snapshot summary
+    let summaryInjected = false;
+    if (droppedCount > 0 && snapshotSummary) {
+      const summaryTokens = this.tokenCounter.countMessage('user', snapshotSummary);
+      if (usedTokens + summaryTokens <= availableBudget) {
+        includedMessages.unshift({
+          role: 'user',
+          content: `[Previous conversation context]\n${snapshotSummary}`
+        });
+        includedMessages.splice(1, 0, {
+          role: 'assistant',
+          content: 'I understand the context from our earlier conversation. Continuing from where we left off.'
+        });
+        usedTokens += summaryTokens;
+        summaryInjected = true;
+      }
+    }
+
+    const result: ContextResult = {
+      messages: includedMessages,
+      tokenCount: usedTokens + systemTokens,
+      budget: budget.totalContext - budget.maxOutputTokens,
+      truncated: droppedCount > 0,
+      droppedCount,
+      summaryInjected,
+    };
+
+    logger.info(
+      `[Context] ${result.tokenCount.toLocaleString()}/${result.budget.toLocaleString()} tokens` +
+      ` | ${result.droppedCount} dropped` +
+      (result.summaryInjected ? ' | summary injected' : '')
+    );
+
+    return result;
+  }
+}

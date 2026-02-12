@@ -3,6 +3,8 @@ import { HttpClient, HttpError, createStreamReader } from './utils/httpClient';
 import { FormattingEngine } from './utils/formatting';
 import { ConfigManager } from './utils/config';
 import { logger } from './utils/logger';
+import { TokenCounter, EstimationTokenCounter, countRequestTokens } from './services/tokenCounter';
+import { ContextBuilder, ContextResult } from './context/contextBuilder';
 
 export type MessageContent = string | Array<{
   type: 'text';
@@ -84,11 +86,15 @@ export class DeepSeekClient {
   private context: vscode.ExtensionContext;
   private conversationHistory: Message[] = [];
   private modelOverride: string | null = null;
+  private tokenCounter: TokenCounter;
+  private contextBuilder: ContextBuilder;
 
-  constructor(context: vscode.ExtensionContext) {
+  constructor(context: vscode.ExtensionContext, tokenCounter?: TokenCounter) {
     this.context = context;
     this.config = ConfigManager.getInstance();
     this.formattingEngine = new FormattingEngine();
+    this.tokenCounter = tokenCounter ?? new EstimationTokenCounter();
+    this.contextBuilder = new ContextBuilder(this.tokenCounter);
 
     // Standard API endpoint
     this.httpClient = new HttpClient({
@@ -211,6 +217,10 @@ export class DeepSeekClient {
       const tool_calls = message.tool_calls;
       const usage = response.data.usage;
 
+      // Cross-validate our token count against the API's
+      // Note: systemPrompt is already unshifted into requestMessages above
+      this.crossValidateTokens(requestMessages, usage, requestBody.tools);
+
       return { content, reasoning_content, tool_calls, usage };
     } catch (error: unknown) {
       const httpError = error as HttpError;
@@ -277,7 +287,7 @@ export class DeepSeekClient {
 
       const stream = createStreamReader(response.data);
 
-      return new Promise((resolve, reject) => {
+      const result = await new Promise<ChatResponse>((resolve, reject) => {
         let fullResponse = '';
         let fullReasoning = '';
         let usage: ChatResponse['usage'];
@@ -398,6 +408,12 @@ export class DeepSeekClient {
           }
         });
       });
+
+      // Cross-validate our token count against the API's
+      // Note: systemPrompt is already unshifted into requestMessages above
+      this.crossValidateTokens(requestMessages, result.usage);
+
+      return result;
     } catch (error: unknown) {
       const httpError = error as HttpError;
       logger.apiError('DeepSeek stream error', httpError.message);
@@ -580,10 +596,70 @@ export class DeepSeekClient {
     return completions[0] || '';
   }
 
-  // Token estimation for chat history
+  // Token estimation for chat history (uses calibrating estimation counter)
   estimateTokens(text: string): number {
-    // Rough estimate: 1 token ≈ 4 characters for English
-    return Math.ceil(text.length / 4);
+    return this.tokenCounter.count(text);
+  }
+
+  /**
+   * Build an optimized context window that fits within the model's token budget.
+   * Drops oldest messages first, optionally injects a snapshot summary.
+   */
+  async buildContext(
+    messages: Message[],
+    systemPrompt?: string,
+    snapshotSummary?: string
+  ): Promise<ContextResult> {
+    return this.contextBuilder.build(messages, systemPrompt, this.getModel(), snapshotSummary);
+  }
+
+  /**
+   * Calibrate the token estimator using actual API usage data.
+   * Only applies when using EstimationTokenCounter (no-op for exact WASM counter).
+   */
+  calibrateTokenEstimation(inputCharCount: number, actualPromptTokens: number): void {
+    if (this.tokenCounter instanceof EstimationTokenCounter) {
+      this.tokenCounter.calibrate(inputCharCount, actualPromptTokens);
+      logger.info(
+        `[TokenCounter] Calibrated: ratio=${this.tokenCounter.ratio.toFixed(4)}, ` +
+        `samples=${this.tokenCounter.sampleCount}`
+      );
+    }
+  }
+
+  /**
+   * Cross-validate our token count against the API's usage.prompt_tokens.
+   * Counts everything in the request: content, tool calls, tool definitions.
+   * Logs the delta as a percentage. Also calibrates the estimation counter.
+   */
+  private crossValidateTokens(
+    requestMessages: Array<{ role: string; content: MessageContent; tool_calls?: ToolCall[]; tool_call_id?: string }>,
+    usage: ChatResponse['usage'],
+    tools?: Tool[]
+  ): void {
+    if (!usage?.prompt_tokens) { return; }
+
+    // systemPrompt is already in requestMessages (unshifted before the API call),
+    // so we pass undefined — countRequestTokens will count it via the messages loop.
+    const ourCount = countRequestTokens(this.tokenCounter, requestMessages, undefined, tools);
+    const apiCount = usage.prompt_tokens;
+    const delta = apiCount - ourCount;
+    const deltaPercent = apiCount > 0 ? ((delta / apiCount) * 100).toFixed(1) : '0.0';
+
+    logger.info(
+      `[TokenCV] ours=${ourCount.toLocaleString()} api=${apiCount.toLocaleString()} ` +
+      `delta=${delta > 0 ? '+' : ''}${delta} (${deltaPercent}%) ` +
+      `[${this.tokenCounter.isExact ? 'WASM' : 'estimation'}]`
+    );
+
+    // Calibrate estimation counter with actual data
+    if (this.tokenCounter instanceof EstimationTokenCounter) {
+      const charCount = requestMessages.reduce((sum, msg) => {
+        const text = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content);
+        return sum + text.length;
+      }, 0);
+      this.calibrateTokenEstimation(charCount, apiCount);
+    }
   }
 
   // Conversation management (for backward compatibility)

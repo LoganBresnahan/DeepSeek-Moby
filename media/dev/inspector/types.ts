@@ -130,8 +130,3 @@ export function getAllStyleProperties(): StyleProperty[] {
   return STYLE_CATEGORIES.flatMap(cat => cat.properties);
 }
 
-/**
- * Legacy export for backwards compatibility.
- * @deprecated Use STYLE_CATEGORIES instead
- */
-export const DEFAULT_STYLE_PROPERTIES: StyleProperty[] = getAllStyleProperties();

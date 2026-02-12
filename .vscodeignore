@@ -14,3 +14,6 @@ yarn.lock
 !*.d.ts
 media/*.js
 media/*.css
+
+# WASM tokenizer — all needed files are copied to dist/ by webpack
+packages/**

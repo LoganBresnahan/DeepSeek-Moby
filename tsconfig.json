@@ -13,5 +13,5 @@
     "resolveJsonModule": true,
     "moduleResolution": "node"
   },
-  "exclude": ["node_modules", ".vscode-test", "media", "tests", "vitest.config.ts"]
+  "exclude": ["node_modules", ".vscode-test", "media", "tests", "packages", "vitest.config.ts"]
 }

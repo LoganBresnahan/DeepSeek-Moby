@@ -189,6 +189,29 @@ export interface SessionRenamedEvent extends BaseEvent {
 }
 
 // ============================================================================
+// File Write Events
+// ============================================================================
+
+/**
+ * File written/modified during conversation.
+ */
+export interface FileWriteEvent extends BaseEvent {
+  type: 'file_write';
+  filePath: string;
+}
+
+// ============================================================================
+// Context Events
+// ============================================================================
+
+/**
+ * Context imported from a previous session.
+ */
+export interface ContextImportedEvent extends BaseEvent {
+  type: 'context_imported';
+}
+
+// ============================================================================
 // Error Events
 // ============================================================================
 
@@ -216,12 +239,14 @@ export type ConversationEvent =
   | ToolCallEvent
   | ToolResultEvent
   | FileReadEvent
+  | FileWriteEvent
   | DiffCreatedEvent
   | DiffAcceptedEvent
   | DiffRejectedEvent
   | WebSearchEvent
   | SessionCreatedEvent
   | SessionRenamedEvent
+  | ContextImportedEvent
   | ErrorEvent;
 
 /**

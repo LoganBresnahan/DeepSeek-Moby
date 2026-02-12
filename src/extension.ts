@@ -9,6 +9,7 @@ import { ConversationManager } from './events';
 import { TavilyClient } from './clients/tavilyClient';
 import { logger } from './utils/logger';
 import { UnifiedLogExporter } from './logging/UnifiedLogExporter';
+import { TokenService } from './services/tokenService';
 import * as crypto from 'crypto';
 
 let chatProvider: ChatProvider;
@@ -25,8 +26,20 @@ export async function activate(context: vscode.ExtensionContext) {
   // Initialize configuration
   const config = ConfigManager.getInstance();
   
-  // Initialize DeepSeek client
-  deepSeekClient = new DeepSeekClient(context);
+  // Initialize WASM tokenizer (exact token counting)
+  const tokenService = TokenService.getInstance(context.extensionPath);
+  try {
+    await tokenService.initialize();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(`[TokenService] WASM tokenizer failed: ${msg}`);
+    // Don't block activation — DeepSeekClient falls back to EstimationTokenCounter
+  }
+
+  // Initialize DeepSeek client (uses WASM tokenizer if available, estimation otherwise)
+  const useWasm = tokenService.isReady;
+  deepSeekClient = new DeepSeekClient(context, useWasm ? tokenService : undefined);
+  logger.info(`[TokenService] Active: ${useWasm ? 'WASM (exact)' : 'Estimation (fallback)'}`);
   
   // Initialize conversation manager (event sourcing) with encrypted DB
   const dbEncryptionKey = await getOrCreateEncryptionKey(context);
@@ -176,5 +189,6 @@ export function deactivate() {
   if (deepSeekClient) {
     deepSeekClient.dispose();
   }
+  TokenService.resetInstance();
   logger.dispose();
 }

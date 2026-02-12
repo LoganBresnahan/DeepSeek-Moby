@@ -33,14 +33,13 @@
 export {
   LogLevel,
   setLogLevel,
-  getLogLevel,
   shouldLog,
   enableDebugMode,
   disableDebugMode
 } from './logLevel';
 
 // Component logger factory
-export { createLogger, type ComponentLogger } from './createLogger';
+export { createLogger } from './createLogger';
 
 // Webview log buffer (syncs to extension)
 export { WebviewLogBuffer, webviewLogBuffer, type WebviewLogEntry } from './WebviewLogBuffer';

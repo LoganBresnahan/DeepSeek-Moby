@@ -54,6 +54,7 @@ DeepSeek Moby is a VS Code extension that provides AI-powered chat and code assi
 | [event-sourcing.md](../backend/event-sourcing.md) | Event Sourcing architecture, ConversationManager, snapshots |
 | [database-layer.md](../backend/database-layer.md) | SQLite persistence with @signalapp/sqlcipher, schema design |
 | [tool-execution.md](../backend/tool-execution.md) | Tool loop, shell commands, file operations |
+| [token-counting.md](../backend/token-counting.md) | WASM tokenizer, context budgeting, cross-validation |
 
 ### Frontend (Webview)
 
@@ -92,6 +93,7 @@ DeepSeek Moby is a VS Code extension that provides AI-powered chat and code assi
 |------|-------------|
 | [dead-code-cleanup.md](../../plans/dead-code-cleanup.md) | Cleanup status (complete) |
 | [backend-refactor.md](../../plans/backend-refactor.md) | Event Sourcing implementation plan |
+| [tokenizer.md](../../plans/tokenizer.md) | WASM tokenizer plan (complete) |
 
 ## Key Concepts
 

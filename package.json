@@ -442,6 +442,7 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run package",
+    "build:wasm": "cd packages/moby-wasm && PATH=\"$HOME/.cargo/bin:$PATH\" wasm-pack build --target nodejs --release",
     "build:media": "node scripts/build-media.js",
     "compile": "npm run build:media && webpack",
     "watch": "npm run build:media && webpack --watch",
@@ -463,6 +464,7 @@
     "@typescript-eslint/parser": "^6.13.1",
     "@vitest/coverage-v8": "^2.0.0",
     "@vitest/ui": "^2.0.0",
+    "copy-webpack-plugin": "^13.0.1",
     "esbuild": "^0.19.12",
     "eslint": "^8.54.0",
     "glob": "^10.3.10",
@@ -475,6 +477,7 @@
   },
   "dependencies": {
     "@signalapp/sqlcipher": "^3.1.0",
+    "deepseek-moby-wasm": "file:packages/moby-wasm/pkg",
     "diff": "^8.0.3",
     "events": "^3.3.0",
     "highlight.js": "^11.11.1",

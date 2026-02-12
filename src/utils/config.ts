@@ -24,16 +24,4 @@ export class ConfigManager {
   async update(key: string, value: any, target?: vscode.ConfigurationTarget) {
     await this.getConfig().update(key, value, target);
   }
-
-  getApiKey(): string | undefined {
-    return this.get<string>('apiKey');
-  }
-
-  getModel(): string {
-    return this.get<string>('model') || 'deepseek-chat';
-  }
-
-  shouldAutoFormat(): boolean {
-    return this.get<boolean>('autoFormat') ?? true;
-  }
 }

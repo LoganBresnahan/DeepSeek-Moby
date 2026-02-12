@@ -38,6 +38,11 @@ coverage/
 # Anthropic
 .claude/*
 
+# WASM build output (build locally with: npm run build:wasm)
+packages/moby-wasm/pkg/
+packages/moby-wasm/target/
+packages/moby-wasm/assets/tokenizer.json
+
 # Me
 PLAN.md
 REMINDER.md

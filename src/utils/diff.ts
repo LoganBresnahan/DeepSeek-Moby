@@ -50,43 +50,6 @@ export class DiffEngine {
   }
 
   /**
-   * Compute line-level diff between two strings.
-   */
-  computeDiff(original: string, modified: string): Diff.Change[] {
-    return Diff.diffLines(original, modified);
-  }
-
-  /**
-   * Create a unified diff patch string.
-   */
-  createPatch(original: string, modified: string, filename: string = 'file'): string {
-    return Diff.createPatch(filename, original, modified);
-  }
-
-  /**
-   * Apply a unified diff patch to content.
-   */
-  applyPatch(content: string, patch: string, options?: { fuzzFactor?: number }): DiffResult {
-    const fuzzFactor = options?.fuzzFactor ?? this.options.fuzzFactor ?? 0;
-    const result = Diff.applyPatch(content, patch, { fuzzFactor });
-
-    if (result === false) {
-      return {
-        content,
-        success: false,
-        operation: 'patch',
-        message: 'Patch application failed'
-      };
-    }
-
-    return {
-      content: result,
-      success: true,
-      operation: 'patch',
-    };
-  }
-
-  /**
    * Parse search/replace blocks from content.
    * Supports Aider-style format:
    *
@@ -642,21 +605,6 @@ export class DiffEngine {
 
     return overlapRatio > 0.7 && sizeRatio > 0.8 && sizeRatio < 1.3;
   }
-
-  /**
-   * Generate a unified diff string between two texts.
-   */
-  generateUnifiedDiff(original: string, modified: string, filename: string = 'file'): string {
-    return Diff.createPatch(filename, original, modified);
-  }
-
-  /**
-   * Parse a unified diff string into structured patches.
-   */
-  parseUnifiedDiff(patchText: string): Diff.StructuredPatch[] {
-    return Diff.parsePatch(patchText);
-  }
 }
 
 export const diffEngine = new DiffEngine();
-export default DiffEngine;

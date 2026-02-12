@@ -12,7 +12,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { InspectorShadowActor } from '../../../media/dev/inspector/InspectorShadowActor';
 import { EventStateManager } from '../../../media/state/EventStateManager';
-import { DEFAULT_STYLE_PROPERTIES } from '../../../media/dev/inspector/types';
+import { getAllStyleProperties } from '../../../media/dev/inspector/types';
 
 /**
  * Helper to select an element using the new right-click flow:
@@ -273,7 +273,7 @@ describe('InspectorShadowActor', () => {
 
       const styleControls = hostElement.shadowRoot?.querySelector('.style-controls');
       const rows = styleControls?.querySelectorAll('.style-row');
-      expect(rows?.length).toBe(DEFAULT_STYLE_PROPERTIES.length);
+      expect(rows?.length).toBe(getAllStyleProperties().length);
     });
 
     it('selection overlay positions over element', () => {

@@ -326,7 +326,7 @@ export function createExtractSummarizer(): SummarizerFn {
     const filesModified = new Set<string>();
     events.forEach(event => {
       if (event.type === 'diff_accepted' || event.type === 'file_write') {
-        const filePath = (event as any).filePath;
+        const filePath = 'filePath' in event ? event.filePath : undefined;
         if (filePath) filesModified.add(filePath);
       }
       if (event.type === 'diff_created') {

@@ -17,6 +17,7 @@
 - [Event Sourcing](architecture/backend/event-sourcing.md) - ConversationManager, events, snapshots
 - [Database Layer](architecture/backend/database-layer.md) - SQLite with @signalapp/sqlcipher
 - [Tool Execution](architecture/backend/tool-execution.md) - Tool loop, shell commands
+- [Token Counting](architecture/backend/token-counting.md) - WASM tokenizer, context budgeting, cross-validation
 
 ### Integration
 
@@ -40,3 +41,4 @@
 
 - [Dead Code Cleanup](plans/dead-code-cleanup.md) - Cleanup status (complete)
 - [Backend Refactor](plans/backend-refactor.md) - Event Sourcing implementation plan
+- [WASM Tokenizer](plans/tokenizer.md) - Tokenizer implementation plan (complete)

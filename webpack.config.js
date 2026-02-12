@@ -3,6 +3,7 @@
 'use strict';
 
 const path = require('path');
+const CopyPlugin = require('copy-webpack-plugin');
 
 /** @type {import('webpack').Configuration} */
 const config = {
@@ -15,10 +16,17 @@ const config = {
     filename: 'extension.js',
     libraryTarget: 'commonjs2'
   },
-  externals: {
-    vscode: 'commonjs vscode',
-    '@signalapp/sqlcipher': 'commonjs @signalapp/sqlcipher'  // Native N-API module - load at runtime
-  },
+  externals: [
+    { vscode: 'commonjs vscode' },
+    { '@signalapp/sqlcipher': 'commonjs @signalapp/sqlcipher' },  // Native N-API module
+    // WASM tokenizer — resolve to co-located copy in dist/wasm/
+    ({ request }, callback) => {
+      if (request === 'deepseek-moby-wasm') {
+        return callback(null, 'commonjs ./wasm/deepseek_moby_wasm.js');
+      }
+      callback();
+    }
+  ],
   resolve: {
     extensions: ['.ts', '.js']
   },
@@ -35,6 +43,26 @@ const config = {
       }
     ]
   },
+  plugins: [
+    new CopyPlugin({
+      patterns: [
+        // Compressed vocabulary for WASM tokenizer
+        {
+          from: 'packages/moby-wasm/assets/tokenizer.json.br',
+          to: 'assets/tokenizer.json.br'
+        },
+        // WASM module (JS glue + binary) — vsce can't follow file: symlinks
+        {
+          from: 'packages/moby-wasm/pkg/deepseek_moby_wasm.js',
+          to: 'wasm/deepseek_moby_wasm.js'
+        },
+        {
+          from: 'packages/moby-wasm/pkg/deepseek_moby_wasm_bg.wasm',
+          to: 'wasm/deepseek_moby_wasm_bg.wasm'
+        }
+      ]
+    })
+  ],
   devtool: 'nosources-source-map',
   infrastructureLogging: {
     level: "log",
