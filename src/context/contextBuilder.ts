@@ -99,8 +99,45 @@ export class ContextBuilder {
       if (i === 0) { cutoffIndex = 0; }
     }
 
-    const includedMessages = messageCosts.slice(cutoffIndex).map(mc => mc.message);
-    const droppedCount = cutoffIndex;
+    // Adjust cutoff to avoid splitting tool-call / tool-result pairs.
+    // If the first kept message is an orphaned tool result or an assistant
+    // whose tool results were dropped, nudge the cutoff forward.
+    let adjustedCutoff = cutoffIndex;
+    while (adjustedCutoff < messageCosts.length) {
+      const msg = messageCosts[adjustedCutoff].message;
+      if (msg.role === 'tool' && msg.tool_call_id) {
+        // Orphaned tool result — its parent assistant was dropped
+        usedTokens -= messageCosts[adjustedCutoff].tokens;
+        adjustedCutoff++;
+      } else if (msg.role === 'assistant' && msg.tool_calls?.length) {
+        // Check if all its tool results are still in the kept portion
+        const expectedIds = new Set(msg.tool_calls.map(tc => tc.id));
+        let nextIdx = adjustedCutoff + 1;
+        while (nextIdx < messageCosts.length) {
+          const next = messageCosts[nextIdx].message;
+          if (next.role === 'tool' && next.tool_call_id && expectedIds.has(next.tool_call_id)) {
+            expectedIds.delete(next.tool_call_id);
+            nextIdx++;
+          } else {
+            break;
+          }
+        }
+        if (expectedIds.size > 0) {
+          // Some tool results are missing — drop this assistant + remaining tool results
+          for (let k = adjustedCutoff; k < nextIdx; k++) {
+            usedTokens -= messageCosts[k].tokens;
+          }
+          adjustedCutoff = nextIdx;
+        } else {
+          break; // Clean boundary
+        }
+      } else {
+        break; // Regular message — boundary is clean
+      }
+    }
+
+    const includedMessages = messageCosts.slice(adjustedCutoff).map(mc => mc.message);
+    const droppedCount = adjustedCutoff;
 
     // If messages were dropped, inject snapshot summary
     let summaryInjected = false;

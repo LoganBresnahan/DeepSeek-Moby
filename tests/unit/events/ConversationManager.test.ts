@@ -1,5 +1,5 @@
 /**
- * Tests for ConversationManager.getSessionRichHistory()
+ * Tests for ConversationManager.getSessionRichHistory() and getLatestSnapshotSummary()
  *
  * Uses in-memory database and directly injects EventStore
  * to test the event grouping logic without full initialization.
@@ -8,6 +8,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { Database } from '../../../src/events/SqlJsWrapper';
 import { EventStore } from '../../../src/events/EventStore';
+import { SnapshotManager, createExtractSummarizer } from '../../../src/events/SnapshotManager';
 import { ConversationManager, RichHistoryTurn } from '../../../src/events/ConversationManager';
 
 // Bind getSessionRichHistory to a lightweight mock that has just the eventStore.
@@ -646,5 +647,93 @@ describe('ConversationManager.getSessionRichHistory', () => {
     expect(assistant.reasoning_iterations).toBeUndefined();
     expect(assistant.shellResults).toBeUndefined();
     expect(assistant.contentIterations).toBeUndefined();
+  });
+});
+
+// Bind getLatestSnapshotSummary to a lightweight mock
+const getLatestSnapshotSummary = ConversationManager.prototype.getLatestSnapshotSummary;
+
+describe('ConversationManager.getLatestSnapshotSummary', () => {
+  let db: Database;
+  let eventStore: EventStore;
+  let snapshotManager: SnapshotManager;
+  let callGetSummary: (sessionId: string) => string | undefined;
+  const SESSION_ID = 'test-session-snap';
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    // Create sessions table (SnapshotManager references it in a LEFT JOIN)
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS sessions (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        model TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        event_count INTEGER DEFAULT 0,
+        last_snapshot_sequence INTEGER DEFAULT 0,
+        tags TEXT DEFAULT '[]',
+        first_user_message TEXT,
+        last_activity_preview TEXT
+      )
+    `);
+    eventStore = new EventStore(db);
+    snapshotManager = new SnapshotManager(db, eventStore, createExtractSummarizer());
+
+    const mockCm = { snapshotManager };
+    callGetSummary = (sessionId: string) => getLatestSnapshotSummary.call(mockCm, sessionId);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('returns undefined when no snapshots exist', () => {
+    const result = callGetSummary(SESSION_ID);
+    expect(result).toBeUndefined();
+  });
+
+  it('returns snapshot summary after snapshot is created', async () => {
+    // Append enough events to trigger a snapshot (default interval is 20)
+    for (let i = 0; i < 25; i++) {
+      eventStore.append({
+        sessionId: SESSION_ID,
+        timestamp: 1000 + i * 100,
+        type: i % 2 === 0 ? 'user_message' : 'assistant_message',
+        content: `Message ${i}`,
+        ...(i % 2 === 1 ? { model: 'deepseek-chat', finishReason: 'stop' } : {})
+      });
+    }
+
+    // Force create a snapshot
+    await snapshotManager.createSnapshot(SESSION_ID);
+
+    const result = callGetSummary(SESSION_ID);
+    expect(result).toBeDefined();
+    expect(typeof result).toBe('string');
+    expect(result!.length).toBeGreaterThan(0);
+    // The extractive summarizer prefixes with "Conversation topics:"
+    expect(result).toContain('Conversation topics:');
+  });
+
+  it('returns undefined for session with no snapshots even if other sessions have them', async () => {
+    // Create events and snapshot for session A
+    for (let i = 0; i < 5; i++) {
+      eventStore.append({
+        sessionId: 'session-A',
+        timestamp: 1000 + i * 100,
+        type: 'user_message',
+        content: `Message ${i}`
+      });
+    }
+    await snapshotManager.createSnapshot('session-A');
+
+    // Session B has no snapshots
+    const result = callGetSummary('session-B');
+    expect(result).toBeUndefined();
+
+    // Session A should have a summary
+    const resultA = callGetSummary('session-A');
+    expect(resultA).toBeDefined();
   });
 });

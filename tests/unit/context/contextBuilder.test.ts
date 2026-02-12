@@ -204,6 +204,132 @@ describe('ContextBuilder', () => {
     expect(result.droppedCount).toBe(0);
   });
 
+  it('should not split tool-call / tool-result pairs at cutoff boundary', async () => {
+    // Use exact counter with known ratio so we can control budget precisely
+    const counter = createExactCounter(0.3);
+    const builder = new ContextBuilder(counter);
+
+    // Build messages: old conversation + a tool pair + more conversation
+    // We want the cutoff to land right in the middle of the tool pair
+    const messages: Message[] = [
+      // Old messages that will be dropped (large to force truncation)
+      ...Array.from({ length: 20 }, (_, i) => ({
+        role: (i % 2 === 0 ? 'user' : 'assistant') as 'user' | 'assistant',
+        content: 'x'.repeat(20000),
+      })),
+      // Tool pair that might get split
+      {
+        role: 'assistant' as const,
+        content: 'I will read the file',
+        tool_calls: [{ id: 'call-1', type: 'function' as const, function: { name: 'read_file', arguments: '{"path":"app.ts"}' } }],
+      },
+      {
+        role: 'tool' as const,
+        content: 'file contents here',
+        tool_call_id: 'call-1',
+      },
+      // Recent messages that should always be kept
+      { role: 'assistant' as const, content: 'Here is what I found.' },
+      { role: 'user' as const, content: 'Thanks, now fix it.' },
+    ];
+
+    const result = await builder.build(messages, undefined, 'deepseek-chat');
+
+    expect(result.truncated).toBe(true);
+
+    // Verify no orphaned tool results exist
+    for (const msg of result.messages) {
+      if (msg.role === 'tool' && msg.tool_call_id) {
+        // There must be an assistant with matching tool_calls earlier in the array
+        const hasParent = result.messages.some(
+          m => m.role === 'assistant' && m.tool_calls?.some(tc => tc.id === msg.tool_call_id)
+        );
+        expect(hasParent).toBe(true);
+      }
+    }
+
+    // Verify no assistant with tool_calls has missing tool results
+    for (const msg of result.messages) {
+      if (msg.role === 'assistant' && msg.tool_calls?.length) {
+        for (const tc of msg.tool_calls) {
+          const hasResult = result.messages.some(
+            m => m.role === 'tool' && m.tool_call_id === tc.id
+          );
+          expect(hasResult).toBe(true);
+        }
+      }
+    }
+  });
+
+  it('should drop orphaned tool result at cutoff boundary', async () => {
+    // Exact counter: chars * 0.3 + 4 overhead per message
+    // Budget: (128000 - 8192) * 1.0 = 119808 tokens (no system prompt)
+    const counter = createExactCounter(0.3);
+    const builder = new ContextBuilder(counter);
+
+    // Layout (indices):
+    //   0: user (20000 chars = 6004 tokens)
+    //   1: assistant (20000 chars = 6004 tokens)
+    //   2: assistant w/tool_calls (40000 chars = 12004 tokens) — LARGE so it won't fit
+    //   3: tool result (small = ~12 tokens)
+    //   4-21: 18 recent messages (20000 chars = 6004 tokens each)
+    //
+    // Backward fill: 18 msgs (108072) + tool (12) = 108084. Remaining: 11724.
+    // Index 2 costs 12004 > 11724, so cutoff = 3.
+    // Index 3 (tool result) is kept initially but its parent (index 2) was dropped.
+    const messages: Message[] = [
+      { role: 'user' as const, content: 'x'.repeat(20000) },
+      { role: 'assistant' as const, content: 'x'.repeat(20000) },
+      {
+        role: 'assistant' as const,
+        content: 'x'.repeat(40000),
+        tool_calls: [{ id: 'call-split', type: 'function' as const, function: { name: 'read_file', arguments: '{}' } }],
+      },
+      {
+        role: 'tool' as const,
+        content: 'file contents',
+        tool_call_id: 'call-split',
+      },
+      ...Array.from({ length: 18 }, (_, i) => ({
+        role: (i % 2 === 0 ? 'user' : 'assistant') as 'user' | 'assistant',
+        content: 'x'.repeat(20000),
+      })),
+    ];
+
+    const result = await builder.build(messages, undefined, 'deepseek-chat');
+
+    expect(result.truncated).toBe(true);
+
+    // The orphaned tool result should NOT be in the included messages
+    const hasOrphan = result.messages.some(
+      m => m.role === 'tool' && m.tool_call_id === 'call-split'
+    );
+    expect(hasOrphan).toBe(false);
+  });
+
+  it('should keep complete tool pairs when both sides fit in budget', async () => {
+    const counter = new EstimationTokenCounter();
+    const builder = new ContextBuilder(counter);
+
+    // Small messages — everything fits
+    const messages: Message[] = [
+      { role: 'user', content: 'Read the file' },
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ id: 'tc-1', type: 'function' as const, function: { name: 'read_file', arguments: '{}' } }],
+      },
+      { role: 'tool', content: 'file contents', tool_call_id: 'tc-1' },
+      { role: 'assistant', content: 'Done reading.' },
+    ];
+
+    const result = await builder.build(messages, undefined, 'deepseek-chat');
+
+    expect(result.truncated).toBe(false);
+    expect(result.droppedCount).toBe(0);
+    expect(result.messages).toHaveLength(4);
+  });
+
   it('should skip summary injection if summary itself exceeds remaining budget', async () => {
     const counter = new EstimationTokenCounter();
     const builder = new ContextBuilder(counter);

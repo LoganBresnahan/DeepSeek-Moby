@@ -954,6 +954,14 @@ export class ConversationManager {
     return await this.searchSessions(query);
   }
 
+  /**
+   * Get the latest snapshot summary for a session.
+   * Used by ContextBuilder to inject context when old messages are dropped.
+   */
+  getLatestSnapshotSummary(sessionId: string): string | undefined {
+    return this.snapshotManager.getLatestSnapshot(sessionId)?.summary;
+  }
+
   // ==========================================================================
   // Private Helpers
   // ==========================================================================

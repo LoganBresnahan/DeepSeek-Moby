@@ -1687,18 +1687,37 @@ ${webSearchContext}
         }
       }
 
+      // --- Context Window Management ---
+      // Truncate old messages to fit within the model's token budget.
+      // ContextBuilder fills from newest messages backward and injects a
+      // snapshot summary when older messages are dropped.
+      const snapshotSummary = currentSession
+        ? this.conversationManager.getLatestSnapshotSummary(currentSession.id)
+        : undefined;
+
+      const contextResult = await this.deepSeekClient.buildContext(
+        historyMessages,
+        systemPrompt,
+        snapshotSummary
+      );
+
+      const contextMessages: ApiMessage[] = contextResult.messages as ApiMessage[];
+
       // Tool calling loop (only for non-reasoner models)
       let streamingSystemPrompt = systemPrompt;
       if (!isReasonerModel) {
-        const { toolMessages, limitReached, allToolDetails: toolDetails } = await this.runToolLoop(historyMessages, systemPrompt, signal);
+        const { toolMessages, limitReached, budgetExceeded, allToolDetails: toolDetails } = await this.runToolLoop(
+          contextMessages, systemPrompt, signal,
+          contextResult.tokenCount, contextResult.budget
+        );
         toolCallsForHistory = toolDetails;
         // Add tool interactions to history for context
-        historyMessages.push(...toolMessages);
+        contextMessages.push(...toolMessages);
 
         // If tools were used, update system prompt to indicate exploration is complete
         // This prevents the model from trying to use tools during streaming
         if (toolMessages.length > 0) {
-          const limitWarning = limitReached
+          const limitWarning = (limitReached || budgetExceeded)
             ? `\n\nNOTE: The tool calling limit was reached. Summarize what you were able to accomplish and explain what remains to be done.`
             : '';
           streamingSystemPrompt = systemPrompt + `
@@ -1715,7 +1734,7 @@ Now provide your final response based on what you learned. Do NOT attempt to use
       const maxShellIterations = 5;  // Prevent infinite loops
       let shellIteration = 0;
       let currentSystemPrompt = streamingSystemPrompt;
-      let currentHistoryMessages = [...historyMessages];
+      let currentHistoryMessages = [...contextMessages];
 
       // Store original user message for re-injection in continuation prompts
       // This ensures R1 doesn't "forget" the task after shell exploration
@@ -2254,14 +2273,22 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
   private async runToolLoop(
     messages: ApiMessage[],
     systemPrompt: string,
-    signal: AbortSignal
-  ): Promise<{ toolMessages: ApiMessage[]; limitReached: boolean; allToolDetails: Array<{ name: string; detail: string; status: string }> }> {
+    signal: AbortSignal,
+    contextTokenCount?: number,
+    contextBudget?: number
+  ): Promise<{ toolMessages: ApiMessage[]; limitReached: boolean; budgetExceeded: boolean; allToolDetails: Array<{ name: string; detail: string; status: string }> }> {
     const toolMessages: ApiMessage[] = [];
     // Get max tool calls from config (100 = no limit)
     const config = vscode.workspace.getConfiguration('deepseek');
     const configuredLimit = config.get<number>('maxToolCalls') ?? 25;
     const maxIterations = configuredLimit >= 100 ? Infinity : configuredLimit;
     let iterations = 0;
+
+    // Token budget tracking for tool loop messages
+    let accumulatedToolTokens = 0;
+    const budgetLimit = contextBudget ?? 0;
+    const baseTokenCount = contextTokenCount ?? 0;
+    let budgetExceeded = false;
 
     // Track ALL tool calls across all iterations for return value
     const allToolDetails: Array<{ name: string; detail: string; status: string }> = [];
@@ -2277,6 +2304,17 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
 
       // Check if aborted
       if (signal.aborted) {
+        break;
+      }
+
+      // Check if accumulated tool messages are approaching the budget
+      if (budgetLimit > 0 && baseTokenCount + accumulatedToolTokens > budgetLimit * 0.95) {
+        logger.warn(
+          `[Context] Tool loop stopped: approaching budget ` +
+          `(${(baseTokenCount + accumulatedToolTokens).toLocaleString()}/${budgetLimit.toLocaleString()} tokens, ` +
+          `${iterations - 1} iterations completed)`
+        );
+        budgetExceeded = true;
         break;
       }
 
@@ -2375,6 +2413,12 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
         tool_calls: response.tool_calls
       });
 
+      // Count assistant message tokens (content + tool_calls JSON)
+      if (budgetLimit > 0) {
+        const assistantText = (response.content || '') + JSON.stringify(response.tool_calls);
+        accumulatedToolTokens += this.deepSeekClient.estimateTokens(assistantText);
+      }
+
       // Calculate batch-relative index for this iteration's tools
       const batchStartIndex = batchToolDetails.length - newTools.length;
 
@@ -2463,6 +2507,11 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
           tool_call_id: toolCall.id
         });
 
+        // Count tool result tokens
+        if (budgetLimit > 0) {
+          accumulatedToolTokens += this.deepSeekClient.estimateTokens(result);
+        }
+
         // Update status to done (use batch index for the current batch)
         const finalStatus = success ? 'done' : 'error';
         batchToolDetails[batchIndex].status = finalStatus;
@@ -2505,15 +2554,16 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
     }
 
     const limitReached = iterations >= maxIterations && maxIterations !== Infinity;
-    if (limitReached) {
+    if (limitReached || budgetExceeded) {
       const totalToolCalls = globalToolIndex;
+      const reason = budgetExceeded ? 'Context budget exceeded' : 'Tool iteration limit reached';
       this._view?.webview.postMessage({
         type: 'warning',
-        message: `Tool iteration limit reached (${iterations} iterations, ${totalToolCalls} total tool calls). The task may require multiple requests to complete.`
+        message: `${reason} (${iterations} iterations, ${totalToolCalls} total tool calls). The task may require multiple requests to complete.`
       });
     }
 
-    return { toolMessages, limitReached, allToolDetails };
+    return { toolMessages, limitReached, budgetExceeded, allToolDetails };
   }
 
   private async getEditorContext(): Promise<string> {

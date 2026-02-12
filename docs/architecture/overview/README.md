@@ -91,6 +91,7 @@ DeepSeek Moby is a VS Code extension that provides AI-powered chat and code assi
 
 | File | Description |
 |------|-------------|
+| [context-management.md](../../plans/context-management.md) | Wire ContextBuilder into request flow |
 | [dead-code-cleanup.md](../../plans/dead-code-cleanup.md) | Cleanup status (complete) |
 | [backend-refactor.md](../../plans/backend-refactor.md) | Event Sourcing implementation plan |
 | [tokenizer.md](../../plans/tokenizer.md) | WASM tokenizer plan (complete) |
