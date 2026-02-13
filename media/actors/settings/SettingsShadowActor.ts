@@ -31,7 +31,8 @@ export interface SettingsValues {
   allowAllCommands: boolean;
   systemPrompt: string;
   searchDepth: string;
-  searchesPerPrompt: number;
+  creditsPerPrompt: number;
+  maxResultsPerSearch: number;
   cacheDuration: number;
   autoSaveHistory: boolean;
   maxSessions: number;
@@ -55,7 +56,8 @@ export class SettingsShadowActor extends PopupShadowActor {
   private _allowAllCommands = false;
   private _systemPrompt = '';
   private _searchDepth = 'basic';
-  private _searchesPerPrompt = 1;
+  private _creditsPerPrompt = 1;
+  private _maxResultsPerSearch = 5;
   private _cacheDuration = 15;
   private _autoSaveHistory = true;
   private _maxSessions = 100;
@@ -173,13 +175,17 @@ export class SettingsShadowActor extends PopupShadowActor {
         <div class="settings-control">
           <label>Search Depth</label>
           <select class="settings-select" data-setting="searchDepth">
-            <option value="basic" ${this._searchDepth === 'basic' ? 'selected' : ''}>Basic (faster)</option>
-            <option value="advanced" ${this._searchDepth === 'advanced' ? 'selected' : ''}>Advanced (thorough)</option>
+            <option value="basic" ${this._searchDepth === 'basic' ? 'selected' : ''}>Basic (1 credit/search)</option>
+            <option value="advanced" ${this._searchDepth === 'advanced' ? 'selected' : ''}>Advanced (2 credits/search)</option>
           </select>
         </div>
         <div class="settings-control">
-          <label>Searches per prompt: <span data-value="searchesPerPrompt">${this._searchesPerPrompt}</span></label>
-          <input type="range" class="settings-slider" data-setting="searchesPerPrompt" min="1" max="10" step="1" value="${this._searchesPerPrompt}">
+          <label>Credits per prompt: <span data-value="creditsPerPrompt">${this._creditsPerPrompt}</span> <span data-credits-info>(${this._searchDepth === 'basic' ? this._creditsPerPrompt : Math.floor(this._creditsPerPrompt / 2)} request${(this._searchDepth === 'basic' ? this._creditsPerPrompt : Math.floor(this._creditsPerPrompt / 2)) !== 1 ? 's' : ''})</span></label>
+          <input type="range" class="settings-slider" data-setting="creditsPerPrompt" min="${this._searchDepth === 'basic' ? 1 : 2}" max="${this._searchDepth === 'basic' ? 5 : 10}" step="${this._searchDepth === 'basic' ? 1 : 2}" value="${this._creditsPerPrompt}">
+        </div>
+        <div class="settings-control">
+          <label>Results per request: <span data-value="maxResultsPerSearch">${this._maxResultsPerSearch}</span></label>
+          <input type="range" class="settings-slider" data-setting="maxResultsPerSearch" min="1" max="20" step="1" value="${this._maxResultsPerSearch}">
         </div>
         <div class="settings-control">
           <label>Cache duration: <span data-value="cacheDuration">${this._cacheDuration}</span> min</label>
@@ -271,6 +277,15 @@ export class SettingsShadowActor extends PopupShadowActor {
         if (valueEl) {
           valueEl.textContent = value.toString();
         }
+
+        // Update credits info when credits slider changes
+        if (setting === 'creditsPerPrompt') {
+          const infoEl = this.query<HTMLElement>('[data-credits-info]');
+          if (infoEl) {
+            const requests = this._searchDepth === 'basic' ? value : Math.floor(value / 2);
+            infoEl.textContent = `(${requests} request${requests !== 1 ? 's' : ''})`;
+          }
+        }
       }
     });
 
@@ -320,8 +335,12 @@ export class SettingsShadowActor extends PopupShadowActor {
       this._searchDepth = settings.searchDepth;
       changed = true;
     }
-    if (settings.searchesPerPrompt !== undefined && settings.searchesPerPrompt !== this._searchesPerPrompt) {
-      this._searchesPerPrompt = settings.searchesPerPrompt;
+    if (settings.creditsPerPrompt !== undefined && settings.creditsPerPrompt !== this._creditsPerPrompt) {
+      this._creditsPerPrompt = settings.creditsPerPrompt;
+      changed = true;
+    }
+    if (settings.maxResultsPerSearch !== undefined && settings.maxResultsPerSearch !== this._maxResultsPerSearch) {
+      this._maxResultsPerSearch = settings.maxResultsPerSearch;
       changed = true;
     }
     if (settings.cacheDuration !== undefined && settings.cacheDuration !== this._cacheDuration) {
@@ -379,13 +398,29 @@ export class SettingsShadowActor extends PopupShadowActor {
         this._allowAllCommands = value as boolean;
         this._vscode.postMessage({ type: 'setAllowAllCommands', enabled: value });
         break;
-      case 'searchDepth':
+      case 'searchDepth': {
         this._searchDepth = value as string;
-        this._vscode.postMessage({ type: 'setSearchDepth', depth: value });
+        this._vscode.postMessage({ type: 'setSearchDepth', searchDepth: value });
+        // Re-clamp credits to valid range for the new depth mode
+        if (this._searchDepth === 'advanced') {
+          if (this._creditsPerPrompt < 2) this._creditsPerPrompt = 2;
+          if (this._creditsPerPrompt % 2 !== 0) this._creditsPerPrompt = this._creditsPerPrompt + 1;
+          if (this._creditsPerPrompt > 10) this._creditsPerPrompt = 10;
+        } else {
+          if (this._creditsPerPrompt > 5) this._creditsPerPrompt = 5;
+        }
+        this._vscode.postMessage({ type: 'setCreditsPerPrompt', value: this._creditsPerPrompt });
+        // Re-render to update slider min/max/step
+        this.updateBodyContent(this.renderPopupContent());
         break;
-      case 'searchesPerPrompt':
-        this._searchesPerPrompt = value as number;
-        this._vscode.postMessage({ type: 'setSearchesPerPrompt', value });
+      }
+      case 'creditsPerPrompt':
+        this._creditsPerPrompt = value as number;
+        this._vscode.postMessage({ type: 'setCreditsPerPrompt', value });
+        break;
+      case 'maxResultsPerSearch':
+        this._maxResultsPerSearch = value as number;
+        this._vscode.postMessage({ type: 'setMaxResultsPerSearch', value });
         break;
       case 'cacheDuration':
         this._cacheDuration = value as number;
@@ -500,7 +535,8 @@ export class SettingsShadowActor extends PopupShadowActor {
       allowAllCommands: this._allowAllCommands,
       systemPrompt: this._systemPrompt,
       searchDepth: this._searchDepth,
-      searchesPerPrompt: this._searchesPerPrompt,
+      creditsPerPrompt: this._creditsPerPrompt,
+      maxResultsPerSearch: this._maxResultsPerSearch,
       cacheDuration: this._cacheDuration,
       autoSaveHistory: this._autoSaveHistory,
       maxSessions: this._maxSessions

@@ -351,12 +351,17 @@ describe('SettingsShadowActor', () => {
 
       expect(mockVSCode.postMessage).toHaveBeenCalledWith({
         type: 'setSearchDepth',
-        depth: 'advanced'
+        searchDepth: 'advanced'
       });
     });
 
-    it('renders searches per prompt slider', () => {
-      const slider = element.shadowRoot?.querySelector('[data-setting="searchesPerPrompt"]');
+    it('renders credits per prompt slider', () => {
+      const slider = element.shadowRoot?.querySelector('[data-setting="creditsPerPrompt"]');
+      expect(slider).toBeTruthy();
+    });
+
+    it('renders results per search slider', () => {
+      const slider = element.shadowRoot?.querySelector('[data-setting="maxResultsPerSearch"]');
       expect(slider).toBeTruthy();
     });
 
@@ -495,11 +500,14 @@ describe('SettingsShadowActor', () => {
     it('updates settings when settings.values is published', () => {
       const values: SettingsValues = {
         logLevel: 'DEBUG',
+        webviewLogLevel: 'INFO',
+        tracingEnabled: true,
         logColors: false,
         allowAllCommands: true,
         systemPrompt: 'Custom',
         searchDepth: 'advanced',
-        searchesPerPrompt: 5,
+        creditsPerPrompt: 4,
+        maxResultsPerSearch: 10,
         cacheDuration: 30,
         autoSaveHistory: false,
         maxSessions: 200
@@ -510,7 +518,7 @@ describe('SettingsShadowActor', () => {
       const settings = actor.getSettings();
       expect(settings.logLevel).toBe('DEBUG');
       expect(settings.allowAllCommands).toBe(true);
-      expect(settings.searchesPerPrompt).toBe(5);
+      expect(settings.creditsPerPrompt).toBe(4);
     });
   });
 
@@ -527,7 +535,8 @@ describe('SettingsShadowActor', () => {
       expect(settings).toHaveProperty('allowAllCommands');
       expect(settings).toHaveProperty('systemPrompt');
       expect(settings).toHaveProperty('searchDepth');
-      expect(settings).toHaveProperty('searchesPerPrompt');
+      expect(settings).toHaveProperty('creditsPerPrompt');
+      expect(settings).toHaveProperty('maxResultsPerSearch');
       expect(settings).toHaveProperty('cacheDuration');
       expect(settings).toHaveProperty('autoSaveHistory');
       expect(settings).toHaveProperty('maxSessions');

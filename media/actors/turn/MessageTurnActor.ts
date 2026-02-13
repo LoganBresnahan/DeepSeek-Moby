@@ -703,7 +703,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
     // Ensure pending container exists
     if (!this._pendingContainerId) {
       const container = this.createContainer('message', {
-        hostClasses: ['pending-container'],
+        hostClasses: ['pending-container', 'expanded'],
         dataAttributes: { 'turn-id': this._turnId ?? '' }
       });
       this._pendingContainerId = container.id;
@@ -718,8 +718,18 @@ export class MessageTurnActor extends InterleavedShadowActor {
   /**
    * Update pending file status.
    */
-  updatePendingStatus(fileId: string, status: PendingFileStatus): void {
-    const file = this._pendingFiles.get(fileId);
+  updatePendingStatus(fileId: string, status: PendingFileStatus, diffId?: string, filePath?: string): void {
+    let file = this._pendingFiles.get(fileId);
+    // Fallback: VirtualListActor uses different IDs than MessageTurnActor,
+    // so look up by diffId or filePath when the fileId doesn't match.
+    if (!file && (diffId || filePath)) {
+      for (const f of this._pendingFiles.values()) {
+        if ((diffId && f.diffId === diffId) || (filePath && f.filePath === filePath)) {
+          file = f;
+          break;
+        }
+      }
+    }
     if (file) {
       file.status = status;
       this.renderPendingFiles();
@@ -947,14 +957,24 @@ export class MessageTurnActor extends InterleavedShadowActor {
     const isAuto = this._editMode === 'auto';
     const title = isAuto ? 'Modified Files' : 'Pending Changes';
     const icon = isAuto ? '✓' : '📝';
-    const toggle = '+';  // Always show collapsed toggle for now
+    const isExpanded = container.host.classList.contains('expanded');
+    const toggle = isExpanded ? '−' : '+';
 
     // Count label: show appropriate status based on mode
+    const rejectedCount = files.filter(f => f.status === 'rejected').length;
     let countLabel: string;
     if (isAuto) {
       countLabel = appliedCount > 0 ? `${appliedCount} applied` : `${files.length} file${files.length > 1 ? 's' : ''}`;
+    } else if (pendingCount > 0) {
+      countLabel = `${pendingCount} pending`;
+    } else if (appliedCount > 0 && rejectedCount > 0) {
+      countLabel = `${appliedCount} applied, ${rejectedCount} rejected`;
+    } else if (appliedCount > 0) {
+      countLabel = `${appliedCount} applied`;
+    } else if (rejectedCount > 0) {
+      countLabel = `${rejectedCount} rejected`;
     } else {
-      countLabel = pendingCount > 0 ? `${pendingCount} pending` : `${files.length} file${files.length > 1 ? 's' : ''}`;
+      countLabel = `${files.length} file${files.length > 1 ? 's' : ''}`;
     }
 
     container.host.classList.toggle('auto-mode', isAuto);
@@ -1107,6 +1127,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
       const container = this.getContainer(containerId);
       if (container) {
         container.host.classList.toggle('expanded');
+        this.renderPendingFiles();
       }
     });
 
@@ -1176,7 +1197,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
       /```(\w*)\n([\s\S]*?)```/g,
       (_, lang, code) => {
         const language = lang || 'text';
-        const escapedCode = this.escapeHtml(code.trimEnd());
+        const escapedCode = this.escapeHtml(code.trimEnd()).replace(/\n/g, '&#10;');
         const expandedClass = startExpanded ? ' expanded' : '';
 
         const firstLine = code.trim().split('\n')[0] || '';

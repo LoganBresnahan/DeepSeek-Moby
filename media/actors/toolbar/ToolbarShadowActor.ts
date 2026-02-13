@@ -42,7 +42,8 @@ export type StopHandler = () => void;
 export type AttachHandler = () => void;
 
 export interface WebSearchSettings {
-  searchesPerPrompt: number;
+  creditsPerPrompt: number;
+  maxResultsPerSearch: number;
   searchDepth: 'basic' | 'advanced';
 }
 
@@ -100,7 +101,8 @@ export class ToolbarShadowActor extends ShadowActor {
 
   // Web search settings
   private _webSearchSettings: WebSearchSettings = {
-    searchesPerPrompt: 3,
+    creditsPerPrompt: 1,
+    maxResultsPerSearch: 5,
     searchDepth: 'basic'
   };
 
@@ -201,8 +203,7 @@ export class ToolbarShadowActor extends ShadowActor {
     e.stopPropagation();
     this._filesModalOpen = true;
     this._onFilesOpen?.();
-    this._vscode?.postMessage({ type: 'getOpenFiles' });
-    this._vscode?.postMessage({ type: 'fileModalOpened' });
+    // FilesShadowActor.onOpen() sends getOpenFiles + fileModalOpened
     this.publish({ 'toolbar.filesModalOpen': true });
   }
 
@@ -229,18 +230,8 @@ export class ToolbarShadowActor extends ShadowActor {
 
   private handleSearchClick(e: Event): void {
     e.stopPropagation();
-
-    if (this._webSearchEnabled) {
-      this._webSearchEnabled = false;
-      this.query<HTMLButtonElement>('.search-btn')?.classList.remove('active');
-      this._onWebSearchToggle?.(false);
-      this._vscode?.postMessage({ type: 'toggleWebSearch', enabled: false });
-    } else {
-      this.closeAllModals();
-      this.showWebSearchModal();
-    }
-
-    this.publish({ 'toolbar.webSearchEnabled': this._webSearchEnabled });
+    this.closeAllModals();
+    this.showWebSearchModal();
   }
 
   private handleAttachClick(): void {
@@ -317,6 +308,14 @@ export class ToolbarShadowActor extends ShadowActor {
     const searchBtn = this.query<HTMLButtonElement>('.search-btn');
     if (!searchBtn) return;
 
+    const isAdvanced = this._webSearchSettings.searchDepth === 'advanced';
+    const creditsMin = isAdvanced ? 2 : 1;
+    const creditsMax = isAdvanced ? 10 : 5;
+    const creditsStep = isAdvanced ? 2 : 1;
+    const credits = this._webSearchSettings.creditsPerPrompt;
+    const costPerCall = isAdvanced ? 2 : 1;
+    const requestCount = Math.floor(credits / costPerCall);
+
     const modal = document.createElement('div');
     modal.className = 'web-search-modal';
     modal.setAttribute('data-modal', 'web-search');
@@ -327,23 +326,30 @@ export class ToolbarShadowActor extends ShadowActor {
       </div>
       <div class="web-search-modal-content">
         <div class="web-search-option">
-          <label>Searches per prompt: <span id="searchCountValue">${this._webSearchSettings.searchesPerPrompt}</span></label>
-          <input type="range" id="searchCountSlider" min="1" max="20" step="1" value="${this._webSearchSettings.searchesPerPrompt}">
+          <label>Credits per prompt: <span id="creditsValue">${credits}</span> <span id="creditsInfo">(${requestCount} request${requestCount !== 1 ? 's' : ''})</span></label>
+          <input type="range" id="creditsSlider" min="${creditsMin}" max="${creditsMax}" step="${creditsStep}" value="${credits}">
+        </div>
+        <div class="web-search-option">
+          <label>Results per request: <span id="maxResultsValue">${this._webSearchSettings.maxResultsPerSearch}</span></label>
+          <input type="range" id="maxResultsSlider" min="1" max="20" step="1" value="${this._webSearchSettings.maxResultsPerSearch}">
         </div>
         <div class="web-search-option">
           <label>Search depth:</label>
           <div class="search-depth-options">
-            <button class="depth-btn ${this._webSearchSettings.searchDepth === 'basic' ? 'active' : ''}" data-depth="basic">
+            <button class="depth-btn ${!isAdvanced ? 'active' : ''}" data-depth="basic">
               <span class="depth-name">Basic</span>
               <span class="depth-credits">1 credit</span>
             </button>
-            <button class="depth-btn ${this._webSearchSettings.searchDepth === 'advanced' ? 'active' : ''}" data-depth="advanced">
+            <button class="depth-btn ${isAdvanced ? 'active' : ''}" data-depth="advanced">
               <span class="depth-name">Advanced</span>
               <span class="depth-credits">2 credits</span>
             </button>
           </div>
         </div>
-        <button class="web-search-enable-btn">Enable Web Search</button>
+        <div class="web-search-toggle-row">
+          <button class="web-search-enable-btn${this._webSearchEnabled ? ' disabled' : ''}">Enable</button>
+          <button class="web-search-disable-btn${!this._webSearchEnabled ? ' disabled' : ''}">Disable</button>
+        </div>
         <button class="web-search-clear-cache-btn">Clear Cache</button>
       </div>
     `;
@@ -356,21 +362,68 @@ export class ToolbarShadowActor extends ShadowActor {
       this.closeWebSearchModal();
     });
 
-    modal.querySelector('#searchCountSlider')?.addEventListener('input', (e) => {
-      const value = (e.target as HTMLInputElement).value;
-      const valueEl = modal.querySelector('#searchCountValue');
-      if (valueEl) valueEl.textContent = value;
-      this._webSearchSettings.searchesPerPrompt = parseInt(value, 10);
+    // Credits slider
+    modal.querySelector('#creditsSlider')?.addEventListener('input', (e) => {
+      const value = parseInt((e.target as HTMLInputElement).value, 10);
+      const valueEl = modal.querySelector('#creditsValue');
+      const infoEl = modal.querySelector('#creditsInfo');
+      if (valueEl) valueEl.textContent = value.toString();
+      const cost = this._webSearchSettings.searchDepth === 'advanced' ? 2 : 1;
+      const requests = Math.floor(value / cost);
+      if (infoEl) infoEl.textContent = `(${requests} request${requests !== 1 ? 's' : ''})`;
+      this._webSearchSettings.creditsPerPrompt = value;
+      this._vscode?.postMessage({ type: 'setCreditsPerPrompt', value });
     });
 
+    // Results slider
+    modal.querySelector('#maxResultsSlider')?.addEventListener('input', (e) => {
+      const value = parseInt((e.target as HTMLInputElement).value, 10);
+      const valueEl = modal.querySelector('#maxResultsValue');
+      if (valueEl) valueEl.textContent = value.toString();
+      this._webSearchSettings.maxResultsPerSearch = value;
+      this._vscode?.postMessage({ type: 'setMaxResultsPerSearch', value });
+    });
+
+    // Depth toggle buttons
     modal.querySelectorAll('.depth-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         modal.querySelectorAll('.depth-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
-        this._webSearchSettings.searchDepth = (btn as HTMLElement).dataset.depth as 'basic' | 'advanced';
+        const newDepth = (btn as HTMLElement).dataset.depth as 'basic' | 'advanced';
+        this._webSearchSettings.searchDepth = newDepth;
+
+        // Update credits slider range/step/value
+        const slider = modal.querySelector('#creditsSlider') as HTMLInputElement;
+        const newIsAdvanced = newDepth === 'advanced';
+        const newMin = newIsAdvanced ? 2 : 1;
+        const newMax = newIsAdvanced ? 10 : 5;
+        const newStep = newIsAdvanced ? 2 : 1;
+        slider.min = newMin.toString();
+        slider.max = newMax.toString();
+        slider.step = newStep.toString();
+
+        // Re-clamp credits
+        let clamped = this._webSearchSettings.creditsPerPrompt;
+        if (clamped < newMin) clamped = newMin;
+        if (clamped > newMax) clamped = newMax;
+        if (newIsAdvanced && clamped % 2 !== 0) clamped = Math.min(clamped + 1, newMax);
+        slider.value = clamped.toString();
+        this._webSearchSettings.creditsPerPrompt = clamped;
+
+        // Update display
+        const valueEl = modal.querySelector('#creditsValue');
+        const infoEl = modal.querySelector('#creditsInfo');
+        if (valueEl) valueEl.textContent = clamped.toString();
+        const cost = newIsAdvanced ? 2 : 1;
+        const requests = Math.floor(clamped / cost);
+        if (infoEl) infoEl.textContent = `(${requests} request${requests !== 1 ? 's' : ''})`;
+
+        this._vscode?.postMessage({ type: 'setSearchDepth', searchDepth: newDepth });
+        this._vscode?.postMessage({ type: 'setCreditsPerPrompt', value: clamped });
       });
     });
 
+    // Enable button
     modal.querySelector('.web-search-enable-btn')?.addEventListener('click', () => {
       this._webSearchEnabled = true;
       this.query<HTMLButtonElement>('.search-btn')?.classList.add('active');
@@ -379,6 +432,16 @@ export class ToolbarShadowActor extends ShadowActor {
       this._vscode?.postMessage({ type: 'updateWebSearchSettings', settings: this._webSearchSettings });
       this.closeWebSearchModal();
       this.publish({ 'toolbar.webSearchEnabled': true });
+    });
+
+    // Disable button
+    modal.querySelector('.web-search-disable-btn')?.addEventListener('click', () => {
+      this._webSearchEnabled = false;
+      this.query<HTMLButtonElement>('.search-btn')?.classList.remove('active');
+      this._onWebSearchToggle?.(false);
+      this._vscode?.postMessage({ type: 'toggleWebSearch', enabled: false });
+      this.closeWebSearchModal();
+      this.publish({ 'toolbar.webSearchEnabled': false });
     });
 
     modal.querySelector('.web-search-clear-cache-btn')?.addEventListener('click', () => {
@@ -451,7 +514,7 @@ export class ToolbarShadowActor extends ShadowActor {
 
   closeFilesModal(): void {
     this._filesModalOpen = false;
-    this._vscode?.postMessage({ type: 'fileModalClosed' });
+    // FilesShadowActor.onClose() sends fileModalClosed
     this.publish({ 'toolbar.filesModalOpen': false });
   }
 

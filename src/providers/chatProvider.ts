@@ -11,7 +11,10 @@ import { tracer, type TraceCategory } from '../tracing';
 import { webviewLogStore } from '../logging/WebviewLogStore';
 import { workspaceTools, applyCodeEditTool, executeToolCall } from '../tools/workspaceTools';
 import { parseDSMLToolCalls, stripDSML } from '../utils/dsmlParser';
-import { TavilyClient, TavilySearchResponse } from '../clients/tavilyClient';
+import { TavilyClient } from '../clients/tavilyClient';
+import { WebSearchManager } from './webSearchManager';
+import { FileContextManager } from './fileContextManager';
+import { DiffManager } from './diffManager';
 import {
   parseShellCommands,
   containsShellCommands,
@@ -24,18 +27,6 @@ import {
 } from '../tools/reasonerShellExecutor';
 import { ContentTransformBuffer, BufferedSegment, ShellCommand } from '../utils/ContentTransformBuffer';
 
-interface DiffMetadata {
-  proposedUri: vscode.Uri;        // The "modified" side of the diff
-  originalUri: vscode.Uri;        // The "original" side of the diff
-  targetFilePath: string;         // Actual file path (e.g., "src/file.ts")
-  code: string;                   // Full code including "# File:" header
-  language: string;               // Language identifier
-  timestamp: number;              // When this diff was created
-  iteration: number;              // Edit iteration number (1, 2, 3, etc.)
-  diffId: string;                 // Unique ID for this specific diff
-  superseded?: boolean;           // True if a newer iteration exists for same file
-}
-
 export class ChatProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'deepseek-chat-view';
   private _view?: vscode.WebviewView;
@@ -43,51 +34,12 @@ export class ChatProvider implements vscode.WebviewViewProvider {
   private statusBar: StatusBar;
   private conversationManager: ConversationManager;
   private currentSessionId: string | null = null;
-  private lastActiveEditorUri: vscode.Uri | null = null;
   private abortController: AbortController | null = null;
-  private diffEngine: DiffEngine;
-  private activeDiffs: Map<string, DiffMetadata> = new Map();
-  private resolvedDiffs: Array<{ filePath: string; timestamp: number; status: 'applied' | 'rejected'; iteration: number; diffId: string }> = [];
-  private autoAppliedFiles: Array<{ filePath: string; timestamp: number; description?: string }> = [];
-  private diffTabGroupId: number | null = null;
-  private diffStatusBarItem: vscode.StatusBarItem;
   private disposables: vscode.Disposable[] = [];
   private tavilyClient: TavilyClient;
-  private webSearchEnabled: boolean = false;
-  private webSearchSettings: {
-    searchesPerPrompt: number;
-    searchDepth: 'basic' | 'advanced';
-    cacheDuration: number;
-    maxSearchesPerPrompt: number;
-  } = {
-    searchesPerPrompt: 1,
-    searchDepth: 'basic',
-    cacheDuration: 15,
-    maxSearchesPerPrompt: 1
-  };
-  private searchCache: Map<string, { results: string; timestamp: number }> = new Map();
-  // Edit mode state
-  private editMode: 'manual' | 'ask' | 'auto' = 'manual';
-  private processedCodeBlocks = new Set<string>();
-
-  // Debouncing state for ask mode (reduces duplicate diffs when LLM iterates)
-  private pendingDiffs = new Map<string, { code: string; language: string; timer: NodeJS.Timeout }>();
-
-  // Track edit iterations per file (for numbering multiple edits to same file)
-  private fileEditCounts = new Map<string, number>();
-
-  // Track file changes for current response (saved to history)
-  private currentResponseFileChanges: Array<{ filePath: string; status: 'applied' | 'rejected' | 'pending'; iteration: number }> = [];
-
-  // Flag to prevent onDidCloseTextDocument from removing diffs we're intentionally closing
-  // Use a counter instead of boolean to handle nested/overlapping close operations
-  private closingDiffsInProgress: number = 0;
-
-  // File tracking state
-  private selectedFiles = new Map<string, string>(); // path → content (user-selected files)
-  private readFilesInTurn = new Set<string>(); // Track ALL files read by LLM during conversation turn
-  private userMessageIntent: string | null = null; // Extracted file intent from user message
-  private fileModalOpen = false; // Track whether file selection modal is open
+  private webSearchManager: WebSearchManager;
+  private fileContextManager: FileContextManager;
+  private diffManager: DiffManager;
 
   // Content transform buffer for debounced streaming
   private contentBuffer: ContentTransformBuffer | null = null;
@@ -102,92 +54,88 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     this.deepSeekClient = deepSeekClient;
     this.statusBar = statusBar;
     this.conversationManager = conversationManager;
-    this.diffEngine = new DiffEngine();
     this.tavilyClient = tavilyClient;
 
-    // Create status bar item for diff tracking
-    this.diffStatusBarItem = vscode.window.createStatusBarItem(
-      vscode.StatusBarAlignment.Left,
-      100 // Priority: higher = more to the left
-    );
-    this.diffStatusBarItem.command = 'deepseek.showDiffQuickPick';
-    this.diffStatusBarItem.tooltip = 'Click to review pending diffs';
-    this.disposables.push(this.diffStatusBarItem);
+    // Create web search manager and wire events → webview
+    this.webSearchManager = new WebSearchManager(this.tavilyClient);
+    this.webSearchManager.onSearching((progress) => {
+      this._view?.webview.postMessage({ type: 'webSearching', current: progress.current, total: progress.total });
+    });
+    this.webSearchManager.onSearchComplete(() => {
+      this._view?.webview.postMessage({ type: 'webSearchComplete' });
+    });
+    this.webSearchManager.onSearchCached(() => {
+      this._view?.webview.postMessage({ type: 'webSearchCached' });
+    });
+    this.webSearchManager.onSearchError(e => {
+      this._view?.webview.postMessage({ type: 'warning', message: `Web search failed: ${e.message}` });
+    });
+    this.webSearchManager.onToggled(d => {
+      this._view?.webview.postMessage({ type: 'webSearchToggled', enabled: d.enabled });
+    });
+
+    // Create file context manager and wire events → webview
+    this.fileContextManager = new FileContextManager();
+    this.fileContextManager.onOpenFiles(data => {
+      this._view?.webview.postMessage({ type: 'openFiles', files: data.files });
+    });
+    this.fileContextManager.onSearchResults(data => {
+      this._view?.webview.postMessage({ type: 'searchResults', results: data.results });
+    });
+    this.fileContextManager.onFileContent(data => {
+      this._view?.webview.postMessage({ type: 'fileContent', filePath: data.filePath, content: data.content });
+    });
+
+    // Create diff manager and wire events → webview
+    const config = vscode.workspace.getConfiguration('deepseek');
+    const editMode = (config.get<string>('editMode') || 'manual') as 'manual' | 'ask' | 'auto';
+    this.diffManager = new DiffManager(new DiffEngine(), this.fileContextManager, editMode);
+    this.diffManager.setFlushCallback(() => {
+      if (this.contentBuffer) {
+        this.contentBuffer.flush();
+      }
+    });
+    this.diffManager.onDiffListChanged(data => {
+      this._view?.webview.postMessage({ type: 'diffListChanged', diffs: data.diffs, editMode: data.editMode });
+    });
+    this.diffManager.onAutoAppliedFilesChanged(data => {
+      this._view?.webview.postMessage({ type: 'diffListChanged', diffs: data.diffs, editMode: data.editMode });
+    });
+    this.diffManager.onCodeApplied(data => {
+      this._view?.webview.postMessage({ type: 'codeApplied', success: data.success, error: data.error, filePath: data.filePath });
+    });
+    this.diffManager.onActiveDiffChanged(data => {
+      this._view?.webview.postMessage({ type: 'activeDiffChanged', filePath: data.filePath });
+    });
+    this.diffManager.onDiffClosed(() => {
+      this._view?.webview.postMessage({ type: 'diffClosed' });
+    });
+    this.diffManager.onWarning(data => {
+      this._view?.webview.postMessage({ type: 'warning', message: data.message });
+    });
+    this.diffManager.onEditConfirm(data => {
+      this._view?.webview.postMessage({ type: 'showEditConfirm', filePath: data.filePath, code: data.code, language: data.language });
+    });
+    this.diffManager.onEditRejected(data => {
+      this._view?.webview.postMessage({ type: 'editRejected', filePath: data.filePath });
+    });
 
     // Load current session
     this.loadCurrentSession();
 
-    // Track when diff documents are actually closed (tab closed, not just hidden)
-    this.disposables.push(
-      vscode.workspace.onDidCloseTextDocument((document) => {
-        if (document.uri.scheme !== 'deepseek-diff') return;
-
-        logger.info(`[OVERLAY-DEBUG] Diff document closed: ${document.uri.toString()}`);
-
-        // Find which diff this corresponds to
-        for (const [uriKey, metadata] of this.activeDiffs.entries()) {
-          if (metadata.proposedUri.toString() === document.uri.toString() ||
-              metadata.originalUri.toString() === document.uri.toString()) {
-            // If we're intentionally closing any diff, ignore ALL close events
-            // We handle removal manually in closeSingleDiff to avoid race conditions
-            // (VS Code fires close events for documents we're programmatically closing,
-            // and sometimes for OTHER diffs in the same tab group)
-            if (this.closingDiffsInProgress > 0) {
-              logger.info(`[OVERLAY-DEBUG] Ignoring close for ${metadata.targetFilePath} - ${this.closingDiffsInProgress} intentional close(s) in progress`);
-              return;
-            }
-            // User manually closed the diff tab
-            logger.info(`[OVERLAY-DEBUG] Removing diff for ${metadata.targetFilePath} due to manual tab close`);
-            this.activeDiffs.delete(uriKey);
-            this.updateDiffStatusBar();
-            this.notifyDiffListChanged();
-            break;
-          }
-        }
-      })
-    );
-
-    // Track when active editor changes (to update which diff is active)
-    this.disposables.push(
-      vscode.window.onDidChangeActiveTextEditor((editor) => {
-        if (!editor || !this._view) return;
-
-        // Check if the active editor is a diff editor
-        if (editor.document.uri.scheme === 'deepseek-diff') {
-          // Find which diff this corresponds to
-          const uriString = editor.document.uri.toString();
-
-          for (const [key, metadata] of this.activeDiffs.entries()) {
-            if (metadata.proposedUri.toString() === uriString ||
-                metadata.originalUri.toString() === uriString) {
-              // Notify frontend which diff is now active
-              this._view.webview.postMessage({
-                type: 'activeDiffChanged',
-                filePath: metadata.targetFilePath
-              });
-              logger.info(`[ChatProvider] Active diff changed to: ${metadata.targetFilePath}`);
-              break;
-            }
-          }
-        }
-      })
-    );
-
     // Track when new files are opened (for live modal updates)
     this.disposables.push(
       vscode.workspace.onDidOpenTextDocument((document) => {
-        // If file modal is open, send updated open files list
-        if (this.fileModalOpen) {
+        if (this.fileContextManager.isModalOpen) {
           const validSchemes = ['file', 'vscode-remote'];
           if (validSchemes.includes(document.uri.scheme) && !document.isClosed) {
             const relativePath = vscode.workspace.asRelativePath(document.uri);
 
-            // Skip VS Code internal files
             if (!relativePath.startsWith('extension-output-') &&
                 !relativePath.includes('[') &&
                 !document.isUntitled) {
               logger.info(`[ChatProvider] File opened while modal open: ${relativePath} - refreshing list`);
-              this.sendOpenFiles();
+              this.fileContextManager.sendOpenFiles();
             }
           }
         }
@@ -196,113 +144,10 @@ export class ChatProvider implements vscode.WebviewViewProvider {
   }
 
   public dispose() {
+    this.webSearchManager.dispose();
+    this.fileContextManager.dispose();
+    this.diffManager.dispose();
     this.disposables.forEach(d => d.dispose());
-  }
-
-  private notifyDiffClosed() {
-    if (this._view) {
-      this._view.webview.postMessage({ type: 'diffClosed' });
-    }
-  }
-
-  private notifyDiffListChanged() {
-    if (!this._view) return;
-
-    // IMPORTANT: Flush buffer before sending diffListChanged to prevent race condition
-    // where buffered content hasn't been emitted before segment finalization
-    if (this.contentBuffer) {
-      logger.info(`[Buffer] FLUSH before notifyDiffListChanged`);
-      this.contentBuffer.flush();
-    }
-
-    // Combine pending diffs with resolved diffs
-    const pendingDiffs = Array.from(this.activeDiffs.values()).map(meta => ({
-      filePath: meta.targetFilePath,
-      timestamp: meta.timestamp,
-      status: 'pending' as const,
-      proposedUri: meta.proposedUri.toString(),
-      iteration: meta.iteration,
-      diffId: meta.diffId,
-      superseded: meta.superseded || false
-    }));
-
-    const resolvedDiffsList = this.resolvedDiffs.map(d => ({
-      filePath: d.filePath,
-      timestamp: d.timestamp,
-      status: d.status,
-      iteration: d.iteration,
-      diffId: d.diffId,
-      superseded: false
-    }));
-
-    // Combine all diffs
-    const combinedDiffs = [...pendingDiffs, ...resolvedDiffsList];
-
-    // Deduplicate by filePath - for resolved diffs, keep only the most recent entry per file
-    // Keep all pending diffs visible as user may need to accept/reject them
-    const pendingByPath = new Map<string, typeof pendingDiffs[0]>();
-    const resolvedByPath = new Map<string, typeof resolvedDiffsList[0]>();
-
-    for (const d of combinedDiffs) {
-      if (d.status === 'pending') {
-        // For pending, keep the most recent per file (older ones are superseded)
-        const existing = pendingByPath.get(d.filePath);
-        if (!existing || d.timestamp > existing.timestamp) {
-          pendingByPath.set(d.filePath, d);
-        }
-      } else {
-        // For resolved (applied/rejected), keep only the most recent per file
-        const existing = resolvedByPath.get(d.filePath);
-        if (!existing || d.timestamp > existing.timestamp) {
-          resolvedByPath.set(d.filePath, d);
-        }
-      }
-    }
-
-    // Combine deduplicated diffs and sort by timestamp
-    const allDiffs = [...pendingByPath.values(), ...resolvedByPath.values()]
-      .sort((a, b) => a.timestamp - b.timestamp);
-
-    this._view.webview.postMessage({
-      type: 'diffListChanged',
-      diffs: allDiffs,
-      editMode: this.editMode
-    });
-  }
-
-  /**
-   * Get the list of files that have been successfully modified in this session.
-   * Used to inform the LLM about already-applied changes to prevent redundant edits.
-   */
-  private getModifiedFilesContext(): string {
-    // Combine resolved diffs (ask mode) and auto-applied files (auto mode)
-    const appliedFiles = new Set<string>();
-
-    for (const diff of this.resolvedDiffs) {
-      if (diff.status === 'applied') {
-        appliedFiles.add(diff.filePath);
-      }
-    }
-
-    for (const file of this.autoAppliedFiles) {
-      appliedFiles.add(file.filePath);
-    }
-
-    if (appliedFiles.size === 0) {
-      return '';
-    }
-
-    const fileList = Array.from(appliedFiles).map(f => `- ${f}`).join('\n');
-    return `
---- ALREADY MODIFIED FILES (this session) ---
-The following files have already been successfully modified in this conversation:
-${fileList}
-
-Do NOT re-edit these files unless the user explicitly requests additional changes to them.
-If changes in other files might require updates to an already-modified file, mention this to the user
-rather than automatically re-editing. Example: "I notice my changes to X might require updating Y
-which I already edited - would you like me to update it?"
-`;
   }
 
   private async loadCurrentSession() {
@@ -343,13 +188,13 @@ which I already edited - would you like me to update it?"
           this.clearConversation();
           break;
         case 'applyCode':
-          await this.applyCode(data.code, data.language);
+          await this.diffManager.applyCode(data.code, data.language);
           break;
         case 'showDiff':
-          await this.showDiff(data.code, data.language);
+          await this.diffManager.showDiff(data.code, data.language);
           break;
         case 'closeDiff':
-          await this.closeDiff();
+          await this.diffManager.closeDiff();
           break;
         case 'loadHistory':
           await this.loadCurrentSessionHistory();
@@ -414,72 +259,71 @@ which I already edited - would you like me to update it?"
           vscode.commands.executeCommand(data.command);
           break;
         case 'toggleWebSearch':
-          this.toggleWebSearch(data.enabled);
+          this.webSearchManager.toggle(data.enabled);
           break;
         case 'updateWebSearchSettings':
-          this.updateWebSearchSettings(data.settings);
+          this.webSearchManager.updateSettings(data.settings);
           break;
         case 'getWebSearchSettings':
           this.sendWebSearchSettings();
           break;
         case 'clearSearchCache':
-          this.clearSearchCache();
+          this.webSearchManager.clearCache();
           break;
         case 'setEditMode':
-          this.setEditMode(data.mode);
+          this.diffManager.setEditMode(data.mode);
           break;
         case 'showLogs':
           // Show the DeepSeek output channel (logs)
           logger.show();
           break;
         case 'rejectEdit':
-          await this.rejectEdit(data.filePath);
+          await this.diffManager.rejectEdit(data.filePath);
           break;
         case 'acceptSpecificDiff':
-          await this.acceptSpecificDiff(data.diffId);
+          await this.diffManager.acceptSpecificDiff(data.diffId);
           break;
         case 'rejectSpecificDiff':
-          await this.rejectSpecificDiff(data.diffId);
+          await this.diffManager.rejectSpecificDiff(data.diffId);
           break;
         case 'focusDiff':
-          await this.focusSpecificDiff(data.diffId);
+          await this.diffManager.focusSpecificDiff(data.diffId);
           break;
         case 'openFile':
-          await this.openFile(data.filePath);
+          await this.diffManager.openFile(data.filePath);
           break;
         case 'focusFile':
-          // Try to focus the diff first, fall back to opening the file directly
-          // This handles the case where a file was auto-applied and the diff is closed
-          await this.focusFileOrDiff(data.diffId, data.filePath);
+          await this.diffManager.focusFileOrDiff(data.diffId, data.filePath);
           break;
         case 'getOpenFiles':
-          await this.sendOpenFiles();
+          this.fileContextManager.sendOpenFiles();
           break;
         case 'fileModalOpened':
-          this.fileModalOpen = true;
-          logger.info('[ChatProvider] File modal opened - live updates enabled');
+          this.fileContextManager.setModalOpen(true);
           break;
         case 'fileModalClosed':
-          this.fileModalOpen = false;
-          logger.info('[ChatProvider] File modal closed - live updates disabled');
+          this.fileContextManager.setModalOpen(false);
           break;
         case 'searchFiles':
-          await this.handleFileSearch(data.query);
+          await this.fileContextManager.handleFileSearch(data.query);
           break;
         case 'getFileContent':
-          await this.sendFileContent(data.filePath);
+          await this.fileContextManager.sendFileContent(data.filePath);
           break;
         case 'setSelectedFiles':
-          await this.setSelectedFiles(data.files);
+          this.fileContextManager.setSelectedFiles(data.files);
           break;
         case 'setSearchDepth':
-          await this.updateWebSearchSettings({ searchDepth: data.searchDepth });
+          this.webSearchManager.updateSettings({ searchDepth: data.searchDepth });
           break;
-        case 'setSearchesPerPrompt':
-          await this.updateWebSearchSettings({ maxSearchesPerPrompt: data.searchesPerPrompt });
+        case 'setCreditsPerPrompt':
+          this.webSearchManager.updateSettings({ creditsPerPrompt: data.value });
+          break;
+        case 'setMaxResultsPerSearch':
+          this.webSearchManager.updateSettings({ maxResultsPerSearch: data.value });
           break;
         case 'setCacheDuration':
-          await this.updateWebSearchSettings({ cacheDuration: data.cacheDuration });
+          this.webSearchManager.updateSettings({ cacheDuration: data.cacheDuration });
           break;
         case 'setAutoSaveHistory':
           await this.updateSettings({ autoSaveHistory: data.enabled });
@@ -644,16 +488,10 @@ which I already edited - would you like me to update it?"
     }
 
     // Clear search cache on new session
-    this.searchCache.clear();
+    this.webSearchManager.clearCache();
 
-    // Clear auto-applied files list for new conversation
-    this.autoAppliedFiles = [];
-
-    // Clear resolved diffs list for new conversation
-    this.resolvedDiffs = [];
-
-    // Clear file edit counts for new conversation
-    this.fileEditCounts.clear();
+    // Clear diff state for new conversation
+    this.diffManager.clearSession();
 
     // Create a new session for fresh conversation
     const editor = vscode.window.activeTextEditor;
@@ -859,8 +697,8 @@ Always:
     const maxSessions = config.get<number>('maxSessions') ?? 50;
     const allowAllCommands = config.get<boolean>('allowAllShellCommands') ?? false;
 
-    // Sync internal state with config
-    this.editMode = editMode as 'manual' | 'ask' | 'auto';
+    // Sync edit mode with config
+    this.diffManager.setEditMode(editMode as 'manual' | 'ask' | 'auto');
 
     // Sync tracer enabled state
     tracer.enabled = tracingEnabled;
@@ -882,9 +720,10 @@ Always:
         allowAllCommands,
         // Web search settings
         webSearch: {
-          searchDepth: this.webSearchSettings.searchDepth,
-          searchesPerPrompt: this.webSearchSettings.maxSearchesPerPrompt,
-          cacheDuration: this.webSearchSettings.cacheDuration
+          searchDepth: this.webSearchManager.getSettings().settings.searchDepth,
+          creditsPerPrompt: this.webSearchManager.getSettings().settings.creditsPerPrompt,
+          maxResultsPerSearch: this.webSearchManager.getSettings().settings.maxResultsPerSearch,
+          cacheDuration: this.webSearchManager.getSettings().settings.cacheDuration
         }
       });
       // Send edit mode separately
@@ -895,56 +734,17 @@ Always:
     }
   }
 
-  private toggleWebSearch(enabled: boolean) {
-    this.webSearchEnabled = enabled;
-    if (enabled && !this.tavilyClient.isConfigured()) {
-      this._view?.webview.postMessage({
-        type: 'warning',
-        message: 'Tavily API key not configured. Please set it in VS Code settings (deepseek.tavilyApiKey).'
-      });
-      this.webSearchEnabled = false;
-      this._view?.webview.postMessage({ type: 'webSearchToggled', enabled: false });
-      return;
-    }
-    this._view?.webview.postMessage({ type: 'webSearchToggled', enabled });
-  }
-
-  private updateWebSearchSettings(settings: {
-    searchesPerPrompt?: number;
-    searchDepth?: 'basic' | 'advanced';
-    cacheDuration?: number;
-    maxSearchesPerPrompt?: number;
-  }) {
-    if (settings.searchesPerPrompt !== undefined) {
-      this.webSearchSettings.searchesPerPrompt = settings.searchesPerPrompt;
-    }
-    if (settings.searchDepth !== undefined) {
-      this.webSearchSettings.searchDepth = settings.searchDepth;
-    }
-    if (settings.cacheDuration !== undefined) {
-      this.webSearchSettings.cacheDuration = settings.cacheDuration;
-    }
-    if (settings.maxSearchesPerPrompt !== undefined) {
-      this.webSearchSettings.maxSearchesPerPrompt = settings.maxSearchesPerPrompt;
-    }
-  }
 
   private sendWebSearchSettings() {
+    const { enabled, settings, configured } = this.webSearchManager.getSettings();
     this._view?.webview.postMessage({
       type: 'webSearchSettings',
-      enabled: this.webSearchEnabled,
-      settings: this.webSearchSettings,
-      configured: this.tavilyClient.isConfigured()
+      enabled,
+      settings,
+      configured
     });
   }
 
-  private clearSearchCache() {
-    this.searchCache.clear();
-    logger.webSearchCacheCleared();
-    this._view?.webview.postMessage({
-      type: 'searchCacheCleared'
-    });
-  }
 
   private async clearAllHistory() {
     try {
@@ -1127,13 +927,8 @@ Always:
       // Reset tracer to enabled
       tracer.enabled = true;
 
-      // Reset in-memory settings
-      this.webSearchSettings = {
-        searchesPerPrompt: 1,
-        searchDepth: 'basic',
-        cacheDuration: 15,
-        maxSearchesPerPrompt: 1
-      };
+      // Reset web search settings
+      this.webSearchManager.resetToDefaults();
 
       // Reset logger
       logger.minLevel = 'INFO';
@@ -1150,175 +945,6 @@ Always:
     }
   }
 
-  private setEditMode(mode: 'manual' | 'ask' | 'auto') {
-    this.editMode = mode;
-    logger.info(`[ChatProvider] Edit mode changed to: ${mode}`);
-    // Persist to settings
-    const config = vscode.workspace.getConfiguration('deepseek');
-    config.update('editMode', mode, vscode.ConfigurationTarget.Global);
-  }
-
-  private async rejectEdit(filePath: string) {
-    logger.info(`[ChatProvider] Edit rejected for: ${filePath}`);
-    // Close diff without applying
-    await this.closeDiffEditor();
-    this._view?.webview.postMessage({ type: 'editRejected', filePath });
-  }
-
-  // ============================================
-  // FILE SELECTION METHODS
-  // ============================================
-
-  private async sendOpenFiles() {
-    const openFiles: string[] = [];
-    const allUris = new Set<string>();
-
-    // Use tab groups API to get ALL open tabs (even background/unfocused ones)
-    // This is more reliable than workspace.textDocuments which may miss deferred tabs
-    const tabGroups = vscode.window.tabGroups.all;
-    logger.info(`[ChatProvider] Scanning ${tabGroups.length} tab groups for open files`);
-
-    for (const group of tabGroups) {
-      logger.info(`[ChatProvider]   Tab group has ${group.tabs.length} tabs`);
-      for (const tab of group.tabs) {
-        if (tab.input instanceof vscode.TabInputText) {
-          const uri = tab.input.uri;
-          allUris.add(uri.toString());
-          logger.info(`[ChatProvider]     Found tab: ${vscode.workspace.asRelativePath(uri)}`);
-        }
-      }
-    }
-
-    logger.info(`[ChatProvider] Total unique file URIs from tabs: ${allUris.size}`);
-
-    // Process all unique URIs
-    for (const uriString of allUris) {
-      const uri = vscode.Uri.parse(uriString);
-      const relativePath = vscode.workspace.asRelativePath(uri);
-
-      // Log each document
-      logger.info(`[ChatProvider] Processing: ${relativePath} | scheme: ${uri.scheme}`);
-
-      // Include file and vscode-remote schemes (for WSL/SSH/containers)
-      const validSchemes = ['file', 'vscode-remote'];
-      if (!validSchemes.includes(uri.scheme)) {
-        logger.info(`[ChatProvider]   → Skipped (invalid scheme: ${uri.scheme})`);
-        continue;
-      }
-
-      // Skip VS Code internal files (output channels, debug console, etc.)
-      if (relativePath.startsWith('extension-output-') ||
-          relativePath.includes('[')) {
-        logger.info(`[ChatProvider]   → Skipped (VS Code internal file)`);
-        continue;
-      }
-
-      openFiles.push(relativePath);
-      logger.info(`[ChatProvider]   → ✓ INCLUDED in open files list`);
-    }
-
-    logger.info(`[ChatProvider] Sending ${openFiles.length} open files to frontend: ${JSON.stringify(openFiles)}`);
-    this._view?.webview.postMessage({
-      type: 'openFiles',
-      files: openFiles
-    });
-  }
-
-  private async handleFileSearch(query: string) {
-    logger.info(`[ChatProvider] File search requested: "${query}"`);
-    const results: string[] = [];
-
-    try {
-      // Use VS Code's findFiles API to search (case-sensitive by default)
-      // Convert query to glob pattern if it doesn't contain wildcards
-      let pattern = query;
-      if (!query.includes('*') && !query.includes('?')) {
-        pattern = `**/*${query}*`;
-      }
-
-      logger.info(`[ChatProvider] Searching with pattern: "${pattern}"`);
-
-      const files = await vscode.workspace.findFiles(
-        pattern,
-        '**/node_modules/**',
-        50 // Limit to 50 results
-      );
-
-      for (const file of files) {
-        const relativePath = vscode.workspace.asRelativePath(file);
-        results.push(relativePath);
-        logger.info(`[ChatProvider] Found file: ${relativePath}`);
-      }
-
-      logger.info(`[ChatProvider] File search for "${query}" returned ${results.length} results`);
-    } catch (error: any) {
-      logger.error(`[ChatProvider] File search error: ${error.message}`);
-    }
-
-    this._view?.webview.postMessage({
-      type: 'searchResults',
-      results: results
-    });
-  }
-
-  private async sendFileContent(filePath: string) {
-    try {
-      // Resolve relative path to absolute
-      const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-      if (!workspaceFolder) {
-        logger.error('[ChatProvider] No workspace folder found');
-        return;
-      }
-
-      const absolutePath = vscode.Uri.joinPath(workspaceFolder.uri, filePath);
-      const content = await vscode.workspace.fs.readFile(absolutePath);
-      const textContent = Buffer.from(content).toString('utf8');
-
-      logger.info(`[ChatProvider] Sending file content for: ${filePath} (${textContent.length} chars)`);
-
-      this._view?.webview.postMessage({
-        type: 'fileContent',
-        filePath: filePath,
-        content: textContent
-      });
-    } catch (error: any) {
-      logger.error(`[ChatProvider] Error reading file ${filePath}: ${error.message}`);
-      vscode.window.showErrorMessage(`Failed to read file: ${filePath}`);
-    }
-  }
-
-  private async setSelectedFiles(files: Array<{ path: string; content: string }>) {
-    this.selectedFiles.clear();
-
-    for (const file of files) {
-      this.selectedFiles.set(file.path, file.content);
-    }
-
-    logger.info(`[ChatProvider] Updated selected files: ${this.selectedFiles.size} files`);
-
-    // Log file paths for debugging
-    for (const path of this.selectedFiles.keys()) {
-      logger.info(`[ChatProvider]   - ${path}`);
-    }
-  }
-
-  private formatSearchResults(response: TavilySearchResponse): string {
-    let output = `Web search results for: "${response.query}"\n`;
-    output += '─'.repeat(50) + '\n\n';
-
-    if (response.answer) {
-      output += `Summary: ${response.answer}\n\n`;
-    }
-
-    for (const result of response.results.slice(0, 5)) {
-      output += `**${result.title}**\n`;
-      output += `URL: ${result.url}\n`;
-      output += `${result.content.substring(0, 500)}${result.content.length > 500 ? '...' : ''}\n\n`;
-    }
-
-    return output;
-  }
-
   public getTavilyClient(): TavilyClient {
     return this.tavilyClient;
   }
@@ -1328,14 +954,12 @@ Always:
       return;
     }
 
-    // Clear processed code blocks for new conversation turn
-    this.processedCodeBlocks.clear();
-    // Clear read files tracking
-    this.readFilesInTurn.clear();
-    // Extract user intent from message (for file path inference)
-    this.userMessageIntent = this.extractFileIntent(message);
-    // Clear any pending debounced diffs
-    this.clearPendingDiffs();
+    // Clear processed code blocks and pending diffs for new conversation turn
+    this.diffManager.clearProcessedBlocks();
+    this.diffManager.clearPendingDiffs();
+    // Clear read files tracking and extract user intent
+    this.fileContextManager.clearTurnTracking();
+    this.fileContextManager.extractFileIntent(message);
 
     // Get or create current session
     if (!this.currentSessionId) {
@@ -1413,8 +1037,8 @@ USE THESE TOOLS to understand the codebase before making suggestions. When the u
     systemPrompt += `
 IMPORTANT - Code Edit Format Requirements
 
-**Current Edit Mode: ${this.editMode.toUpperCase()}**
-${editModeDescriptions[this.editMode]}
+**Current Edit Mode: ${this.diffManager.currentEditMode.toUpperCase()}**
+${editModeDescriptions[this.diffManager.currentEditMode]}
 
 **CRITICAL FORMAT: Every code edit MUST use this exact structure:**
 
@@ -1491,51 +1115,13 @@ export function newHelper(): string {
     }
 
     // Add modified files context to prevent redundant edits
-    const modifiedFilesContext = this.getModifiedFilesContext();
+    const modifiedFilesContext = this.diffManager.getModifiedFilesContext();
     if (modifiedFilesContext) {
       systemPrompt += modifiedFilesContext;
     }
 
     // Auto web search if enabled (search BEFORE DeepSeek, not via tool calls)
-    let webSearchContext = '';
-    if (this.webSearchEnabled && this.tavilyClient.isConfigured()) {
-      const cacheKey = message.toLowerCase().trim();
-      const cached = this.searchCache.get(cacheKey);
-
-      if (cached) {
-        // Use cached results
-        webSearchContext = cached.results;
-        logger.webSearchCached(message);
-        this._view?.webview.postMessage({ type: 'webSearchCached' });
-      } else {
-        try {
-          // Show searching indicator
-          this._view?.webview.postMessage({ type: 'webSearching' });
-          logger.webSearchRequest(message, this.webSearchSettings.searchDepth);
-
-          const searchStartTime = Date.now();
-          const searchResults = await this.tavilyClient.search(message, {
-            searchDepth: this.webSearchSettings.searchDepth
-          });
-          webSearchContext = this.formatSearchResults(searchResults);
-          logger.webSearchResult(searchResults.results.length, Date.now() - searchStartTime);
-
-          // Cache the results
-          this.searchCache.set(cacheKey, {
-            results: webSearchContext,
-            timestamp: Date.now()
-          });
-
-          this._view?.webview.postMessage({ type: 'webSearchComplete' });
-        } catch (error: any) {
-          logger.webSearchError(error.message);
-          this._view?.webview.postMessage({
-            type: 'warning',
-            message: `Web search failed: ${error.message}`
-          });
-        }
-      }
-    }
+    const webSearchContext = await this.webSearchManager.searchForMessage(message);
 
     // Add search results to system prompt with context for LLM
     if (webSearchContext) {
@@ -1569,7 +1155,7 @@ ${webSearchContext}
     let currentIterationContent = '';
 
     // Clear file changes tracking for this response
-    this.currentResponseFileChanges = [];
+    this.diffManager.clearResponseFileChanges();
 
     // Create abort controller for this request
     this.abortController = new AbortController();
@@ -1667,17 +1253,8 @@ ${webSearchContext}
       }
 
       // If user has selected files for context, include them
-      if (this.selectedFiles.size > 0) {
-        let selectedFilesContext = '\n\n--- Selected Files for Context ---\n';
-        logger.info(`[ChatProvider] Injecting ${this.selectedFiles.size} selected files into context`);
-
-        for (const [filePath, content] of this.selectedFiles.entries()) {
-          selectedFilesContext += `\n### File: ${filePath}\n\`\`\`\n${content}\n\`\`\`\n`;
-          logger.info(`[ChatProvider] ✓ Added selected file to context: ${filePath} (${content.length} chars)`);
-        }
-        selectedFilesContext += '--- End Selected Files ---\n';
-
-        // Append to the last user message
+      const selectedFilesContext = this.fileContextManager.getSelectedFilesContext();
+      if (selectedFilesContext) {
         if (historyMessages.length > 0) {
           const lastMsg = historyMessages[historyMessages.length - 1];
           if (lastMsg.role === 'user') {
@@ -1822,55 +1399,7 @@ Now provide your final response based on what you learned. Do NOT attempt to use
             }
 
             // Detect complete code blocks and auto-handle in "ask" or "auto" mode
-            if (this.editMode === 'ask' || this.editMode === 'auto') {
-              const codeBlockRegex = /```(\w+)?\n([\s\S]*?)\n```/g;
-              const matches = [...accumulatedResponse.matchAll(codeBlockRegex)];
-
-              for (const match of matches) {
-                const language = match[1] || 'plaintext';
-                const code = match[2];
-
-                // Skip tool outputs
-                if (language === 'tool-output') {
-                  continue;
-                }
-
-                // IMPORTANT: Only auto-process if code has explicit # File: header
-                // This prevents false positives when LLM shows explanatory code
-                const fileHeaderMatch = code.match(/^#\s*File:\s*(.+?)$/m);
-                if (!fileHeaderMatch) {
-                  logger.info(`[ChatProvider] Skipping auto-diff for code block without # File: header (likely explanatory code)`);
-                  continue;
-                }
-
-                // Create unique identifier for this block
-                const blockId = `${match.index}-${match[0].length}`;
-
-                // Skip if already processed
-                if (this.processedCodeBlocks.has(blockId)) {
-                  continue;
-                }
-
-                // Mark as processed
-                this.processedCodeBlocks.add(blockId);
-
-                if (this.editMode === 'ask') {
-                  // Use debounced diff display (waits 2.5s to batch rapid LLM iterations)
-                  this.handleDebouncedDiff(code, language);
-                } else if (this.editMode === 'auto') {
-                  // Auto-apply directly
-                  const filePath = fileHeaderMatch[1].trim();
-                  const codeWithoutHeader = code.replace(/^#\s*File:.*\n/i, '');
-                  logger.info(`[ChatProvider] Auto-applying code block for: ${filePath}`);
-                  // Track file modification synchronously before the async apply
-                  // This ensures it's available at save time even though apply is fire-and-forget
-                  if (!this.currentResponseFileChanges.some(f => f.filePath === filePath)) {
-                    this.currentResponseFileChanges.push({ filePath, status: 'applied', iteration: 0 });
-                  }
-                  this.applyCodeDirectlyForAutoMode(filePath, codeWithoutHeader, 'Auto-applied from code block');
-                }
-              }
-            }
+            this.diffManager.handleCodeBlockDetection(accumulatedResponse);
           },
           currentSystemPrompt,
           // Reasoning callback for deepseek-reasoner
@@ -2115,8 +1644,8 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
       // ============================================
       // Check for SEARCH/REPLACE markers that might be OUTSIDE code fences.
       // This handles cases where the LLM outputs the format without proper markdown.
-      if (this.editMode !== 'manual') {
-        await this.detectAndProcessUnfencedEdits(cleanResponse);
+      if (this.diffManager.currentEditMode !== 'manual') {
+        await this.diffManager.detectAndProcessUnfencedEdits(cleanResponse);
       }
 
       // Finalize response
@@ -2128,7 +1657,7 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
           reasoning_content: fullReasoning || undefined,
           reasoning_iterations: reasoningIterations.length > 0 ? reasoningIterations : undefined,
           content_iterations: contentIterations.length > 0 ? contentIterations : undefined,
-          editMode: this.editMode
+          editMode: this.diffManager.currentEditMode
         }
       });
 
@@ -2182,7 +1711,7 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
 
           // 4. Record file modifications (for restore of "Modified Files" dropdown)
           const modifiedFiles = [...new Set(
-            this.currentResponseFileChanges
+            this.diffManager.getFileChanges()
               .filter(f => f.status === 'applied')
               .map(f => f.filePath)
           )];
@@ -2453,8 +1982,7 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
             const args = JSON.parse(toolCall.function.arguments);
             logger.info(`[ChatProvider] Parsed args: ${JSON.stringify(args)}`);
             if (args.file_path) {
-              this.readFilesInTurn.add(args.file_path);
-              logger.info(`[ChatProvider] ✓ Tracked read file: ${args.file_path} (total: ${this.readFilesInTurn.size})`);
+              this.fileContextManager.trackReadFile(args.file_path);
             } else {
               logger.warn(`[ChatProvider] ✗ read tool called but no file_path in args`);
             }
@@ -2470,23 +1998,22 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
             const args = JSON.parse(toolCall.function.arguments);
             logger.info(`[ChatProvider] Parsed apply_code_edit args: ${JSON.stringify(args)}`);
             if (args.file) {
-              this.readFilesInTurn.add(args.file);
-              logger.info(`[ChatProvider] ✓ Tracked file from apply_code_edit: ${args.file} (total tracked: ${this.readFilesInTurn.size})`);
+              this.fileContextManager.trackReadFile(args.file);
 
               // Handle based on edit mode
               if (args.code) {
-                if (this.editMode === 'ask') {
+                if (this.diffManager.currentEditMode === 'ask') {
                   logger.info(`[ChatProvider] Triggering auto-diff for apply_code_edit in ask mode`);
                   // Add # File: header to the code
                   const codeWithHeader = `# File: ${args.file}\n${args.code}`;
                   const language = args.language || 'plaintext';
 
                   // Trigger auto-diff (this will open diff and show accept/reject overlay)
-                  await this.handleAutoShowDiff(codeWithHeader, language);
-                } else if (this.editMode === 'auto') {
+                  await this.diffManager.handleAutoShowDiff(codeWithHeader, language);
+                } else if (this.diffManager.currentEditMode === 'auto') {
                   logger.info(`[ChatProvider] Auto-applying code edit for: ${args.file}`);
                   // In auto mode, apply code directly (skip notification, we'll batch it)
-                  const applied = await this.applyCodeDirectlyForAutoMode(args.file, args.code, args.description, true);
+                  const applied = await this.diffManager.applyCodeDirectlyForAutoMode(args.file, args.code, args.description, true);
                   if (applied) {
                     fileModifiedInBatch = true;
                   }
@@ -2537,7 +2064,7 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
         logger.info(`[Frontend] Sent toolCallsEnd (file modified, closing batch after iteration ${iterations})`);
 
         // Send the modified files notification
-        this.notifyAutoAppliedFilesChanged();
+        this.diffManager.emitAutoAppliedChanges();
 
         // Reset for next batch
         batchToolDetails = [];
@@ -2779,1475 +2306,11 @@ Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain c
     return null;
   }
 
-  private async applyCode(code: string, language: string) {
-    // NEW: Determine which diff this applies to
-    const activeEditor = vscode.window.activeTextEditor;
-    let targetMetadata: DiffMetadata | undefined;
-
-    if (activeEditor && activeEditor.document.uri.scheme === 'deepseek-diff') {
-      // User is viewing a diff - apply that one
-      const uriKey = activeEditor.document.uri.toString();
-      targetMetadata = this.activeDiffs.get(uriKey);
-
-      if (!targetMetadata) {
-        // Try to find by matching the URI on either side of diff
-        for (const [key, meta] of this.activeDiffs.entries()) {
-          if (meta.proposedUri.toString() === uriKey ||
-              meta.originalUri.toString() === uriKey) {
-            targetMetadata = meta;
-            break;
-          }
-        }
-      }
-    }
-
-    if (!targetMetadata && this.activeDiffs.size > 0) {
-      // Fallback: Use most recent diff (last in queue)
-      const diffs = Array.from(this.activeDiffs.values())
-        .sort((a, b) => b.timestamp - a.timestamp);
-      targetMetadata = diffs[0];
-      logger.info(`[ChatProvider] No active diff editor, using most recent diff: ${targetMetadata.targetFilePath}`);
-    }
-
-    // Extract file path from code or use metadata
-    const filePathMatch = code.match(/^#\s*File:\s*(.+?)$/m);
-    let targetFilePath = filePathMatch ? filePathMatch[1].trim() : null;
-
-    // If we have metadata and no explicit file path, use metadata's file path
-    if (!targetFilePath && targetMetadata) {
-      targetFilePath = targetMetadata.targetFilePath;
-      logger.info(`[ChatProvider] Using file path from diff metadata: ${targetFilePath}`);
-    }
-
-    // Strip "# File:" header
-    const cleanCode = code.replace(/^#\s*File:.*\n/i, '');
-
-    let editor = vscode.window.activeTextEditor;
-
-    // If a specific file path is mentioned, try to find/open that file
-    if (targetFilePath) {
-      const workspaceFolders = vscode.workspace.workspaceFolders;
-      if (workspaceFolders && workspaceFolders.length > 0) {
-        let foundDoc: vscode.TextDocument | undefined;
-
-        // Try each workspace folder
-        for (const folder of workspaceFolders) {
-          const fullPath = vscode.Uri.joinPath(folder.uri, targetFilePath);
-          try {
-            foundDoc = await vscode.workspace.openTextDocument(fullPath);
-            break;
-          } catch (error) {
-            continue;
-          }
-        }
-
-        if (foundDoc) {
-          // Open the document and use it
-          editor = await vscode.window.showTextDocument(foundDoc, { preview: false });
-        } else {
-          vscode.window.showWarningMessage(`File not found in workspace: ${targetFilePath}`);
-          this.sendCodeAppliedStatus(false, `File not found: ${targetFilePath}`);
-          return;
-        }
-      }
-    } else {
-      // No file path specified - find the target editor
-      // If current editor is a diff view or virtual doc, find the real file
-      if (editor && (editor.document.uri.scheme === 'deepseek-diff' || editor.document.uri.scheme === 'git')) {
-        // Try to find an editor with a real file
-        const realEditor = vscode.window.visibleTextEditors.find(e =>
-          e.document.uri.scheme === 'file' && !e.document.uri.path.includes('deepseek-diff')
-        );
-        if (realEditor) {
-          editor = realEditor;
-        } else if (this.lastActiveEditorUri) {
-          // Open the last known real file
-          const doc = await vscode.workspace.openTextDocument(this.lastActiveEditorUri);
-          editor = await vscode.window.showTextDocument(doc);
-        }
-      }
-    }
-
-    try {
-      if (!editor || editor.document.uri.scheme !== 'file') {
-        // No active editor - create a new file with the code
-        const doc = await vscode.workspace.openTextDocument({
-          content: cleanCode,
-          language: this.mapLanguage(language)
-        });
-        await vscode.window.showTextDocument(doc);
-        this.sendCodeAppliedStatus(true);
-        return;
-      }
-
-      const document = editor.document;
-      const currentContent = document.getText();
-      const selection = editor.selection;
-
-      // Only use selection replacement if:
-      // 1. We didn't explicitly open a file (no targetFilePath)
-      // 2. There's a non-empty selection
-      if (!targetFilePath && !selection.isEmpty) {
-        await editor.edit((editBuilder) => {
-          editBuilder.replace(selection, cleanCode);
-        });
-        this.sendCodeAppliedStatus(true);
-        return;
-      }
-
-      // Use DiffEngine to intelligently apply changes
-      const result = this.diffEngine.applyChanges(currentContent, cleanCode);
-
-      const fullRange = new vscode.Range(
-        document.positionAt(0),
-        document.positionAt(currentContent.length)
-      );
-
-      await editor.edit((editBuilder) => {
-        editBuilder.replace(fullRange, result.content);
-      });
-
-      this.sendCodeAppliedStatus(result.success, result.success ? undefined : 'Patch applied with fallback');
-
-      // Close only the specific diff if we identified it
-      if (targetMetadata) {
-        await this.closeSingleDiff(targetMetadata);
-      } else {
-        // Fallback: close all diffs (old behavior)
-        await this.closeDiffEditor();
-      }
-
-    } catch (error: any) {
-      logger.error('Failed to apply code', error.message);
-      this.sendCodeAppliedStatus(false, error.message);
-    }
-  }
-
   /**
-   * Close just the diff tab without removing from tracking.
-   * Used for superseded diffs where we want to close the tab but keep showing
-   * the entry in the dropdown as "Newer Version Below".
-   */
-  private async closeDiffTabOnly(metadata: DiffMetadata) {
-    // Increment counter to prevent onDidCloseTextDocument from removing ANY diffs
-    this.closingDiffsInProgress++;
-    logger.info(`[OVERLAY-DEBUG] Closing tab only for ${metadata.targetFilePath} (counter: ${this.closingDiffsInProgress})`);
-
-    try {
-      // Find and close the tab for this specific diff
-      for (const tabGroup of vscode.window.tabGroups.all) {
-        for (const tab of tabGroup.tabs) {
-          const input = tab.input as any;
-          if (input?.original?.toString() === metadata.originalUri.toString() ||
-              input?.modified?.toString() === metadata.proposedUri.toString()) {
-            try {
-              await vscode.window.tabGroups.close(tab);
-              logger.info(`[ChatProvider] Closed superseded diff tab for: ${metadata.targetFilePath}`);
-            } catch (e) {
-              // Tab might already be closed
-            }
-            break;
-          }
-        }
-      }
-      // Note: We intentionally do NOT remove from activeDiffs or update status bar here
-      // The entry stays in tracking so it shows as "Newer Version Below" in the dropdown
-    } finally {
-      setTimeout(() => {
-        this.closingDiffsInProgress = Math.max(0, this.closingDiffsInProgress - 1);
-        logger.info(`[OVERLAY-DEBUG] Tab close complete, counter now: ${this.closingDiffsInProgress}`);
-      }, 500);
-    }
-  }
-
-  private async closeSingleDiff(metadata: DiffMetadata) {
-    // Increment counter to prevent onDidCloseTextDocument from removing ANY diffs
-    // VS Code sometimes fires close events for other diffs in the same tab group
-    this.closingDiffsInProgress++;
-    logger.info(`[OVERLAY-DEBUG] Starting intentional close for ${metadata.targetFilePath} (counter: ${this.closingDiffsInProgress})`);
-
-    try {
-      // Find and close the tab for this specific diff
-      for (const tabGroup of vscode.window.tabGroups.all) {
-        for (const tab of tabGroup.tabs) {
-          const input = tab.input as any;
-          if (input?.original?.toString() === metadata.originalUri.toString() ||
-              input?.modified?.toString() === metadata.proposedUri.toString()) {
-            try {
-              await vscode.window.tabGroups.close(tab);
-            } catch (e) {
-              // Tab might already be closed
-            }
-            break;
-          }
-        }
-      }
-
-      // Remove from tracking
-      this.activeDiffs.delete(metadata.proposedUri.toString());
-      logger.info(`Closed diff for: ${metadata.targetFilePath}`);
-
-      // Update status bar
-      this.updateDiffStatusBar();
-
-      // Notify frontend
-      this.notifyDiffListChanged();
-    } finally {
-      // Decrement counter after a delay to allow all document close events to settle
-      // Use 500ms to be safe - VS Code close events can be delayed
-      setTimeout(() => {
-        this.closingDiffsInProgress = Math.max(0, this.closingDiffsInProgress - 1);
-        logger.info(`[OVERLAY-DEBUG] Intentional close complete, counter now: ${this.closingDiffsInProgress}`);
-      }, 500);
-    }
-  }
-
-  private async closeDiffEditor() {
-    // Find and close tabs with deepseek-diff scheme
-    const tabsToClose: vscode.Tab[] = [];
-
-    for (const tabGroup of vscode.window.tabGroups.all) {
-      for (const tab of tabGroup.tabs) {
-        // Check if this is a diff tab (TabInputTextDiff has original and modified)
-        const input = tab.input as any;
-        if (input?.original?.scheme === 'deepseek-diff' ||
-            input?.modified?.scheme === 'deepseek-diff') {
-          tabsToClose.push(tab);
-        }
-      }
-    }
-
-    // Close all found diff tabs
-    if (tabsToClose.length > 0) {
-      logger.info(`Closing ${tabsToClose.length} diff tab(s)`);
-      for (const tab of tabsToClose) {
-        try {
-          await vscode.window.tabGroups.close(tab);
-        } catch (e) {
-          // Tab might already be closed
-        }
-      }
-    }
-
-    // Clear all tracked diffs
-    this.activeDiffs.clear();
-    this.diffTabGroupId = null;
-
-    // Update status bar
-    this.updateDiffStatusBar();
-
-    this.notifyDiffListChanged();
-  }
-
-  private async acceptSpecificDiff(diffId: string) {
-    const metadata = Array.from(this.activeDiffs.values())
-      .find(m => m.diffId === diffId);
-
-    if (!metadata) {
-      logger.warn(`[ChatProvider] No diff found for diffId: ${diffId}`);
-      return;
-    }
-
-    // Check if this diff is superseded
-    if (metadata.superseded) {
-      logger.warn(`[ChatProvider] Cannot accept superseded diff: ${diffId}`);
-      this._view?.webview.postMessage({
-        type: 'warning',
-        message: `This version has been superseded by a newer edit. Please use the newer version.`
-      });
-      return;
-    }
-
-    logger.info(`[ChatProvider] Accepting specific diff: ${diffId} (${metadata.targetFilePath})`);
-
-    try {
-      // Open the target file directly using the metadata's file path
-      const workspaceFolders = vscode.workspace.workspaceFolders;
-      if (!workspaceFolders || workspaceFolders.length === 0) {
-        throw new Error('No workspace folder open');
-      }
-
-      let fileUri: vscode.Uri | undefined;
-      for (const folder of workspaceFolders) {
-        const possibleUri = vscode.Uri.joinPath(folder.uri, metadata.targetFilePath);
-        try {
-          await vscode.workspace.fs.stat(possibleUri);
-          fileUri = possibleUri;
-          break;
-        } catch {
-          // File doesn't exist in this folder, might need to create it
-        }
-      }
-
-      // If file doesn't exist, create it (for new file diffs)
-      if (!fileUri) {
-        fileUri = vscode.Uri.joinPath(workspaceFolders[0].uri, metadata.targetFilePath);
-        // Ensure parent directory exists
-        const parentDir = vscode.Uri.joinPath(fileUri, '..');
-        try {
-          await vscode.workspace.fs.createDirectory(parentDir);
-        } catch {
-          // Directory might already exist
-        }
-      }
-
-      // Open the document
-      let document: vscode.TextDocument;
-      try {
-        document = await vscode.workspace.openTextDocument(fileUri);
-      } catch {
-        // File doesn't exist, create empty
-        await vscode.workspace.fs.writeFile(fileUri, new Uint8Array());
-        document = await vscode.workspace.openTextDocument(fileUri);
-      }
-
-      const currentContent = document.getText();
-
-      // Strip "# File:" header from the code
-      const cleanCode = metadata.code.replace(/^#\s*File:.*\n/i, '');
-
-      // Use DiffEngine to apply changes
-      const result = this.diffEngine.applyChanges(currentContent, cleanCode);
-
-      // Apply the changes
-      const edit = new vscode.WorkspaceEdit();
-      const fullRange = new vscode.Range(
-        document.positionAt(0),
-        document.positionAt(currentContent.length)
-      );
-      edit.replace(fileUri, fullRange, result.content);
-      await vscode.workspace.applyEdit(edit);
-
-      // Save the document
-      await document.save();
-
-      logger.info(`Code applied to: ${metadata.targetFilePath}`);
-
-      // Track as resolved
-      this.resolvedDiffs.push({
-        filePath: metadata.targetFilePath,
-        timestamp: metadata.timestamp,
-        status: 'applied',
-        iteration: metadata.iteration,
-        diffId: metadata.diffId
-      });
-
-      // Update status in current response file changes for history
-      this.updateFileChangeStatus(metadata.targetFilePath, metadata.iteration, 'applied');
-
-      // Close the specific diff tab
-      await this.closeSingleDiff(metadata);
-
-      this.sendCodeAppliedStatus(true);
-
-    } catch (error: any) {
-      logger.error(`[ChatProvider] Failed to accept diff ${diffId}:`, error.message);
-      this.sendCodeAppliedStatus(false, error.message);
-    }
-  }
-
-  private async rejectSpecificDiff(diffId: string) {
-    const metadata = Array.from(this.activeDiffs.values())
-      .find(m => m.diffId === diffId);
-
-    if (!metadata) {
-      logger.warn(`[ChatProvider] No diff found for diffId: ${diffId}`);
-      return;
-    }
-
-    // Check if this diff is superseded - allow rejection to clean up the entry
-    logger.info(`[ChatProvider] Rejecting specific diff: ${diffId} (${metadata.targetFilePath})`);
-
-    // Track as resolved
-    this.resolvedDiffs.push({
-      filePath: metadata.targetFilePath,
-      timestamp: metadata.timestamp,
-      status: 'rejected',
-      iteration: metadata.iteration,
-      diffId: metadata.diffId
-    });
-
-    // Update status in current response file changes for history
-    this.updateFileChangeStatus(metadata.targetFilePath, metadata.iteration, 'rejected');
-
-    // Close the specific diff tab
-    await this.closeSingleDiff(metadata);
-  }
-
-  private updateFileChangeStatus(filePath: string, iteration: number, status: 'applied' | 'rejected') {
-    const index = this.currentResponseFileChanges.findIndex(
-      fc => fc.filePath === filePath && fc.iteration === iteration
-    );
-    if (index !== -1) {
-      this.currentResponseFileChanges[index].status = status;
-    }
-  }
-
-  /**
-   * Apply code changes directly to a file without showing a diff (for auto mode)
-   * @param skipNotification If true, don't send diffListChanged (caller handles batching)
-   * @returns true if code was applied successfully
-   */
-  private async applyCodeDirectlyForAutoMode(filePath: string, code: string, description?: string, skipNotification = false): Promise<boolean> {
-    try {
-      // Find the file - handle both absolute and relative paths
-      let fileUri: vscode.Uri | undefined;
-
-      // Check if path is absolute (Unix: starts with /, Windows: starts with drive letter)
-      const isAbsolutePath = filePath.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(filePath);
-
-      if (isAbsolutePath) {
-        // Try absolute path directly
-        const absoluteUri = vscode.Uri.file(filePath);
-        try {
-          await vscode.workspace.fs.stat(absoluteUri);
-          fileUri = absoluteUri;
-        } catch {
-          // Absolute path doesn't exist, will fall through to workspace search
-        }
-      }
-
-      // If not found via absolute path, try workspace-relative
-      if (!fileUri) {
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        if (workspaceFolders && workspaceFolders.length > 0) {
-          for (const folder of workspaceFolders) {
-            const possibleUri = vscode.Uri.joinPath(folder.uri, filePath);
-            try {
-              await vscode.workspace.fs.stat(possibleUri);
-              fileUri = possibleUri;
-              break;
-            } catch {
-              // File doesn't exist in this folder, continue
-            }
-          }
-        }
-      }
-
-      if (!fileUri) {
-        logger.warn(`[ChatProvider] Auto mode: File not found: ${filePath}`);
-        this._view?.webview.postMessage({
-          type: 'warning',
-          message: `Could not find file: ${filePath}. The file may have been moved or deleted.`
-        });
-        return false;
-      }
-
-      // Read current content
-      const document = await vscode.workspace.openTextDocument(fileUri);
-      const currentContent = document.getText();
-
-      // Apply changes using DiffEngine
-      const result = this.diffEngine.applyChanges(currentContent, code);
-
-      if (!result.success) {
-        logger.warn(`[ChatProvider] Auto mode: Diff application had issues for ${filePath}: ${result.message}`);
-        this._view?.webview.postMessage({
-          type: 'warning',
-          message: `Code edit may not have been applied correctly to ${filePath}: ${result.message || 'No matching code found'}`
-        });
-      }
-
-      // Apply the changes
-      const edit = new vscode.WorkspaceEdit();
-      const fullRange = new vscode.Range(
-        document.positionAt(0),
-        document.positionAt(currentContent.length)
-      );
-      edit.replace(fileUri, fullRange, result.content);
-      await vscode.workspace.applyEdit(edit);
-
-      // Save the document
-      await document.save();
-
-      // Track iteration for this file (same as showDiff)
-      const currentCount = this.fileEditCounts.get(filePath) || 0;
-      const iteration = currentCount + 1;
-      this.fileEditCounts.set(filePath, iteration);
-      const diffId = `${filePath}-${Date.now()}-${iteration}`;
-
-      logger.info(`[ChatProvider] Auto mode: Applied changes to ${filePath} (iteration ${iteration})`);
-
-      // Track this file as modified (for LLM feedback context)
-      this.autoAppliedFiles.push({
-        filePath,
-        timestamp: Date.now(),
-        description
-      });
-
-      // Also add to resolvedDiffs so it shows in the dropdown with iteration
-      this.resolvedDiffs.push({
-        filePath,
-        timestamp: Date.now(),
-        status: 'applied',
-        iteration,
-        diffId
-      });
-
-      // Track this file change for history (auto-applied = applied status)
-      this.currentResponseFileChanges.push({
-        filePath,
-        status: 'applied',
-        iteration
-      });
-
-      // Notify frontend (unless caller is handling batching)
-      if (!skipNotification) {
-        this.notifyAutoAppliedFilesChanged();
-      }
-      this.sendCodeAppliedStatus(true);
-      return true;
-
-    } catch (error: any) {
-      logger.error(`[ChatProvider] Auto mode: Failed to apply code to ${filePath}:`, error.message);
-      this.sendCodeAppliedStatus(false, error.message, filePath);
-      return false;
-    }
-  }
-
-  /**
-   * Notify frontend of auto-applied files list change
-   * Uses resolvedDiffs instead of autoAppliedFiles because it has proper diffId/iteration
-   */
-  private notifyAutoAppliedFilesChanged() {
-    if (!this._view) return;
-
-    // IMPORTANT: Flush buffer before sending diffListChanged to prevent race condition
-    // where buffered content hasn't been emitted before segment finalization
-    if (this.contentBuffer) {
-      logger.info(`[Buffer] FLUSH before notifyAutoAppliedFilesChanged`);
-      this.contentBuffer.flush();
-    }
-
-    // Use resolvedDiffs which has the proper structure (diffId, iteration)
-    // Auto-applied files are added to resolvedDiffs with status 'applied'
-    // Deduplicate by filePath - keep only the most recent entry for each file
-    const deduplicatedDiffs = new Map<string, typeof this.resolvedDiffs[0]>();
-    for (const d of this.resolvedDiffs) {
-      const existing = deduplicatedDiffs.get(d.filePath);
-      if (!existing || d.timestamp > existing.timestamp) {
-        deduplicatedDiffs.set(d.filePath, d);
-      }
-    }
-
-    const diffsArray = Array.from(deduplicatedDiffs.values())
-      .sort((a, b) => a.timestamp - b.timestamp)
-      .map(d => ({
-        filePath: d.filePath,
-        timestamp: d.timestamp,
-        status: d.status,
-        iteration: d.iteration,
-        diffId: d.diffId,
-        superseded: false
-      }));
-
-    logger.info(`[Frontend] Sending diffListChanged (auto-applied) message: ${diffsArray.length} unique files`);
-    this._view.webview.postMessage({
-      type: 'diffListChanged',
-      diffs: diffsArray,
-      editMode: this.editMode
-    });
-  }
-
-  private async acceptAllDiffs() {
-    // Apply in chronological order (oldest first)
-    const sorted = Array.from(this.activeDiffs.values())
-      .sort((a, b) => a.timestamp - b.timestamp);
-
-    logger.info(`[ChatProvider] Accepting all ${sorted.length} diffs`);
-
-    for (const meta of sorted) {
-      await this.applyCode(meta.code, meta.language);
-    }
-  }
-
-  private async rejectAllDiffs() {
-    // Create copy since closeSingleDiff modifies the map
-    const allDiffs = Array.from(this.activeDiffs.values());
-
-    logger.info(`[ChatProvider] Rejecting all ${allDiffs.length} diffs`);
-
-    for (const meta of allDiffs) {
-      await this.closeSingleDiff(meta);
-    }
-  }
-
-  private async focusSpecificDiff(diffId: string) {
-    const metadata = Array.from(this.activeDiffs.values())
-      .find(m => m.diffId === diffId);
-
-    if (!metadata) {
-      logger.warn(`[ChatProvider] No diff found for diffId: ${diffId}`);
-      return;
-    }
-
-    // Re-open the diff to bring it to front
-    const iterationLabel = metadata.iteration > 1 ? ` (${metadata.iteration})` : '';
-    await vscode.commands.executeCommand('vscode.diff',
-      metadata.originalUri,
-      metadata.proposedUri,
-      `${metadata.targetFilePath}${iterationLabel} ↔ With Changes`
-    );
-
-    logger.info(`[ChatProvider] Focused diff: ${diffId} (${metadata.targetFilePath})`);
-  }
-
-  /**
-   * Focus a file - tries to focus the diff view first, falls back to opening the file directly.
-   * This handles the case where a file was auto-applied and the diff is no longer available.
-   */
-  private async focusFileOrDiff(diffId: string | undefined, filePath: string | undefined) {
-    // Try to focus the diff if we have a diffId and it exists
-    if (diffId) {
-      const metadata = Array.from(this.activeDiffs.values())
-        .find(m => m.diffId === diffId);
-
-      if (metadata) {
-        // Diff exists, focus it
-        const iterationLabel = metadata.iteration > 1 ? ` (${metadata.iteration})` : '';
-        await vscode.commands.executeCommand('vscode.diff',
-          metadata.originalUri,
-          metadata.proposedUri,
-          `${metadata.targetFilePath}${iterationLabel} ↔ With Changes`
-        );
-        logger.info(`[ChatProvider] Focused diff: ${diffId} (${metadata.targetFilePath})`);
-        return;
-      }
-
-      // Diff not found - might have been applied already
-      logger.info(`[ChatProvider] Diff ${diffId} not found (may have been applied), falling back to file`);
-    }
-
-    // Fall back to opening the file directly
-    if (filePath) {
-      await this.openFile(filePath);
-    } else {
-      logger.warn('[ChatProvider] focusFileOrDiff: no diffId or filePath provided');
-    }
-  }
-
-  /**
-   * Opens a file in the editor (used for auto-applied files without active diffs)
-   */
-  private async openFile(filePath: string) {
-    if (!filePath) {
-      logger.warn('[ChatProvider] openFile called with empty filePath');
-      return;
-    }
-
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-    if (!workspaceFolder) {
-      logger.warn('[ChatProvider] No workspace folder found');
-      return;
-    }
-
-    const absolutePath = path.isAbsolute(filePath)
-      ? filePath
-      : path.join(workspaceFolder.uri.fsPath, filePath);
-
-    const uri = vscode.Uri.file(absolutePath);
-
-    try {
-      const doc = await vscode.workspace.openTextDocument(uri);
-      await vscode.window.showTextDocument(doc, { preview: false });
-      logger.info(`[ChatProvider] Opened file: ${filePath}`);
-    } catch (error) {
-      logger.warn(`[ChatProvider] Failed to open file: ${filePath}: ${error}`);
-      vscode.window.showWarningMessage(`Could not open file: ${filePath}`);
-    }
-  }
-
-  /**
-   * Updates the status bar item to show current diff count
-   */
-  private updateDiffStatusBar(): void {
-    const diffCount = this.activeDiffs.size;
-
-    if (diffCount === 0) {
-      this.diffStatusBarItem.hide();
-    } else {
-      const plural = diffCount === 1 ? 'diff' : 'diffs';
-      this.diffStatusBarItem.text = `$(diff) DeepSeek: ${diffCount} ${plural}`;
-      this.diffStatusBarItem.backgroundColor = new vscode.ThemeColor(
-        'statusBarItem.warningBackground'
-      );
-      this.diffStatusBarItem.show();
-    }
-  }
-
-  /**
-   * Shows quick pick menu for managing diffs
+   * Shows quick pick menu for managing diffs (public wrapper for extension.ts command)
    */
   public async showDiffQuickPick(): Promise<void> {
-    if (this.activeDiffs.size === 0) {
-      vscode.window.showInformationMessage('No pending diffs');
-      return;
-    }
-
-    // Group diffs by file path
-    const diffsByFile = new Map<string, DiffMetadata[]>();
-
-    for (const [key, meta] of this.activeDiffs.entries()) {
-      const filePath = meta.targetFilePath;
-      if (!diffsByFile.has(filePath)) {
-        diffsByFile.set(filePath, []);
-      }
-      diffsByFile.get(filePath)!.push(meta);
-    }
-
-    // Create quick pick items
-    interface DiffQuickPickItem extends vscode.QuickPickItem {
-      metadata: DiffMetadata;
-      action?: 'accept' | 'reject';
-    }
-
-    const items: DiffQuickPickItem[] = [];
-
-    for (const [filePath, metas] of diffsByFile.entries()) {
-      const fileName = path.basename(filePath);
-      const diffCount = metas.length;
-      const label = diffCount > 1
-        ? `$(file) ${fileName} (${diffCount} diffs)`
-        : `$(file) ${fileName}`;
-
-      // Add item for each diff
-      for (let i = 0; i < metas.length; i++) {
-        const meta = metas[i];
-        const itemLabel = diffCount > 1 ? `  ${label} - Diff ${i + 1}` : label;
-
-        items.push({
-          label: itemLabel,
-          description: path.dirname(filePath),
-          detail: `Created ${this.formatTimestamp(meta.timestamp)}`,
-          metadata: meta,
-          buttons: [
-            {
-              iconPath: new vscode.ThemeIcon('check'),
-              tooltip: 'Accept changes'
-            },
-            {
-              iconPath: new vscode.ThemeIcon('close'),
-              tooltip: 'Reject changes'
-            }
-          ]
-        });
-      }
-    }
-
-    // Show quick pick
-    const quickPick = vscode.window.createQuickPick<DiffQuickPickItem>();
-    quickPick.items = items;
-    quickPick.placeholder = 'Select a diff to review (Enter to focus, click buttons to accept/reject)';
-    quickPick.matchOnDescription = true;
-    quickPick.matchOnDetail = true;
-
-    // Handle item selection (Enter key or click)
-    quickPick.onDidAccept(async () => {
-      const selected = quickPick.selectedItems[0];
-      if (selected) {
-        // Focus the diff editor
-        await this.focusDiff(selected.metadata);
-      }
-    });
-
-    // Handle button clicks (Accept/Reject)
-    quickPick.onDidTriggerItemButton(async (e) => {
-      const item = e.item;
-      const button = e.button;
-
-      if (button.tooltip === 'Accept changes') {
-        await this.acceptSpecificDiff(item.metadata.targetFilePath);
-        logger.info(`[QuickPick] Accepted diff for ${item.metadata.targetFilePath}`);
-      } else if (button.tooltip === 'Reject changes') {
-        await this.rejectSpecificDiff(item.metadata.targetFilePath);
-        logger.info(`[QuickPick] Rejected diff for ${item.metadata.targetFilePath}`);
-      }
-
-      // Refresh the quick pick items
-      const remainingItems = quickPick.items.filter(i =>
-        i.metadata.targetFilePath !== item.metadata.targetFilePath
-      );
-
-      if (remainingItems.length === 0) {
-        quickPick.hide();
-        vscode.window.showInformationMessage('All diffs processed!');
-      } else {
-        quickPick.items = remainingItems;
-      }
-    });
-
-    quickPick.show();
-  }
-
-  /**
-   * Focuses a specific diff editor
-   */
-  private async focusDiff(metadata: DiffMetadata): Promise<void> {
-    // Find the diff editor tab
-    for (const tabGroup of vscode.window.tabGroups.all) {
-      for (const tab of tabGroup.tabs) {
-        if (tab.input instanceof vscode.TabInputTextDiff) {
-          // Check if this is our diff
-          if (tab.input.modified.toString() === metadata.proposedUri.toString()) {
-            // Focus this tab
-            await vscode.window.showTextDocument(metadata.proposedUri, {
-              viewColumn: tabGroup.viewColumn,
-              preview: false
-            });
-            return;
-          }
-        }
-      }
-    }
-
-    logger.warn(`[ChatProvider] Could not find diff editor for ${metadata.targetFilePath}`);
-  }
-
-  /**
-   * Formats timestamp for display
-   */
-  private formatTimestamp(timestamp: number): string {
-    const now = Date.now();
-    const diffMs = now - timestamp;
-    const diffMins = Math.floor(diffMs / 60000);
-    const diffHours = Math.floor(diffMs / 3600000);
-
-    if (diffMins < 1) return 'just now';
-    if (diffMins < 60) return `${diffMins}m ago`;
-    if (diffHours < 24) return `${diffHours}h ago`;
-    return new Date(timestamp).toLocaleString();
-  }
-
-  private async showDiff(code: string, language: string) {
-    // Extract file path from "# File:" header if present
-    const filePathMatch = code.match(/^#\s*File:\s*(.+?)$/m);
-    const targetFilePath = filePathMatch ? filePathMatch[1].trim() : null;
-
-    let editor = vscode.window.activeTextEditor;
-    let document: vscode.TextDocument | undefined;
-
-    // If a specific file path is mentioned, try to find/open that file
-    if (targetFilePath) {
-      // Try to find the file in workspace
-      const workspaceFolders = vscode.workspace.workspaceFolders;
-      if (workspaceFolders && workspaceFolders.length > 0) {
-        // Try each workspace folder
-        for (const folder of workspaceFolders) {
-          const fullPath = vscode.Uri.joinPath(folder.uri, targetFilePath);
-          try {
-            // Check if file exists and open it (don't show in editor, just load the document)
-            document = await vscode.workspace.openTextDocument(fullPath);
-            // Update tracked editor URI for later use
-            this.lastActiveEditorUri = document.uri;
-            break;
-          } catch (error) {
-            // File not found in this workspace folder, try next
-            continue;
-          }
-        }
-
-        if (!document) {
-          // File doesn't exist - this might be a new file creation
-          // Create an empty file so we can show a diff (empty → new content)
-          logger.info(`[ChatProvider] File not found, creating new file: ${targetFilePath}`);
-
-          const newFileUri = vscode.Uri.joinPath(workspaceFolders[0].uri, targetFilePath);
-
-          // Ensure parent directory exists
-          const parentDir = vscode.Uri.joinPath(newFileUri, '..');
-          try {
-            await vscode.workspace.fs.createDirectory(parentDir);
-          } catch {
-            // Directory might already exist, that's fine
-          }
-
-          // Create empty file
-          await vscode.workspace.fs.writeFile(newFileUri, new Uint8Array());
-          document = await vscode.workspace.openTextDocument(newFileUri);
-          this.lastActiveEditorUri = document.uri;
-
-          logger.info(`[ChatProvider] Created new file for diff: ${targetFilePath}`);
-        }
-      } else {
-        vscode.window.showWarningMessage('No workspace folder open');
-        return;
-      }
-    } else {
-      // No file path specified - use active editor
-      // If current editor isn't a file (e.g., diff view is active), try to use the last tracked editor
-      if (!editor || editor.document.uri.scheme !== 'file') {
-        if (this.lastActiveEditorUri) {
-          // Try to find the editor with our tracked URI
-          const existingDoc = vscode.workspace.textDocuments.find(
-            doc => doc.uri.toString() === this.lastActiveEditorUri?.toString()
-          );
-          if (existingDoc) {
-            document = existingDoc;
-          } else {
-            vscode.window.showWarningMessage('No active editor to compare with');
-            return;
-          }
-        } else {
-          vscode.window.showWarningMessage('No active editor to compare with');
-          return;
-        }
-      } else {
-        // Track this editor so Apply can find it later
-        this.lastActiveEditorUri = editor.document.uri;
-        document = editor.document;
-      }
-    }
-
-    // Track iteration number for this file (for multiple edits to same file)
-    const targetPath = targetFilePath || vscode.workspace.asRelativePath(document.uri);
-    const currentCount = this.fileEditCounts.get(targetPath) || 0;
-    const iteration = currentCount + 1;
-    this.fileEditCounts.set(targetPath, iteration);
-
-    // Generate unique diffId
-    const diffId = `${targetPath}-${Date.now()}-${iteration}`;
-
-    logger.info(`[ChatProvider] Creating diff for ${targetPath} (iteration ${iteration})`);
-
-    try {
-      const originalContent = document.getText();
-      const selection = editor?.selection;
-
-      // Strip "# File:" header if present
-      const cleanCode = code.replace(/^#\s*File:.*\n/i, '');
-
-      // Create the proposed content by applying the code to the current file
-      let proposedContent: string;
-
-      // Only use selection replacement if:
-      // 1. We didn't explicitly open a file (no targetFilePath)
-      // 2. There's an active editor with a non-empty selection
-      if (!targetFilePath && selection && !selection.isEmpty && editor) {
-        // If there's a selection, replace it
-        const before = originalContent.substring(0, document.offsetAt(selection.start));
-        const after = originalContent.substring(document.offsetAt(selection.end));
-        proposedContent = before + cleanCode + after;
-      } else {
-        // Use DiffEngine to compute the proposed content
-        const result = this.diffEngine.applyChanges(originalContent, cleanCode);
-        proposedContent = result.content;
-      }
-
-      // Create virtual documents for both original and proposed
-      // Include file extension for syntax highlighting
-      const timestamp = Date.now();
-      const fileExt = document.fileName.split('.').pop() || 'txt';
-      const originalUri = vscode.Uri.parse(`deepseek-diff:original-${timestamp}.${fileExt}`);
-      const proposedUri = vscode.Uri.parse(`deepseek-diff:proposed-${timestamp}.${fileExt}`);
-
-      // Register content provider
-      const provider = new (class implements vscode.TextDocumentContentProvider {
-        private contents: Map<string, string> = new Map();
-
-        constructor() {
-          this.contents.set(originalUri.toString(), originalContent);
-          this.contents.set(proposedUri.toString(), proposedContent);
-        }
-
-        provideTextDocumentContent(uri: vscode.Uri): string {
-          return this.contents.get(uri.toString()) || '';
-        }
-      })();
-
-      const disposable = vscode.workspace.registerTextDocumentContentProvider('deepseek-diff', provider);
-
-      // Show diff editor in dedicated tab group
-      const fileName = document.fileName.split('/').pop() || 'file';
-      const iterationLabel = iteration > 1 ? ` (${iteration})` : '';
-      const diffTitle = `${fileName}${iterationLabel} ↔ With Changes`;
-
-      // Find or create dedicated diff tab group
-      let diffTabGroup: vscode.TabGroup | undefined;
-
-      // Check if we have a tracked diff tab group that still exists
-      if (this.diffTabGroupId !== null) {
-        diffTabGroup = vscode.window.tabGroups.all.find(g => g.viewColumn === this.diffTabGroupId);
-      }
-
-      // If no existing diff tab group, create one by splitting to the right
-      if (!diffTabGroup) {
-        // Get the rightmost tab group to split from
-        const rightmostGroup = vscode.window.tabGroups.all
-          .reduce((max, g) => (!max || (g.viewColumn ?? 0) > (max.viewColumn ?? 0)) ? g : max,
-                  vscode.window.tabGroups.all[0]);
-
-        // Calculate the new view column (to the right)
-        const newViewColumn = (rightmostGroup?.viewColumn ?? vscode.ViewColumn.One) + 1;
-
-        // Open diff in new column (splits to the right)
-        // Use preview: false to ensure it opens as a permanent tab
-        await vscode.commands.executeCommand('vscode.diff',
-          originalUri,
-          proposedUri,
-          diffTitle,
-          {
-            viewColumn: newViewColumn,
-            preview: false,
-            preserveFocus: true
-          }
-        );
-
-        // Track the new diff tab group
-        this.diffTabGroupId = newViewColumn;
-        logger.info(`Created new diff tab group at view column ${newViewColumn}`);
-      } else {
-        // Open diff in existing diff tab group as a NEW TAB
-        // CRITICAL: Use preview: false to prevent replacing existing diffs
-        await vscode.commands.executeCommand('vscode.diff',
-          originalUri,
-          proposedUri,
-          diffTitle,
-          {
-            viewColumn: diffTabGroup.viewColumn,
-            preview: false,
-            preserveFocus: true
-          }
-        );
-        logger.info(`Opened new diff tab in existing group at view column ${diffTabGroup.viewColumn}`);
-      }
-
-      // Mark any existing diffs for the same file as superseded and collect them for closing
-      // This happens when LLM creates multiple iterations for the same file
-      const supersededDiffs: DiffMetadata[] = [];
-      for (const [key, existingMeta] of this.activeDiffs.entries()) {
-        if (existingMeta.targetFilePath === targetPath && !existingMeta.superseded) {
-          existingMeta.superseded = true;
-          supersededDiffs.push(existingMeta);
-          logger.info(`[ChatProvider] Marked diff iteration ${existingMeta.iteration} for ${targetPath} as superseded`);
-        }
-      }
-
-      // Track this diff in the Map
-      const metadata: DiffMetadata = {
-        proposedUri,
-        originalUri,
-        targetFilePath: targetPath,
-        code,
-        language,
-        timestamp,
-        iteration,
-        diffId,
-        superseded: false
-      };
-
-      this.activeDiffs.set(proposedUri.toString(), metadata);
-      logger.diffShown(fileName);
-
-      // Track this file change for history (initially pending)
-      this.currentResponseFileChanges.push({
-        filePath: targetPath,
-        status: 'pending',
-        iteration
-      });
-
-      // Update status bar
-      this.updateDiffStatusBar();
-
-      // Notify frontend of updated diff list
-      this.notifyDiffListChanged();
-
-      // Close superseded diff tabs (do this after notifying frontend so they see the superseded state first)
-      // Use closeDiffTabOnly to keep entries in activeDiffs for dropdown display as "Newer Version Below"
-      for (const supersededMeta of supersededDiffs) {
-        logger.info(`[ChatProvider] Closing superseded diff tab for ${supersededMeta.targetFilePath} (iteration ${supersededMeta.iteration})`);
-        await this.closeDiffTabOnly(supersededMeta);
-      }
-
-      // Clean up provider after a delay
-      setTimeout(() => disposable.dispose(), 300000); // 5 minutes
-
-    } catch (error: any) {
-      logger.error('Failed to show diff', error.message);
-      vscode.window.showErrorMessage(`Failed to show diff: ${error.message}`);
-    }
-  }
-
-  /**
-   * Clears all pending debounced diffs
-   */
-  private clearPendingDiffs(): void {
-    for (const [filePath, pending] of this.pendingDiffs.entries()) {
-      clearTimeout(pending.timer);
-      logger.info(`[ChatProvider] Cleared pending diff timer for ${filePath}`);
-    }
-    this.pendingDiffs.clear();
-  }
-
-  /**
-   * Handles debounced diff display for ask mode.
-   * Waits 2.5 seconds after the last code block for the same file before showing the diff.
-   * This batches rapid LLM iterations (e.g., "oh wait, let me update that again").
-   */
-  private handleDebouncedDiff(code: string, language: string): void {
-    // Extract file path from code
-    const filePathMatch = code.match(/^#\s*File:\s*(.+?)$/m);
-    const filePath = filePathMatch ? filePathMatch[1].trim() : 'unknown';
-
-    logger.info(`[ChatProvider] Debouncing diff for ${filePath} (2.5s delay)`);
-
-    // Check if there's already a pending diff for this file
-    const existing = this.pendingDiffs.get(filePath);
-
-    if (existing) {
-      // Clear the old timer
-      clearTimeout(existing.timer);
-      logger.info(`[ChatProvider] Replaced pending diff for ${filePath} (LLM iteration detected)`);
-    }
-
-    // Create new timer
-    const timer = setTimeout(async () => {
-      logger.info(`[ChatProvider] Debounce timer expired for ${filePath}, showing diff now`);
-      this.pendingDiffs.delete(filePath);
-      await this.handleAutoShowDiff(code, language);
-    }, 2500); // 2.5 second debounce
-
-    // Store the pending diff
-    this.pendingDiffs.set(filePath, { code, language, timer });
-  }
-
-  /**
-   * Detect and process SEARCH/REPLACE blocks that appear OUTSIDE of code fences.
-   * This is a fallback for when the LLM doesn't format output correctly.
-   *
-   * The DiffEngine already has robust parsing for SEARCH/REPLACE format.
-   * This method just needs to detect when to invoke it outside of fenced code blocks.
-   */
-  private async detectAndProcessUnfencedEdits(content: string): Promise<void> {
-    // Quick check: does the content even have SEARCH/REPLACE markers?
-    const hasSearchMarker = /<<<{3,}\s*SEARCH/i.test(content);
-    const hasReplaceMarker = />>>{3,}\s*REPLACE/i.test(content);
-
-    if (!hasSearchMarker || !hasReplaceMarker) {
-      return; // No unfenced markers to process
-    }
-
-    logger.info(`[ChatProvider] Detected potential unfenced SEARCH/REPLACE markers`);
-
-    // Check if all SEARCH/REPLACE blocks are inside code fences
-    // If they're inside fences, they were already processed during streaming
-    const fencedBlockRegex = /```[\w]*\n[\s\S]*?```/g;
-    let contentWithoutFencedBlocks = content;
-    let match;
-    while ((match = fencedBlockRegex.exec(content)) !== null) {
-      // Replace fenced blocks with placeholder to check what's left
-      contentWithoutFencedBlocks = contentWithoutFencedBlocks.replace(match[0], '<<<FENCED_BLOCK>>>');
-    }
-
-    // Check if SEARCH/REPLACE markers exist OUTSIDE of fenced blocks
-    const unfencedHasSearch = /<<<{3,}\s*SEARCH/i.test(contentWithoutFencedBlocks);
-    const unfencedHasReplace = />>>{3,}\s*REPLACE/i.test(contentWithoutFencedBlocks);
-
-    if (!unfencedHasSearch || !unfencedHasReplace) {
-      logger.info(`[ChatProvider] All SEARCH/REPLACE blocks are inside code fences (already processed)`);
-      return;
-    }
-
-    logger.info(`[ChatProvider] Found UNFENCED SEARCH/REPLACE blocks - attempting fallback processing`);
-
-    // Extract just the unfenced portion for parsing
-    // Look for # File: header followed by SEARCH/REPLACE block
-    const unfencedEditRegex = /#\s*File:\s*(.+?)(?:\n|\r\n)([\s\S]*?<<<{3,}\s*SEARCH[\s\S]*?>>>{3,}\s*REPLACE)/gi;
-    const unfencedMatches = [...contentWithoutFencedBlocks.matchAll(unfencedEditRegex)];
-
-    if (unfencedMatches.length > 0) {
-      // Found unfenced edits with file headers - process them
-      for (const editMatch of unfencedMatches) {
-        const filePath = editMatch[1].trim();
-        const codeBlock = editMatch[2];
-
-        logger.info(`[ChatProvider] Processing unfenced edit for: ${filePath}`);
-
-        // Create a code block with the header for processing
-        const codeWithHeader = `# File: ${filePath}\n${codeBlock}`;
-
-        // Create a unique ID to avoid reprocessing
-        const blockId = `unfenced-${filePath}-${codeBlock.length}`;
-        if (this.processedCodeBlocks.has(blockId)) {
-          logger.info(`[ChatProvider] Skipping already processed unfenced block: ${blockId}`);
-          continue;
-        }
-        this.processedCodeBlocks.add(blockId);
-
-        if (this.editMode === 'ask') {
-          this.handleDebouncedDiff(codeWithHeader, 'plaintext');
-        } else if (this.editMode === 'auto') {
-          await this.applyCodeDirectlyForAutoMode(filePath, codeBlock, 'Auto-applied from unfenced code block');
-        }
-      }
-    } else {
-      // SEARCH/REPLACE markers found but no # File: header
-      // Send a warning to help the user understand why the edit wasn't applied
-      logger.warn(`[ChatProvider] Found SEARCH/REPLACE markers but no # File: header - cannot auto-process`);
-
-      this._view?.webview.postMessage({
-        type: 'warning',
-        message: 'Code edit detected but missing file path. The response contains SEARCH/REPLACE format but no "# File:" header to identify which file to edit.'
-      });
-    }
-  }
-
-  private async handleAutoShowDiff(code: string, language: string) {
-    try {
-      logger.info(`[ChatProvider] Starting auto-show diff (language: ${language}, editMode: ${this.editMode})`);
-
-      // Layer 1: Extract explicit file path from code (# File: header)
-      logger.info(`[FileResolver] Strategy 0: Checking # File: header in code...`);
-      const filePathMatch = code.match(/^#\s*File:\s*(.+?)$/m);
-      let filePath = filePathMatch ? filePathMatch[1].trim() : null;
-
-      if (filePath) {
-        logger.info(`[FileResolver] ✓ Strategy 0 SUCCESS: Found # File: header "${filePath}"`);
-      } else {
-        logger.warn(`[FileResolver] ✗ Strategy 0 FAILED: No # File: header found`);
-
-        // Layer 2-6: Use multi-layer resolution (inference + interactive fallback)
-        filePath = await this.resolveFilePath(code, language);
-
-        if (filePath) {
-          // Inject the resolved file path into the code
-          code = `# File: ${filePath}\n${code}`;
-          logger.info(`[ChatProvider] Injected inferred file path: ${filePath}`);
-        } else {
-          logger.error(`[ChatProvider] Could not determine target file - skipping auto-diff`);
-          vscode.window.showWarningMessage(
-            'Could not determine which file to edit. Please add a "# File: path" comment to the code block.'
-          );
-          return;
-        }
-      }
-
-      // Auto-show the diff
-      logger.info(`[ChatProvider] Opening diff editor for file: ${filePath}`);
-      await this.showDiff(code, language);
-
-      // Send confirmation request to frontend (for ask mode)
-      this._view?.webview.postMessage({
-        type: 'showEditConfirm',
-        filePath,
-        code,
-        language
-      });
-
-      logger.info(`[ChatProvider] ✓ Auto-showed diff for "${filePath}" in ask mode`);
-    } catch (error: any) {
-      logger.error('[ChatProvider] Failed to auto-show diff:', error.message);
-      vscode.window.showErrorMessage(`Failed to show diff: ${error.message}`);
-    }
-  }
-
-  /**
-   * Extract file intent from user's message
-   * Returns file path if user explicitly mentioned a file to edit
-   */
-  private extractFileIntent(message: string): string | null {
-    const patterns = [
-      // "update the changelog" -> CHANGELOG.md
-      { regex: /(?:update|edit|modify|change|fix)\s+(?:the\s+)?(changelog)/i, file: 'CHANGELOG.md' },
-      { regex: /(?:update|edit|modify|change|fix)\s+(?:the\s+)?(readme)/i, file: 'README.md' },
-      { regex: /(?:update|edit|modify|change|fix)\s+(?:the\s+)?(package\.json|package)/i, file: 'package.json' },
-
-      // "edit src/utils/helper.ts" - captures full path
-      { regex: /(?:update|edit|modify|change|fix)\s+(\S+\.\w+)/i, file: '$1' }
-    ];
-
-    for (const { regex, file } of patterns) {
-      const match = message.match(regex);
-      if (match) {
-        const resolved = file.startsWith('$') ? match[1] : file;
-        logger.info(`[FileResolver] Extracted file intent from message: "${resolved}"`);
-        return resolved;
-      }
-    }
-
-    return null;
-  }
-
-  /**
-   * Infer file path from context when # File: header is missing
-   * Uses multiple strategies with detailed logging
-   */
-  private inferFilePath(code: string, language: string): string | null {
-    logger.info(`[FileResolver] Starting file path inference (language: ${language})`);
-
-    // Strategy 1: Check user's message intent
-    logger.info(`[FileResolver] Strategy 1: Checking user message intent...`);
-    if (this.userMessageIntent) {
-      logger.info(`[FileResolver] ✓ Strategy 1 SUCCESS: Using file intent "${this.userMessageIntent}"`);
-      return this.userMessageIntent;
-    } else {
-      logger.warn(`[FileResolver] ✗ Strategy 1 FAILED: No user intent extracted`);
-    }
-
-    // Strategy 2: Check selected files
-    logger.info(`[FileResolver] Strategy 2: Checking selected files (${this.selectedFiles.size} selected)...`);
-    if (this.selectedFiles.size === 1) {
-      const file = Array.from(this.selectedFiles.keys())[0];
-      logger.info(`[FileResolver] ✓ Strategy 2 SUCCESS: Single selected file "${file}"`);
-      return file;
-    } else if (this.selectedFiles.size > 1) {
-      logger.warn(`[FileResolver] ✗ Strategy 2 FAILED: Multiple files selected (${this.selectedFiles.size})`);
-    } else {
-      logger.warn(`[FileResolver] ✗ Strategy 2 FAILED: No files selected`);
-    }
-
-    // Strategy 3: Check read files - single file rule
-    logger.info(`[FileResolver] Strategy 3: Checking read files (${this.readFilesInTurn.size} read)...`);
-    if (this.readFilesInTurn.size === 1) {
-      const file = Array.from(this.readFilesInTurn)[0];
-      logger.info(`[FileResolver] ✓ Strategy 3 SUCCESS: Single read file "${file}"`);
-      return file;
-    } else if (this.readFilesInTurn.size > 1) {
-      logger.warn(`[FileResolver] ✗ Strategy 3 FAILED: Multiple files read (${this.readFilesInTurn.size})`);
-    } else {
-      logger.warn(`[FileResolver] ✗ Strategy 3 FAILED: No files read`);
-    }
-
-    // Strategy 4: Match by language/extension
-    logger.info(`[FileResolver] Strategy 4: Matching by extension for language "${language}"...`);
-    const extMap: Record<string, string[]> = {
-      markdown: ['.md'],
-      typescript: ['.ts', '.tsx'],
-      javascript: ['.js', '.jsx'],
-      python: ['.py'],
-      json: ['.json'],
-      css: ['.css'],
-      html: ['.html']
-    };
-
-    const extensions = extMap[language] || [];
-    if (extensions.length > 0) {
-      // Check selected files first
-      if (this.selectedFiles.size > 0) {
-        for (const file of this.selectedFiles.keys()) {
-          if (extensions.some(ext => file.endsWith(ext))) {
-            logger.info(`[FileResolver] ✓ Strategy 4 SUCCESS: Matched selected file by extension "${file}"`);
-            return file;
-          }
-        }
-      }
-
-      // Then check read files
-      if (this.readFilesInTurn.size > 0) {
-        for (const file of this.readFilesInTurn) {
-          if (extensions.some(ext => file.endsWith(ext))) {
-            logger.info(`[FileResolver] ✓ Strategy 4 SUCCESS: Matched read file by extension "${file}"`);
-            return file;
-          }
-        }
-      }
-
-      logger.warn(`[FileResolver] ✗ Strategy 4 FAILED: No files match extensions ${extensions.join(', ')}`);
-    } else {
-      logger.warn(`[FileResolver] ✗ Strategy 4 FAILED: Unknown language "${language}"`);
-    }
-
-    logger.warn(`[FileResolver] All inference strategies failed`);
-    return null;
-  }
-
-  /**
-   * Resolve file path using inference + interactive fallback
-   * Returns null if unable to determine file
-   */
-  private async resolveFilePath(code: string, language: string): Promise<string | null> {
-    // Try inference first
-    const inferred = this.inferFilePath(code, language);
-    if (inferred) {
-      return inferred;
-    }
-
-    // Strategy 5: Interactive quick picker as last resort
-    logger.info(`[FileResolver] Strategy 5: Showing interactive quick picker...`);
-    const availableFiles = Array.from(new Set([
-      ...this.selectedFiles.keys(),
-      ...this.readFilesInTurn
-    ]));
-
-    if (availableFiles.length > 1) {
-      const selected = await vscode.window.showQuickPick(availableFiles, {
-        placeHolder: 'Which file should these changes apply to?',
-        title: 'Select target file for code changes'
-      });
-
-      if (selected) {
-        logger.info(`[FileResolver] ✓ Strategy 5 SUCCESS: User selected "${selected}"`);
-        return selected;
-      } else {
-        logger.warn(`[FileResolver] ✗ Strategy 5 FAILED: User cancelled selection`);
-      }
-    } else {
-      logger.warn(`[FileResolver] ✗ Strategy 5 FAILED: No available files to choose from`);
-    }
-
-    // Fallback: Use active editor if nothing else works
-    logger.info(`[FileResolver] Strategy 6 (Fallback): Using active editor...`);
-    const editor = vscode.window.activeTextEditor;
-    if (editor) {
-      const relativePath = vscode.workspace.asRelativePath(editor.document.uri);
-      logger.info(`[FileResolver] ✓ Strategy 6 SUCCESS: Active editor "${relativePath}"`);
-      return relativePath;
-    } else {
-      logger.warn(`[FileResolver] ✗ Strategy 6 FAILED: No active editor`);
-    }
-
-    logger.error(`[FileResolver] COMPLETE FAILURE: Unable to determine target file`);
-    return null;
-  }
-
-  private async closeDiff() {
-    // Close all diff editors (delegates to closeDiffEditor which handles activeDiffs)
-    await this.closeDiffEditor();
-  }
-
-  private mapLanguage(language: string): string {
-    const languageMap: Record<string, string> = {
-      'js': 'javascript',
-      'ts': 'typescript',
-      'py': 'python',
-      'rb': 'ruby',
-      'rs': 'rust',
-      'go': 'go',
-      'java': 'java',
-      'cpp': 'cpp',
-      'c': 'c',
-      'cs': 'csharp',
-      'php': 'php',
-      'swift': 'swift',
-      'kt': 'kotlin',
-      'scala': 'scala',
-      'sh': 'shellscript',
-      'bash': 'shellscript',
-      'zsh': 'shellscript',
-      'sql': 'sql',
-      'html': 'html',
-      'css': 'css',
-      'scss': 'scss',
-      'json': 'json',
-      'yaml': 'yaml',
-      'yml': 'yaml',
-      'xml': 'xml',
-      'md': 'markdown',
-      'markdown': 'markdown',
-      'text': 'plaintext'
-    };
-    return languageMap[language.toLowerCase()] || language;
-  }
-
-  private sendCodeAppliedStatus(success: boolean, error?: string, filePath?: string) {
-    logger.codeApplied(success, filePath);
-    if (this._view) {
-      this._view.webview.postMessage({
-        type: 'codeApplied',
-        success,
-        error,
-        filePath
-      });
-    }
+    return this.diffManager.showDiffQuickPick();
   }
 
   private async loadCurrentSessionHistory() {

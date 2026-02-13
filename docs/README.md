@@ -39,7 +39,8 @@
 
 ## Plans
 
-- [Context Management](plans/context-management.md) - Wire ContextBuilder into request flow
+- [ChatProvider Refactor](plans/chatprovider-refactor.md) - Event emitter extraction (6 phases)
+- [Context Management](plans/context-management.md) - Wire ContextBuilder into request flow (complete)
 - [Dead Code Cleanup](plans/dead-code-cleanup.md) - Cleanup status (complete)
 - [Backend Refactor](plans/backend-refactor.md) - Event Sourcing implementation plan
 - [WASM Tokenizer](plans/tokenizer.md) - Tokenizer implementation plan (complete)

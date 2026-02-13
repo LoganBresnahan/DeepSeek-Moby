@@ -806,7 +806,7 @@ export class VirtualListActor extends EventStateActor {
 
     const bound = this._boundActors.get(turnId);
     if (bound) {
-      bound.actor.updatePendingStatus(fileId, status);
+      bound.actor.updatePendingStatus(fileId, status, file?.diffId, file?.filePath);
     }
   }
 
@@ -822,11 +822,26 @@ export class VirtualListActor extends EventStateActor {
         file.status = status;
         const bound = this._boundActors.get(turnId);
         if (bound) {
-          bound.actor.updatePendingStatus(file.id, status);
+          bound.actor.updatePendingStatus(file.id, status, file.diffId, file.filePath);
         }
         return; // Found and updated
       }
     }
+  }
+
+  /**
+   * Find a pending file by diffId across ALL turns.
+   * Returns the turnId and file data if found, null otherwise.
+   */
+  findPendingFileGlobal(diffId: string): { turnId: string; file: PendingFileData } | null {
+    for (const [turnId, turn] of this._turnMap) {
+      for (const file of turn.pendingFiles) {
+        if (file.diffId === diffId) {
+          return { turnId, file };
+        }
+      }
+    }
+    return null;
   }
 
   // ============================================
@@ -1046,11 +1061,9 @@ export class VirtualListActor extends EventStateActor {
           if (file) {
             actor.addPendingFile({
               filePath: file.filePath,
-              diffId: file.diffId
+              diffId: file.diffId,
+              status: file.status
             });
-            if (file.status !== 'pending') {
-              actor.updatePendingStatus(file.id, file.status);
-            }
           }
           break;
         }

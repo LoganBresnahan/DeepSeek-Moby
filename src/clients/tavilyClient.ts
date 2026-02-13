@@ -59,7 +59,7 @@ export class TavilyClient {
     return apiKey;
   }
 
-  async search(query: string, options?: { searchDepth?: 'basic' | 'advanced' }): Promise<TavilySearchResponse> {
+  async search(query: string, options?: { searchDepth?: 'basic' | 'advanced'; maxResults?: number }): Promise<TavilySearchResponse> {
     const apiKey = this.getApiKey();
     const searchDepth = options?.searchDepth || this.config.get<string>('tavilySearchDepth') || 'basic';
 
@@ -74,7 +74,7 @@ export class TavilyClient {
         query,
         search_depth: searchDepth,
         include_answer: true,
-        max_results: 5
+        max_results: options?.maxResults ?? 5
       });
 
       this.trackUsage(searchDepth);

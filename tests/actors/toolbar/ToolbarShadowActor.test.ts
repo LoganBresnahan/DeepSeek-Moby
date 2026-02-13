@@ -123,12 +123,13 @@ describe('ToolbarShadowActor', () => {
       expect(handler).toHaveBeenCalled();
     });
 
-    it('posts messages to vscode', () => {
+    it('does not duplicate messages (FilesShadowActor handles them)', () => {
       const filesBtn = element.shadowRoot?.querySelector('.files-btn') as HTMLButtonElement;
       filesBtn.click();
 
-      expect(mockVscode.postMessage).toHaveBeenCalledWith({ type: 'getOpenFiles' });
-      expect(mockVscode.postMessage).toHaveBeenCalledWith({ type: 'fileModalOpened' });
+      // ToolbarShadowActor no longer sends these — FilesShadowActor.onOpen() does
+      expect(mockVscode.postMessage).not.toHaveBeenCalledWith({ type: 'getOpenFiles' });
+      expect(mockVscode.postMessage).not.toHaveBeenCalledWith({ type: 'fileModalOpened' });
     });
 
     it('updates filesModalOpen state', () => {
@@ -208,11 +209,14 @@ describe('ToolbarShadowActor', () => {
       expect(searchBtn.classList.contains('active')).toBe(true);
     });
 
-    it('disables web search when clicking while enabled', () => {
+    it('disables web search via disable button in popup', () => {
       actor.setWebSearchEnabled(true);
 
       const searchBtn = element.shadowRoot?.querySelector('.search-btn') as HTMLButtonElement;
       searchBtn.click();
+
+      const disableBtn = document.body.querySelector('.web-search-disable-btn') as HTMLButtonElement;
+      disableBtn.click();
 
       expect(actor.getState().webSearchEnabled).toBe(false);
     });
@@ -228,7 +232,8 @@ describe('ToolbarShadowActor', () => {
       enableBtn.click();
 
       expect(handler).toHaveBeenCalledWith(true, expect.objectContaining({
-        searchesPerPrompt: expect.any(Number),
+        creditsPerPrompt: expect.any(Number),
+        maxResultsPerSearch: expect.any(Number),
         searchDepth: expect.any(String)
       }));
     });

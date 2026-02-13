@@ -678,23 +678,41 @@ export class VirtualMessageGatewayActor extends EventStateActor {
     if (!turn) return;
 
     const currentDiffIds = new Map(turn.pendingFiles.map(f => [f.diffId, f]));
+    const currentPaths = new Map(turn.pendingFiles.map(f => [f.filePath, f]));
 
     for (const diff of diffs) {
-      const existingFile = diff.diffId ? currentDiffIds.get(diff.diffId) : undefined;
+      const status = diff.status as 'pending' | 'applied' | 'rejected' | 'superseded' | 'error';
 
-      if (!existingFile) {
-        virtualList.addPendingFile(turnId, {
-          filePath: diff.filePath,
-          diffId: diff.diffId,
-          status: diff.status as 'pending' | 'applied' | 'rejected' | 'superseded' | 'error'
-        });
-      } else if (existingFile.status !== diff.status) {
-        virtualList.updatePendingStatus(
-          turnId,
-          existingFile.id,
-          diff.status as 'pending' | 'applied' | 'rejected' | 'superseded' | 'error'
-        );
+      // First: check if this diff exists in ANY turn (global search by diffId).
+      // This prevents resolved diffs from previous turns being re-added to the current turn.
+      if (diff.diffId) {
+        const globalMatch = virtualList.findPendingFileGlobal(diff.diffId);
+        if (globalMatch) {
+          if (globalMatch.file.status !== status) {
+            virtualList.updatePendingStatus(globalMatch.turnId, globalMatch.file.id, status);
+          }
+          continue;
+        }
       }
+
+      // Second: check current turn by filePath (same file re-edited with new diffId)
+      const existingByPath = currentPaths.get(diff.filePath);
+      if (existingByPath) {
+        if (diff.diffId && existingByPath.diffId !== diff.diffId) {
+          existingByPath.diffId = diff.diffId;
+        }
+        if (existingByPath.status !== status) {
+          virtualList.updatePendingStatus(turnId, existingByPath.id, status);
+        }
+        continue;
+      }
+
+      // Truly new diff — add to current turn
+      virtualList.addPendingFile(turnId, {
+        filePath: diff.filePath,
+        diffId: diff.diffId,
+        status
+      });
     }
 
     // Update edit mode if provided
@@ -954,7 +972,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       log.debug('Tracing enabled:', msg.tracingEnabled);
     }
 
-    const webSearch = msg.webSearch as { searchDepth?: number; searchesPerPrompt?: number; cacheDuration?: number } | undefined;
+    const webSearch = msg.webSearch as { searchDepth?: string; creditsPerPrompt?: number; maxResultsPerSearch?: number; cacheDuration?: number } | undefined;
     this._manager.publishDirect('settings.values', {
       logLevel: msg.logLevel,
       webviewLogLevel: msg.webviewLogLevel,
@@ -963,7 +981,8 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       allowAllCommands: msg.allowAllCommands,
       systemPrompt: msg.systemPrompt,
       searchDepth: webSearch?.searchDepth,
-      searchesPerPrompt: webSearch?.searchesPerPrompt,
+      creditsPerPrompt: webSearch?.creditsPerPrompt,
+      maxResultsPerSearch: webSearch?.maxResultsPerSearch,
       cacheDuration: webSearch?.cacheDuration,
       autoSaveHistory: msg.autoSaveHistory,
       maxSessions: msg.maxSessions
