@@ -730,19 +730,62 @@ export class SettingsManager {
 
 ## 9. Phase 5 — RequestOrchestrator
 
-**Goal:** Extract the request pipeline from `handleUserMessage`. This is the hardest phase because `handleUserMessage` is 940 lines with complex control flow (tool loop, shell loop, streaming, history save). We split it into a pipeline of discrete stages.
+**Goal:** Extract the request pipeline from `handleUserMessage` (~845 lines, 760-1604) and `runToolLoop` (~290 lines, 1610-1901). This is the hardest extraction because these methods have complex control flow (tool loop, shell loop, streaming callbacks, history save pipeline) and cross-cutting interactions with every manager.
 
-### What Moves
+**Status:** Research complete, ready for implementation.
 
-The 940-line `handleUserMessage` and 300-line `runToolLoop` become a separate class that orchestrates the request lifecycle.
+### Research Findings
 
-### State Moved
+#### handleUserMessage Stages (Lines 760-1604)
 
-| Variable | From | To |
-|----------|------|----|
-| `contentBuffer` | ChatProvider | RequestOrchestrator |
-| `abortController` | ChatProvider | RequestOrchestrator |
-| `currentResponseFileChanges` | ChatProvider | RequestOrchestrator |
+| Stage | Lines | Description | Dependencies |
+|-------|-------|-------------|-------------|
+| 1. Init & Session | 760-799 | Clear turn tracking, create/get session, save user message | diffManager, fileContextManager, conversationManager |
+| 2. System Prompt | 800-952 | Build base + model-specific + edit mode + editor context + modified files + web search | deepSeekClient, diffManager, webSearchManager, getEditorContext() |
+| 3. Streaming Init | 954-1016 | Create AbortController, ContentTransformBuffer, tracking variables | ContentTransformBuffer |
+| 4. API Prep | 1018-1032 | Get session messages, log request, start timing | conversationManager |
+| 5. Message Building | 1035-1073 | Build history array, inject attachments + selected files | fileContextManager |
+| 6. Context Management | 1075-1113 | Token budget truncation, tool loop (chat only), update system prompt | deepSeekClient.buildContext(), runToolLoop() |
+| 7. Shell Loop | 1115-1424 | Stream response, detect shell/web_search tags, execute, feed results back, auto-continue | deepSeekClient.streamChat(), ContentTransformBuffer, executeShellCommands() |
+| 8. Buffer Finalize | 1436-1457 | Flush buffer, strip DSML/shell tags, detect unfenced edits | diffManager, stripDSML(), stripShellTags() |
+| 9. End Response | 1459-1470 | Send endResponse with iterations and editMode to webview | diffManager.currentEditMode |
+| 10. History Save | 1472-1545 | Record reasoning → tools → shells → files → message (order matters) | conversationManager, diffManager.getFileChanges() |
+| 11. Success Log | 1547-1551 | Log response metrics, update status bar | statusBar |
+| 12. Error Handling | 1552-1593 | Abort detection + partial save, real error display | conversationManager |
+| 13. Cleanup | 1594-1603 | null abortController, flush + reset contentBuffer | |
+
+#### runToolLoop Stages (Lines 1610-1901)
+
+| Stage | Lines | Description |
+|-------|-------|-------------|
+| Config | 1617-1637 | Read maxToolCalls setting, init budget tracking, batch tracking |
+| Main While | 1639-1881 | Iterate: abort check → budget check → API call → parse DSML → execute tools → handle apply_code_edit |
+| Batch Mgmt | 1862-1880 | Close batch on file modification, emit auto-applied changes |
+| Finalize | 1883-1901 | Close remaining batch, send limit warnings, return results |
+
+#### Critical Invariants
+1. **Buffer flush before shellExecuting** — prevents race condition
+2. **`accumulatedResponse` accumulates across ALL shell iterations** — not reset per iteration
+3. **History save order**: reasoning → tool calls → shell results → file modifications → assistant message
+4. **Tool loop: chat model ONLY**; Shell loop: reasoner model ONLY
+5. **Auto-continuation** only triggers if: shellIteration > 0 && !hasCodeEdits && count < 2
+6. **Partial save on abort** — save what we have + `[Generation stopped]` marker
+
+### State Moving to RequestOrchestrator
+
+| Variable | Current Location | Notes |
+|----------|---------|-------|
+| `abortController` | ChatProvider line 38 | AbortController \| null, lifecycle: created per request, cleared in finally |
+| `contentBuffer` | ChatProvider line 47 | ContentTransformBuffer \| null, created per request with onFlush callback |
+| `currentSessionId` | ChatProvider line 37 | **Shared** — also used by clearConversation, loadSession. Keep in ChatProvider, pass to orchestrator |
+
+### What Stays in ChatProvider
+
+- `currentSessionId` — shared across clearConversation, loadSession, etc.
+- `_view` reference — needed for event wiring
+- `getEditorContext()` + `findRelatedFiles()` + `searchWorkspace()` + `getFileContent()` — VS Code context gathering (used by system prompt builder)
+- History session CRUD methods (loadSession, sendHistorySessions, etc.)
+- `clearConversation()`, `showDiffQuickPick()`, `reveal()`, `openHistoryModal()`, `showStats()`
 
 ### Class Design
 
@@ -750,96 +793,413 @@ The 940-line `handleUserMessage` and 300-line `runToolLoop` become a separate cl
 // src/providers/requestOrchestrator.ts
 
 export class RequestOrchestrator {
-  // Events (streaming)
-  private readonly _onStartResponse = new vscode.EventEmitter<{ isReasoner: boolean; correlationId?: string }>();
+  // ── Events (streaming) ──
+  private readonly _onStartResponse = new vscode.EventEmitter<StartResponseEvent>();
   private readonly _onStreamToken = new vscode.EventEmitter<{ token: string }>();
   private readonly _onStreamReasoning = new vscode.EventEmitter<{ token: string }>();
   private readonly _onEndResponse = new vscode.EventEmitter<EndResponseEvent>();
   private readonly _onGenerationStopped = new vscode.EventEmitter<void>();
   private readonly _onIterationStart = new vscode.EventEmitter<{ iteration: number }>();
-  private readonly _onAutoContinuation = new vscode.EventEmitter<{ count: number; max: number; reason: string }>();
+  private readonly _onAutoContinuation = new vscode.EventEmitter<AutoContinuationEvent>();
 
-  // Events (tool calls)
-  private readonly _onToolCallsStart = new vscode.EventEmitter<{ tools: ToolInfo[] }>();
-  private readonly _onToolCallsUpdate = new vscode.EventEmitter<{ tools: ToolInfo[] }>();
-  private readonly _onToolCallUpdate = new vscode.EventEmitter<{ index: number; status: string; detail: string }>();
+  // ── Events (tool calls) ──
+  private readonly _onToolCallsStart = new vscode.EventEmitter<{ tools: ToolDetail[] }>();
+  private readonly _onToolCallsUpdate = new vscode.EventEmitter<{ tools: ToolDetail[] }>();
+  private readonly _onToolCallUpdate = new vscode.EventEmitter<ToolCallUpdateEvent>();
   private readonly _onToolCallsEnd = new vscode.EventEmitter<void>();
 
-  // Events (shell execution)
-  private readonly _onShellExecuting = new vscode.EventEmitter<{ commands: ShellCommandInfo[] }>();
-  private readonly _onShellResults = new vscode.EventEmitter<{ results: ShellResultInfo[] }>();
+  // ── Events (shell execution) ──
+  private readonly _onShellExecuting = new vscode.EventEmitter<ShellExecutingEvent>();
+  private readonly _onShellResults = new vscode.EventEmitter<ShellResultsEvent>();
 
-  // Events (errors)
+  // ── Events (session) ──
+  private readonly _onSessionCreated = new vscode.EventEmitter<{ sessionId: string; model: string }>();
+
+  // ── Events (errors) ──
   private readonly _onError = new vscode.EventEmitter<{ error: string }>();
   private readonly _onWarning = new vscode.EventEmitter<{ message: string }>();
 
-  // Events (history)
-  private readonly _onSessionCreated = new vscode.EventEmitter<{ sessionId: string; model: string }>();
+  // ── State ──
+  private abortController: AbortController | null = null;
+  private contentBuffer: ContentTransformBuffer | null = null;
 
   constructor(
     private deepSeekClient: DeepSeekClient,
     private conversationManager: ConversationManager,
+    private statusBar: StatusBar,
     private diffManager: DiffManager,
     private webSearchManager: WebSearchManager,
     private fileContextManager: FileContextManager,
-    private settingsManager: SettingsManager,
   ) {}
 
-  // Main entry point (replaces handleUserMessage)
-  async handleMessage(message: string, attachments?: Attachment[]): Promise<void> { ... }
+  // ── Public API ──
 
-  // Abort current request
+  /**
+   * Main entry point — replaces ChatProvider.handleUserMessage().
+   * currentSessionId is passed in (ChatProvider owns session lifecycle).
+   */
+  async handleMessage(
+    message: string,
+    currentSessionId: string | null,
+    editorContextProvider: () => Promise<string>,
+    attachments?: Array<{ content: string; name: string; size: number }>
+  ): Promise<{ sessionId: string }> { ... }
+
+  /** Abort current request (replaces ChatProvider.stopGeneration()). */
   stopGeneration(): void { ... }
 
   dispose(): void { ... }
 }
 ```
 
+**Key design decisions:**
+1. **`currentSessionId` passed in, returned out** — ChatProvider creates sessions on first message, RequestOrchestrator may create one too. Return the final sessionId so ChatProvider can update its state.
+2. **`editorContextProvider` callback** — Avoids moving `getEditorContext()` + `findRelatedFiles()` which depend on VS Code APIs and `cp.spawnSync`. The orchestrator calls `await editorContextProvider()` during system prompt building.
+3. **No `settingsManager` dependency** — Settings are read via `vscode.workspace.getConfiguration('deepseek')` inline (same pattern as before extraction). The orchestrator doesn't write settings, only reads them.
+4. **StatusBar injected** — For `statusBar.updateLastResponse()` after success.
+
 ### The Pipeline
 
-`handleMessage` becomes a pipeline of steps:
+`handleMessage()` orchestrates 8 private methods in sequence:
 
 ```
-1. prepareSession()        — get/create session, save user message
-2. buildSystemPrompt()     — combine base + edit mode + editor context + modified files
-3. runWebSearch()           — call webSearchManager.searchForMessage()
-4. buildContext()           — ContextBuilder truncation + snapshot injection
-5. runToolLoop()            — tool calling (chat model only)
-6. streamResponse()        — stream tokens through ContentTransformBuffer
-7. runShellLoop()           — shell execution loop (reasoner only)
-8. saveToHistory()          — record reasoning, tools, shells, files, assistant message
+1. prepareSession()        — diffManager.clear*, fileContextManager.clear*, get/create session
+2. buildSystemPrompt()     — base + model-specific + edit mode + editor context + modified files + web search
+3. prepareMessages()       — get session messages, inject attachments + selected files
+4. buildContext()           — ContextBuilder token budget truncation + snapshot injection
+5. runToolLoop()            — tool calling with workspace tools (CHAT MODEL ONLY)
+6. streamAndIterate()      — ContentTransformBuffer + streaming + shell loop (REASONER ONLY) or plain streaming (CHAT)
+7. finalizeResponse()      — flush buffer, strip tags, detect unfenced edits, send endResponse
+8. saveToHistory()          — record reasoning → tools → shells → files → assistant message
 ```
 
-Each step is a separate private method. The 940-line method becomes ~8 methods of ~100 lines each.
-
-### Coordination with DiffManager
-
-During streaming, the orchestrator detects code blocks and delegates to DiffManager:
-
+**try/catch/finally structure:**
 ```typescript
-// In streaming callback:
-if (this.diffManager.editMode !== 'manual') {
-  const codeBlockRegex = /```(\w+)?\n([\s\S]*?)\n```/g;
-  for (const match of accumulatedResponse.matchAll(codeBlockRegex)) {
-    const blockId = `${match.index}-${match[0].length}`;
-    this.diffManager.handleCodeBlock(blockId, match[2], match[1] || 'plaintext');
+async handleMessage(...): Promise<{ sessionId }> {
+  const sessionId = await this.prepareSession(message, currentSessionId);
+  const systemPrompt = await this.buildSystemPrompt(editorContextProvider);
+
+  this.abortController = new AbortController();
+  const signal = this.abortController.signal;
+  this._onStartResponse.fire({ isReasoner, correlationId });
+
+  // Per-request accumulation variables (local, not class state)
+  let accumulatedResponse = '';
+  let fullReasoning = '';
+  let toolCallsForHistory = [];
+
+  try {
+    const messages = await this.prepareMessages(sessionId, attachments);
+    const contextResult = await this.buildContext(messages, systemPrompt, sessionId);
+
+    let streamingSystemPrompt = systemPrompt;
+    if (!isReasonerModel) {
+      const toolResult = await this.runToolLoop(contextResult, systemPrompt, signal);
+      toolCallsForHistory = toolResult.allToolDetails;
+      contextResult.messages.push(...toolResult.toolMessages);
+      if (toolResult.toolMessages.length > 0) {
+        streamingSystemPrompt += '...exploration complete...';
+      }
+    }
+
+    const streamResult = await this.streamAndIterate(
+      contextResult.messages, streamingSystemPrompt, signal, message
+    );
+    accumulatedResponse = streamResult.accumulatedResponse;
+    fullReasoning = streamResult.fullReasoning;
+
+    const cleanResponse = this.finalizeResponse(accumulatedResponse);
+    await this.saveToHistory(cleanResponse, streamResult, toolCallsForHistory, model);
+
+    logger.apiResponse(tokenCount, Date.now() - startTime);
+    this.statusBar.updateLastResponse();
+
+  } catch (error) {
+    if (isAbortError(error, signal)) {
+      await this.savePartialResponse(accumulatedResponse, fullReasoning, ...);
+      return { sessionId };
+    }
+    this._onError.fire({ error: formatError(error, attachments) });
+  } finally {
+    this.abortController = null;
+    this.flushAndResetBuffer();
   }
+
+  return { sessionId };
 }
 ```
 
-### Files
+### ContentTransformBuffer Coordination
+
+The buffer is created inside `streamAndIterate()`:
+
+```typescript
+private async streamAndIterate(...) {
+  this.contentBuffer = new ContentTransformBuffer({
+    debounceMs: 150,
+    onFlush: (segments) => {
+      for (const segment of segments) {
+        if (segment.type === 'text') {
+          this._onStreamToken.fire({ token: segment.content });
+        }
+        // 'shell' and 'thinking' segments handled separately
+      }
+    }
+  });
+
+  // DiffManager needs to flush buffer before emitting events
+  this.diffManager.setFlushCallback(() => this.contentBuffer?.flush());
+
+  // ... streaming loop ...
+
+  this.contentBuffer.flush();
+  this.contentBuffer.reset();
+}
+```
+
+### Shell Iteration Loop (Inside streamAndIterate)
+
+The do-while loop for reasoner models stays as one coherent block inside `streamAndIterate()`:
+
+```typescript
+private async streamAndIterate(messages, systemPrompt, signal, originalMessage) {
+  // ... buffer creation ...
+
+  const state = {
+    accumulatedResponse: '', fullReasoning: '',
+    reasoningIterations: [], contentIterations: [],
+    shellResults: [],
+    shellIteration: 0, autoContinuationCount: 0, totalIterations: 0
+  };
+
+  let currentMessages = [...messages];
+  let currentPrompt = systemPrompt;
+
+  do {
+    state.totalIterations++;
+    if (state.totalIterations > 10) break;
+
+    // Stream one iteration
+    const iterResult = await this.streamOneIteration(currentMessages, currentPrompt, signal, state);
+
+    // Check for shell commands (reasoner only)
+    if (isReasonerModel && containsShellCommands(iterResult.combined)) {
+      state.shellIteration++;
+      this.contentBuffer?.flush();
+
+      const commands = parseShellCommands(iterResult.combined);
+      this._onShellExecuting.fire({ commands: ... });
+      const results = await executeShellCommands(commands, workspacePath, { allowAllCommands });
+      state.shellResults.push(...results);
+      this._onShellResults.fire({ results: ... });
+
+      // Inject results into context for next iteration
+      currentMessages.push({ role: 'assistant', content: iterResult.content });
+      currentMessages.push({ role: 'user', content: `Shell results:\n${formatResults}\nREMINDER: ${originalMessage}` });
+      continue;
+    }
+
+    // Auto-continuation check
+    if (state.shellIteration > 0 && !containsCodeEdits(state.accumulatedResponse) && state.autoContinuationCount < 2) {
+      state.autoContinuationCount++;
+      this._onAutoContinuation.fire({ ... });
+      // Inject continuation prompt
+      continue;
+    }
+
+    break; // No shell commands and no auto-continuation needed
+  } while (state.shellIteration < 5 && isReasonerModel);
+
+  return state;
+}
+```
+
+### Tool Loop (runToolLoop — separate method)
+
+Moves as-is, with `this._view?.webview.postMessage` replaced by event fires:
+
+| Original postMessage | Replacement Event |
+|---------------------|-------------------|
+| `{ type: 'toolCallsStart', tools }` | `this._onToolCallsStart.fire({ tools })` |
+| `{ type: 'toolCallsUpdate', tools }` | `this._onToolCallsUpdate.fire({ tools })` |
+| `{ type: 'toolCallUpdate', index, status, detail }` | `this._onToolCallUpdate.fire({ index, status, detail })` |
+| `{ type: 'toolCallsEnd' }` | `this._onToolCallsEnd.fire()` |
+| `{ type: 'warning', message }` | `this._onWarning.fire({ message })` |
+
+### ChatProvider Changes
+
+#### New member + constructor wiring
+
+```typescript
+private requestOrchestrator: RequestOrchestrator;
+
+// In constructor:
+this.requestOrchestrator = new RequestOrchestrator(
+  this.deepSeekClient, this.conversationManager, this.statusBar,
+  this.diffManager, this.webSearchManager, this.fileContextManager
+);
+
+// Wire ~16 events → webview
+this.requestOrchestrator.onStartResponse(d => {
+  this._view?.webview.postMessage({ type: 'startResponse', ...d });
+});
+this.requestOrchestrator.onStreamToken(d => {
+  this._view?.webview.postMessage({ type: 'streamToken', token: d.token });
+});
+this.requestOrchestrator.onStreamReasoning(d => {
+  this._view?.webview.postMessage({ type: 'streamReasoning', token: d.token });
+});
+this.requestOrchestrator.onEndResponse(d => {
+  this._view?.webview.postMessage({ type: 'endResponse', message: d });
+});
+this.requestOrchestrator.onGenerationStopped(() => {
+  this._view?.webview.postMessage({ type: 'generationStopped' });
+});
+this.requestOrchestrator.onIterationStart(d => {
+  this._view?.webview.postMessage({ type: 'iterationStart', iteration: d.iteration });
+});
+this.requestOrchestrator.onAutoContinuation(d => {
+  this._view?.webview.postMessage({ type: 'autoContinuation', ...d });
+});
+this.requestOrchestrator.onToolCallsStart(d => {
+  this._view?.webview.postMessage({ type: 'toolCallsStart', tools: d.tools });
+});
+this.requestOrchestrator.onToolCallsUpdate(d => {
+  this._view?.webview.postMessage({ type: 'toolCallsUpdate', tools: d.tools });
+});
+this.requestOrchestrator.onToolCallUpdate(d => {
+  this._view?.webview.postMessage({ type: 'toolCallUpdate', ...d });
+});
+this.requestOrchestrator.onToolCallsEnd(() => {
+  this._view?.webview.postMessage({ type: 'toolCallsEnd' });
+});
+this.requestOrchestrator.onShellExecuting(d => {
+  this._view?.webview.postMessage({ type: 'shellExecuting', commands: d.commands });
+});
+this.requestOrchestrator.onShellResults(d => {
+  this._view?.webview.postMessage({ type: 'shellResults', results: d.results });
+});
+this.requestOrchestrator.onSessionCreated(d => {
+  this._view?.webview.postMessage({ type: 'sessionCreated', ...d });
+});
+this.requestOrchestrator.onError(d => {
+  this._view?.webview.postMessage({ type: 'error', error: d.error });
+});
+this.requestOrchestrator.onWarning(d => {
+  this._view?.webview.postMessage({ type: 'warning', message: d.message });
+});
+```
+
+#### Switch case updates
+
+```typescript
+case 'sendMessage':
+  const result = await this.requestOrchestrator.handleMessage(
+    data.message, this.currentSessionId,
+    () => this.getEditorContext(),
+    data.attachments
+  );
+  this.currentSessionId = result.sessionId;
+  break;
+
+case 'stopGeneration':
+  this.requestOrchestrator.stopGeneration();
+  break;
+```
+
+#### Removed from ChatProvider
+
+- `handleUserMessage()` (~845 lines)
+- `runToolLoop()` (~290 lines)
+- `stopGeneration()` (~12 lines)
+- `abortController` state variable
+- `contentBuffer` state variable
+
+#### Kept in ChatProvider (shared context)
+
+- `currentSessionId` — passed to orchestrator, updated from result
+- `getEditorContext()` + `findRelatedFiles()` + `searchWorkspace()` + `getFileContent()` — passed as callback
+- History session CRUD (loadSession, clearConversation, etc.)
+
+### Event Types (new in types.ts)
+
+```typescript
+// ── Request Orchestrator Types ──
+
+export interface StartResponseEvent {
+  isReasoner: boolean;
+  correlationId?: string;
+}
+
+export interface EndResponseEvent {
+  role: 'assistant';
+  content: string;
+  reasoning_content?: string;
+  reasoning_iterations?: string[];
+  content_iterations?: string[];
+  editMode: 'manual' | 'ask' | 'auto';
+}
+
+export interface AutoContinuationEvent {
+  count: number;
+  max: number;
+  reason: string;
+}
+
+export interface ToolDetail {
+  name: string;
+  detail: string;
+  status: string;
+}
+
+export interface ToolCallUpdateEvent {
+  index: number;
+  status: string;
+  detail: string;
+}
+
+export interface ShellExecutingEvent {
+  commands: Array<{ command: string; description: string }>;
+}
+
+export interface ShellResultsEvent {
+  results: Array<{ command: string; output: string; success: boolean }>;
+}
+```
+
+### Files Changed
 
 | File | Change |
 |------|--------|
-| `src/providers/requestOrchestrator.ts` | **New** — ~1,200 lines (handleUserMessage + runToolLoop + helpers) |
-| `src/providers/chatProvider.ts` | Remove ~1,200 lines, add ~20 lines of subscriptions |
-| `tests/unit/providers/requestOrchestrator.test.ts` | **New** — pipeline stages, abort handling |
+| `src/providers/requestOrchestrator.ts` | **New** — ~1,200 lines |
+| `src/providers/chatProvider.ts` | Remove ~1,150 lines, add ~60 lines (member, events, delegations) |
+| `src/providers/types.ts` | Add 7 event types (~50 lines) |
+| `tests/unit/providers/requestOrchestrator.test.ts` | **New** — ~500 lines |
+
+### Test Strategy
+
+Test each pipeline stage independently:
+
+1. **prepareSession** — creates session if null, saves user message, clears turn tracking
+2. **buildSystemPrompt** — includes edit mode context, editor context, modified files, web search
+3. **prepareMessages** — injects attachments + selected files into last user message
+4. **runToolLoop** — tool execution, DSML parsing, apply_code_edit handling, budget limits
+5. **streamAndIterate** — streaming callbacks fire events, shell detection, auto-continuation
+6. **finalizeResponse** — strips DSML/shell tags, detects unfenced edits
+7. **saveToHistory** — records all event types in correct order
+8. **stopGeneration** — aborts controller, fires generationStopped
+9. **abort handling** — partial save with `[Generation stopped]` marker
+10. **error handling** — context length errors with attachment hints
 
 ### Verification
 
-- `npx vitest run` — all pass
-- Manual: send message, verify streaming, tool calls, shell execution, history save
-- Manual: stop generation mid-stream, verify partial save
+1. `npx vitest run` — all tests pass including new RequestOrchestrator tests
+2. Manual (Chat model): send message → verify tool calls appear → streaming response → history saved
+3. Manual (Reasoner model): send message → verify shell execution → auto-continuation → code edits
+4. Manual: stop generation mid-stream → verify partial save in history
+5. Manual: send message with file attachments → verify context injection
+6. Manual: verify web search results appear in response when enabled
+7. Check output channel for logging throughout pipeline
 
 ---
 

@@ -103,3 +103,52 @@ export interface FileContentEvent {
   filePath: string;
   content: string;
 }
+
+// ── Request Orchestrator Types ──
+
+/** Payload for start of streaming response */
+export interface StartResponseEvent {
+  isReasoner: boolean;
+  correlationId?: string;
+}
+
+/** Payload for end of streaming response */
+export interface EndResponseEvent {
+  role: 'assistant';
+  content: string;
+  reasoning_content?: string;
+  reasoning_iterations?: string[];
+  content_iterations?: string[];
+  editMode: 'manual' | 'ask' | 'auto';
+}
+
+/** Payload for auto-continuation (reasoner model) */
+export interface AutoContinuationEvent {
+  count: number;
+  max: number;
+  reason: string;
+}
+
+/** Tool call detail for UI display */
+export interface ToolDetail {
+  name: string;
+  detail: string;
+  status: string;
+}
+
+/** Payload for individual tool call status update */
+export interface ToolCallUpdateEvent {
+  index: number;
+  status: string;
+  detail: string;
+}
+
+/** Payload for shell command execution notification */
+export interface ShellExecutingEvent {
+  commands: Array<{ command: string; description: string }>;
+}
+
+/** Payload for shell command results */
+export interface ShellResultsEvent {
+  results: Array<{ command: string; output: string; success: boolean }>;
+}

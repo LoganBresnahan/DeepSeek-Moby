@@ -2,30 +2,19 @@ import * as vscode from 'vscode';
 import * as cp from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
-import { DeepSeekClient, Message as ApiMessage, ToolCall } from '../deepseekClient';
+import { DeepSeekClient } from '../deepseekClient';
 import { StatusBar } from '../views/statusBar';
 import { ConversationManager } from '../events';
 import { DiffEngine } from '../utils/diff';
 import { logger } from '../utils/logger';
 import { tracer, type TraceCategory } from '../tracing';
 import { webviewLogStore } from '../logging/WebviewLogStore';
-import { workspaceTools, applyCodeEditTool, executeToolCall } from '../tools/workspaceTools';
-import { parseDSMLToolCalls, stripDSML } from '../utils/dsmlParser';
 import { TavilyClient } from '../clients/tavilyClient';
 import { WebSearchManager } from './webSearchManager';
 import { FileContextManager } from './fileContextManager';
 import { DiffManager } from './diffManager';
-import {
-  parseShellCommands,
-  containsShellCommands,
-  containsCodeEdits,
-  executeShellCommands,
-  formatShellResultsForContext,
-  getReasonerShellPrompt,
-  stripShellTags,
-  ShellResult
-} from '../tools/reasonerShellExecutor';
-import { ContentTransformBuffer, BufferedSegment, ShellCommand } from '../utils/ContentTransformBuffer';
+import { SettingsManager } from './settingsManager';
+import { RequestOrchestrator } from './requestOrchestrator';
 
 export class ChatProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'deepseek-chat-view';
@@ -34,15 +23,13 @@ export class ChatProvider implements vscode.WebviewViewProvider {
   private statusBar: StatusBar;
   private conversationManager: ConversationManager;
   private currentSessionId: string | null = null;
-  private abortController: AbortController | null = null;
   private disposables: vscode.Disposable[] = [];
   private tavilyClient: TavilyClient;
   private webSearchManager: WebSearchManager;
   private fileContextManager: FileContextManager;
   private diffManager: DiffManager;
-
-  // Content transform buffer for debounced streaming
-  private contentBuffer: ContentTransformBuffer | null = null;
+  private settingsManager: SettingsManager;
+  private requestOrchestrator: RequestOrchestrator;
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
@@ -90,11 +77,6 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     const config = vscode.workspace.getConfiguration('deepseek');
     const editMode = (config.get<string>('editMode') || 'manual') as 'manual' | 'ask' | 'auto';
     this.diffManager = new DiffManager(new DiffEngine(), this.fileContextManager, editMode);
-    this.diffManager.setFlushCallback(() => {
-      if (this.contentBuffer) {
-        this.contentBuffer.flush();
-      }
-    });
     this.diffManager.onDiffListChanged(data => {
       this._view?.webview.postMessage({ type: 'diffListChanged', diffs: data.diffs, editMode: data.editMode });
     });
@@ -118,6 +100,94 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     });
     this.diffManager.onEditRejected(data => {
       this._view?.webview.postMessage({ type: 'editRejected', filePath: data.filePath });
+    });
+
+    // Create settings manager and wire events → webview
+    this.settingsManager = new SettingsManager(this.deepSeekClient);
+    this.settingsManager.onSettingsChanged(snapshot => {
+      if (this._view) {
+        // Override webSearch with actual WebSearchManager data
+        const wsSettings = this.webSearchManager.getSettings().settings;
+        this._view.webview.postMessage({
+          type: 'settings',
+          ...snapshot,
+          webSearch: {
+            searchDepth: wsSettings.searchDepth,
+            creditsPerPrompt: wsSettings.creditsPerPrompt,
+            maxResultsPerSearch: wsSettings.maxResultsPerSearch,
+            cacheDuration: wsSettings.cacheDuration
+          }
+        });
+        // Send edit mode separately
+        const config = vscode.workspace.getConfiguration('deepseek');
+        const editMode = config.get<string>('editMode') || 'manual';
+        this.diffManager.setEditMode(editMode as 'manual' | 'ask' | 'auto');
+        this._view.webview.postMessage({ type: 'editModeSettings', mode: editMode });
+      }
+    });
+    this.settingsManager.onModelChanged(data => {
+      this._view?.webview.postMessage({ type: 'modelChanged', model: data.model });
+    });
+    this.settingsManager.onDefaultPromptRequested(data => {
+      this._view?.webview.postMessage({ type: 'defaultSystemPrompt', model: data.model, prompt: data.prompt });
+    });
+    this.settingsManager.onSettingsReset(() => {
+      this.webSearchManager.resetToDefaults();
+      this._view?.webview.postMessage({ type: 'settingsReset' });
+    });
+
+    // Create request orchestrator and wire events → webview
+    this.requestOrchestrator = new RequestOrchestrator(
+      this.deepSeekClient, this.conversationManager, this.statusBar,
+      this.diffManager, this.webSearchManager, this.fileContextManager
+    );
+    this.requestOrchestrator.onStartResponse(d => {
+      this._view?.webview.postMessage({ type: 'startResponse', ...d });
+    });
+    this.requestOrchestrator.onStreamToken(d => {
+      this._view?.webview.postMessage({ type: 'streamToken', token: d.token });
+    });
+    this.requestOrchestrator.onStreamReasoning(d => {
+      this._view?.webview.postMessage({ type: 'streamReasoning', token: d.token });
+    });
+    this.requestOrchestrator.onEndResponse(d => {
+      this._view?.webview.postMessage({ type: 'endResponse', message: d });
+    });
+    this.requestOrchestrator.onGenerationStopped(() => {
+      this._view?.webview.postMessage({ type: 'generationStopped' });
+    });
+    this.requestOrchestrator.onIterationStart(d => {
+      this._view?.webview.postMessage({ type: 'iterationStart', iteration: d.iteration });
+    });
+    this.requestOrchestrator.onAutoContinuation(d => {
+      this._view?.webview.postMessage({ type: 'autoContinuation', ...d });
+    });
+    this.requestOrchestrator.onToolCallsStart(d => {
+      this._view?.webview.postMessage({ type: 'toolCallsStart', tools: d.tools });
+    });
+    this.requestOrchestrator.onToolCallsUpdate(d => {
+      this._view?.webview.postMessage({ type: 'toolCallsUpdate', tools: d.tools });
+    });
+    this.requestOrchestrator.onToolCallUpdate(d => {
+      this._view?.webview.postMessage({ type: 'toolCallUpdate', ...d });
+    });
+    this.requestOrchestrator.onToolCallsEnd(() => {
+      this._view?.webview.postMessage({ type: 'toolCallsEnd' });
+    });
+    this.requestOrchestrator.onShellExecuting(d => {
+      this._view?.webview.postMessage({ type: 'shellExecuting', commands: d.commands });
+    });
+    this.requestOrchestrator.onShellResults(d => {
+      this._view?.webview.postMessage({ type: 'shellResults', results: d.results });
+    });
+    this.requestOrchestrator.onSessionCreated(d => {
+      this._view?.webview.postMessage({ type: 'sessionCreated', ...d });
+    });
+    this.requestOrchestrator.onError(d => {
+      this._view?.webview.postMessage({ type: 'error', error: d.error });
+    });
+    this.requestOrchestrator.onWarning(d => {
+      this._view?.webview.postMessage({ type: 'warning', message: d.message });
     });
 
     // Load current session
@@ -147,6 +217,8 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     this.webSearchManager.dispose();
     this.fileContextManager.dispose();
     this.diffManager.dispose();
+    this.settingsManager.dispose();
+    this.requestOrchestrator.dispose();
     this.disposables.forEach(d => d.dispose());
   }
 
@@ -181,9 +253,15 @@ export class ChatProvider implements vscode.WebviewViewProvider {
 
     webviewView.webview.onDidReceiveMessage(async (data) => {
       switch (data.type) {
-        case 'sendMessage':
-          await this.handleUserMessage(data.message, data.attachments);
+        case 'sendMessage': {
+          const result = await this.requestOrchestrator.handleMessage(
+            data.message, this.currentSessionId,
+            () => this.getEditorContext(),
+            data.attachments
+          );
+          this.currentSessionId = result.sessionId;
           break;
+        }
         case 'clearChat':
           this.clearConversation();
           break;
@@ -200,57 +278,46 @@ export class ChatProvider implements vscode.WebviewViewProvider {
           await this.loadCurrentSessionHistory();
           break;
         case 'stopGeneration':
-          this.stopGeneration();
+          this.requestOrchestrator.stopGeneration();
           break;
         case 'updateSettings':
-          await this.updateSettings(data.settings);
+          await this.settingsManager.updateSettings(data.settings);
           break;
         case 'selectModel':
-          // Handle model selection from dropdown
-          await this.updateSettings({ model: data.model });
+          await this.settingsManager.updateSettings({ model: data.model });
           break;
         case 'setTemperature':
-          // Handle temperature slider
-          await this.updateSettings({ temperature: data.temperature });
+          await this.settingsManager.updateSettings({ temperature: data.temperature });
           break;
         case 'setToolLimit':
-          // Handle tool limit slider
-          await this.updateSettings({ maxToolCalls: data.toolLimit });
+          await this.settingsManager.updateSettings({ maxToolCalls: data.toolLimit });
           break;
         case 'setMaxTokens':
-          // Handle token limit slider
-          await this.updateSettings({ maxTokens: data.maxTokens });
+          await this.settingsManager.updateSettings({ maxTokens: data.maxTokens });
           break;
         case 'setLogLevel':
-          // Handle log level change
-          await this.updateLogSettings({ logLevel: data.logLevel });
+          await this.settingsManager.updateLogSettings({ logLevel: data.logLevel });
           break;
         case 'setLogColors':
-          // Handle log colors toggle
-          await this.updateLogSettings({ logColors: data.enabled });
+          await this.settingsManager.updateLogSettings({ logColors: data.enabled });
           break;
         case 'setWebviewLogLevel':
-          // Handle webview log level change - save to config, then send settings back for live update
-          await this.updateWebviewLogSettings({ webviewLogLevel: data.logLevel });
+          await this.settingsManager.updateWebviewLogSettings({ webviewLogLevel: data.logLevel });
           break;
         case 'setTracingEnabled':
-          // Handle tracing toggle
-          await this.updateTracingSettings({ enabled: data.enabled });
+          await this.settingsManager.updateTracingSettings({ enabled: data.enabled });
           break;
         case 'openLogs':
-          // Show the DeepSeek output channel
           logger.show();
           break;
         case 'setAllowAllCommands':
-          // Handle "Walk on the Wild Side" toggle
-          await this.updateReasonerSettings({ allowAllCommands: data.enabled });
+          await this.settingsManager.updateReasonerSettings({ allowAllCommands: data.enabled });
           break;
         case 'setSystemPrompt':
-          // Handle system prompt change
-          await this.updateSystemPrompt(data.systemPrompt);
+          await this.settingsManager.updateSystemPrompt(data.systemPrompt);
           break;
         case 'getDefaultSystemPrompt':
-          this.sendDefaultSystemPrompt();
+          this.settingsManager.sendDefaultSystemPrompt();
           break;
         case 'getSettings':
           this.sendCurrentSettings();
@@ -326,16 +393,16 @@ export class ChatProvider implements vscode.WebviewViewProvider {
           this.webSearchManager.updateSettings({ cacheDuration: data.cacheDuration });
           break;
         case 'setAutoSaveHistory':
-          await this.updateSettings({ autoSaveHistory: data.enabled });
+          await this.settingsManager.updateSettings({ autoSaveHistory: data.enabled });
           break;
         case 'setMaxSessions':
-          await this.updateSettings({ maxSessions: data.maxSessions });
+          await this.settingsManager.updateSettings({ maxSessions: data.maxSessions });
           break;
         case 'clearAllHistory':
           await this.clearAllHistory();
           break;
         case 'resetToDefaults':
-          await this.resetToDefaults();
+          await this.settingsManager.resetToDefaults();
           break;
         // History modal messages
         case 'getHistorySessions':
@@ -514,216 +581,24 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private stopGeneration() {
-    if (this.abortController) {
-      this.abortController.abort();
-      this.abortController = null;
-      logger.apiAborted();
-    }
-    if (this._view) {
-      this._view.webview.postMessage({ type: 'generationStopped' });
-    }
-  }
-
-  private async updateSettings(settings: {
-    model?: string;
-    temperature?: number;
-    maxToolCalls?: number;
-    maxTokens?: number;
-    autoSaveHistory?: boolean;
-    maxSessions?: number;
-  }) {
-    const config = vscode.workspace.getConfiguration('deepseek');
-
-    if (settings.model !== undefined) {
-      // Set model immediately on client (VS Code config has propagation delay)
-      this.deepSeekClient.setModel(settings.model);
-      await config.update('model', settings.model, vscode.ConfigurationTarget.Global);
-      logger.modelChanged(settings.model);
-      // Notify webview to update UI
-      if (this._view) {
-        this._view.webview.postMessage({ type: 'modelChanged', model: settings.model });
-      }
-      // Sync full settings back to webview so token limits, temperature etc. stay in sync
-      this.sendCurrentSettings();
-    }
-
-    if (settings.temperature !== undefined) {
-      await config.update('temperature', settings.temperature, vscode.ConfigurationTarget.Global);
-      logger.settingsChanged('temperature', settings.temperature);
-    }
-
-    if (settings.maxToolCalls !== undefined) {
-      await config.update('maxToolCalls', settings.maxToolCalls, vscode.ConfigurationTarget.Global);
-      logger.settingsChanged('maxToolCalls', settings.maxToolCalls);
-    }
-
-    if (settings.maxTokens !== undefined) {
-      await config.update('maxTokens', settings.maxTokens, vscode.ConfigurationTarget.Global);
-      logger.settingsChanged('maxTokens', settings.maxTokens);
-    }
-
-    if (settings.autoSaveHistory !== undefined) {
-      await config.update('autoSaveHistory', settings.autoSaveHistory, vscode.ConfigurationTarget.Global);
-      logger.settingsChanged('autoSaveHistory', settings.autoSaveHistory);
-    }
-
-    if (settings.maxSessions !== undefined) {
-      await config.update('maxSessions', settings.maxSessions, vscode.ConfigurationTarget.Global);
-      logger.settingsChanged('maxSessions', settings.maxSessions);
-    }
-  }
-
-  private async updateLogSettings(settings: { logLevel?: string; logColors?: boolean }) {
-    const config = vscode.workspace.getConfiguration('deepseek');
-
-    if (settings.logLevel !== undefined) {
-      await config.update('logLevel', settings.logLevel, vscode.ConfigurationTarget.Global);
-      logger.settingsChanged('logLevel', settings.logLevel);
-    }
-
-    if (settings.logColors !== undefined) {
-      await config.update('logColors', settings.logColors, vscode.ConfigurationTarget.Global);
-      logger.settingsChanged('logColors', settings.logColors);
-    }
-  }
-
-  private async updateWebviewLogSettings(settings: { webviewLogLevel?: string }) {
-    const config = vscode.workspace.getConfiguration('deepseek');
-
-    if (settings.webviewLogLevel !== undefined) {
-      await config.update('webviewLogLevel', settings.webviewLogLevel, vscode.ConfigurationTarget.Global);
-      logger.settingsChanged('webviewLogLevel', settings.webviewLogLevel);
-      // Send settings back to webview so it applies the new log level immediately
-      this.sendCurrentSettings();
-    }
-  }
-
-  private async updateTracingSettings(settings: { enabled?: boolean }) {
-    const config = vscode.workspace.getConfiguration('deepseek');
-
-    if (settings.enabled !== undefined) {
-      await config.update('tracing.enabled', settings.enabled, vscode.ConfigurationTarget.Global);
-      logger.settingsChanged('tracing.enabled', settings.enabled);
-      // Also update the tracer directly
-      tracer.enabled = settings.enabled;
-    }
-  }
-
-  private async updateReasonerSettings(settings: { allowAllCommands?: boolean }) {
-    const config = vscode.workspace.getConfiguration('deepseek');
-
-    if (settings.allowAllCommands !== undefined) {
-      await config.update('allowAllShellCommands', settings.allowAllCommands, vscode.ConfigurationTarget.Global);
-      logger.settingsChanged('allowAllShellCommands', settings.allowAllCommands ? 'enabled (Wild Side)' : 'disabled');
-    }
-  }
-
-  private async updateSystemPrompt(prompt: string) {
-    const config = vscode.workspace.getConfiguration('deepseek');
-    await config.update('systemPrompt', prompt, vscode.ConfigurationTarget.Global);
-    logger.settingsChanged('systemPrompt', prompt ? `${prompt.substring(0, 50)}...` : '(default)');
-  }
-
-  private sendDefaultSystemPrompt() {
-    const config = vscode.workspace.getConfiguration('deepseek');
-    const model = config.get<string>('model') || 'deepseek-chat';
-    const isReasoner = model.includes('reasoner');
-
-    // Get the appropriate default prompt based on model type
-    const prompt = isReasoner
-      ? this.getReasonerDefaultPrompt()
-      : this.getChatDefaultPrompt();
-
-    this._view?.webview.postMessage({
-      type: 'defaultSystemPrompt',
-      model: isReasoner ? 'DeepSeek Reasoner (R1)' : 'DeepSeek Chat',
-      prompt
-    });
-  }
-
-  private getChatDefaultPrompt(): string {
-    return `You are a highly capable AI programming assistant integrated into VS Code. Your role is to help developers write, understand, and improve code.
-
-Key capabilities:
-- Analyze code and explain its functionality
-- Help debug issues and suggest fixes
-- Write new code following best practices
-- Refactor and optimize existing code
-- Answer programming questions
-
-When providing code changes, use the SEARCH/REPLACE format for precise edits.
-
-Always be concise, accurate, and helpful.`;
-  }
-
-  private getReasonerDefaultPrompt(): string {
-    return `You are a highly capable AI programming assistant with shell access for exploring codebases.
-
-You can run shell commands using <shell> tags to explore and understand code:
-<shell>cat src/file.ts</shell>
-<shell>grep -rn "function" src/</shell>
-
-For code changes, use the SEARCH/REPLACE format:
-\`\`\`typescript
-# File: path/to/file.ts
-<<<<<<< SEARCH
-exact code to find
-======= AND
-replacement code
->>>>>>> REPLACE
-\`\`\`
-
-Always:
-1. Explore the codebase first using shell commands
-2. Understand the existing code structure
-3. Make precise, targeted changes
-4. Complete tasks in a single response`;
-  }
-
   private sendCurrentSettings() {
+    const snapshot = this.settingsManager.getCurrentSettings();
+    const wsSettings = this.webSearchManager.getSettings().settings;
     const config = vscode.workspace.getConfiguration('deepseek');
-    const model = config.get<string>('model') || 'deepseek-chat';
-    const temperature = config.get<number>('temperature') ?? 0.7;
-    const maxToolCalls = config.get<number>('maxToolCalls') ?? 25;
-    const maxTokens = config.get<number>('maxTokens') ?? 8192;
     const editMode = config.get<string>('editMode') || 'manual';
-    const logLevel = config.get<string>('logLevel') || 'WARN';
-    const webviewLogLevel = config.get<string>('webviewLogLevel') || 'WARN';
-    const tracingEnabled = config.get<boolean>('tracing.enabled') ?? true;
-    const logColors = config.get<boolean>('logColors') ?? true;
-    const systemPrompt = config.get<string>('systemPrompt') || '';
-    const autoSaveHistory = config.get<boolean>('autoSaveHistory') ?? true;
-    const maxSessions = config.get<number>('maxSessions') ?? 50;
-    const allowAllCommands = config.get<boolean>('allowAllShellCommands') ?? false;
 
     // Sync edit mode with config
     this.diffManager.setEditMode(editMode as 'manual' | 'ask' | 'auto');
 
-    // Sync tracer enabled state
-    tracer.enabled = tracingEnabled;
-
     if (this._view) {
       this._view.webview.postMessage({
         type: 'settings',
-        model,
-        temperature,
-        maxToolCalls,
-        maxTokens,
-        logLevel,
-        webviewLogLevel,
-        tracingEnabled,
-        logColors,
-        systemPrompt,
-        autoSaveHistory,
-        maxSessions,
-        allowAllCommands,
-        // Web search settings
+        ...snapshot,
         webSearch: {
-          searchDepth: this.webSearchManager.getSettings().settings.searchDepth,
-          creditsPerPrompt: this.webSearchManager.getSettings().settings.creditsPerPrompt,
-          maxResultsPerSearch: this.webSearchManager.getSettings().settings.maxResultsPerSearch,
-          cacheDuration: this.webSearchManager.getSettings().settings.cacheDuration
+          searchDepth: wsSettings.searchDepth,
+          creditsPerPrompt: wsSettings.creditsPerPrompt,
+          maxResultsPerSearch: wsSettings.maxResultsPerSearch,
+          cacheDuration: wsSettings.cacheDuration
         }
       });
       // Send edit mode separately
@@ -908,1189 +783,8 @@ Always:
     }
   }
 
-  private async resetToDefaults() {
-    try {
-      const config = vscode.workspace.getConfiguration('deepseek');
-
-      // Reset all settings to defaults
-      await config.update('logLevel', undefined, vscode.ConfigurationTarget.Global);
-      await config.update('webviewLogLevel', undefined, vscode.ConfigurationTarget.Global);
-      await config.update('tracing.enabled', undefined, vscode.ConfigurationTarget.Global);
-      await config.update('logColors', undefined, vscode.ConfigurationTarget.Global);
-      await config.update('systemPrompt', undefined, vscode.ConfigurationTarget.Global);
-      await config.update('maxTokens', undefined, vscode.ConfigurationTarget.Global);
-      await config.update('maxToolCalls', undefined, vscode.ConfigurationTarget.Global);
-      await config.update('editMode', undefined, vscode.ConfigurationTarget.Global);
-      await config.update('autoSaveHistory', undefined, vscode.ConfigurationTarget.Global);
-      await config.update('maxSessions', undefined, vscode.ConfigurationTarget.Global);
-
-      // Reset tracer to enabled
-      tracer.enabled = true;
-
-      // Reset web search settings
-      this.webSearchManager.resetToDefaults();
-
-      // Reset logger
-      logger.minLevel = 'INFO';
-
-      logger.info('[ChatProvider] Settings reset to defaults');
-
-      // Send fresh settings to webview
-      this.sendCurrentSettings();
-
-      // Notify webview
-      this._view?.webview.postMessage({ type: 'settingsReset' });
-    } catch (error) {
-      logger.error(`[ChatProvider] Failed to reset settings: ${error}`);
-    }
-  }
-
   public getTavilyClient(): TavilyClient {
     return this.tavilyClient;
-  }
-
-  private async handleUserMessage(message: string, attachments?: Array<{content: string, name: string, size: number}>) {
-    if (!this._view) {
-      return;
-    }
-
-    // Clear processed code blocks and pending diffs for new conversation turn
-    this.diffManager.clearProcessedBlocks();
-    this.diffManager.clearPendingDiffs();
-    // Clear read files tracking and extract user intent
-    this.fileContextManager.clearTurnTracking();
-    this.fileContextManager.extractFileIntent(message);
-
-    // Get or create current session
-    if (!this.currentSessionId) {
-      const editor = vscode.window.activeTextEditor;
-      const language = editor?.document.languageId;
-      const session = await this.conversationManager.startNewSession(
-        message,
-        this.deepSeekClient.getModel(),
-        language
-      );
-      this.currentSessionId = session.id;
-
-      // Notify webview of new session (for SessionActor)
-      if (this._view) {
-        this._view.webview.postMessage({
-          type: 'sessionCreated',
-          sessionId: session.id,
-          model: this.deepSeekClient.getModel()
-        });
-      }
-    }
-
-    // Save user message to history (UI already shows it from frontend)
-    if (this.currentSessionId) {
-      await this.conversationManager.addMessageToCurrentSession({
-        role: 'user',
-        content: message
-      });
-    }
-
-    // Get active editor context
-    const editorContext = await this.getEditorContext();
-    const isReasonerModel = this.deepSeekClient.isReasonerModel();
-
-    // Get custom system prompt from settings (if set)
-    const config = vscode.workspace.getConfiguration('deepseek');
-    const customSystemPrompt = config.get<string>('systemPrompt') || '';
-
-    let systemPrompt = `You are DeepSeek Moby, an expert programming assistant integrated into VS Code.
-`;
-
-    // Prepend custom system prompt if set
-    if (customSystemPrompt.trim()) {
-      systemPrompt = `${customSystemPrompt.trim()}\n\n---\n\n${systemPrompt}`;
-    }
-
-    // Add exploration capabilities based on model type
-    if (isReasonerModel) {
-      // Reasoner uses shell commands instead of native tool calling
-      systemPrompt += getReasonerShellPrompt();
-    } else {
-      // Chat model uses native tool calling
-      systemPrompt += `
-You have access to tools that let you explore the codebase:
-- read_file: Read contents of any file in the workspace
-- search_files: Find files by name pattern (glob)
-- grep_content: Search for text/patterns in file contents
-- list_directory: See directory structure
-- get_file_info: Get file metadata and preview
-
-USE THESE TOOLS to understand the codebase before making suggestions. When the user asks about code or wants changes:
-1. First explore relevant files using the tools
-2. Read the actual source code to understand the context
-3. Then provide accurate, informed responses
-`;
-    }
-
-    // Add edit mode context to system prompt
-    const editModeDescriptions = {
-      manual: 'Code blocks will be displayed for reference. The user will manually copy and apply changes.',
-      ask: 'Code blocks will trigger a diff view where the user can review and accept/reject changes.',
-      auto: 'Code blocks will be automatically applied to files without user confirmation.'
-    };
-
-    systemPrompt += `
-IMPORTANT - Code Edit Format Requirements
-
-**Current Edit Mode: ${this.diffManager.currentEditMode.toUpperCase()}**
-${editModeDescriptions[this.diffManager.currentEditMode]}
-
-**CRITICAL FORMAT: Every code edit MUST use this exact structure:**
-
-\`\`\`<language>
-# File: path/to/file.ext
-<<<<<<< SEARCH
-exact code to find (copy from file verbatim)
-======= AND
-replacement code
->>>>>>> REPLACE
-\`\`\`
-
-**EXAMPLE - Editing a TypeScript function:**
-\`\`\`typescript
-# File: src/utils/helper.ts
-<<<<<<< SEARCH
-export function calculate(x: number): number {
-  return x + 1;
-}
-======= AND
-export function calculate(x: number): number {
-  return x * 2;  // Changed from addition to multiplication
-}
->>>>>>> REPLACE
-\`\`\`
-
-**REQUIREMENTS (MANDATORY - edits will fail without these):**
-1. ✓ Code block must start with triple backticks and optional language
-2. ✓ First line INSIDE the code block must be "# File: <path>"
-3. ✓ SEARCH section contains EXACT code from the file (including whitespace)
-4. ✓ All markers (<<<<<<< SEARCH, ======= AND, >>>>>>> REPLACE) must be INSIDE the code block
-5. ✓ ONE code block per file edit - do NOT split into separate "before" and "after" blocks
-
-**For ADDING new code** (inserting new functions/methods):
-\`\`\`typescript
-# File: src/services/api.ts
-<<<<<<< SEARCH
-  async fetchUser(id: string): Promise<User> {
-    // existing method
-  }
-======= AND
-  async fetchUser(id: string): Promise<User> {
-    // existing method
-  }
-
-  async createUser(data: UserData): Promise<User> {
-    // new method I'm adding
-    return this.post('/users', data);
-  }
->>>>>>> REPLACE
-\`\`\`
-
-**For CREATING new files** (empty SEARCH section):
-\`\`\`typescript
-# File: src/utils/newFile.ts
-<<<<<<< SEARCH
-======= AND
-// This is a brand new file
-export function newHelper(): string {
-  return "hello";
-}
->>>>>>> REPLACE
-\`\`\`
-
-**COMMON MISTAKES TO AVOID:**
-✗ Forgetting the "# File:" header (edit won't be detected)
-✗ Putting SEARCH/REPLACE outside code fences (won't be parsed)
-✗ Using separate code blocks for "before" and "after" (use ONE block)
-✗ Showing code without the edit format (won't be applied)
-
-`;
-    if (editorContext) {
-      systemPrompt += `\n${editorContext}`;
-    }
-
-    // Add modified files context to prevent redundant edits
-    const modifiedFilesContext = this.diffManager.getModifiedFilesContext();
-    if (modifiedFilesContext) {
-      systemPrompt += modifiedFilesContext;
-    }
-
-    // Auto web search if enabled (search BEFORE DeepSeek, not via tool calls)
-    const webSearchContext = await this.webSearchManager.searchForMessage(message);
-
-    // Add search results to system prompt with context for LLM
-    if (webSearchContext) {
-      const today = new Date().toLocaleDateString('en-US', {
-        weekday: 'long',
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric'
-      });
-      systemPrompt += `
-
---- CURRENT WEB SEARCH RESULTS (${today}) ---
-The following are real-time web search results. Use this information to answer questions
-about current events, dates, times, news, or anything requiring up-to-date information.
-Do NOT say you lack access to current information - these results ARE current.
-
-${webSearchContext}
---- END WEB SEARCH RESULTS ---
-`;
-    }
-
-    // Start streaming response
-    let fullResponse = '';
-    let fullReasoning = '';
-    let accumulatedResponse = '';  // For reasoner: accumulates responses across shell iterations
-
-    // Per-iteration tracking for R1 continuation (reasoning AND content)
-    let reasoningIterations: string[] = [];
-    let currentIterationReasoning = '';
-    let contentIterations: string[] = [];
-    let currentIterationContent = '';
-
-    // Clear file changes tracking for this response
-    this.diffManager.clearResponseFileChanges();
-
-    // Create abort controller for this request
-    this.abortController = new AbortController();
-    const signal = this.abortController.signal;
-
-    // Get the current correlation ID for cross-boundary tracing
-    const correlationId = logger.getCurrentCorrelationId();
-
-    this._view.webview.postMessage({
-      type: 'startResponse',
-      isReasoner: isReasonerModel,
-      correlationId: correlationId || undefined
-    });
-
-    // Initialize content transform buffer for debounced streaming
-    // This prevents jarring UI transitions when <shell> tags are detected
-    this.contentBuffer = new ContentTransformBuffer({
-      debounceMs: 150,
-      debug: false,
-      log: (msg) => logger.debug(msg), // Route buffer logs through our logger
-      onFlush: (segments) => {
-        for (const segment of segments) {
-          switch (segment.type) {
-            case 'text':
-              // Send regular text to frontend
-              const textContent = segment.content as string;
-              this._view?.webview.postMessage({
-                type: 'streamToken',
-                token: textContent
-              });
-              break;
-
-            case 'shell':
-              // Don't send shell tags as text - they'll be handled by shellExecuting message
-              // Just log for debugging
-              logger.debug(`[ContentBuffer] Detected shell commands, will be handled after iteration`);
-              break;
-
-            case 'thinking':
-              // Thinking tags are for R1 reasoner, handled separately via streamReasoning
-              // Just skip them here
-              logger.debug(`[ContentBuffer] Detected thinking tags, handled separately`);
-              break;
-
-            // NOTE: Code blocks are no longer detected by the buffer - they flow through
-            // as normal text and are rendered by the frontend's markdown processing.
-          }
-        }
-      }
-    });
-
-    // Log the API request
-    const model = this.deepSeekClient.getModel();
-    const hasAttachments = attachments && attachments.length > 0;
-    const requestStartTime = Date.now();
-
-    // Declare outside try so it's accessible in catch for partial save
-    let toolCallsForHistory: Array<{ name: string; detail: string; status: string }> = [];
-
-    try {
-      // Get current session messages for context (user message already saved above)
-      const currentSession = await this.conversationManager.getCurrentSession();
-      const sessionMessages = currentSession
-        ? await this.conversationManager.getSessionMessagesCompat(currentSession.id)
-        : [];
-      const messageCount = sessionMessages.length || 1;
-      logger.apiRequest(model, messageCount, hasAttachments);
-
-      // Build messages array - handle multimodal content if attachments present
-      const historyMessages: ApiMessage[] = [];
-      for (const msg of sessionMessages) {
-        historyMessages.push({
-          role: msg.role,
-          content: msg.content
-        });
-      }
-
-      // If this message has file attachments, include their contents in the context
-      if (attachments && attachments.length > 0) {
-        // Build file context to prepend to the last user message
-        let fileContext = '\n\n--- Attached Files ---\n';
-        for (const attachment of attachments) {
-          const content = attachment.content || '';
-          fileContext += `\n### File: ${attachment.name}\n\`\`\`\n${content}\n\`\`\`\n`;
-        }
-        fileContext += '--- End Attached Files ---\n';
-
-        // Append file context to the last user message
-        if (historyMessages.length > 0) {
-          const lastMsg = historyMessages[historyMessages.length - 1];
-          if (lastMsg.role === 'user') {
-            lastMsg.content = lastMsg.content + fileContext;
-          }
-        }
-      }
-
-      // If user has selected files for context, include them
-      const selectedFilesContext = this.fileContextManager.getSelectedFilesContext();
-      if (selectedFilesContext) {
-        if (historyMessages.length > 0) {
-          const lastMsg = historyMessages[historyMessages.length - 1];
-          if (lastMsg.role === 'user') {
-            lastMsg.content = lastMsg.content + selectedFilesContext;
-            logger.info(`[ChatProvider] ✓ Selected files context injected into user message`);
-          }
-        }
-      }
-
-      // --- Context Window Management ---
-      // Truncate old messages to fit within the model's token budget.
-      // ContextBuilder fills from newest messages backward and injects a
-      // snapshot summary when older messages are dropped.
-      const snapshotSummary = currentSession
-        ? this.conversationManager.getLatestSnapshotSummary(currentSession.id)
-        : undefined;
-
-      const contextResult = await this.deepSeekClient.buildContext(
-        historyMessages,
-        systemPrompt,
-        snapshotSummary
-      );
-
-      const contextMessages: ApiMessage[] = contextResult.messages as ApiMessage[];
-
-      // Tool calling loop (only for non-reasoner models)
-      let streamingSystemPrompt = systemPrompt;
-      if (!isReasonerModel) {
-        const { toolMessages, limitReached, budgetExceeded, allToolDetails: toolDetails } = await this.runToolLoop(
-          contextMessages, systemPrompt, signal,
-          contextResult.tokenCount, contextResult.budget
-        );
-        toolCallsForHistory = toolDetails;
-        // Add tool interactions to history for context
-        contextMessages.push(...toolMessages);
-
-        // If tools were used, update system prompt to indicate exploration is complete
-        // This prevents the model from trying to use tools during streaming
-        if (toolMessages.length > 0) {
-          const limitWarning = (limitReached || budgetExceeded)
-            ? `\n\nNOTE: The tool calling limit was reached. Summarize what you were able to accomplish and explain what remains to be done.`
-            : '';
-          streamingSystemPrompt = systemPrompt + `
-
-IMPORTANT: The tool exploration phase is now complete. You have already gathered the necessary information using tools.
-Now provide your final response based on what you learned. Do NOT attempt to use any more tools or output any tool-calling markup - just provide your answer directly in plain text.${limitWarning}`;
-        }
-      }
-
-      // Shell execution tracking for history
-      let shellResultsForHistory: ShellResult[] = [];
-
-      // Reasoner shell loop - run shell commands if R1 outputs them
-      const maxShellIterations = 5;  // Prevent infinite loops
-      let shellIteration = 0;
-      let currentSystemPrompt = streamingSystemPrompt;
-      let currentHistoryMessages = [...contextMessages];
-
-      // Store original user message for re-injection in continuation prompts
-      // This ensures R1 doesn't "forget" the task after shell exploration
-      const originalUserMessage = message;
-
-      // Auto-continuation tracking for R1
-      // When R1 explores with shell commands but doesn't produce code edits,
-      // we auto-continue to prompt it to complete the task
-      const maxAutoContinuations = 2;  // Limit to prevent infinite loops
-      let autoContinuationCount = 0;
-      let lastIterationHadShellCommands = false;
-
-      // Total iteration safeguard (shell iterations + auto-continuations)
-      const maxTotalIterations = 10;
-      let totalIterations = 0;
-
-      do {
-        totalIterations++;
-        if (totalIterations > maxTotalIterations) {
-          logger.warn(`[R1-Shell] Total iteration limit reached (${maxTotalIterations}), breaking loop`);
-          break;
-        }
-
-        // Track iteration-specific response (accumulated response is declared outside try block)
-        let iterationResponse = '';
-
-        // Timing metrics for debugging
-        const iterationStartTime = Date.now();
-        let firstReasoningTokenTime: number | null = null;
-        let firstContentTokenTime: number | null = null;
-
-        // Log iteration start for debugging R1 continuation
-        if (isReasonerModel) {
-          logger.info(`[R1-Shell] Starting iteration ${shellIteration + 1}, messages in context: ${currentHistoryMessages.length}`);
-          logger.info(`[Timing] Iteration ${shellIteration + 1} started at ${new Date().toISOString()}`);
-          // Set iteration for trace context (1-indexed)
-          logger.setIteration(shellIteration + 1);
-          // Notify frontend of new iteration for per-iteration thinking dropdowns
-          this._view?.webview.postMessage({
-            type: 'iterationStart',
-            iteration: shellIteration + 1  // 1-indexed for display
-          });
-        } else {
-          // Non-reasoner models: single iteration
-          logger.setIteration(1);
-        }
-
-        const _response = await this.deepSeekClient.streamChat(
-          currentHistoryMessages,
-          async (token) => {
-            // Track timing for first content token
-            if (!firstContentTokenTime) {
-              firstContentTokenTime = Date.now();
-              const waitTime = firstContentTokenTime - iterationStartTime;
-              const afterReasoning = firstReasoningTokenTime
-                ? firstContentTokenTime - firstReasoningTokenTime
-                : 0;
-              logger.info(`[Timing] First content token after ${waitTime}ms (${afterReasoning}ms after reasoning started)`);
-              // For non-reasoner models, this is the first token
-              if (!isReasonerModel) {
-                logger.apiStreamProgress('first-token');
-              } else if (firstReasoningTokenTime) {
-                // For reasoner models: emit thinking-end before content-start
-                logger.apiStreamProgress('thinking-end');
-              }
-              logger.apiStreamProgress('content-start');
-            }
-
-            // Log streaming chunk for trace
-            logger.apiStreamChunk(token.length, 'text');
-
-            iterationResponse += token;
-            accumulatedResponse += token;
-            currentIterationContent += token;  // Track content per iteration
-
-            // Use content buffer for debounced streaming (filters shell tags)
-            if (this.contentBuffer) {
-              this.contentBuffer.append(token);
-            } else {
-              // Fallback if buffer not initialized
-              this._view?.webview.postMessage({
-                type: 'streamToken',
-                token
-              });
-            }
-
-            // Detect complete code blocks and auto-handle in "ask" or "auto" mode
-            this.diffManager.handleCodeBlockDetection(accumulatedResponse);
-          },
-          currentSystemPrompt,
-          // Reasoning callback for deepseek-reasoner
-          isReasonerModel ? (reasoningToken) => {
-            // Track timing for first reasoning token
-            if (!firstReasoningTokenTime) {
-              firstReasoningTokenTime = Date.now();
-              const waitTime = firstReasoningTokenTime - iterationStartTime;
-              logger.info(`[Timing] First reasoning token after ${waitTime}ms`);
-              logger.apiStreamProgress('first-token');
-              logger.apiStreamProgress('thinking-start');
-            }
-
-            // Log streaming chunk for trace
-            logger.apiStreamChunk(reasoningToken.length, 'thinking');
-
-            fullReasoning += reasoningToken;
-            currentIterationReasoning += reasoningToken;  // Track per-iteration
-            this._view?.webview.postMessage({
-              type: 'streamReasoning',
-              token: reasoningToken
-            });
-          } : undefined,
-          { signal }
-        );
-
-        // Log iteration completion for debugging R1 continuation
-        if (isReasonerModel) {
-          const iterationDuration = Date.now() - iterationStartTime;
-          logger.info(`[Timing] Iteration ${shellIteration + 1} complete in ${iterationDuration}ms`);
-          logger.info(`[R1-Shell] Iteration ${shellIteration + 1} complete, response length: ${iterationResponse.length} chars`);
-          logger.info(`[R1-Shell] Response preview: ${iterationResponse.substring(0, 300).replace(/\n/g, '\\n')}...`);
-
-          // Save iteration reasoning AND content, reset for next iteration
-          if (currentIterationReasoning) {
-            reasoningIterations.push(currentIterationReasoning);
-            currentIterationReasoning = '';
-          }
-          if (currentIterationContent) {
-            contentIterations.push(currentIterationContent);
-            currentIterationContent = '';
-          }
-        }
-
-        // Check for shell commands in THIS iteration's response AND reasoning
-        // R1 can output <shell> tags in either the content or reasoning stream
-        const combinedForShellCheck = iterationResponse + (currentIterationReasoning || '');
-        if (isReasonerModel && containsShellCommands(combinedForShellCheck)) {
-          shellIteration++;
-          lastIterationHadShellCommands = true;  // Track for auto-continuation
-          const inReasoning = containsShellCommands(currentIterationReasoning || '');
-          const inContent = containsShellCommands(iterationResponse);
-          logger.info(`[R1-Shell] Iteration ${shellIteration}: found shell commands (inContent=${inContent}, inReasoning=${inReasoning})`);
-
-          // Parse and execute shell commands from both streams
-          const commands = parseShellCommands(combinedForShellCheck);
-          const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-
-          if (commands.length > 0 && workspacePath) {
-            // IMPORTANT: Flush buffer before sending shellExecuting to prevent race condition
-            // The frontend will finalize the current segment when it receives this message,
-            // so we need to ensure all pending buffered content is sent first
-            if (this.contentBuffer) {
-              logger.info(`[Buffer] FLUSH before shellExecuting (${commands.length} commands)`);
-              this.contentBuffer.flush();
-            }
-
-            // Notify frontend about shell execution
-            const shellCommandsPayload = commands.map(c => ({
-              command: c.command,
-              description: c.command.length > 50 ? c.command.substring(0, 50) + '...' : c.command
-            }));
-            logger.info(`[Frontend] Sending shellExecuting message: ${shellCommandsPayload.length} commands`);
-            this._view?.webview.postMessage({
-              type: 'shellExecuting',
-              commands: shellCommandsPayload
-            });
-
-            // Check "Walk on the Wild Side" setting
-            const config = vscode.workspace.getConfiguration('deepseek');
-            const allowAllCommands = config.get<boolean>('allowAllShellCommands') ?? false;
-
-            // Execute commands
-            const shellStartTime = Date.now();
-            logger.info(`[Timing] Shell execution started at ${new Date().toISOString()}`);
-            const results = await executeShellCommands(commands, workspacePath, {
-              allowAllCommands
-            });
-            const shellDuration = Date.now() - shellStartTime;
-            logger.info(`[Timing] Shell execution completed in ${shellDuration}ms`);
-            shellResultsForHistory.push(...results);
-
-            // Notify frontend of results
-            this._view?.webview.postMessage({
-              type: 'shellResults',
-              results: results.map(r => ({
-                command: r.command,
-                output: r.output.substring(0, 500) + (r.output.length > 500 ? '...' : ''),
-                success: r.success
-              }))
-            });
-
-            // Add to context and continue
-            const resultsContext = formatShellResultsForContext(results);
-
-            // Add assistant response with shell commands to API context (for continuation)
-            currentHistoryMessages.push({
-              role: 'assistant',
-              content: iterationResponse
-            });
-
-            // Add shell results as user message (like tool results in chat model)
-            // Include original user request so R1 doesn't "forget" the task
-            currentHistoryMessages.push({
-              role: 'user',
-              content: `Shell command results:\n${resultsContext}
-
----
-REMINDER - Your original task was:
-"${originalUserMessage}"
-
-You have explored the codebase. Now you MUST either:
-1. Run additional shell commands if you need more information, OR
-2. Produce the code edits using properly formatted code blocks with # File: headers
-
-Do NOT just describe what you found. Complete the original task with actual code changes.`
-            });
-
-            // Update system prompt for continuation - reinforce the code edit requirement
-            // Include original task to prevent R1 from losing context
-            currentSystemPrompt = streamingSystemPrompt + `
-
-The shell commands have been executed and results are provided.
-ORIGINAL TASK: "${originalUserMessage}"
-
-You MUST now complete this task:
-- If you need more information, run additional shell commands
-- Otherwise, produce the code edits in properly formatted code blocks with # File: headers
-- Your response is NOT complete until you provide the actual code changes
-- Do NOT end with just analysis or description - include the code edits`;
-
-            logger.info(`[R1-Shell] Injected ${results.length} shell results for task: "${originalUserMessage.substring(0, 50)}...", continuing...`);
-          }
-        } else {
-          // No shell commands in this iteration
-          if (isReasonerModel) {
-            logger.info(`[R1-Shell] No shell commands in iteration, checking for auto-continuation...`);
-            logger.info(`[R1-Shell] shellIteration=${shellIteration}, autoContinuationCount=${autoContinuationCount}, lastIterationHadShellCommands=${lastIterationHadShellCommands}`);
-
-            // Check if we should auto-continue:
-            // 1. Shell commands were executed in previous iterations (model was exploring)
-            // 2. Response doesn't contain code edits (task not complete)
-            // 3. Under max auto-continuation limit
-            const hasCodeEdits = containsCodeEdits(accumulatedResponse);
-            logger.info(`[R1-Shell] Response has code edits: ${hasCodeEdits}`);
-
-            if (shellIteration > 0 && !hasCodeEdits && autoContinuationCount < maxAutoContinuations) {
-              autoContinuationCount++;
-              logger.info(`[R1-Shell] Auto-continuing (${autoContinuationCount}/${maxAutoContinuations}): shell commands were executed but no code edits produced`);
-
-              // Notify frontend
-              this._view?.webview.postMessage({
-                type: 'autoContinuation',
-                count: autoContinuationCount,
-                max: maxAutoContinuations,
-                reason: 'No code edits after shell exploration'
-              });
-
-              // Add current response to context
-              currentHistoryMessages.push({
-                role: 'assistant',
-                content: iterationResponse
-              });
-
-              // Add continuation prompt as user message
-              currentHistoryMessages.push({
-                role: 'user',
-                content: `You explored the codebase but didn't complete the task.
-
-ORIGINAL TASK: "${originalUserMessage}"
-
-You MUST now produce the code edits. Use the SEARCH/REPLACE format with "# File:" headers:
-
-\`\`\`<language>
-# File: path/to/file.ext
-<<<<<<< SEARCH
-exact code to find
-======= AND
-replacement code
->>>>>>> REPLACE
-\`\`\`
-
-Do NOT describe what to do - actually produce the code changes now.`
-              });
-
-              // Update system prompt to be more insistent
-              currentSystemPrompt = streamingSystemPrompt + `
-
-CRITICAL: The user's original task was: "${originalUserMessage}"
-You have already explored the codebase. NOW YOU MUST produce the actual code edits.
-Use the SEARCH/REPLACE format with # File: headers. Your response MUST contain code changes.`;
-
-              lastIterationHadShellCommands = false;  // Reset for next iteration
-              continue;  // Continue the loop instead of breaking
-            }
-
-            // Log exit reason
-            logger.info(`[R1-Shell] Loop exiting: iteration=${shellIteration}, hasCodeEdits=${hasCodeEdits}, autoContinuations=${autoContinuationCount}/${maxAutoContinuations}`);
-            const lastChars = combinedForShellCheck.slice(-200);
-            logger.info(`[R1-Shell] Last 200 chars: ${lastChars.replace(/\n/g, '\\n')}`);
-          }
-          break;
-        }
-      } while (shellIteration < maxShellIterations && isReasonerModel);
-
-      if (shellIteration >= maxShellIterations) {
-        logger.warn(`[ChatProvider] Reasoner shell loop limit reached (${maxShellIterations} iterations)`);
-      }
-
-      // Push final iteration's content (if the loop exited without shell commands)
-      if (currentIterationContent) {
-        contentIterations.push(currentIterationContent);
-        currentIterationContent = '';
-      }
-
-      // Flush and reset the content buffer before finalizing
-      if (this.contentBuffer) {
-        logger.info(`[Buffer] FLUSH before endResponse (final)`);
-        this.contentBuffer.flush();
-        logger.info(`[Buffer] RESET after final flush`);
-        this.contentBuffer.reset();
-      }
-
-      // Strip any DSML markup and shell tags from the final response
-      // (DeepSeek chat outputs DSML, Reasoner outputs <shell> tags)
-      // Use accumulatedResponse to include all content from all shell iterations
-      let cleanResponse = stripDSML(accumulatedResponse);
-      cleanResponse = stripShellTags(cleanResponse);
-
-      // ============================================
-      // Unfenced SEARCH/REPLACE Detection (Fallback)
-      // ============================================
-      // Check for SEARCH/REPLACE markers that might be OUTSIDE code fences.
-      // This handles cases where the LLM outputs the format without proper markdown.
-      if (this.diffManager.currentEditMode !== 'manual') {
-        await this.diffManager.detectAndProcessUnfencedEdits(cleanResponse);
-      }
-
-      // Finalize response
-      this._view.webview.postMessage({
-        type: 'endResponse',
-        message: {
-          role: 'assistant',
-          content: cleanResponse,
-          reasoning_content: fullReasoning || undefined,
-          reasoning_iterations: reasoningIterations.length > 0 ? reasoningIterations : undefined,
-          content_iterations: contentIterations.length > 0 ? contentIterations : undefined,
-          editMode: this.diffManager.currentEditMode
-        }
-      });
-
-      // Convert shell results to tool call format for history
-      // Use 'done' not 'success' to match frontend expectation for status icons
-      const shellToolCalls = shellResultsForHistory.map(r => ({
-        name: 'shell',
-        detail: r.command,
-        status: r.success ? 'done' : 'error'
-      }));
-      const allToolCalls = [...toolCallsForHistory, ...shellToolCalls];
-
-      // ── History Save Pipeline ──
-      // Records all aspects of the assistant response as granular events for full-fidelity restore.
-      // Order matters: reasoning → tool calls → shell results → file modifications → assistant message.
-      // The final recordAssistantMessage() call seals the turn — getSessionRichHistory() uses
-      // event sequence order to group everything between the last user_message and this event.
-      //
-      // For Reasoner model, contentIterations captures per-iteration text (cleaned of shell tags)
-      // so that restore can interleave thinking[i] → content[i] → shell[i] matching live streaming.
-      //
-      // File modifications are tracked synchronously at code block detection time (line ~1848)
-      // because applyCodeDirectlyForAutoMode() is fire-and-forget async — the file wouldn't be
-      // in currentResponseFileChanges at save time otherwise.
-      const tokenCount = this.deepSeekClient.estimateTokens(cleanResponse + fullReasoning);
-      if (this.currentSessionId && (cleanResponse || fullReasoning)) {
-        logger.info(`[HistorySave] Saving to session=${this.currentSessionId}: reasoning=${reasoningIterations.length}, toolCalls=${toolCallsForHistory.length}, shells=${shellResultsForHistory.length}, content=${cleanResponse.length} chars, model=${model}`);
-
-        try {
-          // 1. Record reasoning iterations
-          for (let i = 0; i < reasoningIterations.length; i++) {
-            this.conversationManager.recordAssistantReasoning(reasoningIterations[i], i);
-            logger.info(`[HistorySave] Recorded reasoning iteration ${i} (${reasoningIterations[i].length} chars)`);
-          }
-
-          // 2. Record non-shell tool calls
-          for (const tc of toolCallsForHistory) {
-            const toolCallId = `tc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-            this.conversationManager.recordToolCall(toolCallId, tc.name, { detail: tc.detail });
-            this.conversationManager.recordToolResult(toolCallId, tc.detail, tc.status === 'done');
-            logger.info(`[HistorySave] Recorded tool call: ${tc.name}`);
-          }
-
-          // 3. Record shell results with richer data
-          for (const sr of shellResultsForHistory) {
-            const shellCallId = `sh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-            this.conversationManager.recordToolCall(shellCallId, 'shell', { command: sr.command });
-            this.conversationManager.recordToolResult(shellCallId, sr.output, sr.success, sr.executionTimeMs);
-            logger.info(`[HistorySave] Recorded shell: ${sr.command.substring(0, 50)}`);
-          }
-
-          // 4. Record file modifications (for restore of "Modified Files" dropdown)
-          const modifiedFiles = [...new Set(
-            this.diffManager.getFileChanges()
-              .filter(f => f.status === 'applied')
-              .map(f => f.filePath)
-          )];
-          for (const filePath of modifiedFiles) {
-            const fileCallId = `fm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-            this.conversationManager.recordToolCall(fileCallId, '_file_modified', { filePath });
-            this.conversationManager.recordToolResult(fileCallId, filePath, true);
-            logger.info(`[HistorySave] Recorded file modification: ${filePath}`);
-          }
-
-          // 5. Record the assistant message with real model + finishReason
-          // Include per-iteration content text (cleaned) for correct restore ordering
-          const cleanedContentIterations = contentIterations.length > 0
-            ? contentIterations.map(c => stripShellTags(stripDSML(c)).trim()).filter(c => c.length > 0)
-            : undefined;
-          await this.conversationManager.recordAssistantMessage(cleanResponse, model, 'stop', undefined, cleanedContentIterations);
-          logger.info(`[HistorySave] Recorded assistant message (${cleanResponse.length} chars, model=${model}, contentIts=${cleanedContentIterations?.length || 0})`);
-        } catch (saveError: any) {
-          logger.error(`[HistorySave] FAILED to save history: ${saveError.message}`, saveError.stack);
-        }
-      } else {
-        logger.warn(`[HistorySave] Skipped save: sessionId=${this.currentSessionId}, cleanResponse=${!!cleanResponse}, fullReasoning=${!!fullReasoning}`);
-      }
-
-      // Log successful response
-      logger.apiResponse(tokenCount, Date.now() - requestStartTime);
-
-      // Update status bar
-      this.statusBar.updateLastResponse();
-    } catch (error: any) {
-      // Check if this was an abort (user stopped generation)
-      if (error.name === 'CanceledError' || error.name === 'AbortError' || signal.aborted) {
-        // Save partial response to history if there's content
-        // Use accumulatedResponse for reasoner (accumulates across shell iterations), fallback to fullResponse
-        const partialContent = accumulatedResponse || fullResponse;
-        if (this.currentSessionId && (partialContent || fullReasoning)) {
-          const cleanPartialResponse = stripShellTags(stripDSML(partialContent));
-
-          // Record reasoning iterations that completed
-          for (let i = 0; i < reasoningIterations.length; i++) {
-            this.conversationManager.recordAssistantReasoning(reasoningIterations[i], i);
-          }
-
-          // Record the partial assistant message
-          const partialText = cleanPartialResponse
-            ? `${cleanPartialResponse}\n\n*[Generation stopped]*`
-            : '*[Generation stopped]*';
-          await this.conversationManager.recordAssistantMessage(partialText, model, 'length');
-          logger.info(`[ChatProvider] Saved partial response to history`);
-        }
-        // Don't show error for user-initiated stops - handled by stopGeneration
-        return;
-      }
-      // Log the error
-      logger.error(error.message, error.stack);
-
-      // Check if error is related to context length and provide helpful message about attachments
-      let errorMessage = error.message;
-      const lowerMessage = errorMessage.toLowerCase();
-      if (lowerMessage.includes('context') || lowerMessage.includes('token') || lowerMessage.includes('length') || lowerMessage.includes('too long')) {
-        const totalAttachmentSize = attachments ? attachments.reduce((sum, a) => sum + (a.content?.length || 0), 0) : 0;
-        if (totalAttachmentSize > 0) {
-          const sizeKB = (totalAttachmentSize / 1024).toFixed(1);
-          errorMessage = `Context limit exceeded. Your attached files total ${sizeKB}KB - try attaching smaller or fewer files.`;
-        }
-      }
-
-      this._view.webview.postMessage({
-        type: 'error',
-        error: errorMessage
-      });
-    } finally {
-      this.abortController = null;
-      // Clean up content buffer
-      if (this.contentBuffer) {
-        logger.info(`[Buffer] FLUSH in finally block (cleanup)`);
-        this.contentBuffer.flush();
-        logger.info(`[Buffer] RESET in finally block (cleanup)`);
-        this.contentBuffer.reset();
-      }
-    }
-  }
-
-  /**
-   * Run the tool calling loop - keeps calling the LLM until it stops requesting tools.
-   * Returns the messages from tool interactions to add to context.
-   */
-  private async runToolLoop(
-    messages: ApiMessage[],
-    systemPrompt: string,
-    signal: AbortSignal,
-    contextTokenCount?: number,
-    contextBudget?: number
-  ): Promise<{ toolMessages: ApiMessage[]; limitReached: boolean; budgetExceeded: boolean; allToolDetails: Array<{ name: string; detail: string; status: string }> }> {
-    const toolMessages: ApiMessage[] = [];
-    // Get max tool calls from config (100 = no limit)
-    const config = vscode.workspace.getConfiguration('deepseek');
-    const configuredLimit = config.get<number>('maxToolCalls') ?? 25;
-    const maxIterations = configuredLimit >= 100 ? Infinity : configuredLimit;
-    let iterations = 0;
-
-    // Token budget tracking for tool loop messages
-    let accumulatedToolTokens = 0;
-    const budgetLimit = contextBudget ?? 0;
-    const baseTokenCount = contextTokenCount ?? 0;
-    let budgetExceeded = false;
-
-    // Track ALL tool calls across all iterations for return value
-    const allToolDetails: Array<{ name: string; detail: string; status: string }> = [];
-    // Track tools for the CURRENT BATCH (may span multiple iterations)
-    let batchToolDetails: Array<{ name: string; detail: string; status: string }> = [];
-    let toolContainerStarted = false;
-    let globalToolIndex = 0;
-    // Track if a file was modified in the current batch (triggers batch close)
-    let fileModifiedInBatch = false;
-
-    while (iterations < maxIterations) {
-      iterations++;
-
-      // Check if aborted
-      if (signal.aborted) {
-        break;
-      }
-
-      // Check if accumulated tool messages are approaching the budget
-      if (budgetLimit > 0 && baseTokenCount + accumulatedToolTokens > budgetLimit * 0.95) {
-        logger.warn(
-          `[Context] Tool loop stopped: approaching budget ` +
-          `(${(baseTokenCount + accumulatedToolTokens).toLocaleString()}/${budgetLimit.toLocaleString()} tokens, ` +
-          `${iterations - 1} iterations completed)`
-        );
-        budgetExceeded = true;
-        break;
-      }
-
-      // Build tools array (web search is now handled before this loop, not as a tool)
-      // Add apply_code_edit tool for chat model (reasoner can't use tools)
-      const tools = [...workspaceTools, applyCodeEditTool];
-
-      // Make a non-streaming call with tools
-      const response = await this.deepSeekClient.chat(
-        [...messages, ...toolMessages],
-        systemPrompt,
-        { tools }
-      );
-
-      // Check for DSML-formatted tool calls in content (DeepSeek Chat uses this format
-      // instead of the standard OpenAI function calling format)
-      if ((!response.tool_calls || response.tool_calls.length === 0) && response.content) {
-        const dsmlCalls = parseDSMLToolCalls(response.content);
-        if (dsmlCalls && dsmlCalls.length > 0) {
-          // Convert DSML calls to standard ToolCall format
-          response.tool_calls = dsmlCalls.map(dc => ({
-            id: dc.id,
-            type: 'function' as const,
-            function: {
-              name: dc.name,
-              arguments: JSON.stringify(dc.arguments)
-            }
-          }));
-          // Strip DSML from content to avoid displaying raw markup
-          response.content = stripDSML(response.content);
-        }
-      }
-
-      // If no tool calls, we're done with the tool loop
-      if (!response.tool_calls || response.tool_calls.length === 0) {
-        // Don't add the final content to history - let the streaming response be the complete reply
-        // Adding partial content here causes the model to try continuing with tool calls during streaming
-        break;
-      }
-
-      // Parse tool call details for better display
-      const toolDetails = response.tool_calls.map(tc => {
-        const name = tc.function.name;
-        let args: Record<string, string> = {};
-        try {
-          args = JSON.parse(tc.function.arguments);
-        } catch (e) { /* ignore */ }
-
-        // Create a user-friendly description
-        let detail = name;
-        if (name === 'read_file' && args.path) {
-          detail = `read: ${args.path}`;
-        } else if (name === 'search_files' && args.pattern) {
-          detail = `search: ${args.pattern}`;
-        } else if (name === 'grep_content' && args.query) {
-          detail = `grep: "${args.query}"`;
-        } else if (name === 'list_directory') {
-          detail = `list: ${args.path || '.'}`;
-        } else if (name === 'get_file_info' && args.path) {
-          detail = `info: ${args.path}`;
-        }
-        return { name, detail, args };
-      });
-
-      // Add tools from this iteration to the current batch
-      const newTools = toolDetails.map(t => ({ name: t.name, detail: t.detail, status: 'pending' }));
-      batchToolDetails.push(...newTools);
-
-      // Add to global tracking (for return value)
-      allToolDetails.push(...newTools);
-
-      // Start a NEW tool container OR update existing batch
-      if (!toolContainerStarted) {
-        // Start new batch
-        logger.info(`[Frontend] Sending toolCallsStart message: ${batchToolDetails.length} tools`);
-        this._view?.webview.postMessage({
-          type: 'toolCallsStart',
-          tools: batchToolDetails
-        });
-        toolContainerStarted = true;
-      } else {
-        // Update existing batch with all tools (including new ones)
-        logger.info(`[Frontend] Sending toolCallsUpdate message: batch now has ${batchToolDetails.length} tools`);
-        this._view?.webview.postMessage({
-          type: 'toolCallsUpdate',
-          tools: batchToolDetails
-        });
-      }
-
-      // Add assistant message with tool calls (required for API contract)
-      // Use empty content if no real content - the tool_calls field is what matters
-      // Avoid placeholder text like "Calling tools:" as it can appear in the output
-      toolMessages.push({
-        role: 'assistant',
-        content: response.content || '',
-        tool_calls: response.tool_calls
-      });
-
-      // Count assistant message tokens (content + tool_calls JSON)
-      if (budgetLimit > 0) {
-        const assistantText = (response.content || '') + JSON.stringify(response.tool_calls);
-        accumulatedToolTokens += this.deepSeekClient.estimateTokens(assistantText);
-      }
-
-      // Calculate batch-relative index for this iteration's tools
-      const batchStartIndex = batchToolDetails.length - newTools.length;
-
-      // Execute each tool call
-      for (let i = 0; i < response.tool_calls.length; i++) {
-        const toolCall = response.tool_calls[i];
-        const detail = toolDetails[i];
-        const globalIndex = globalToolIndex + i;
-        const batchIndex = batchStartIndex + i;
-
-        logger.toolCall(toolCall.function.name);
-
-        // Update status to running (use batch index for the current batch)
-        batchToolDetails[batchIndex].status = 'running';
-        allToolDetails[globalIndex].status = 'running';
-        this._view?.webview.postMessage({
-          type: 'toolCallUpdate',
-          index: batchIndex, // Index within the current batch
-          status: 'running',
-          detail: detail.detail
-        });
-
-        // Execute tool
-        const result = await executeToolCall(toolCall);
-        const success = !result.startsWith('Error:');
-        logger.toolResult(toolCall.function.name, success);
-
-        // Track ALL read files for auto-diff and inference
-        if (toolCall.function.name === 'read' && success) {
-          try {
-            logger.info(`[ChatProvider] Tool arguments raw: ${toolCall.function.arguments}`);
-            const args = JSON.parse(toolCall.function.arguments);
-            logger.info(`[ChatProvider] Parsed args: ${JSON.stringify(args)}`);
-            if (args.file_path) {
-              this.fileContextManager.trackReadFile(args.file_path);
-            } else {
-              logger.warn(`[ChatProvider] ✗ read tool called but no file_path in args`);
-            }
-          } catch (e) {
-            logger.error(`[ChatProvider] ✗ Failed to parse tool arguments: ${e}`);
-          }
-        }
-
-        // Track apply_code_edit tool calls for file path extraction
-        if (toolCall.function.name === 'apply_code_edit' && success) {
-          try {
-            logger.info(`[ChatProvider] apply_code_edit tool called - args: ${toolCall.function.arguments}`);
-            const args = JSON.parse(toolCall.function.arguments);
-            logger.info(`[ChatProvider] Parsed apply_code_edit args: ${JSON.stringify(args)}`);
-            if (args.file) {
-              this.fileContextManager.trackReadFile(args.file);
-
-              // Handle based on edit mode
-              if (args.code) {
-                if (this.diffManager.currentEditMode === 'ask') {
-                  logger.info(`[ChatProvider] Triggering auto-diff for apply_code_edit in ask mode`);
-                  // Add # File: header to the code
-                  const codeWithHeader = `# File: ${args.file}\n${args.code}`;
-                  const language = args.language || 'plaintext';
-
-                  // Trigger auto-diff (this will open diff and show accept/reject overlay)
-                  await this.diffManager.handleAutoShowDiff(codeWithHeader, language);
-                } else if (this.diffManager.currentEditMode === 'auto') {
-                  logger.info(`[ChatProvider] Auto-applying code edit for: ${args.file}`);
-                  // In auto mode, apply code directly (skip notification, we'll batch it)
-                  const applied = await this.diffManager.applyCodeDirectlyForAutoMode(args.file, args.code, args.description, true);
-                  if (applied) {
-                    fileModifiedInBatch = true;
-                  }
-                }
-              }
-            } else {
-              logger.warn(`[ChatProvider] ✗ apply_code_edit called but no file in args`);
-            }
-          } catch (e) {
-            logger.error(`[ChatProvider] ✗ Failed to parse apply_code_edit arguments: ${e}`);
-          }
-        }
-
-        // Add tool result to messages
-        toolMessages.push({
-          role: 'tool',
-          content: result,
-          tool_call_id: toolCall.id
-        });
-
-        // Count tool result tokens
-        if (budgetLimit > 0) {
-          accumulatedToolTokens += this.deepSeekClient.estimateTokens(result);
-        }
-
-        // Update status to done (use batch index for the current batch)
-        const finalStatus = success ? 'done' : 'error';
-        batchToolDetails[batchIndex].status = finalStatus;
-        allToolDetails[globalIndex].status = finalStatus;
-        this._view?.webview.postMessage({
-          type: 'toolCallUpdate',
-          index: batchIndex, // Index within the current batch
-          status: finalStatus,
-          detail: detail.detail
-        });
-      }
-
-      // Update global index for next iteration
-      globalToolIndex += response.tool_calls.length;
-
-      // If a file was modified in this iteration, close the batch and show modified files
-      // This creates the interleaving: [Tools batch] [Modified Files] [Next Tools batch]
-      if (fileModifiedInBatch) {
-        this._view?.webview.postMessage({
-          type: 'toolCallsEnd'
-        });
-        toolContainerStarted = false;
-        logger.info(`[Frontend] Sent toolCallsEnd (file modified, closing batch after iteration ${iterations})`);
-
-        // Send the modified files notification
-        this.diffManager.emitAutoAppliedChanges();
-
-        // Reset for next batch
-        batchToolDetails = [];
-        fileModifiedInBatch = false;
-      }
-    }
-
-    // Close any remaining open batch at the end of the loop
-    if (toolContainerStarted) {
-      this._view?.webview.postMessage({
-        type: 'toolCallsEnd'
-      });
-      logger.info(`[Frontend] Sent toolCallsEnd (end of tool loop)`);
-    }
-
-    const limitReached = iterations >= maxIterations && maxIterations !== Infinity;
-    if (limitReached || budgetExceeded) {
-      const totalToolCalls = globalToolIndex;
-      const reason = budgetExceeded ? 'Context budget exceeded' : 'Tool iteration limit reached';
-      this._view?.webview.postMessage({
-        type: 'warning',
-        message: `${reason} (${iterations} iterations, ${totalToolCalls} total tool calls). The task may require multiple requests to complete.`
-      });
-    }
-
-    return { toolMessages, limitReached, budgetExceeded, allToolDetails };
   }
 
   private async getEditorContext(): Promise<string> {
