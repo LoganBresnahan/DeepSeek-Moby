@@ -33,6 +33,7 @@ vi.mock('vscode', async (importOriginal) => {
       }),
       findFiles: vi.fn(async () => []),
       workspaceFolders: [{ uri: { toString: () => 'file:///workspace', fsPath: '/workspace' } }],
+      getWorkspaceFolder: vi.fn(() => ({ uri: { fsPath: '/workspace' } })),
       fs: {
         readFile: vi.fn(async () => Buffer.from('file content here')),
       },
@@ -44,6 +45,10 @@ vi.mock('vscode', async (importOriginal) => {
     TabInputText: class TabInputText { uri: any; constructor(uri: any) { this.uri = uri; } },
   };
 });
+
+vi.mock('child_process', () => ({
+  spawnSync: vi.fn(() => ({ stdout: '', stderr: '', status: 0, error: null })),
+}));
 
 import { FileContextManager } from '../../../src/providers/fileContextManager';
 import type { OpenFilesEvent, FileSearchResultsEvent, FileContentEvent } from '../../../src/providers/types';
@@ -428,6 +433,128 @@ describe('FileContextManager', () => {
       (vscode.window as any).activeTextEditor = undefined;
       const result = await manager.resolveFilePath('code', 'unknown');
       expect(result).toBeNull();
+    });
+  });
+
+  // ── getEditorContext ──
+
+  describe('getEditorContext', () => {
+    it('should return empty string when no active editor', async () => {
+      (vscode.window as any).activeTextEditor = undefined;
+      const result = await manager.getEditorContext();
+      expect(result).toBe('');
+    });
+
+    it('should include file info and content', async () => {
+      (vscode.window as any).activeTextEditor = {
+        document: {
+          fileName: '/workspace/src/main.ts',
+          languageId: 'typescript',
+          getText: vi.fn(() => 'const x = 1;'),
+          lineCount: 1,
+          uri: { toString: () => 'file:///workspace/src/main.ts' },
+        },
+        selection: {
+          isEmpty: true,
+          active: { line: 0 },
+          start: { line: 0 },
+          end: { line: 0 },
+        },
+      };
+
+      const result = await manager.getEditorContext();
+      expect(result).toContain('Current File: main.ts');
+      expect(result).toContain('Full Path: /workspace/src/main.ts');
+      expect(result).toContain('Language: typescript');
+      expect(result).toContain('Total Lines: 1');
+      expect(result).toContain('Cursor at line 1');
+      expect(result).toContain('--- FULL FILE CONTENT ---');
+      expect(result).toContain('const x = 1;');
+      expect(result).toContain('--- END FILE CONTENT ---');
+
+      (vscode.window as any).activeTextEditor = undefined;
+    });
+
+    it('should include selection info when text is selected', async () => {
+      (vscode.window as any).activeTextEditor = {
+        document: {
+          fileName: '/workspace/src/main.ts',
+          languageId: 'typescript',
+          getText: vi.fn((sel?: any) => sel ? 'selected text' : 'const x = 1;\nconst y = 2;'),
+          lineCount: 2,
+          uri: { toString: () => 'file:///workspace/src/main.ts' },
+        },
+        selection: {
+          isEmpty: false,
+          active: { line: 0 },
+          start: { line: 0 },
+          end: { line: 1 },
+        },
+      };
+
+      const result = await manager.getEditorContext();
+      expect(result).toContain('Selected code (lines 1-2)');
+      expect(result).toContain('selected text');
+
+      (vscode.window as any).activeTextEditor = undefined;
+    });
+
+    it('should include related files when found', async () => {
+      const cp = await import('child_process');
+      (cp.spawnSync as any).mockReturnValue({
+        stdout: './src/main.test.ts\n./src/mainHelper.ts\n',
+        stderr: '',
+        status: 0,
+        error: null,
+      });
+
+      (vscode.window as any).activeTextEditor = {
+        document: {
+          fileName: '/workspace/src/main.ts',
+          languageId: 'typescript',
+          getText: vi.fn(() => 'code'),
+          lineCount: 1,
+          uri: { toString: () => 'file:///workspace/src/main.ts' },
+        },
+        selection: {
+          isEmpty: true,
+          active: { line: 0 },
+          start: { line: 0 },
+          end: { line: 0 },
+        },
+      };
+
+      const result = await manager.getEditorContext();
+      expect(result).toContain('--- RELATED FILES IN WORKSPACE ---');
+
+      (vscode.window as any).activeTextEditor = undefined;
+      (cp.spawnSync as any).mockReturnValue({ stdout: '', stderr: '', status: 0, error: null });
+    });
+
+    it('should handle findRelatedFiles returning empty gracefully', async () => {
+      (vscode.workspace.getWorkspaceFolder as any).mockReturnValue(undefined);
+
+      (vscode.window as any).activeTextEditor = {
+        document: {
+          fileName: '/workspace/src/main.ts',
+          languageId: 'typescript',
+          getText: vi.fn(() => 'code'),
+          lineCount: 1,
+          uri: { toString: () => 'file:///workspace/src/main.ts' },
+        },
+        selection: {
+          isEmpty: true,
+          active: { line: 0 },
+          start: { line: 0 },
+          end: { line: 0 },
+        },
+      };
+
+      const result = await manager.getEditorContext();
+      expect(result).not.toContain('--- RELATED FILES IN WORKSPACE ---');
+
+      (vscode.window as any).activeTextEditor = undefined;
+      (vscode.workspace.getWorkspaceFolder as any).mockReturnValue({ uri: { fsPath: '/workspace' } });
     });
   });
 

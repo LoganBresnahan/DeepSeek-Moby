@@ -440,6 +440,32 @@ export const historyShadowStyles = `
     background: var(--vscode-scrollbarSlider-hoverBackground);
   }
 
+  /* Delete Confirmation Inline */
+  .delete-confirm-inline {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .delete-confirm-entry {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+  }
+
+  .delete-confirm-text {
+    font-size: 12px;
+    color: var(--vscode-errorForeground, #f44336);
+    font-weight: 500;
+    white-space: nowrap;
+  }
+
+  .history-btn-sm {
+    padding: 3px 8px;
+    font-size: 11px;
+  }
+
   /* Rename Input */
   .history-entry-rename-input {
     width: 100%;

@@ -1,7 +1,4 @@
 import * as vscode from 'vscode';
-import * as cp from 'child_process';
-import * as fs from 'fs';
-import * as path from 'path';
 import { DeepSeekClient } from '../deepseekClient';
 import { StatusBar } from '../views/statusBar';
 import { ConversationManager } from '../events';
@@ -43,8 +40,48 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     this.conversationManager = conversationManager;
     this.tavilyClient = tavilyClient;
 
-    // Create web search manager and wire events → webview
+    // Create managers
     this.webSearchManager = new WebSearchManager(this.tavilyClient);
+    this.fileContextManager = new FileContextManager();
+    const config = vscode.workspace.getConfiguration('deepseek');
+    const editMode = (config.get<string>('editMode') || 'manual') as 'manual' | 'ask' | 'auto';
+    this.diffManager = new DiffManager(new DiffEngine(), this.fileContextManager, editMode);
+    this.settingsManager = new SettingsManager(this.deepSeekClient);
+    this.requestOrchestrator = new RequestOrchestrator(
+      this.deepSeekClient, this.conversationManager, this.statusBar,
+      this.diffManager, this.webSearchManager, this.fileContextManager
+    );
+
+    // Wire manager events → webview
+    this.wireEvents();
+
+    // Load current session
+    this.loadCurrentSession();
+
+    // Track when new files are opened (for live modal updates)
+    this.disposables.push(
+      vscode.workspace.onDidOpenTextDocument((document) => {
+        if (this.fileContextManager.isModalOpen) {
+          const validSchemes = ['file', 'vscode-remote'];
+          if (validSchemes.includes(document.uri.scheme) && !document.isClosed) {
+            const relativePath = vscode.workspace.asRelativePath(document.uri);
+
+            if (!relativePath.startsWith('extension-output-') &&
+                !relativePath.includes('[') &&
+                !document.isUntitled) {
+              logger.info(`[ChatProvider] File opened while modal open: ${relativePath} - refreshing list`);
+              this.fileContextManager.sendOpenFiles();
+            }
+          }
+        }
+      })
+    );
+  }
+
+  // ── Manager Event Wiring ──
+
+  private wireEvents(): void {
+    // WebSearchManager → webview
     this.webSearchManager.onSearching((progress) => {
       this._view?.webview.postMessage({ type: 'webSearching', current: progress.current, total: progress.total });
     });
@@ -61,8 +98,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       this._view?.webview.postMessage({ type: 'webSearchToggled', enabled: d.enabled });
     });
 
-    // Create file context manager and wire events → webview
-    this.fileContextManager = new FileContextManager();
+    // FileContextManager → webview
     this.fileContextManager.onOpenFiles(data => {
       this._view?.webview.postMessage({ type: 'openFiles', files: data.files });
     });
@@ -73,10 +109,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       this._view?.webview.postMessage({ type: 'fileContent', filePath: data.filePath, content: data.content });
     });
 
-    // Create diff manager and wire events → webview
-    const config = vscode.workspace.getConfiguration('deepseek');
-    const editMode = (config.get<string>('editMode') || 'manual') as 'manual' | 'ask' | 'auto';
-    this.diffManager = new DiffManager(new DiffEngine(), this.fileContextManager, editMode);
+    // DiffManager → webview
     this.diffManager.onDiffListChanged(data => {
       this._view?.webview.postMessage({ type: 'diffListChanged', diffs: data.diffs, editMode: data.editMode });
     });
@@ -102,11 +135,9 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       this._view?.webview.postMessage({ type: 'editRejected', filePath: data.filePath });
     });
 
-    // Create settings manager and wire events → webview
-    this.settingsManager = new SettingsManager(this.deepSeekClient);
+    // SettingsManager → webview
     this.settingsManager.onSettingsChanged(snapshot => {
       if (this._view) {
-        // Override webSearch with actual WebSearchManager data
         const wsSettings = this.webSearchManager.getSettings().settings;
         this._view.webview.postMessage({
           type: 'settings',
@@ -118,7 +149,6 @@ export class ChatProvider implements vscode.WebviewViewProvider {
             cacheDuration: wsSettings.cacheDuration
           }
         });
-        // Send edit mode separately
         const config = vscode.workspace.getConfiguration('deepseek');
         const editMode = config.get<string>('editMode') || 'manual';
         this.diffManager.setEditMode(editMode as 'manual' | 'ask' | 'auto');
@@ -136,11 +166,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       this._view?.webview.postMessage({ type: 'settingsReset' });
     });
 
-    // Create request orchestrator and wire events → webview
-    this.requestOrchestrator = new RequestOrchestrator(
-      this.deepSeekClient, this.conversationManager, this.statusBar,
-      this.diffManager, this.webSearchManager, this.fileContextManager
-    );
+    // RequestOrchestrator → webview
     this.requestOrchestrator.onStartResponse(d => {
       this._view?.webview.postMessage({ type: 'startResponse', ...d });
     });
@@ -189,29 +215,9 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     this.requestOrchestrator.onWarning(d => {
       this._view?.webview.postMessage({ type: 'warning', message: d.message });
     });
-
-    // Load current session
-    this.loadCurrentSession();
-
-    // Track when new files are opened (for live modal updates)
-    this.disposables.push(
-      vscode.workspace.onDidOpenTextDocument((document) => {
-        if (this.fileContextManager.isModalOpen) {
-          const validSchemes = ['file', 'vscode-remote'];
-          if (validSchemes.includes(document.uri.scheme) && !document.isClosed) {
-            const relativePath = vscode.workspace.asRelativePath(document.uri);
-
-            if (!relativePath.startsWith('extension-output-') &&
-                !relativePath.includes('[') &&
-                !document.isUntitled) {
-              logger.info(`[ChatProvider] File opened while modal open: ${relativePath} - refreshing list`);
-              this.fileContextManager.sendOpenFiles();
-            }
-          }
-        }
-      })
-    );
   }
+
+  // ── Lifecycle ──
 
   public dispose() {
     this.webSearchManager.dispose();
@@ -228,6 +234,8 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       this.currentSessionId = currentSession.id;
     }
   }
+
+  // ── WebviewViewProvider & Message Router ──
 
   public resolveWebviewView(
     webviewView: vscode.WebviewView,
@@ -256,7 +264,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         case 'sendMessage': {
           const result = await this.requestOrchestrator.handleMessage(
             data.message, this.currentSessionId,
-            () => this.getEditorContext(),
+            () => this.fileContextManager.getEditorContext(),
             data.attachments
           );
           this.currentSessionId = result.sessionId;
@@ -466,10 +474,8 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     this.loadCurrentSessionHistory();
   }
 
-  /**
-   * Send trace calibration data to webview for timeline alignment.
-   * Includes the extension's base timestamp so relativeTime can be synchronized.
-   */
+  // ── Tracing ──
+
   private sendTraceCalibration(): void {
     if (!this._view) return;
 
@@ -483,6 +489,8 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       correlationId: correlationId || undefined
     });
   }
+
+  // ── Public API (extension.ts) ──
 
   public reveal() {
     if (this._view) {
@@ -548,6 +556,8 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  // ── Settings & Search Helpers ──
+
   public async clearConversation() {
     // Clear current conversation but keep session
     if (this._view) {
@@ -609,7 +619,6 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     }
   }
 
-
   private sendWebSearchSettings() {
     const { enabled, settings, configured } = this.webSearchManager.getSettings();
     this._view?.webview.postMessage({
@@ -620,6 +629,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  // ── History & Session Management ──
 
   private async clearAllHistory() {
     try {
@@ -753,10 +763,6 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  /**
-   * Handle trace events received from the webview.
-   * Merges webview traces into the extension trace collector for unified timeline.
-   */
   private handleWebviewTraceEvents(events: unknown[]): void {
     if (!Array.isArray(events)) return;
 
@@ -787,219 +793,6 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     return this.tavilyClient;
   }
 
-  private async getEditorContext(): Promise<string> {
-    const editor = vscode.window.activeTextEditor;
-    if (!editor) {
-      return '';
-    }
-
-    const document = editor.document;
-    const language = document.languageId;
-    const fileName = document.fileName.split('/').pop() || 'unknown';
-    const fullPath = document.fileName;
-    const selection = editor.selection;
-
-    // Include FULL file content so AI can make smart insertions
-    const fullContent = document.getText();
-    const lineCount = document.lineCount;
-
-    let context = `Current File: ${fileName}\nFull Path: ${fullPath}\nLanguage: ${language}\nTotal Lines: ${lineCount}\n`;
-
-    // Add selection info if any
-    if (!selection.isEmpty) {
-      const selectedText = document.getText(selection);
-      context += `\nSelected code (lines ${selection.start.line + 1}-${selection.end.line + 1}):\n${selectedText}\n`;
-    } else {
-      context += `\nCursor at line ${selection.active.line + 1}\n`;
-    }
-
-    // Include full file content
-    context += `\n--- FULL FILE CONTENT ---\n${fullContent}\n--- END FILE CONTENT ---\n`;
-
-    // Search for related files in the workspace
-    const relatedFiles = await this.findRelatedFiles(document);
-    if (relatedFiles.length > 0) {
-      context += `\n--- RELATED FILES IN WORKSPACE ---\n`;
-      for (const file of relatedFiles) {
-        context += `${file}\n`;
-      }
-      context += `--- END RELATED FILES ---\n`;
-    }
-
-    return context;
-  }
-
-  /**
-   * Search the workspace for files related to the current document.
-   * Uses ripgrep/grep/find to locate relevant files.
-   */
-  private async findRelatedFiles(document: vscode.TextDocument): Promise<string[]> {
-    const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
-    if (!workspaceFolder) {
-      return [];
-    }
-
-    const cwd = workspaceFolder.uri.fsPath;
-    const fileName = path.basename(document.fileName, path.extname(document.fileName));
-    const ext = path.extname(document.fileName);
-
-    const relatedFiles: string[] = [];
-
-    try {
-      // Strategy 1: Find files with similar names
-      const findResult = cp.spawnSync('find', [
-        '.', '-type', 'f',
-        '-name', `*${fileName}*`,
-        '-o', '-name', `*${fileName.toLowerCase()}*`,
-        '!', '-path', '*/node_modules/*',
-        '!', '-path', '*/.git/*',
-        '!', '-path', '*/vendor/*'
-      ], {
-        cwd,
-        encoding: 'utf-8',
-        timeout: 3000
-      });
-
-      if (findResult.stdout) {
-        const files = findResult.stdout.split('\n').filter(f => f.trim() && f !== document.fileName);
-        relatedFiles.push(...files.slice(0, 5).map(f => `Similar name: ${f}`));
-      }
-
-      // Strategy 2: Find files that reference this file (using grep/ripgrep)
-      const searchTerm = fileName;
-      let grepResult = cp.spawnSync('rg', [
-        '-l', '--max-count', '1',
-        searchTerm,
-        '--type-not', 'binary',
-        '--ignore-file', '.gitignore',
-        '-g', '!node_modules',
-        '-g', '!.git'
-      ], {
-        cwd,
-        encoding: 'utf-8',
-        timeout: 3000
-      });
-
-      // Fallback to grep if ripgrep not available
-      if (grepResult.error || grepResult.status !== 0) {
-        grepResult = cp.spawnSync('grep', [
-          '-rl', '--include', `*${ext}`,
-          searchTerm, '.'
-        ], {
-          cwd,
-          encoding: 'utf-8',
-          timeout: 3000
-        });
-      }
-
-      if (grepResult.stdout) {
-        const files = grepResult.stdout.split('\n').filter(f => f.trim() && !f.includes(document.fileName));
-        relatedFiles.push(...files.slice(0, 5).map(f => `References this: ${f}`));
-      }
-
-      // Strategy 3: Find test files
-      const testPatterns = [`*${fileName}*test*${ext}`, `*${fileName}*spec*${ext}`, `test_${fileName}${ext}`];
-      for (const pattern of testPatterns) {
-        const testResult = cp.spawnSync('find', ['.', '-type', 'f', '-name', pattern, '!', '-path', '*/node_modules/*'], {
-          cwd,
-          encoding: 'utf-8',
-          timeout: 2000
-        });
-
-        if (testResult.stdout) {
-          const files = testResult.stdout.split('\n').filter(f => f.trim());
-          relatedFiles.push(...files.slice(0, 2).map(f => `Test file: ${f}`));
-        }
-      }
-
-    } catch (error) {
-      // Silently fail - this is optional context
-    }
-
-    // Remove duplicates and limit
-    return [...new Set(relatedFiles)].slice(0, 10);
-  }
-
-  /**
-   * Search the workspace for content matching a query.
-   * Can be called to provide additional context to the AI.
-   */
-  private async searchWorkspace(query: string, maxResults: number = 10): Promise<string> {
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-    if (!workspaceFolder) {
-      return '';
-    }
-
-    const cwd = workspaceFolder.uri.fsPath;
-    let results = '';
-
-    try {
-      // Try ripgrep first (faster)
-      let searchResult = cp.spawnSync('rg', [
-        '-n', '--max-count', '3',
-        '-C', '2', // 2 lines of context
-        query,
-        '--type-not', 'binary',
-        '-g', '!node_modules',
-        '-g', '!.git',
-        '-g', '!*.min.js',
-        '-g', '!*.min.css'
-      ], {
-        cwd,
-        encoding: 'utf-8',
-        timeout: 5000
-      });
-
-      // Fallback to grep
-      if (searchResult.error || !searchResult.stdout) {
-        searchResult = cp.spawnSync('grep', [
-          '-rn', '--include', '*.{js,ts,py,rb,go,rs,java,c,cpp,h}',
-          '-C', '2',
-          query, '.'
-        ], {
-          cwd,
-          encoding: 'utf-8',
-          timeout: 5000
-        });
-      }
-
-      if (searchResult.stdout) {
-        const lines = searchResult.stdout.split('\n').slice(0, maxResults * 5);
-        results = lines.join('\n');
-      }
-
-    } catch (error) {
-      // Silently fail
-    }
-
-    return results;
-  }
-
-  /**
-   * Get the content of a file in the workspace by path.
-   */
-  private async getFileContent(relativePath: string): Promise<string | null> {
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-    if (!workspaceFolder) {
-      return null;
-    }
-
-    const fullPath = path.join(workspaceFolder.uri.fsPath, relativePath);
-
-    try {
-      if (fs.existsSync(fullPath)) {
-        const content = fs.readFileSync(fullPath, 'utf-8');
-        // Limit to first 500 lines to avoid huge context
-        const lines = content.split('\n').slice(0, 500);
-        return lines.join('\n');
-      }
-    } catch (error) {
-      // File not readable
-    }
-
-    return null;
-  }
-
   /**
    * Shows quick pick menu for managing diffs (public wrapper for extension.ts command)
    */
@@ -1013,6 +806,11 @@ export class ChatProvider implements vscode.WebviewViewProvider {
 
     const history = await this.conversationManager.getSessionRichHistory(currentSession.id);
     if (history.length > 0) {
+      // Send edit mode BEFORE history so webview has correct mode when rendering pending files
+      const config = vscode.workspace.getConfiguration('deepseek');
+      const editMode = config.get<string>('editMode') || 'manual';
+      this._view.webview.postMessage({ type: 'editModeSettings', mode: editMode });
+
       // Notify webview of loaded session (for SessionActor)
       this._view.webview.postMessage({
         type: 'sessionLoaded',
@@ -1039,6 +837,11 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       // Don't switch to session's model - keep user's current model selection
       // The model dropdown reflects user preference, not per-session setting
 
+      // Send edit mode BEFORE history so webview has correct mode when rendering pending files
+      const config = vscode.workspace.getConfiguration('deepseek');
+      const editMode = config.get<string>('editMode') || 'manual';
+      this._view.webview.postMessage({ type: 'editModeSettings', mode: editMode });
+
       // Notify webview of loaded session (for SessionActor)
       this._view.webview.postMessage({
         type: 'sessionLoaded',
@@ -1056,6 +859,8 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       });
     }
   }
+
+  // ── HTML Template ──
 
   private getHtmlForWebview(webview: vscode.Webview): string {
     const scriptUri = webview.asWebviewUri(

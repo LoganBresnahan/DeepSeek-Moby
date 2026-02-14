@@ -13,7 +13,7 @@
 
 ### Backend (Extension)
 
-- [Backend Architecture](architecture/backend/backend-architecture.md) - ChatProvider orchestrator
+- [Backend Architecture](architecture/backend/backend-architecture.md) - Event-driven coordinator, extracted managers
 - [Event Sourcing](architecture/backend/event-sourcing.md) - ConversationManager, events, snapshots
 - [Database Layer](architecture/backend/database-layer.md) - SQLite with @signalapp/sqlcipher
 - [Tool Execution](architecture/backend/tool-execution.md) - Tool loop, shell commands
@@ -39,7 +39,7 @@
 
 ## Plans
 
-- [ChatProvider Refactor](plans/chatprovider-refactor.md) - Event emitter extraction (6 phases)
+- [ChatProvider Refactor](plans/chatprovider-refactor.md) - Event emitter extraction (6 phases, complete)
 - [Context Management](plans/context-management.md) - Wire ContextBuilder into request flow (complete)
 - [Dead Code Cleanup](plans/dead-code-cleanup.md) - Cleanup status (complete)
 - [Backend Refactor](plans/backend-refactor.md) - Event Sourcing implementation plan

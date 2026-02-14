@@ -61,6 +61,8 @@ export class HistoryShadowActor extends ShadowActor {
   private _searchQuery = '';
   private _openMenuId: string | null = null;
   private _exportDropdownOpen = false;
+  private _confirmingDeleteAll = false;
+  private _confirmingDeleteId: string | null = null;
   private _vscode: VSCodeAPI;
 
   // Bound handlers for cleanup
@@ -397,6 +399,34 @@ export class HistoryShadowActor extends ShadowActor {
     this.delegate('click', '[data-action="deleteAll"]', () => {
       this.deleteAll();
     });
+
+    // Delete All confirmation buttons
+    this.delegate('click', '[data-action="confirmDeleteAll"]', (e) => {
+      e.stopPropagation();
+      this.confirmDeleteAll();
+    });
+
+    this.delegate('click', '[data-action="cancelDeleteAll"]', (e) => {
+      e.stopPropagation();
+      this.cancelDeleteAll();
+    });
+
+    // Delete Session confirmation buttons
+    this.delegate('click', '[data-action="confirmDelete"]', (e) => {
+      e.stopPropagation();
+      const sessionId = (e.target as HTMLElement).getAttribute('data-session-id');
+      if (sessionId) {
+        this.confirmDeleteSession(sessionId);
+      }
+    });
+
+    this.delegate('click', '[data-action="cancelDelete"]', (e) => {
+      e.stopPropagation();
+      const sessionId = (e.target as HTMLElement).getAttribute('data-session-id');
+      if (sessionId) {
+        this.cancelDeleteSession(sessionId);
+      }
+    });
   }
 
   private handleKeydown(e: KeyboardEvent): void {
@@ -473,6 +503,13 @@ export class HistoryShadowActor extends ShadowActor {
     this._visible = false;
     this._openMenuId = null;
     this._exportDropdownOpen = false;
+
+    // Reset pending confirmations
+    if (this._confirmingDeleteAll) {
+      this._confirmingDeleteAll = false;
+      this.restoreDeleteAllButton();
+    }
+    this._confirmingDeleteId = null;
 
     // Update UI
     const backdrop = this.query<HTMLElement>('[data-history-backdrop]');
@@ -597,15 +634,33 @@ export class HistoryShadowActor extends ShadowActor {
   }
 
   private deleteSession(sessionId: string): void {
+    // Show inline confirmation instead of window.confirm (which fails in VS Code webviews)
+    this._confirmingDeleteId = sessionId;
+    const deleteItem = this.query<HTMLElement>(`[data-entry-action="delete"][data-session-id="${sessionId}"]`);
+    if (!deleteItem) return;
+
+    const container = document.createElement('div');
+    container.className = 'delete-confirm-entry';
+    container.setAttribute('data-delete-confirm', sessionId);
+    container.innerHTML = `
+      <span class="delete-confirm-text">Delete?</span>
+      <button class="history-btn history-btn-secondary history-btn-sm" data-action="cancelDelete" data-session-id="${sessionId}">No</button>
+      <button class="history-btn history-btn-danger history-btn-sm" data-action="confirmDelete" data-session-id="${sessionId}">Yes</button>
+    `;
+    deleteItem.replaceWith(container);
+  }
+
+  private confirmDeleteSession(sessionId: string): void {
+    this._confirmingDeleteId = null;
+    this._vscode.postMessage({ type: 'deleteSession', sessionId });
     this.closeAllMenus();
+  }
 
-    // Confirm deletion
-    const session = this._sessions.find(s => s.id === sessionId);
-    const title = session?.title || 'this session';
-
-    if (confirm(`Delete "${title}"? This cannot be undone.`)) {
-      this._vscode.postMessage({ type: 'deleteSession', sessionId });
-    }
+  private cancelDeleteSession(_sessionId: string): void {
+    this._confirmingDeleteId = null;
+    this.closeAllMenus();
+    // Re-render the list to restore the dropdown item
+    this.updateHistoryList();
   }
 
   // ============================================
@@ -618,9 +673,42 @@ export class HistoryShadowActor extends ShadowActor {
   }
 
   private deleteAll(): void {
-    if (confirm('Delete ALL chat history? This cannot be undone.')) {
-      this._vscode.postMessage({ type: 'clearAllHistory' });
-    }
+    // Show inline confirmation instead of window.confirm (which fails in VS Code webviews)
+    this._confirmingDeleteAll = true;
+    const btn = this.query<HTMLElement>('[data-action="deleteAll"]');
+    if (!btn) return;
+
+    const container = document.createElement('div');
+    container.className = 'delete-confirm-inline';
+    container.setAttribute('data-delete-all-confirm', '');
+    container.innerHTML = `
+      <span class="delete-confirm-text">Delete all?</span>
+      <button class="history-btn history-btn-secondary history-btn-sm" data-action="cancelDeleteAll">Cancel</button>
+      <button class="history-btn history-btn-danger history-btn-sm" data-action="confirmDeleteAll">Delete</button>
+    `;
+    btn.replaceWith(container);
+  }
+
+  private confirmDeleteAll(): void {
+    this._confirmingDeleteAll = false;
+    this._vscode.postMessage({ type: 'clearAllHistory' });
+    this.restoreDeleteAllButton();
+  }
+
+  private cancelDeleteAll(): void {
+    this._confirmingDeleteAll = false;
+    this.restoreDeleteAllButton();
+  }
+
+  private restoreDeleteAllButton(): void {
+    const container = this.query<HTMLElement>('[data-delete-all-confirm]');
+    if (!container) return;
+
+    const btn = document.createElement('button');
+    btn.className = 'history-btn history-btn-danger';
+    btn.setAttribute('data-action', 'deleteAll');
+    btn.innerHTML = '🗑️ Delete All';
+    container.replaceWith(btn);
   }
 
   // ============================================

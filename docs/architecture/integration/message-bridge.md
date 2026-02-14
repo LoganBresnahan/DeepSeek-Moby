@@ -42,23 +42,36 @@ The message bridge handles communication between the VS Code extension (Node.js)
 
 ## API Reference
 
-### Extension Side (ChatProvider)
+### Extension Side (ChatProvider → Managers)
 
 ```typescript
-// Send message to webview
-this._view?.webview.postMessage({
-  type: 'messageName',
-  data: 'value',
-  // ... any serializable data
-});
+// Send message to webview (via event subscription)
+// Managers fire events; ChatProvider subscribes and forwards:
+this.diffManager.onDiffListChanged(d =>
+  this._view?.webview.postMessage({ type: 'diffListChanged', ...d }));
 
-// Receive messages from webview
+// Convenience helper used throughout ChatProvider:
+private post(type: string, data?: any): void {
+  this._view?.webview.postMessage({ type, ...data });
+}
+
+// Receive messages from webview — thin delegations to managers
 webview.onDidReceiveMessage(async (data) => {
   switch (data.type) {
     case 'sendMessage':
-      await this.handleUserMessage(data.message);
+      const result = await this.requestOrchestrator.handleMessage(
+        data.message, this.currentSessionId,
+        () => this.getEditorContext(), data.attachments
+      );
+      this.currentSessionId = result.sessionId;
       break;
-    // ...
+    case 'acceptSpecificDiff':
+      await this.diffManager.acceptSpecificDiff(data.diffId);
+      break;
+    case 'toggleWebSearch':
+      this.webSearchManager.toggle(data.enabled);
+      break;
+    // ... each case is a single-line delegation
   }
 });
 ```
@@ -242,9 +255,9 @@ window.addEventListener('message', (event) => {
        │  message: 'Hello'}               │
        │─────────────────────────────────▶│
        │                                  │
-       │                                  │ handleUserMessage()
-       │                                  │ buildContext()
-       │                                  │ callAPI()
+       │                                  │ requestOrchestrator
+       │                                  │   .handleMessage()
+       │                                  │ buildContext, callAPI
        │                                  │
        │ {type: 'startResponse',          │
        │  messageId: '...'}               │
@@ -272,7 +285,7 @@ window.addEventListener('message', (event) => {
 └──────┬──────┘                    └──────┬──────┘
        │                                  │
        │                                  │ Tool: write_file()
-       │                                  │
+       │                                  │ DiffManager fires event
        │ {type: 'diffListChanged',        │
        │  diffs: [{filePath, diffId,      │
        │          status: 'pending'}]}    │
@@ -287,7 +300,8 @@ window.addEventListener('message', (event) => {
        │  diffId: '...'}                  │
        │─────────────────────────────────▶│
        │                                  │
-       │                                  │ applyDiff()
+       │                                  │ diffManager
+       │                                  │   .acceptSpecificDiff()
        │                                  │
        │ {type: 'diffListChanged',        │
        │  diffs: [{status: 'applied'}]}   │

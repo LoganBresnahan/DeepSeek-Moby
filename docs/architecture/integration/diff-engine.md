@@ -215,8 +215,9 @@ See `DiffEngine.applySearchReplace()` for implementation details.
     ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
     │ PendingChanges  │ │ MessageShadow   │ │ ChatProvider    │
     │ ShadowActor     │ │ Actor           │ │ (extension)     │
-    │ subscribes      │ │ subscribes      │ │ receives via    │
-    └─────────────────┘ └─────────────────┘ │ postMessage     │
+    │ subscribes      │ │ subscribes      │ │ delegates to    │
+    └─────────────────┘ └─────────────────┘ │ DiffManager     │
+                                            │ .setEditMode()  │
                                             └─────────────────┘
 ```
 
@@ -258,7 +259,7 @@ See `DiffEngine.applySearchReplace()` for implementation details.
 ### Phase 2: Diff Creation
 
 ```typescript
-// ChatProvider.createDiff()
+// DiffManager.createDiff()
 async createDiff(filePath: string, newContent: string): Promise<DiffMetadata> {
   const diffId = `diff-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
@@ -282,7 +283,7 @@ async createDiff(filePath: string, newContent: string): Promise<DiffMetadata> {
     iteration: this.currentIteration
   };
 
-  this.activeDiffs.set(diffId, metadata);
+  this._activeDiffs.set(diffId, metadata);
   return metadata;
 }
 ```
@@ -368,17 +369,17 @@ async createDiff(filePath: string, newContent: string): Promise<DiffMetadata> {
                              │
                              ▼
     ┌─────────────────────────────────────────────────────────────┐
-    │  Extension: ChatProvider                                    │
+    │  Extension: ChatProvider → DiffManager                      │
     │                                                             │
     │  case 'acceptSpecificDiff':                                 │
-    │    await this.applyDiff(msg.diffId);                        │
+    │    await this.diffManager.acceptSpecificDiff(msg.diffId);   │
     │    break;                                                   │
     └─────────────────────────────────────────────────────────────┘
                              │
                              ▼
     ┌─────────────────────────────────────────────────────────────┐
-    │  applyDiff(diffId)                                          │
-    │  1. Get diff metadata from activeDiffs                      │
+    │  DiffManager.acceptSpecificDiff(diffId)                      │
+    │  1. Get diff metadata from _activeDiffs                     │
     │  2. Create WorkspaceEdit                                    │
     │  3. Apply edit to file                                      │
     │  4. Update status to 'applied'                              │
@@ -391,8 +392,8 @@ async createDiff(filePath: string, newContent: string): Promise<DiffMetadata> {
 ### In-Memory Structure
 
 ```typescript
-// ChatProvider maintains active diffs
-private activeDiffs: Map<string, DiffMetadata> = new Map();
+// DiffManager maintains active diffs
+private _activeDiffs: Map<string, DiffMetadata> = new Map();
 
 interface DiffMetadata {
   diffId: string;           // Unique identifier
@@ -413,10 +414,10 @@ interface DiffMetadata {
 │                        Diff State Sync                                       │
 └─────────────────────────────────────────────────────────────────────────────┘
 
-    Extension (ChatProvider)                    Webview (Actors)
-    ════════════════════════                    ════════════════
+    Extension (DiffManager)                     Webview (Actors)
+    ═══════════════════════                     ════════════════
 
-    activeDiffs Map                             PendingChangesShadowActor
+    _activeDiffs Map                            PendingChangesShadowActor
     ┌──────────────────┐                        ┌──────────────────┐
     │ diff-001:        │                        │ _files: [        │
     │   path: a.ts     │    postMessage:        │   { id: diff-001 │
@@ -429,7 +430,8 @@ interface DiffMetadata {
                                                 └──────────────────┘
 
     On any change:
-    - notifyDiffListChanged() sends full list
+    - DiffManager fires _onDiffListChanged event
+    - ChatProvider subscribes → postMessage('diffListChanged')
     - Webview reconciles with local state
     - UI updates to reflect current state
 ```
@@ -496,9 +498,9 @@ When the AI modifies the same file multiple times:
 When user clicks on a pending file:
 
 ```typescript
-// Open VS Code's diff editor
-async focusDiff(diffId: string) {
-  const diff = this.activeDiffs.get(diffId);
+// DiffManager: Open VS Code's diff editor
+async focusSpecificDiff(diffId: string) {
+  const diff = this._activeDiffs.get(diffId);
   if (!diff) return;
 
   // Create URIs for diff view
@@ -520,8 +522,9 @@ async focusDiff(diffId: string) {
 ### Workspace Edit Application
 
 ```typescript
-async applyDiff(diffId: string): Promise<boolean> {
-  const diff = this.activeDiffs.get(diffId);
+// DiffManager.acceptSpecificDiff()
+async acceptSpecificDiff(diffId: string): Promise<boolean> {
+  const diff = this._activeDiffs.get(diffId);
   if (!diff || diff.status !== 'pending') return false;
 
   const uri = vscode.Uri.joinPath(this.workspaceRoot, diff.filePath);
@@ -550,7 +553,7 @@ async applyDiff(diffId: string): Promise<boolean> {
 
   if (success) {
     diff.status = 'applied';
-    this.notifyDiffListChanged();
+    this._onDiffListChanged.fire({ diffs: this.getAllDiffs(), editMode: this._editMode });
   }
 
   return success;
@@ -628,13 +631,13 @@ class PendingChangesShadowActor extends ShadowActor {
     Extension                                      Webview
     ═════════                                      ═══════
 
-    1. AI calls write_file
+    1. AI calls write_file (via RequestOrchestrator)
            │
            ▼
-    2. createDiff()
-           │
+    2. DiffManager.createDiff()
+           │ fires _onDiffListChanged event
            ▼
-    3. postMessage ──────────────────────────────▶ 4. diffListChanged
+    3. ChatProvider subscribes → postMessage ─────▶ 4. diffListChanged
        { type: 'diffListChanged',                      │
          diffs: [...],                                 ▼
          editMode: 'manual' }                    5. PendingChangesShadow
@@ -645,7 +648,7 @@ class PendingChangesShadowActor extends ShadowActor {
                                                        │
                                                        │ User clicks Accept
                                                        ▼
-    8. applyDiff(diffId) ◀─────────────────────── 7. postMessage
+    8. DiffManager.acceptSpecificDiff() ◀────────── 7. postMessage
            │                                        { type: 'acceptSpecificDiff',
            ▼                                          diffId: '...' }
     9. WorkspaceEdit
@@ -657,8 +660,9 @@ class PendingChangesShadowActor extends ShadowActor {
    11. Update status
            │
            ▼
-   12. postMessage ──────────────────────────────▶ 13. UI updates
-       { type: 'diffListChanged',                      status to 'applied'
+   12. DiffManager fires event
+       ChatProvider → postMessage ─────────────────▶ 13. UI updates
+       { type: 'diffListChanged',                        status to 'applied'
          diffs: [{...status:'applied'}] }
 ```
 
@@ -753,6 +757,6 @@ window.actors.pending.getFiles()
 window.actors.pending.getEditMode()
 // → 'manual'
 
-// Extension debug console
-this.activeDiffs.forEach((v, k) => console.log(k, v.status, v.filePath))
+// Extension debug console (DiffManager)
+this._activeDiffs.forEach((v, k) => console.log(k, v.status, v.filePath))
 ```

@@ -456,6 +456,23 @@ describe('MessageTurnActor', () => {
       expect(containers[0].hasAttribute('hidden')).toBe(false);
     });
 
+    it('shows applied files in manual mode (history restoration)', () => {
+      actor.setEditMode('manual');
+      actor.addPendingFile({ filePath: '/path/to/file.ts', status: 'applied' });
+
+      const containers = findContainers('pending');
+      expect(containers[0].hasAttribute('hidden')).toBe(false);
+    });
+
+    it('shows container as Modified Files when manual mode has applied files', () => {
+      actor.setEditMode('manual');
+      actor.addPendingFile({ filePath: '/path/to/file.ts', status: 'applied' });
+
+      const containers = findContainers('pending');
+      const title = queryInShadow(containers[0], '.pending-title');
+      expect(title?.textContent).toBe('Modified Files');
+    });
+
     it('updates pending status', () => {
       actor.setEditMode('ask');
       const fileId = actor.addPendingFile({ filePath: '/path/to/file.ts' });

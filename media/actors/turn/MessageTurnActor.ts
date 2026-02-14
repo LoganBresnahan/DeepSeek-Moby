@@ -947,14 +947,22 @@ export class MessageTurnActor extends InterleavedShadowActor {
     const pendingCount = files.filter(f => f.status === 'pending').length;
     const appliedCount = files.filter(f => f.status === 'applied').length;
 
-    // Hide in manual mode or when empty
-    if (this._editMode === 'manual' || files.length === 0) {
+    // Hide when empty
+    if (files.length === 0) {
+      container.host.setAttribute('hidden', '');
+      return;
+    }
+
+    // In manual mode, only show if there are resolved files (applied/rejected from history
+    // or completed actions). Hide if all files are still pending (user manages via diff view).
+    const hasResolvedFiles = files.some(f => f.status === 'applied' || f.status === 'rejected');
+    if (this._editMode === 'manual' && !hasResolvedFiles) {
       container.host.setAttribute('hidden', '');
       return;
     }
     container.host.removeAttribute('hidden');
 
-    const isAuto = this._editMode === 'auto';
+    const isAuto = this._editMode === 'auto' || (this._editMode === 'manual' && hasResolvedFiles);
     const title = isAuto ? 'Modified Files' : 'Pending Changes';
     const icon = isAuto ? '✓' : '📝';
     const isExpanded = container.host.classList.contains('expanded');

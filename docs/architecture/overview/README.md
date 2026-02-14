@@ -16,9 +16,16 @@ DeepSeek Moby is a VS Code extension that provides AI-powered chat and code assi
 │         │                │                     │                 │
 │         └────────────────┼─────────────────────┘                 │
 │                          │                                       │
-│                   ┌──────▼──────┐                                │
-│                   │ ChatProvider │ ◄─── Tool Loop, Streaming     │
-│                   └──────┬──────┘                                │
+│              ┌───────────▼───────────┐                           │
+│              │    ChatProvider       │ ◄── Coordinator            │
+│              │  ┌─────────────────┐  │                           │
+│              │  │RequestOrchestrator│ │ ◄── Streaming, Tools     │
+│              │  │DiffManager      │  │ ◄── Edit modes, Diffs    │
+│              │  │WebSearchManager │  │ ◄── Tavily integration   │
+│              │  │FileContextManager│ │ ◄── File selection       │
+│              │  │SettingsManager  │  │ ◄── Settings sync        │
+│              │  └─────────────────┘  │                           │
+│              └───────────┬───────────┘                           │
 └──────────────────────────┼───────────────────────────────────────┘
                            │ postMessage
                            ▼
@@ -50,7 +57,7 @@ DeepSeek Moby is a VS Code extension that provides AI-powered chat and code assi
 
 | File | Description |
 |------|-------------|
-| [backend-architecture.md](../backend/backend-architecture.md) | ChatProvider orchestrator, request lifecycle, design patterns |
+| [backend-architecture.md](../backend/backend-architecture.md) | Event-driven coordinator, extracted managers, request lifecycle |
 | [event-sourcing.md](../backend/event-sourcing.md) | Event Sourcing architecture, ConversationManager, snapshots |
 | [database-layer.md](../backend/database-layer.md) | SQLite persistence with @signalapp/sqlcipher, schema design |
 | [tool-execution.md](../backend/tool-execution.md) | Tool loop, shell commands, file operations |
@@ -91,7 +98,8 @@ DeepSeek Moby is a VS Code extension that provides AI-powered chat and code assi
 
 | File | Description |
 |------|-------------|
-| [context-management.md](../../plans/context-management.md) | Wire ContextBuilder into request flow |
+| [chatprovider-refactor.md](../../plans/chatprovider-refactor.md) | Event emitter extraction — 6 phases (complete) |
+| [context-management.md](../../plans/context-management.md) | Wire ContextBuilder into request flow (complete) |
 | [dead-code-cleanup.md](../../plans/dead-code-cleanup.md) | Cleanup status (complete) |
 | [backend-refactor.md](../../plans/backend-refactor.md) | Event Sourcing implementation plan |
 | [tokenizer.md](../../plans/tokenizer.md) | WASM tokenizer plan (complete) |
@@ -169,10 +177,17 @@ Extension ↔ Webview communication via `postMessage`:
   - Extension: [src/extension.ts](../../../src/extension.ts)
   - Webview: [media/chat.ts](../../../media/chat.ts)
 
-- **Core Classes**:
-  - [ConversationManager](../../../src/events/ConversationManager.ts) - Event sourcing orchestrator
+- **Core Classes (Backend)**:
+  - [ChatProvider](../../../src/providers/chatProvider.ts) - Coordinator + webview bridge
+  - [RequestOrchestrator](../../../src/providers/requestOrchestrator.ts) - Request pipeline, streaming, tool loop
+  - [DiffManager](../../../src/providers/diffManager.ts) - Diff lifecycle, edit modes
+  - [WebSearchManager](../../../src/providers/webSearchManager.ts) - Web search + caching
+  - [FileContextManager](../../../src/providers/fileContextManager.ts) - File selection + context
+  - [SettingsManager](../../../src/providers/settingsManager.ts) - Settings sync
+  - [ConversationManager](../../../src/events/ConversationManager.ts) - Event sourcing
   - [EventStore](../../../src/events/EventStore.ts) - Append-only event storage
-  - [ChatProvider](../../../src/providers/chatProvider.ts) - Request orchestrator
+
+- **Core Classes (Frontend)**:
   - [EventStateManager](../../../media/state/EventStateManager.ts) - Frontend pub/sub
   - [VirtualListActor](../../../media/actors/virtual-list/VirtualListActor.ts) - Pool management
   - [MessageTurnActor](../../../media/actors/turn/MessageTurnActor.ts) - Turn rendering
@@ -191,13 +206,16 @@ Extension ↔ Webview communication via `postMessage`:
 │   InputAreaActor ──postMessage──► Extension                                  │
 │                                        │                                     │
 │                                        ▼                                     │
-│                              ChatProvider.handleUserMessage()                │
+│                              ChatProvider (coordinator)                      │
+│                                        │ delegates to                        │
+│                                        ▼                                     │
+│                         RequestOrchestrator.handleMessage()                  │
 │                                        │                                     │
 │                    ┌───────────────────┼───────────────────┐                │
 │                    ▼                   ▼                   ▼                │
 │           ┌─────────────┐    ┌─────────────┐    ┌─────────────────────┐     │
-│           │ DeepSeek    │    │ Conversation│    │ Tavily              │     │
-│           │ Client      │    │ Manager     │    │ Client              │     │
+│           │ DeepSeek    │    │ Conversation│    │ WebSearch           │     │
+│           │ Client      │    │ Manager     │    │ Manager             │     │
 │           └──────┬──────┘    └──────┬──────┘    └─────────────────────┘     │
 │                  │                  │                                        │
 │                  │                  ▼                                        │

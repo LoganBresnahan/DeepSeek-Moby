@@ -498,29 +498,119 @@ describe('HistoryShadowActor', () => {
       expect(dropdown?.classList.contains('open')).toBe(true);
     });
 
-    it('sends deleteAll message when Delete All is confirmed', () => {
-      // Mock confirm to return true
-      vi.spyOn(window, 'confirm').mockReturnValue(true);
-
+    it('shows inline confirmation when Delete All is clicked', () => {
       const deleteBtn = element.shadowRoot?.querySelector('[data-action="deleteAll"]') as HTMLElement;
       deleteBtn?.click();
+
+      const confirmContainer = element.shadowRoot?.querySelector('[data-delete-all-confirm]');
+      expect(confirmContainer).toBeTruthy();
+      expect(confirmContainer?.querySelector('[data-action="confirmDeleteAll"]')).toBeTruthy();
+      expect(confirmContainer?.querySelector('[data-action="cancelDeleteAll"]')).toBeTruthy();
+      // Original button should be gone
+      expect(element.shadowRoot?.querySelector('[data-action="deleteAll"]')).toBeNull();
+    });
+
+    it('sends clearAllHistory when Delete All confirmation is accepted', () => {
+      const deleteBtn = element.shadowRoot?.querySelector('[data-action="deleteAll"]') as HTMLElement;
+      deleteBtn?.click();
+      mockVSCode.postMessage.mockClear();
+
+      const confirmBtn = element.shadowRoot?.querySelector('[data-action="confirmDeleteAll"]') as HTMLElement;
+      confirmBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
 
       expect(mockVSCode.postMessage).toHaveBeenCalledWith({
         type: 'clearAllHistory'
       });
     });
 
-    it('does not send deleteAll when cancelled', () => {
-      // Mock confirm to return false
-      vi.spyOn(window, 'confirm').mockReturnValue(false);
-      mockVSCode.postMessage.mockClear();
-
+    it('restores Delete All button when confirmation is cancelled', () => {
       const deleteBtn = element.shadowRoot?.querySelector('[data-action="deleteAll"]') as HTMLElement;
       deleteBtn?.click();
+      mockVSCode.postMessage.mockClear();
 
+      const cancelBtn = element.shadowRoot?.querySelector('[data-action="cancelDeleteAll"]') as HTMLElement;
+      cancelBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+      // Should NOT have sent the delete message
       expect(mockVSCode.postMessage).not.toHaveBeenCalledWith({
         type: 'clearAllHistory'
       });
+      // Delete All button should be restored
+      expect(element.shadowRoot?.querySelector('[data-action="deleteAll"]')).toBeTruthy();
+      expect(element.shadowRoot?.querySelector('[data-delete-all-confirm]')).toBeNull();
+    });
+
+    it('restores Delete All button on modal close', () => {
+      const deleteBtn = element.shadowRoot?.querySelector('[data-action="deleteAll"]') as HTMLElement;
+      deleteBtn?.click();
+
+      // Confirmation should be visible
+      expect(element.shadowRoot?.querySelector('[data-delete-all-confirm]')).toBeTruthy();
+
+      actor.close();
+      actor.open();
+
+      // Button should be restored (close resets confirmation state)
+      expect(element.shadowRoot?.querySelector('[data-action="deleteAll"]')).toBeTruthy();
+      expect(element.shadowRoot?.querySelector('[data-delete-all-confirm]')).toBeNull();
+    });
+  });
+
+  describe('Delete session confirmation', () => {
+    beforeEach(async () => {
+      actor = new HistoryShadowActor(manager, element, mockVSCode);
+      await waitForRegistration();
+      const sessions = [createTestSession({ id: 'del-session', title: 'To Delete' })];
+      actor.open();
+      manager.publishDirect('history.sessions', sessions);
+      await waitForRegistration();
+      mockVSCode.postMessage.mockClear();
+    });
+
+    it('shows inline confirmation when delete is clicked in entry menu', () => {
+      // Open the entry menu
+      const menuBtn = element.shadowRoot?.querySelector('[data-entry-menu]') as HTMLElement;
+      menuBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+      // Click delete
+      const deleteItem = element.shadowRoot?.querySelector('[data-entry-action="delete"]') as HTMLElement;
+      deleteItem?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+      const confirmContainer = element.shadowRoot?.querySelector('[data-delete-confirm="del-session"]');
+      expect(confirmContainer).toBeTruthy();
+      expect(confirmContainer?.querySelector('[data-action="confirmDelete"]')).toBeTruthy();
+      expect(confirmContainer?.querySelector('[data-action="cancelDelete"]')).toBeTruthy();
+    });
+
+    it('sends deleteSession when session delete is confirmed', () => {
+      const menuBtn = element.shadowRoot?.querySelector('[data-entry-menu]') as HTMLElement;
+      menuBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+      const deleteItem = element.shadowRoot?.querySelector('[data-entry-action="delete"]') as HTMLElement;
+      deleteItem?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+      const confirmBtn = element.shadowRoot?.querySelector('[data-action="confirmDelete"]') as HTMLElement;
+      confirmBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+      expect(mockVSCode.postMessage).toHaveBeenCalledWith({
+        type: 'deleteSession',
+        sessionId: 'del-session'
+      });
+    });
+
+    it('does not send deleteSession when cancelled', () => {
+      const menuBtn = element.shadowRoot?.querySelector('[data-entry-menu]') as HTMLElement;
+      menuBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+      const deleteItem = element.shadowRoot?.querySelector('[data-entry-action="delete"]') as HTMLElement;
+      deleteItem?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+      const cancelBtn = element.shadowRoot?.querySelector('[data-action="cancelDelete"]') as HTMLElement;
+      cancelBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+      expect(mockVSCode.postMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'deleteSession' })
+      );
     });
   });
 

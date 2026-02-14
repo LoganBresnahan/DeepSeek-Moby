@@ -1,6 +1,6 @@
 # Backend Architecture
 
-The backend (VS Code extension) follows a **Mediator/Orchestrator pattern** where `ChatProvider` coordinates all services. This contrasts with the frontend's decentralized Actor Model.
+The backend (VS Code extension) follows an **Event-Driven Coordinator pattern** where `ChatProvider` acts as a thin coordinator routing webview messages to focused manager classes. Each manager owns its state and emits typed `vscode.EventEmitter` events, which ChatProvider subscribes to and forwards to the webview.
 
 ## Architecture Overview
 
@@ -9,95 +9,148 @@ The backend (VS Code extension) follows a **Mediator/Orchestrator pattern** wher
 │                         VS Code Extension (Node.js)                          │
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────────┐ │
-│  │                         ChatProvider                                    │ │
-│  │                      (THE ORCHESTRATOR)                                 │ │
+│  │                      ChatProvider (~960 lines)                          │ │
+│  │                    (Coordinator + Webview Bridge)                        │ │
 │  │                                                                         │ │
-│  │  Responsibilities:                                                      │ │
-│  │  • Receive webview messages (onDidReceiveMessage)                       │ │
-│  │  • Build context and system prompts                                     │ │
-│  │  • Coordinate API calls                                                 │ │
-│  │  • Process streaming responses                                          │ │
-│  │  • Execute tools and shell commands                                     │ │
-│  │  • Manage file diffs                                                    │ │
-│  │  • Push updates to webview (postMessage)                                │ │
-│  └──────────────────────────────┬─────────────────────────────────────────┘ │
-│                                 │                                            │
-│           ┌─────────────────────┼─────────────────────┐                      │
-│           │                     │                     │                      │
-│           ▼                     ▼                     ▼                      │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────────────┐  │
-│  │  DeepSeekClient │  │  TavilyClient   │  │  ConversationManager        │  │
-│  │                 │  │  (Web Search)   │  │  (Event Sourcing)           │  │
-│  │  • HTTP/SSE     │  │                 │  │                             │  │
-│  │  • Streaming    │  │  • Search API   │  │  • Session CRUD             │  │
-│  │  • Tool calls   │  │  • Caching      │  │  • Event recording          │  │
-│  └─────────────────┘  └─────────────────┘  │  • Context building         │  │
-│                                            │  • Snapshot management       │  │
-│                                            └─────────────────────────────┘  │
-│                                                         │                    │
-│                                                         ▼                    │
-│                                            ┌─────────────────────────────┐  │
-│                                            │  SQLite Database            │  │
-│                                            │  (via SQLCipher)          │  │
-│                                            │                             │  │
-│                                            │  • events table             │  │
-│                                            │  • sessions table           │  │
-│                                            │  • snapshots table          │  │
-│                                            └─────────────────────────────┘  │
+│  │  • Receive webview messages (onDidReceiveMessage) → delegate            │ │
+│  │  • Subscribe to manager events → forward to webview (postMessage)       │ │
+│  │  • Session lifecycle (currentSessionId, loadSession)                    │ │
+│  │  • VS Code context gathering (getEditorContext, findRelatedFiles)       │ │
+│  └───────────┬───────────────────────────────────────────────────────────┘ │
+│              │ delegates to                                                  │
+│  ┌───────────┴───────────────────────────────────────────────────────────┐ │
+│  │                        Extracted Managers                               │ │
+│  │                                                                         │ │
+│  │ ┌─────────────────┐  ┌────────────────┐  ┌─────────────────────────┐  │ │
+│  │ │ Request         │  │ DiffManager    │  │ WebSearchManager        │  │ │
+│  │ │ Orchestrator    │  │                │  │                         │  │ │
+│  │ │                 │  │ • Diff create  │  │ • Tavily search         │  │ │
+│  │ │ • System prompt │  │ • Accept/reject│  │ • Cache + TTL           │  │ │
+│  │ │ • Streaming     │  │ • Edit modes   │  │ • Toggle/settings       │  │ │
+│  │ │ • Tool loop     │  │ • Superseding  │  └─────────────────────────┘  │ │
+│  │ │ • Shell loop    │  │ • Tab mgmt     │                               │ │
+│  │ │ • History save  │  └────────────────┘  ┌─────────────────────────┐  │ │
+│  │ └─────────────────┘                      │ FileContextManager      │  │ │
+│  │                       ┌────────────────┐ │                         │  │ │
+│  │                       │ Settings       │ │ • File selection        │  │ │
+│  │                       │ Manager        │ │ • Workspace search      │  │ │
+│  │                       │                │ │ • Context injection     │  │ │
+│  │                       │ • Read/write   │ └─────────────────────────┘  │ │
+│  │                       │ • Model change │                               │ │
+│  │                       │ • Sync webview │                               │ │
+│  │                       └────────────────┘                               │ │
+│  └─────────────────────────────────────────────────────────────────────────┘ │
 │                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────────┐│
-│  │                        Supporting Modules                                ││
-│  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────┐      ││
-│  │  │ContentTransform │  │ WorkspaceTools  │  │ ReasonerShell       │      ││
-│  │  │Buffer           │  │                 │  │ Executor            │      ││
-│  │  │                 │  │ • read_file     │  │                     │      ││
-│  │  │ • Tag filtering │  │ • write_file    │  │ • <shell> parsing   │      ││
-│  │  │ • Lookahead     │  │ • search_files  │  │ • Command safety    │      ││
-│  │  │ • Debouncing    │  │ • list_dir      │  │ • Execution         │      ││
-│  │  └─────────────────┘  └─────────────────┘  └─────────────────────┘      ││
-│  └─────────────────────────────────────────────────────────────────────────┘│
+│  ┌─────────────────────────────────────────────────────────────────────────┐ │
+│  │                          Service Layer                                   │ │
+│  │  ┌─────────────────┐  ┌─────────────────┐  ┌───────────────────────┐   │ │
+│  │  │  DeepSeekClient │  │  TavilyClient   │  │  ConversationManager  │   │ │
+│  │  │  • HTTP/SSE     │  │  • Search API   │  │  • Event Sourcing     │   │ │
+│  │  │  • Streaming    │  │                 │  │  • Session CRUD       │   │ │
+│  │  │  • Tool calls   │  │                 │  │  • Context building   │   │ │
+│  │  └─────────────────┘  └─────────────────┘  └───────────┬───────────┘   │ │
+│  └────────────────────────────────────────────────────────┼───────────────┘ │
+│                                                            │                 │
+│  ┌─────────────────────────────────────────────────────────▼───────────────┐ │
+│  │                       SQLite Database (via SQLCipher)                     │ │
+│  │  • events table  • sessions table  • snapshots table                    │ │
+│  └─────────────────────────────────────────────────────────────────────────┘ │
+│                                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────────┐ │
+│  │                        Supporting Modules                                │ │
+│  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────┐     │ │
+│  │  │ContentTransform │  │ WorkspaceTools  │  │ ReasonerShell       │     │ │
+│  │  │Buffer           │  │                 │  │ Executor            │     │ │
+│  │  │                 │  │ • read_file     │  │                     │     │ │
+│  │  │ • Tag filtering │  │ • write_file    │  │ • <shell> parsing   │     │ │
+│  │  │ • Lookahead     │  │ • search_files  │  │ • Command safety    │     │ │
+│  │  │ • Debouncing    │  │ • list_dir      │  │ • Execution         │     │ │
+│  │  └─────────────────┘  └─────────────────┘  └─────────────────────┘     │ │
+│  └─────────────────────────────────────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Design Pattern: Mediator
+## Design Pattern: Event-Driven Coordinator
 
-The backend uses a **Mediator pattern** (sometimes called Orchestrator in service contexts):
+The backend was refactored from a monolithic ~4,400 line ChatProvider into focused managers communicating via `vscode.EventEmitter`:
 
 ```
-                    ┌─────────────────┐
-                    │  ChatProvider   │
-                    │   (Mediator)    │
-                    └────────┬────────┘
-                             │
+                    ┌──────────────────┐
+                    │   ChatProvider   │
+                    │  (Coordinator)   │
+                    │                  │
+                    │ • Message router │
+                    │ • Event wiring   │
+                    └────────┬─────────┘
+                             │ subscribes to events from:
          ┌───────────────────┼───────────────────┐
          │                   │                   │
          ▼                   ▼                   ▼
 ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
-│ DeepSeekClient  │ │ Conversation    │ │ TavilyClient    │
-│  (Colleague)    │ │ Manager         │ │  (Colleague)    │
-│                 │ │ (Colleague)     │ │                 │
-└─────────────────┘ └─────────────────┘ └─────────────────┘
-
-Key principle: Colleagues don't communicate directly.
-All coordination goes through the Mediator.
+│ Request         │ │ DiffManager     │ │ WebSearch       │
+│ Orchestrator    │ │                 │ │ Manager         │
+│                 │ │ events:         │ │                 │
+│ events:         │ │ diffListChanged │ │ events:         │
+│ startResponse   │ │ codeApplied     │ │ onSearching     │
+│ streamToken     │ │ diffClosed      │ │ onSearchComplete│
+│ endResponse     │ │ warning         │ │ onToggled       │
+│ toolCallsStart  │ │ editConfirm     │ └─────────────────┘
+│ shellExecuting  │ └─────────────────┘
+└─────────────────┘         ┌─────────────────┐
+                            │ SettingsManager │
+┌─────────────────┐         │                 │
+│ FileContext      │         │ events:         │
+│ Manager          │         │ settingsChanged │
+│                 │         │ modelChanged    │
+│ events:         │         │ settingsReset   │
+│ onOpenFiles     │         └─────────────────┘
+│ onSearchResults │
+│ onFileContent   │
+└─────────────────┘
 ```
 
-### Why Mediator?
+### Key Design Decisions
 
-| Benefit | How It Applies |
-|---------|----------------|
-| **Single point of control** | ChatProvider orchestrates the entire request lifecycle |
-| **Loose coupling** | DeepSeekClient doesn't know about ConversationManager |
-| **Easy to trace** | Follow the flow through one file |
-| **Centralized error handling** | Catch and handle errors in one place |
+| Decision | Rationale |
+|----------|-----------|
+| **`vscode.EventEmitter<T>`** | Typed events, disposal integration, already used by ConversationManager |
+| **No custom EventBus** | ~5 classes with 3-7 events each — direct subscriptions are simpler |
+| **Managers own their state** | No shared mutable state between managers |
+| **Managers don't know about webview** | They emit events; ChatProvider bridges to postMessage |
+| **Unidirectional dependencies** | Orchestrator → managers, never circular |
 
-### Trade-offs
+### Dependency Graph
 
-| Downside | Mitigation |
-|----------|------------|
-| ChatProvider is large (~3800 lines) | Extract methods, but keep orchestration central |
-| Single point of failure | Comprehensive error handling |
-| Can become a "god class" | Keep colleagues focused; mediator only coordinates |
+```
+ChatProvider (coordinator)
+  ├── WebSearchManager         (independent)
+  ├── FileContextManager       (independent)
+  ├── DiffManager              (depends on: FileContextManager)
+  ├── SettingsManager          (independent)
+  └── RequestOrchestrator      (depends on: all managers + DeepSeekClient + ConversationManager)
+```
+
+### Event Wiring Pattern
+
+```typescript
+// ChatProvider.wireEvents() — subscribes to all manager events, forwards to webview
+private wireEvents(): void {
+  // Streaming events
+  this.requestOrchestrator.onStartResponse(d => this.post('startResponse', d));
+  this.requestOrchestrator.onStreamToken(d => this.post('streamToken', d));
+  this.requestOrchestrator.onEndResponse(d => this.post('endResponse', d));
+
+  // Diff events
+  this.diffManager.onDiffListChanged(d => this.post('diffListChanged', d));
+  this.diffManager.onCodeApplied(d => this.post('codeApplied', d));
+
+  // ... ~25 total subscriptions
+}
+
+private post(type: string, data?: any): void {
+  this._view?.webview.postMessage({ type, ...data });
+}
+```
 
 ## Request Lifecycle
 
@@ -125,101 +178,92 @@ ChatProvider.onDidReceiveMessage()
          │
          │ switch (data.type) {
          │   case 'sendMessage':
-         │     this.handleUserMessage(data)
+         │     this.requestOrchestrator.handleMessage(...)
          │ }
          │
          ▼
 ```
 
-### Phase 2: Context Building
+### Phase 2: Context Building (RequestOrchestrator)
 
 ```
-handleUserMessage(data)
+requestOrchestrator.handleMessage(message, sessionId, editorContextProvider)
          │
-         ├─► conversationManager.addMessageToCurrentSession('user', content, { attachments })
-         │   // Store user message as event
+         ├─► prepareSession()
+         │   • diffManager.clearProcessedBlocks()
+         │   • fileContextManager.clearTurnTracking()
+         │   • conversationManager.recordUserMessage(...)
          │
-         ├─► extractFileIntent(message)
-         │   // Infer which files user wants to modify
-         │   // e.g., "fix auth.ts" → ['src/auth.ts']
+         ├─► buildSystemPrompt()
+         │   • base prompt + model-specific instructions
+         │   • diffManager.getModifiedFilesContext()
+         │   • diffManager.currentEditMode → edit mode instructions
+         │   • await editorContextProvider() (callback to ChatProvider)
+         │   • webSearchManager.searchForMessage(message)
          │
-         ├─► getEditorContext()
-         │   // Current file, selection, workspace info
+         ├─► prepareMessages()
+         │   • conversationManager.getSessionMessagesCompat()
+         │   • inject fileContextManager.getSelectedFilesContext()
+         │   • inject attachments
          │
-         ├─► buildSystemPrompt(editMode, context)
-         │   // Combine base prompt + edit mode instructions
-         │   // + custom user instructions
-         │
-         ├─► tavilyClient.search(query)  // if web search enabled
-         │   // Augment context with web results
-         │
-         └─► Build conversation history for API call
+         └─► buildContext()
+             • ContextBuilder token budget truncation
+             • snapshot injection if needed
 ```
 
-### Phase 3: API Call & Streaming
+### Phase 3: API Call & Streaming (RequestOrchestrator)
 
 ```
-deepSeekClient.streamChat({
-  messages: conversationHistory,
-  tools: getToolDefinitions(),  // Chat model only
-  stream: true
-})
+requestOrchestrator.streamAndIterate(messages, systemPrompt, signal)
          │
-         │ Opens HTTP connection to api.deepseek.com
-         │ Receives SSE stream
+         │ Creates ContentTransformBuffer
+         │ Sets diffManager.flushCallback
          │
          ▼
-for await (const chunk of stream) {
+deepSeekClient.streamChat(...)
          │
-         ├─► chunk.delta.reasoning_content
-         │   │
-         │   └─► sendStreamReasoning(content)
-         │       // Direct to webview, no buffering
-         │       // postMessage({ type: 'streamReasoning', token })
+         ├─► reasoning_content
+         │   └─► _onStreamReasoning.fire({ token })
+         │       → ChatProvider → postMessage('streamReasoning')
          │
-         └─► chunk.delta.content
-             │
+         └─► content
              └─► contentBuffer.append(content)
-                 │
-                 ├─► onText(text)
-                 │   // postMessage({ type: 'streamToken', token })
-                 │
-                 └─► onShell(commands)
-                     // Execute and inject results
-}
+                 └─► _onStreamToken.fire({ token })
+                     → ChatProvider → postMessage('streamToken')
 ```
 
-### Phase 4: Save & Tool Loop
+### Phase 4: Save & Tool Loop (RequestOrchestrator)
 
 ```
-Stream ends with finish_reason
+Stream ends
          │
-         ├─► conversationManager.recordAssistantMessage(content, model, reason)
-         │   // Store assistant response as event
+         ├─► Chat model: runToolLoop() if tool_calls
+         │   │
+         │   └─► While hasToolCalls && iteration < max:
+         │       • Execute tools (read_file, write_file, etc.)
+         │       • _onToolCallsStart/Update/End.fire(...)
+         │       • diffManager.handleAutoShowDiff() for apply_code_edit
+         │       • Append results → call API again
          │
-         ├─► 'stop' ──────────────────► Done
+         ├─► Reasoner model: shell detection in streamAndIterate()
+         │   │
+         │   └─► If <shell> tags detected:
+         │       • _onShellExecuting.fire(...)
+         │       • Execute commands
+         │       • _onShellResults.fire(...)
+         │       • Inject results → stream again
          │
-         └─► 'tool_calls' ────────────► Enter tool loop
-                   │
-                   ▼
-         ┌─────────────────────────────────────────┐
-         │            TOOL LOOP                     │
-         │                                          │
-         │  while (hasToolCalls && iteration < max) │
-         │    │                                     │
-         │    ├─► executeTools(toolCalls)           │
-         │    │   // read_file, write_file, etc.    │
-         │    │                                     │
-         │    ├─► conversationManager.recordToolCall │
-         │    │   conversationManager.recordToolResult│
-         │    │                                     │
-         │    ├─► appendResults(messages)           │
-         │    │   // Tool results go back to LLM    │
-         │    │                                     │
-         │    └─► streamChat(messages) ◄────────────┤
-         │        // Next iteration                 │
-         │                                          │
-         └─────────────────────────────────────────┘
+         ├─► finalizeResponse()
+         │   • Flush buffer, strip DSML/shell tags
+         │   • diffManager.detectAndProcessUnfencedEdits()
+         │   • _onEndResponse.fire(...)
+         │
+         └─► saveToHistory()
+             • conversationManager.recordReasoningContent()
+             • conversationManager.recordToolCalls()
+             • conversationManager.recordShellResults()
+             • conversationManager.recordFileModifications()
+             • conversationManager.recordAssistantMessage()
 ```
 
 ## Two Model Paths
@@ -246,7 +290,7 @@ The system supports two models with different tool execution strategies:
 │    ]                                                         │
 │  }                                                           │
 │                                                              │
-│  Execution:                                                  │
+│  Handled by: RequestOrchestrator.runToolLoop()               │
 │  • Structured JSON arguments                                 │
 │  • Parallel execution possible                               │
 │  • Results formatted as tool_results                         │
@@ -269,7 +313,7 @@ The system supports two models with different tool execution strategies:
 │                                                              │
 │  Based on what I find..."                                    │
 │                                                              │
-│  Execution:                                                  │
+│  Handled by: RequestOrchestrator.streamAndIterate()          │
 │  • Parsed from content text                                  │
 │  • Sequential execution                                      │
 │  • Results injected back into conversation                   │
@@ -308,19 +352,20 @@ The conversation state uses **Event Sourcing** - all changes are stored as an ap
 │  │                                                                      │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
-│  ChatProvider instance state (transient)                                     │
+│  Manager Instance State (transient, distributed across managers)             │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  activeDiffs: Map<diffId, DiffMetadata>                              │    │
-│  │  // Pending file changes awaiting accept/reject                      │    │
+│  │  DiffManager:                                                        │    │
+│  │    activeDiffs: Map<diffId, DiffMetadata>                            │    │
+│  │    editMode, processedCodeBlocks, fileEditCounts                     │    │
 │  │                                                                      │    │
-│  │  readFilesThisTurn: Set<string>                                      │    │
-│  │  // Files LLM has read (prevents redundant reads)                    │    │
+│  │  RequestOrchestrator:                                                │    │
+│  │    abortController, contentBuffer (per-request lifecycle)            │    │
 │  │                                                                      │    │
-│  │  isStreaming: boolean                                                │    │
-│  │  // Prevents concurrent requests                                     │    │
+│  │  FileContextManager:                                                 │    │
+│  │    selectedFiles, readFilesInTurn                                    │    │
 │  │                                                                      │    │
-│  │  contentBuffer: ContentTransformBuffer                               │    │
-│  │  // Stateful streaming buffer                                        │    │
+│  │  WebSearchManager:                                                   │    │
+│  │    searchCache, enabled, settings                                    │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  Database File                                                               │
@@ -348,36 +393,60 @@ The conversation state uses **Event Sourcing** - all changes are stored as an ap
 
 ## File Locations
 
+### Coordinator
+
 | File | Responsibility |
 |------|----------------|
-| [src/providers/chatProvider.ts](../src/providers/chatProvider.ts) | Main orchestrator (~3800 lines) |
-| [src/deepseekClient.ts](../src/deepseekClient.ts) | HTTP/SSE API client |
-| [src/events/ConversationManager.ts](../src/events/ConversationManager.ts) | Event sourcing, sessions, context |
-| [src/events/EventStore.ts](../src/events/EventStore.ts) | Append-only event storage |
-| [src/events/SnapshotManager.ts](../src/events/SnapshotManager.ts) | Snapshot creation/retrieval |
-| [src/events/SqlJsWrapper.ts](../src/events/SqlJsWrapper.ts) | SQLite via SQLCipher |
-| [src/tools/workspaceTools.ts](../src/tools/workspaceTools.ts) | Tool definitions & execution |
-| [src/tools/reasonerShellExecutor.ts](../src/tools/reasonerShellExecutor.ts) | R1 shell command handling |
-| [src/utils/ContentTransformBuffer.ts](../src/utils/ContentTransformBuffer.ts) | Streaming tag filter |
-| [src/providers/commandProvider.ts](../src/providers/commandProvider.ts) | VS Code command handlers |
-| [src/providers/completionProvider.ts](../src/providers/completionProvider.ts) | Inline completions |
+| [src/providers/chatProvider.ts](../../../src/providers/chatProvider.ts) | Coordinator + webview bridge (~960 lines) |
+
+### Extracted Managers
+
+| File | Responsibility |
+|------|----------------|
+| [src/providers/requestOrchestrator.ts](../../../src/providers/requestOrchestrator.ts) | Request pipeline: handleUserMessage + runToolLoop + streaming |
+| [src/providers/diffManager.ts](../../../src/providers/diffManager.ts) | Diff lifecycle, edit modes, tab management, superseding |
+| [src/providers/webSearchManager.ts](../../../src/providers/webSearchManager.ts) | Web search state, caching, Tavily integration |
+| [src/providers/fileContextManager.ts](../../../src/providers/fileContextManager.ts) | File selection, search, context injection |
+| [src/providers/settingsManager.ts](../../../src/providers/settingsManager.ts) | Settings read/write/sync |
+| [src/providers/types.ts](../../../src/providers/types.ts) | Shared event payload types |
+
+### Service Layer
+
+| File | Responsibility |
+|------|----------------|
+| [src/deepseekClient.ts](../../../src/deepseekClient.ts) | HTTP/SSE API client |
+| [src/events/ConversationManager.ts](../../../src/events/ConversationManager.ts) | Event sourcing, sessions, context |
+| [src/events/EventStore.ts](../../../src/events/EventStore.ts) | Append-only event storage |
+| [src/events/SnapshotManager.ts](../../../src/events/SnapshotManager.ts) | Snapshot creation/retrieval |
+| [src/events/SqlJsWrapper.ts](../../../src/events/SqlJsWrapper.ts) | SQLite via SQLCipher |
+| [src/clients/tavilyClient.ts](../../../src/clients/tavilyClient.ts) | Tavily web search API client |
+
+### Supporting Modules
+
+| File | Responsibility |
+|------|----------------|
+| [src/tools/workspaceTools.ts](../../../src/tools/workspaceTools.ts) | Tool definitions & execution |
+| [src/tools/reasonerShellExecutor.ts](../../../src/tools/reasonerShellExecutor.ts) | R1 shell command handling |
+| [src/utils/ContentTransformBuffer.ts](../../../src/utils/ContentTransformBuffer.ts) | Streaming tag filter |
+| [src/providers/commandProvider.ts](../../../src/providers/commandProvider.ts) | VS Code command handlers |
+| [src/providers/completionProvider.ts](../../../src/providers/completionProvider.ts) | Inline completions |
 
 ## Comparison: Frontend vs Backend Architecture
 
 | Aspect | Frontend (Webview) | Backend (Extension) |
 |--------|-------------------|---------------------|
-| **Pattern** | Actor Model | Mediator/Orchestrator |
-| **Communication** | Pub/Sub (decentralized) | Direct calls (centralized) |
-| **State** | Distributed across actors | Event Sourcing (centralized) |
+| **Pattern** | Actor Model | Event-Driven Coordinator |
+| **Communication** | Pub/Sub (decentralized) | vscode.EventEmitter (typed events) |
+| **State** | Distributed across actors | Distributed across managers + Event Sourcing |
 | **Persistence** | None (transient) | SQLite database |
-| **Coordination** | EventStateManager routes | ChatProvider coordinates |
-| **Coupling** | Loose (actors independent) | Tight (services depend on mediator) |
+| **Coordination** | EventStateManager routes | ChatProvider routes messages, subscribes to events |
+| **Coupling** | Loose (actors independent) | Loose (managers independent, coordinator bridges) |
 
 ### Why Different Patterns?
 
 **Frontend**: Many independent UI components that need to update without knowing about each other. Actor model provides isolation and prevents cascading complexity.
 
-**Backend**: Linear request/response flow with clear phases. Mediator provides clear control flow and easier debugging. Event sourcing provides durability and replay.
+**Backend**: Linear request/response flow with clear phases. The coordinator pattern keeps message routing centralized while managers own their business logic independently. Event sourcing provides durability and replay.
 
 ## Error Handling
 
@@ -386,29 +455,29 @@ The conversation state uses **Event Sourcing** - all changes are stored as an ap
 │                    Error Handling Layers                     │
 └─────────────────────────────────────────────────────────────┘
 
-Layer 1: API Errors
+Layer 1: API Errors (RequestOrchestrator)
 ├─► Network failures → Retry with backoff
 ├─► Rate limits → Queue and retry
 ├─► Auth errors → Prompt for API key
 └─► Invalid response → Log and notify user
 
-Layer 2: Tool Errors
+Layer 2: Tool Errors (RequestOrchestrator.runToolLoop)
 ├─► File not found → Return error to LLM (it can adapt)
 ├─► Permission denied → Return error to LLM
 ├─► Timeout → Cancel and notify
 └─► Shell blocked → Return blocked message to LLM
 
-Layer 3: Stream Errors
+Layer 3: Stream Errors (RequestOrchestrator.streamAndIterate)
 ├─► Connection drop → Attempt resume or notify
 ├─► Parse error → Skip chunk, continue
 └─► Timeout (30s) → Force end stream
 
-Layer 4: Database Errors
+Layer 4: Database Errors (ConversationManager)
 ├─► Encryption key error → Toast error message
 ├─► Write failure → Retry, then notify
 └─► Corruption → Offer to reset
 
-Layer 5: User Notification
+Layer 5: User Notification (ChatProvider → webview)
 └─► postMessage({ type: 'error', message: '...' })
 ```
 
@@ -416,7 +485,8 @@ Layer 5: User Notification
 
 - [Event Sourcing](event-sourcing.md) - Detailed event sourcing architecture
 - [Database Layer](database-layer.md) - SQLite/@signalapp/sqlcipher implementation
-- [Message Bridge](message-bridge.md) - postMessage protocol details
+- [Message Bridge](../integration/message-bridge.md) - postMessage protocol details
 - [Tool Execution](tool-execution.md) - Tool loop and shell commands
-- [Chat Streaming](chat-streaming.md) - Token processing and ContentTransformBuffer
-- [Diff Engine](diff-engine.md) - Code edit handling
+- [Chat Streaming](../integration/chat-streaming.md) - Token processing and ContentTransformBuffer
+- [Diff Engine](../integration/diff-engine.md) - Code edit handling
+- [ChatProvider Refactor Plan](../../plans/chatprovider-refactor.md) - Full refactor plan and history

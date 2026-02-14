@@ -14,7 +14,8 @@ User Input
     ▼
 ┌─────────┐     ┌─────────────┐     ┌──────────────┐
 │ Webview │────▶│ Extension   │────▶│ DeepSeek API │
-│         │     │ (ChatProv.) │     │              │
+│         │     │ (Request    │     │              │
+│         │     │ Orchestrator│     │              │
 └─────────┘     └──────┬──────┘     └──────┬───────┘
                        │                    │
                        │◄───────────────────┘
@@ -64,24 +65,23 @@ User types in InputAreaShadowActor
 ### Context Building (Extension Side)
 
 ```typescript
-// ChatProvider.handleUserMessage()
-async handleUserMessage(message: string) {
-  // 1. Build context
-  const context = await this.getEditorContext();
-  const selectedFiles = this.getSelectedFilesContext();
-  const modifiedFiles = this.getModifiedFilesContext();
+// RequestOrchestrator.handleMessage()
+// Called by ChatProvider: this.requestOrchestrator.handleMessage(message, sessionId, editorContextProvider)
+async handleMessage(message, currentSessionId, editorContextProvider) {
+  // 1. Prepare session — clear turn tracking, record user message
+  const sessionId = await this.prepareSession(message, currentSessionId);
 
-  // 2. Record user message as event (Event Sourcing)
-  await this.conversationManager.recordUserMessage(message, attachments);
+  // 2. Build system prompt — edit mode, editor context, modified files, web search
+  const systemPrompt = await this.buildSystemPrompt(editorContextProvider);
 
-  // 3. Get conversation history for API
-  const sessionMessages = await this.conversationManager.getSessionMessagesCompat();
+  // 3. Get conversation history + inject attachments + selected files
+  const messages = await this.prepareMessages(sessionId, attachments);
 
-  // 4. Build API request
-  const messages = this.buildMessages(context, sessionMessages);
+  // 4. Token budget truncation via ContextBuilder
+  const contextResult = await this.buildContext(messages, systemPrompt, sessionId);
 
-  // 5. Start streaming
-  this.streamResponse(messages);
+  // 5. Tool loop (chat model) or streaming + shell loop (reasoner)
+  // ...
 }
 ```
 
@@ -90,7 +90,7 @@ async handleUserMessage(message: string) {
 ### SSE Connection
 
 ```
-ChatProvider                           DeepSeek API
+RequestOrchestrator                    DeepSeek API
      │                                      │
      │  POST /chat/completions              │
      │  { stream: true, messages: [...] }   │
@@ -139,18 +139,21 @@ DeepSeek API
 ```
 
 ```typescript
-// For each SSE chunk
+// In RequestOrchestrator.streamOneIteration()
 for await (const chunk of stream) {
   const delta = chunk.choices[0]?.delta;
 
   if (delta.reasoning_content) {
-    // Reasoner model thinking - direct path, no buffering
-    this.sendStreamReasoning(delta.reasoning_content);
+    // Reasoner model thinking - direct path, emitted as event
+    this._onStreamReasoning.fire({ token: delta.reasoning_content });
+    // ChatProvider subscribes → postMessage('streamReasoning')
   }
 
   if (delta.content) {
     // Regular content - goes through ContentTransformBuffer
     this.contentBuffer.append(delta.content);
+    // Buffer's onFlush callback fires _onStreamToken events
+    // ChatProvider subscribes → postMessage('streamToken')
   }
 }
 ```
@@ -347,13 +350,16 @@ npm run test
 </shell>
 ```
 
-Detection in ChatProvider:
+Detection in RequestOrchestrator.streamAndIterate():
 
 ```typescript
-const shellMatch = content.match(/<shell>([\s\S]*?)<\/shell>/);
-if (shellMatch) {
-  const commands = this.parseShellCommands(shellMatch[1]);
-  await this.executeShellCommands(commands);
+// Inside the do-while shell iteration loop
+if (isReasonerModel && containsShellCommands(iterResult.combined)) {
+  const commands = parseShellCommands(iterResult.combined);
+  this._onShellExecuting.fire({ commands });
+  const results = await executeShellCommands(commands, workspacePath);
+  this._onShellResults.fire({ results });
+  // Inject results into context for next iteration
 }
 ```
 
@@ -516,11 +522,17 @@ Time(ms)  Extension                 Webview                 DOM
 ### Stream Interruption
 
 ```typescript
-// User clicks Stop
+// User clicks Stop — ChatProvider delegates to orchestrator
 case 'stopGeneration':
-  this.abortController?.abort();
-  this.sendMessage({ type: 'generationStopped' });
+  this.requestOrchestrator.stopGeneration();
   break;
+
+// RequestOrchestrator.stopGeneration()
+stopGeneration(): void {
+  this.abortController?.abort();
+  this._onGenerationStopped.fire();
+  // ChatProvider subscribes → postMessage('generationStopped')
+}
 
 // In webview
 case 'generationStopped':
@@ -532,14 +544,16 @@ case 'generationStopped':
 ### API Errors
 
 ```typescript
+// In RequestOrchestrator.handleMessage()
 try {
-  await this.streamResponse(messages);
+  // ... streaming pipeline ...
 } catch (error) {
-  if (error.name === 'AbortError') {
-    // User cancelled - already handled
-  } else {
-    this.sendError(`API Error: ${error.message}`);
+  if (isAbortError(error, signal)) {
+    await this.savePartialResponse(...);  // Save what we have
+    return { sessionId };
   }
+  this._onError.fire({ error: formatError(error) });
+  // ChatProvider subscribes → postMessage('error')
 }
 ```
 
