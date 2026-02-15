@@ -20,8 +20,9 @@
 8. [Logging](#8-logging)
 9. [Testing Strategy](#9-testing-strategy)
 10. [Context Compression — Implemented](#10-context-compression--implemented)
-11. [Future: Token Count Caching](#11-future-token-count-caching)
-12. [Key Files](#12-key-files)
+11. [Token Count Caching — Implemented](#11-token-count-caching--implemented)
+12. [Session & Data Lifecycle Management](#12-session--data-lifecycle-management)
+13. [Key Files](#13-key-files)
 
 ---
 
@@ -438,44 +439,155 @@ Post-response sync was chosen over async (fire-and-forget) because:
 
 ---
 
-## 11. Future: Token Count Caching
+## 11. Token Count Caching — Implemented
 
 ### Opportunity
 
-ContextBuilder re-tokenizes every message on every request. For a 100-message conversation, that is approximately 100 calls to the WASM tokenizer. Currently this takes 5-10ms total (sub-millisecond per message), so it is not a bottleneck.
+ContextBuilder re-tokenizes every message on every request. For a 100-message conversation, that is approximately 100 calls to the WASM tokenizer. Currently this takes 5-10ms total (sub-millisecond per message), so it is not a bottleneck — but it's free to eliminate.
 
-### Design
+### Implementation: In-Memory Map
 
-Cache a single integer (token count) alongside each event in the database. When ContextBuilder runs, it reads pre-computed counts instead of re-tokenizing:
+An in-memory `Map<string, number>` on the `ContextBuilder` instance caches token counts keyed by stable IDs. Two types of content are cached:
 
-```sql
--- Add column to events table
-ALTER TABLE events ADD COLUMN token_count INTEGER;
-```
+**Event messages** — keyed by `eventId`:
 
 ```typescript
-// On event recording
-const tokenCount = tokenCounter.countMessage(role, content);
-eventStore.append(sessionId, event, tokenCount);
-
-// In ContextBuilder -- use cached count if available
-const tokens = cachedTokenCount ?? this.tokenCounter.countMessage(msg.role, text);
+// In the token counting loop:
+const cached = msg.eventId ? this._tokenCache.get(msg.eventId) : undefined;
+if (cached !== undefined) {
+  // Cache hit — skip tokenization
+  messageCosts.push({ message: msg, tokens: cached });
+} else {
+  // Cache miss — tokenize and cache
+  const tokens = this.tokenCounter.countMessage(msg.role, text);
+  if (msg.eventId) { this._tokenCache.set(msg.eventId, tokens); }
+}
 ```
 
-### Why Not Now
+**Snapshot summaries** — keyed by `snapshotId`:
 
-- Tokenization is already sub-millisecond per message
-- `ContextBuilder.build()` for 100 messages takes 5-10ms total
-- Adding a database column and migration adds complexity
-- If DeepSeek changes their tokenizer, cached counts become stale (text is the durable format)
+```typescript
+// Snapshot summary uses pre-computed tokenCount from the Snapshot record
+const summaryTokens = this._tokenCache.get(snapshotSummary.snapshotId)
+  ?? snapshotSummary.tokenCount;
+this._tokenCache.set(snapshotSummary.snapshotId, summaryTokens);
+```
 
-### When to Implement
+`getLatestSnapshotSummary()` returns a `SnapshotSummary` object (`{ summary, tokenCount, snapshotId }`) instead of a plain string. The pre-computed `tokenCount` from the snapshot record is used directly — no tokenization needed on the first encounter either.
 
-When profiling shows ContextBuilder is a bottleneck, or when conversations regularly exceed 500+ messages. The break-even point is when the database read (cached integer) is faster than the WASM tokenization call, which is unlikely to matter until message counts are very high.
+**Event ID threading:** The `eventId` field was added to the `Message` interface. `ConversationManager.getSessionMessagesCompat()` now includes the event store ID in the returned messages, and `RequestOrchestrator` threads it through to `buildContext()`.
+
+**Why in-memory (not DB):**
+- Cache dies on extension restart — no staleness risk if the tokenizer changes
+- No migration needed, no cache busting logic
+- Both event IDs and snapshot IDs are immutable — content never changes for a given ID
+- Messages without an ID (tool messages created during the current request) are always tokenized fresh
+
+### Tokenizer Versioning
+
+The WASM tokenizer ships a static `tokenizer.json.br` (1.4 MB compressed, 7.5 MB decompressed) bundled inside the `.vsix`. This asset is pinned to whichever version was built into the extension — it does not auto-update.
+
+**Why cached counts are fragile across tokenizer versions:**
+
+If DeepSeek releases a new model (e.g., V4) with a different tokenizer (new vocab, different merge rules), any token counts cached in the database become wrong. The same text produces different token counts under the old vs new tokenizer. Since the raw text is always stored in events, re-tokenizing on the fly (current approach) is self-correcting — it always uses the active tokenizer. A cache would silently return stale counts until invalidated.
+
+**Version mismatch risk:**
+
+Even without caching, a version mismatch can occur if a user runs an old extension version while DeepSeek silently updates their API tokenizer. The WASM counter would produce confidently wrong counts until the extension is updated. The `EstimationTokenCounter` self-calibration (adjusts ratio from `usage.prompt_tokens`) would detect this drift naturally, but the WASM counter has no such feedback loop.
+
+**Mitigation if caching is implemented:**
+
+- Store a tokenizer version hash alongside cached counts (e.g., SHA-256 of `tokenizer.json`)
+- On extension startup, compare the current tokenizer hash to the stored one
+- If they differ, invalidate all cached counts (set `token_count = NULL` in the events table)
+
+### Tokenizer Update Script
+
+A periodic check script should be developed to detect when DeepSeek publishes an updated tokenizer. Tokenizer changes are rare (tied to new model releases, not patches to existing models), but catching them early prevents version mismatch drift.
+
+**Approach:**
+
+- Script fetches the latest `tokenizer.json` from HuggingFace (e.g., `https://huggingface.co/deepseek-ai/DeepSeek-V3/resolve/main/tokenizer.json`)
+- Compares SHA-256 hash against the currently bundled `packages/moby-wasm/assets/tokenizer.json`
+- If hashes differ: logs the change, optionally downloads the new version, and alerts the maintainer
+- Can run as a GitHub Actions cron job (e.g., weekly) or a pre-release CI step
+
+**Script location:** `scripts/check-tokenizer-update.sh` (to be created when needed)
+
+### Future: Database-Level Caching
+
+If profiling shows the in-memory cache is insufficient (e.g., conversations exceeding 500+ messages across extension restarts), a database column (`ALTER TABLE events ADD COLUMN token_count INTEGER`) could persist counts across restarts. This would require the PRAGMA migration framework (see [database-cleanup.md](database-cleanup.md)) and tokenizer version hashing for cache invalidation. The in-memory approach is sufficient for now.
 
 ---
 
-## 12. Key Files
+## 12. Session & Data Lifecycle Management
+
+### Design Decisions
+
+**No artificial limits on snapshots or sessions.** Previously, snapshots were pruned to 5 per session and a `maxSessions` setting existed in the UI. Both limits have been removed:
+
+- **Snapshots:** All snapshots are retained for the lifetime of their session. Each snapshot is ~1-2 KB (summary text + metadata), so even hundreds of snapshots per session are negligible. Snapshots are deleted when their parent session is deleted via `deleteSession()`.
+- **Sessions:** No cap on number of sessions. The database grows organically. Users manage sessions through explicit cleanup commands.
+
+### Session Cleanup Commands
+
+Users need easy ways to manage their conversation history. Planned commands:
+
+| Command | Description | Status |
+|---------|-------------|--------|
+| `Moby: Delete Session` | Delete a single session (events + snapshots) | Infrastructure exists (`ConversationManager.deleteSession()`) |
+| `Moby: Delete All Sessions` | Clear all history | Infrastructure exists (`clearAllHistory` message handler) |
+| `Moby: Delete Sessions Older Than...` | Bulk cleanup by age (e.g., older than 30 days) | TODO |
+| `Moby: Export Session` | Export a session before deleting | TODO |
+
+### What `deleteSession()` Already Cleans Up
+
+`ConversationManager.deleteSession(sessionId)` already cascades properly:
+1. `eventStore.deleteSessionEvents(sessionId)` — removes all events
+2. `snapshotManager.deleteSessionSnapshots(sessionId)` — removes all snapshots
+3. `stmtDeleteSession.run(sessionId)` — removes the session record
+
+No orphaned data is left behind.
+
+### Database Growth Estimates
+
+| Usage Pattern | Sessions/Month | Events/Session | DB Growth/Month |
+|---------------|---------------|----------------|-----------------|
+| Light (few chats) | 10 | 50 | ~2 MB |
+| Moderate (daily use) | 60 | 100 | ~25 MB |
+| Heavy (power user) | 200 | 200 | ~150 MB |
+
+At these rates, even heavy users accumulate manageable amounts. The bulk delete commands give users control without imposing arbitrary limits.
+
+### Migration Framework (PRAGMA user_version)
+
+SQLite's `PRAGMA user_version` will be used for schema versioning. This is a single integer stored in the database file header, read in < 1 ms.
+
+```typescript
+function runMigrations(db: Database): void {
+  const version = db.pragma("user_version", { simple: true }) as number;
+
+  if (version < 1) {
+    // Formalize existing schema as version 1
+    // (tables already created by CREATE TABLE IF NOT EXISTS)
+  }
+
+  // Future: if (version < 2) { ALTER TABLE events ADD COLUMN token_count INTEGER; }
+
+  db.pragma(`user_version = 1`);
+}
+```
+
+**Release process:**
+- Each schema change adds a new `if (version < N)` block
+- Runs once during `activate()` before any DB access
+- Fresh installs: all migrations run in sequence from 0
+- Updates: only new migrations run (skips already-applied ones)
+- Downgrades: old code ignores new columns (SQLite is lenient)
+
+---
+
+## 13. Key Files
 
 | File | Role |
 |------|------|

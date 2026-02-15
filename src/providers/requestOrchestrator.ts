@@ -12,6 +12,7 @@ import {
   parseShellCommands,
   containsShellCommands,
   containsCodeEdits,
+  commandsCreateFiles,
   executeShellCommands,
   formatShellResultsForContext,
   getReasonerShellPrompt,
@@ -220,7 +221,8 @@ export class RequestOrchestrator {
       for (const msg of sessionMessages) {
         historyMessages.push({
           role: msg.role,
-          content: msg.content
+          content: msg.content,
+          eventId: msg.eventId
         });
       }
 
@@ -538,18 +540,9 @@ export class RequestOrchestrator {
     const maxAutoContinuations = 2;
     let autoContinuationCount = 0;
     let lastIterationHadShellCommands = false;
-
-    // Total iteration safeguard (shell iterations + auto-continuations)
-    const maxTotalIterations = 10;
-    let totalIterations = 0;
+    let shellCreatedFiles = false;
 
     do {
-      totalIterations++;
-      if (totalIterations > maxTotalIterations) {
-        logger.warn(`[R1-Shell] Total iteration limit reached (${maxTotalIterations}), breaking loop`);
-        break;
-      }
-
       // Track iteration-specific response
       let iterationResponse = '';
 
@@ -651,6 +644,10 @@ export class RequestOrchestrator {
 
         // Parse and execute shell commands from both streams
         const commands = parseShellCommands(combinedForShellCheck);
+        if (commandsCreateFiles(commands)) {
+          shellCreatedFiles = true;
+          logger.info(`[R1-Shell] Shell commands include file creation (heredoc/redirect)`);
+        }
         const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
         if (commands.length > 0 && workspacePath) {
@@ -713,12 +710,12 @@ export class RequestOrchestrator {
         // No shell commands in this iteration
         if (isReasonerModel) {
           logger.info(`[R1-Shell] No shell commands in iteration, checking for auto-continuation...`);
-          logger.info(`[R1-Shell] shellIteration=${shellIteration}, autoContinuationCount=${autoContinuationCount}, lastIterationHadShellCommands=${lastIterationHadShellCommands}`);
+          logger.info(`[R1-Shell] shellIteration=${shellIteration}, autoContinuationCount=${autoContinuationCount}, lastIterationHadShellCommands=${lastIterationHadShellCommands}, shellCreatedFiles=${shellCreatedFiles}`);
 
           const hasCodeEdits = containsCodeEdits(state.accumulatedResponse);
           logger.info(`[R1-Shell] Response has code edits: ${hasCodeEdits}`);
 
-          if (shellIteration > 0 && !hasCodeEdits && autoContinuationCount < maxAutoContinuations) {
+          if (shellIteration > 0 && !hasCodeEdits && !shellCreatedFiles && autoContinuationCount < maxAutoContinuations) {
             autoContinuationCount++;
             logger.info(`[R1-Shell] Auto-continuing (${autoContinuationCount}/${maxAutoContinuations}): shell commands were executed but no code edits produced`);
 

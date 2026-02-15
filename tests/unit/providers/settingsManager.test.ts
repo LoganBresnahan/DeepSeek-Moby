@@ -42,7 +42,6 @@ vi.mock('vscode', async (importOriginal) => {
             'logColors': true,
             'systemPrompt': '',
             'autoSaveHistory': true,
-            'maxSessions': 50,
             'allowAllShellCommands': false,
             'editMode': 'manual'
           };
@@ -113,12 +112,6 @@ describe('SettingsManager', () => {
       await manager.updateSettings({ autoSaveHistory: false });
 
       expect(configStore.get('autoSaveHistory')).toBe(false);
-    });
-
-    it('should update maxSessions in VS Code config', async () => {
-      await manager.updateSettings({ maxSessions: 100 });
-
-      expect(configStore.get('maxSessions')).toBe(100);
     });
 
     it('should set model on client immediately and fire onModelChanged', async () => {
@@ -275,7 +268,6 @@ describe('SettingsManager', () => {
       expect(snapshot.logColors).toBe(true);
       expect(snapshot.systemPrompt).toBe('');
       expect(snapshot.autoSaveHistory).toBe(true);
-      expect(snapshot.maxSessions).toBe(50);
       expect(snapshot.allowAllCommands).toBe(false);
     });
 
@@ -325,7 +317,6 @@ describe('SettingsManager', () => {
       expect(configStore.has('maxShellIterations')).toBe(false);
       expect(configStore.has('editMode')).toBe(false);
       expect(configStore.has('autoSaveHistory')).toBe(false);
-      expect(configStore.has('maxSessions')).toBe(false);
     });
 
     it('should fire onSettingsChanged with fresh defaults', async () => {

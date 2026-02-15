@@ -35,7 +35,6 @@ export interface SettingsValues {
   maxResultsPerSearch: number;
   cacheDuration: number;
   autoSaveHistory: boolean;
-  maxSessions: number;
 }
 
 export interface DefaultPrompt {
@@ -60,7 +59,6 @@ export class SettingsShadowActor extends PopupShadowActor {
   private _maxResultsPerSearch = 5;
   private _cacheDuration = 15;
   private _autoSaveHistory = true;
-  private _maxSessions = 100;
 
   // Preview state
   private _defaultPromptVisible = false;
@@ -205,10 +203,6 @@ export class SettingsShadowActor extends PopupShadowActor {
             Auto-save history
           </label>
         </div>
-        <div class="settings-control">
-          <label>Max sessions: <span data-value="maxSessions">${this._maxSessions}</span></label>
-          <input type="range" class="settings-slider" data-setting="maxSessions" min="10" max="500" step="10" value="${this._maxSessions}">
-        </div>
         <button class="settings-action-btn settings-danger-btn" data-action="clearHistory">Clear All History</button>
       </div>
 
@@ -351,10 +345,6 @@ export class SettingsShadowActor extends PopupShadowActor {
       this._autoSaveHistory = settings.autoSaveHistory;
       changed = true;
     }
-    if (settings.maxSessions !== undefined && settings.maxSessions !== this._maxSessions) {
-      this._maxSessions = settings.maxSessions;
-      changed = true;
-    }
 
     if (changed) {
       this.updateBodyContent(this.renderPopupContent());
@@ -429,10 +419,6 @@ export class SettingsShadowActor extends PopupShadowActor {
       case 'autoSaveHistory':
         this._autoSaveHistory = value as boolean;
         this._vscode.postMessage({ type: 'setAutoSaveHistory', enabled: value });
-        break;
-      case 'maxSessions':
-        this._maxSessions = value as number;
-        this._vscode.postMessage({ type: 'setMaxSessions', value });
         break;
     }
   }
@@ -538,8 +524,7 @@ export class SettingsShadowActor extends PopupShadowActor {
       creditsPerPrompt: this._creditsPerPrompt,
       maxResultsPerSearch: this._maxResultsPerSearch,
       cacheDuration: this._cacheDuration,
-      autoSaveHistory: this._autoSaveHistory,
-      maxSessions: this._maxSessions
+      autoSaveHistory: this._autoSaveHistory
     };
   }
 }

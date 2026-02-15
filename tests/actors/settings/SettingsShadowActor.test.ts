@@ -395,11 +395,6 @@ describe('SettingsShadowActor', () => {
       expect(checkbox).toBeTruthy();
     });
 
-    it('renders max sessions slider', () => {
-      const slider = element.shadowRoot?.querySelector('[data-setting="maxSessions"]');
-      expect(slider).toBeTruthy();
-    });
-
     it('renders Clear All History button', () => {
       const btn = element.shadowRoot?.querySelector('[data-action="clearHistory"]');
       expect(btn).toBeTruthy();
@@ -509,8 +504,7 @@ describe('SettingsShadowActor', () => {
         creditsPerPrompt: 4,
         maxResultsPerSearch: 10,
         cacheDuration: 30,
-        autoSaveHistory: false,
-        maxSessions: 200
+        autoSaveHistory: false
       };
 
       manager.publishDirect('settings.values', values);
@@ -539,7 +533,6 @@ describe('SettingsShadowActor', () => {
       expect(settings).toHaveProperty('maxResultsPerSearch');
       expect(settings).toHaveProperty('cacheDuration');
       expect(settings).toHaveProperty('autoSaveHistory');
-      expect(settings).toHaveProperty('maxSessions');
     });
   });
 

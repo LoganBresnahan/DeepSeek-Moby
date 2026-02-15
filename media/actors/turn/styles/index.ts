@@ -287,6 +287,108 @@ code.inline-code {
   font-family: var(--vscode-editor-font-family);
   font-size: 0.9em;
 }
+
+/* Code generating placeholder — shown while a code block is being streamed */
+.code-generating {
+  position: relative;
+  height: 22px;
+  margin: 10px 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.code-gen-moby {
+  position: relative;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.code-gen-moby img {
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+  filter: brightness(0) invert(1);
+  opacity: 0.85;
+}
+
+.code-gen-spurt {
+  position: absolute;
+  top: -6px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 20px;
+  height: 10px;
+  pointer-events: none;
+}
+
+.code-gen-spurt .drop {
+  position: absolute;
+  bottom: 0;
+  width: 2px;
+  height: 2px;
+  background: #ffffff;
+  border-radius: 50%;
+  opacity: 0;
+  animation: codeSpurt 1.5s ease-out infinite;
+}
+
+.code-gen-spurt .drop:nth-child(1) { animation-delay: 0ms; left: 2px; }
+.code-gen-spurt .drop:nth-child(2) { animation-delay: 150ms; left: 8px; }
+.code-gen-spurt .drop:nth-child(3) { animation-delay: 300ms; left: 14px; }
+.code-gen-spurt .drop:nth-child(4) { animation-delay: 200ms; left: 5px; }
+.code-gen-spurt .drop:nth-child(5) { animation-delay: 350ms; left: 11px; }
+
+@keyframes codeSpurt {
+  0% { opacity: 0.9; transform: translateY(0) scale(1); }
+  40% { transform: translateY(-14px) scale(0.3); opacity: 0; }
+  100% { opacity: 0; }
+}
+
+.code-gen-phrases {
+  position: relative;
+  flex: 1;
+  height: 22px;
+}
+
+.gen-phrase {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 0;
+  font-style: italic;
+  font-size: 13px;
+  letter-spacing: 0.3px;
+}
+
+.gp-1 { animation: cyclePhrase 4.5s ease-in-out infinite; }
+.gp-2 { animation: cyclePhrase 4.5s ease-in-out 1.5s infinite; }
+.gp-3 { animation: cyclePhrase 4.5s ease-in-out 3s infinite; }
+
+@keyframes cyclePhrase {
+  0% { opacity: 0; }
+  6.67% { opacity: 1; }
+  27.78% { opacity: 1; }
+  33.33% { opacity: 0; }
+  100% { opacity: 0; }
+}
+
+.gc {
+  display: inline-block;
+  color: var(--vscode-descriptionForeground);
+  animation: charWave 1.8s ease-in-out infinite;
+  animation-delay: calc(var(--d) * 0.07s);
+}
+
+@keyframes charWave {
+  0%, 100% { transform: translateY(0); opacity: 0.5; }
+  50% { transform: translateY(-2px); opacity: 1; }
+}
 `;
 
 // ============================================
@@ -367,8 +469,8 @@ const thinkingStyles = `
 }
 
 @keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
 }
 `;
 
@@ -550,9 +652,6 @@ const shellStyles = `
 }
 
 .shell-icon {
-  color: var(--vscode-terminal-ansiYellow);
-  font-family: monospace;
-  font-weight: bold;
   flex-shrink: 0;
 }
 

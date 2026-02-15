@@ -598,6 +598,113 @@ describe('MessageTurnActor', () => {
       const codeBlock = queryInShadow(containers[0], '.code-block');
       expect(codeBlock?.classList.contains('expanded')).toBe(false);
     });
+
+    it('shows placeholder instead of incomplete code block during streaming', () => {
+      actor.startStreaming();
+      actor.createTextSegment('Here is the code:');
+      actor.updateTextContent('Here is the code:\n```python\ndef hello():');
+
+      const containers = findContainers('text');
+      const placeholder = queryInShadow(containers[0], '.code-generating');
+      expect(placeholder).toBeTruthy();
+      // No code block dropdown should exist
+      const codeBlock = queryInShadow(containers[0], '.code-block');
+      expect(codeBlock).toBeNull();
+    });
+
+    it('shows code block dropdown when complete during streaming', () => {
+      actor.startStreaming();
+      actor.createTextSegment('');
+      actor.updateTextContent('```python\ndef hello():\n    pass\n```');
+
+      const containers = findContainers('text');
+      const codeBlock = queryInShadow(containers[0], '.code-block');
+      expect(codeBlock).toBeTruthy();
+      // No placeholder — block is complete
+      const placeholder = queryInShadow(containers[0], '.code-generating');
+      expect(placeholder).toBeNull();
+    });
+
+    it('shows no placeholder for incomplete code blocks when not streaming', () => {
+      // History restore — not streaming
+      actor.createTextSegment('Truncated:\n```python\ndef hello():');
+
+      const containers = findContainers('text');
+      const placeholder = queryInShadow(containers[0], '.code-generating');
+      expect(placeholder).toBeNull();
+    });
+
+    it('placeholder contains cycling phrases', () => {
+      actor.startStreaming();
+      actor.createTextSegment('');
+      actor.updateTextContent('```typescript\nconst x');
+
+      const containers = findContainers('text');
+      const phrases = containers[0].shadowRoot?.querySelectorAll('.gen-phrase');
+      expect(phrases?.length).toBe(3);
+    });
+
+    it('placeholder characters have wave animation delays', () => {
+      actor.startStreaming();
+      actor.createTextSegment('');
+      actor.updateTextContent('```js\ncode');
+
+      const containers = findContainers('text');
+      const chars = containers[0].shadowRoot?.querySelectorAll('.gc');
+      expect(chars!.length).toBeGreaterThan(0);
+      // Each char should have --d CSS variable for staggered animation
+      const firstChar = chars![0] as HTMLElement;
+      expect(firstChar.style.getPropertyValue('--d')).toBe('0');
+      const secondChar = chars![1] as HTMLElement;
+      expect(secondChar.style.getPropertyValue('--d')).toBe('1');
+    });
+
+    it('skips DOM update when formatted output unchanged during code streaming', () => {
+      actor.startStreaming();
+      actor.createTextSegment('');
+      actor.updateTextContent('Hello\n```python\ndef a():');
+
+      const containers = findContainers('text');
+      const contentEl = queryInShadow(containers[0], '.content') as HTMLElement;
+      const firstHtml = contentEl.innerHTML;
+
+      // More code tokens arrive but visible output stays the same
+      actor.updateTextContent('Hello\n```python\ndef a():\n    pass');
+      expect(contentEl.innerHTML).toBe(firstHtml);
+    });
+
+    it('finalizeCurrentSegment removes placeholder from finalized segment', () => {
+      actor.startStreaming();
+      actor.createTextSegment('');
+      // Segment has complete block + incomplete block → dropdown + placeholder
+      actor.updateTextContent('```python\ndef a():\n    pass\n```\n\n```javascript\nconst x');
+
+      const containers = findContainers('text');
+      // Before finalize: placeholder should be present
+      expect(queryInShadow(containers[0], '.code-generating')).toBeTruthy();
+
+      // Finalize the segment (simulates interleaving for diffListChanged)
+      actor.finalizeCurrentSegment();
+
+      // After finalize: placeholder should be removed, code block dropdown kept
+      expect(queryInShadow(containers[0], '.code-generating')).toBeNull();
+      expect(queryInShadow(containers[0], '.code-block')).toBeTruthy();
+    });
+
+    it('finalized segment does not show raw code from incomplete block', () => {
+      actor.startStreaming();
+      actor.createTextSegment('');
+      actor.updateTextContent('Done:\n```python\nprint("hi")\n```\n\n```javascript\nconst x = 1;');
+
+      actor.finalizeCurrentSegment();
+
+      const containers = findContainers('text');
+      const contentEl = queryInShadow(containers[0], '.content') as HTMLElement;
+      // The raw "const x = 1;" from the incomplete block should not appear
+      expect(contentEl.textContent).not.toContain('const x = 1;');
+      // The complete python block should still be a dropdown
+      expect(queryInShadow(containers[0], '.code-block')).toBeTruthy();
+    });
   });
 
   // ============================================

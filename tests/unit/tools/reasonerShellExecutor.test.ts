@@ -42,6 +42,16 @@ function containsCodeEdits(content: string): boolean {
   return searchReplacePattern.test(content) || fileHeaderPattern.test(content);
 }
 
+function commandsCreateFiles(commands: Array<{ command: string; index: number }>): boolean {
+  return commands.some(cmd => {
+    const c = cmd.command;
+    if (/<<[-\s]*['"]?\w+/.test(c)) return true;
+    if (/\b(?:cat|echo|printf)\b.*?>/.test(c)) return true;
+    if (/\btee\s/.test(c)) return true;
+    return false;
+  });
+}
+
 const BLOCKED_PATTERNS: RegExp[] = [
   /\brm\s+(-[rf]+\s+)*[\/~]/i,
   /\bsudo\s/i,
@@ -204,6 +214,53 @@ Some code here`;
       expect(containsCodeEdits('# File:test.ts')).toBe(true);
       // Line must start with # (potentially with leading whitespace in multiline string)
       expect(containsCodeEdits('Some text\n# File: test.ts\nmore text')).toBe(true);
+    });
+  });
+
+  describe('commandsCreateFiles', () => {
+    const cmd = (command: string) => [{ command, index: 0 }];
+
+    it('detects heredoc file creation', () => {
+      expect(commandsCreateFiles(cmd("cat > file.txt << 'EOF'\ncontent\nEOF"))).toBe(true);
+      expect(commandsCreateFiles(cmd('cat > src/main.c << EOF\n#include\nEOF'))).toBe(true);
+      expect(commandsCreateFiles(cmd("cat > Makefile <<- 'HEREDOC'\nall:\nHEREDOC"))).toBe(true);
+    });
+
+    it('detects cat/echo/printf redirects', () => {
+      expect(commandsCreateFiles(cmd('cat > file.txt'))).toBe(true);
+      expect(commandsCreateFiles(cmd('echo "hello" > output.txt'))).toBe(true);
+      expect(commandsCreateFiles(cmd('printf "%s" "data" > result.json'))).toBe(true);
+    });
+
+    it('detects tee commands', () => {
+      expect(commandsCreateFiles(cmd('tee file.txt'))).toBe(true);
+      expect(commandsCreateFiles(cmd('echo "data" | tee output.log'))).toBe(true);
+    });
+
+    it('returns false for read-only commands', () => {
+      expect(commandsCreateFiles(cmd('ls -la'))).toBe(false);
+      expect(commandsCreateFiles(cmd('cat file.txt'))).toBe(false);
+      expect(commandsCreateFiles(cmd('grep -rn "pattern" src/'))).toBe(false);
+      expect(commandsCreateFiles(cmd('find . -name "*.ts"'))).toBe(false);
+      expect(commandsCreateFiles(cmd('git status'))).toBe(false);
+    });
+
+    it('returns false for /dev/null redirects', () => {
+      // These redirect stderr/stdout to /dev/null, not file creation
+      expect(commandsCreateFiles(cmd('find . -name "*.ts" 2>/dev/null'))).toBe(false);
+    });
+
+    it('detects file creation in mixed command lists', () => {
+      const commands = [
+        { command: 'ls -la', index: 0 },
+        { command: 'mkdir -p src', index: 1 },
+        { command: "cat > src/index.ts << 'EOF'\nconsole.log('hi')\nEOF", index: 2 },
+      ];
+      expect(commandsCreateFiles(commands)).toBe(true);
+    });
+
+    it('returns false for empty command list', () => {
+      expect(commandsCreateFiles([])).toBe(false);
     });
   });
 

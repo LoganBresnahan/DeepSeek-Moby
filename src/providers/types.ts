@@ -77,7 +77,6 @@ export interface SettingsSnapshot {
   logColors: boolean;
   systemPrompt: string;
   autoSaveHistory: boolean;
-  maxSessions: number;
   allowAllCommands: boolean;
   webSearch: {
     searchDepth: 'basic' | 'advanced';

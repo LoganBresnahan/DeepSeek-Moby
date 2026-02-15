@@ -206,10 +206,9 @@ interface Snapshot {
 ### Snapshot Configuration
 
 ```typescript
-// Default: snapshot every 20 events, keep max 5 per session
+// Default: snapshot every 20 events
 const snapshotManager = new SnapshotManager(db, eventStore, summarizer, {
-  snapshotInterval: 20,        // Events between snapshots
-  maxSnapshotsPerSession: 5    // Old snapshots are pruned
+  snapshotInterval: 20         // Events between snapshots
 });
 ```
 

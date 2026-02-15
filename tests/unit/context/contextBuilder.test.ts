@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { ContextBuilder } from '../../../src/context/contextBuilder';
+import { describe, it, expect, vi } from 'vitest';
+import { ContextBuilder, SnapshotSummary } from '../../../src/context/contextBuilder';
 import { EstimationTokenCounter, TokenCounter } from '../../../src/services/tokenCounter';
 import type { Message } from '../../../src/deepseekClient';
 
@@ -91,15 +91,19 @@ describe('ContextBuilder', () => {
     const builder = new ContextBuilder(counter);
 
     const messages = makeMessages(100, 5000);
-    const summary = 'The user asked about X, the assistant explained Y.';
+    const snapshot: SnapshotSummary = {
+      summary: 'The user asked about X, the assistant explained Y.',
+      tokenCount: counter.countMessage('user', 'The user asked about X, the assistant explained Y.'),
+      snapshotId: 'snap-1',
+    };
 
-    const result = await builder.build(messages, undefined, 'deepseek-chat', summary);
+    const result = await builder.build(messages, undefined, 'deepseek-chat', snapshot);
 
     expect(result.truncated).toBe(true);
     expect(result.summaryInjected).toBe(true);
     // First message should be the summary
     expect(result.messages[0].content).toContain('[Previous conversation context]');
-    expect(result.messages[0].content).toContain(summary);
+    expect(result.messages[0].content).toContain(snapshot.summary);
     // Second message should be the assistant acknowledgment
     expect(result.messages[1].role).toBe('assistant');
   });
@@ -109,9 +113,13 @@ describe('ContextBuilder', () => {
     const builder = new ContextBuilder(counter);
 
     const messages = makeMessages(2, 50);
-    const summary = 'Some summary';
+    const snapshot: SnapshotSummary = {
+      summary: 'Some summary',
+      tokenCount: counter.countMessage('user', 'Some summary'),
+      snapshotId: 'snap-2',
+    };
 
-    const result = await builder.build(messages, undefined, 'deepseek-chat', summary);
+    const result = await builder.build(messages, undefined, 'deepseek-chat', snapshot);
 
     expect(result.truncated).toBe(false);
     expect(result.summaryInjected).toBe(false);
@@ -338,12 +346,128 @@ describe('ContextBuilder', () => {
     // 100 messages * 5000 chars * 0.3 ratio = 150k tokens (over 107k budget)
     const messages = makeMessages(100, 5000);
     // Very long summary that won't fit in the remaining space
-    const summary = 'x'.repeat(500000);
+    const longSummary = 'x'.repeat(500000);
+    const snapshot: SnapshotSummary = {
+      summary: longSummary,
+      tokenCount: counter.countMessage('user', longSummary),
+      snapshotId: 'snap-huge',
+    };
 
-    const result = await builder.build(messages, undefined, 'deepseek-chat', summary);
+    const result = await builder.build(messages, undefined, 'deepseek-chat', snapshot);
 
     // Messages dropped but summary too large to inject
     expect(result.truncated).toBe(true);
     expect(result.summaryInjected).toBe(false);
+  });
+
+  // ── Token Cache Tests ──
+
+  it('should use cached token counts for messages with eventId', async () => {
+    const counter = createExactCounter(0.3);
+    const countMessageSpy = vi.spyOn(counter, 'countMessage');
+    const builder = new ContextBuilder(counter);
+
+    const messages: Message[] = [
+      { role: 'user', content: 'Hello world', eventId: 'evt-1' },
+      { role: 'assistant', content: 'Hi there!', eventId: 'evt-2' },
+    ];
+
+    // First build: all messages should be tokenized
+    await builder.build(messages, undefined, 'deepseek-chat');
+    expect(countMessageSpy).toHaveBeenCalledTimes(2);
+
+    countMessageSpy.mockClear();
+
+    // Second build with same messages: should hit cache
+    await builder.build(messages, undefined, 'deepseek-chat');
+    expect(countMessageSpy).toHaveBeenCalledTimes(0);
+  });
+
+  it('should always recount messages without eventId', async () => {
+    const counter = createExactCounter(0.3);
+    const countMessageSpy = vi.spyOn(counter, 'countMessage');
+    const builder = new ContextBuilder(counter);
+
+    const messages: Message[] = [
+      { role: 'user', content: 'No event ID here' },
+      { role: 'assistant', content: 'Me neither' },
+    ];
+
+    await builder.build(messages, undefined, 'deepseek-chat');
+    expect(countMessageSpy).toHaveBeenCalledTimes(2);
+
+    countMessageSpy.mockClear();
+
+    // Second build: no eventId means no cache, so recount
+    await builder.build(messages, undefined, 'deepseek-chat');
+    expect(countMessageSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('should cache new messages and reuse cached ones on subsequent builds', async () => {
+    const counter = createExactCounter(0.3);
+    const countMessageSpy = vi.spyOn(counter, 'countMessage');
+    const builder = new ContextBuilder(counter);
+
+    const messages1: Message[] = [
+      { role: 'user', content: 'First message', eventId: 'evt-1' },
+      { role: 'assistant', content: 'First reply', eventId: 'evt-2' },
+    ];
+
+    await builder.build(messages1, undefined, 'deepseek-chat');
+    expect(countMessageSpy).toHaveBeenCalledTimes(2);
+
+    countMessageSpy.mockClear();
+
+    // Add a new message to the conversation
+    const messages2: Message[] = [
+      ...messages1,
+      { role: 'user', content: 'Second message', eventId: 'evt-3' },
+    ];
+
+    await builder.build(messages2, undefined, 'deepseek-chat');
+    // Only the new message (evt-3) should be tokenized
+    expect(countMessageSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('should produce identical results with and without cache', async () => {
+    const counter = createExactCounter(0.3);
+    const builder = new ContextBuilder(counter);
+
+    const messages: Message[] = Array.from({ length: 20 }, (_, i) => ({
+      role: (i % 2 === 0 ? 'user' : 'assistant') as 'user' | 'assistant',
+      content: `Message ${i}: ${'y'.repeat(500)}`,
+      eventId: `evt-${i}`,
+    }));
+
+    const result1 = await builder.build(messages, 'system prompt', 'deepseek-chat');
+    const result2 = await builder.build(messages, 'system prompt', 'deepseek-chat');
+
+    expect(result1.tokenCount).toBe(result2.tokenCount);
+    expect(result1.droppedCount).toBe(result2.droppedCount);
+    expect(result1.messages).toHaveLength(result2.messages.length);
+  });
+
+  it('should use pre-computed snapshot token count instead of re-tokenizing', async () => {
+    const counter = createExactCounter(0.3);
+    const countMessageSpy = vi.spyOn(counter, 'countMessage');
+    const builder = new ContextBuilder(counter);
+
+    // Force truncation so snapshot gets injected
+    const messages = makeMessages(100, 5000);
+    const snapshot: SnapshotSummary = {
+      summary: 'Previous context summary here.',
+      tokenCount: 42, // Pre-computed — ContextBuilder should use this, not re-tokenize
+      snapshotId: 'snap-cached',
+    };
+
+    const result = await builder.build(messages, undefined, 'deepseek-chat', snapshot);
+    expect(result.summaryInjected).toBe(true);
+
+    // countMessage should NOT have been called for the snapshot summary
+    // (only for the 100 conversation messages)
+    const summaryCallCount = countMessageSpy.mock.calls
+      .filter(([role, content]) => role === 'user' && content === snapshot.summary)
+      .length;
+    expect(summaryCallCount).toBe(0);
   });
 });

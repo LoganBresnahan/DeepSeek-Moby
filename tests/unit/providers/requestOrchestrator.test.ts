@@ -105,7 +105,7 @@ function createMockDeepSeekClient() {
       return 'Hello world!';
     }),
     estimateTokens: vi.fn((text: string) => Math.ceil(text.length / 4)),
-    buildContext: vi.fn(async (messages: any[], _systemPrompt: string, _snapshot?: string) => ({
+    buildContext: vi.fn(async (messages: any[], _systemPrompt: string, _snapshot?: any) => ({
       messages,
       tokenCount: 100,
       budget: 4096

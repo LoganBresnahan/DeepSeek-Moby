@@ -35,7 +35,6 @@ export interface SettingsUpdateInput {
   maxShellIterations?: number;
   maxTokens?: number;
   autoSaveHistory?: boolean;
-  maxSessions?: number;
 }
 
 export class SettingsManager {
@@ -95,11 +94,6 @@ export class SettingsManager {
     if (settings.autoSaveHistory !== undefined) {
       await config.update('autoSaveHistory', settings.autoSaveHistory, vscode.ConfigurationTarget.Global);
       logger.settingsChanged('autoSaveHistory', settings.autoSaveHistory);
-    }
-
-    if (settings.maxSessions !== undefined) {
-      await config.update('maxSessions', settings.maxSessions, vscode.ConfigurationTarget.Global);
-      logger.settingsChanged('maxSessions', settings.maxSessions);
     }
   }
 
@@ -212,7 +206,6 @@ export class SettingsManager {
       logColors: config.get<boolean>('logColors') ?? true,
       systemPrompt: config.get<string>('systemPrompt') || '',
       autoSaveHistory: config.get<boolean>('autoSaveHistory') ?? true,
-      maxSessions: config.get<number>('maxSessions') ?? 50,
       allowAllCommands: config.get<boolean>('allowAllShellCommands') ?? false,
       webSearch: {
         searchDepth: 'basic',
@@ -242,7 +235,6 @@ export class SettingsManager {
       await config.update('maxShellIterations', undefined, vscode.ConfigurationTarget.Global);
       await config.update('editMode', undefined, vscode.ConfigurationTarget.Global);
       await config.update('autoSaveHistory', undefined, vscode.ConfigurationTarget.Global);
-      await config.update('maxSessions', undefined, vscode.ConfigurationTarget.Global);
 
       // Reset tracer to enabled
       tracer.enabled = true;

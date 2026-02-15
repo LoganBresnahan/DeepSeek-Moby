@@ -97,6 +97,24 @@ export function containsCodeEdits(content: string): boolean {
 }
 
 /**
+ * Check if any shell commands create or write files.
+ * Detects heredocs, output redirects (cat/echo/printf > file), and tee.
+ * Used to skip auto-continuation when R1 creates files via shell instead of code blocks.
+ */
+export function commandsCreateFiles(commands: ShellCommand[]): boolean {
+  return commands.some(cmd => {
+    const c = cmd.command;
+    // Heredoc: cat > file << 'EOF' (most common R1 file creation pattern)
+    if (/<<[-\s]*['"]?\w+/.test(c)) return true;
+    // Write redirect from cat/echo/printf to a file
+    if (/\b(?:cat|echo|printf)\b.*?>/.test(c)) return true;
+    // tee writing to a file
+    if (/\btee\s/.test(c)) return true;
+    return false;
+  });
+}
+
+/**
  * Validate a command against security rules
  * Minimal validation - only block truly catastrophic operations
  *

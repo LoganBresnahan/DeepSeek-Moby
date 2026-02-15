@@ -40,8 +40,7 @@ describe('SnapshotManager', () => {
       eventStore,
       createExtractSummarizer(),
       {
-        snapshotInterval: 5, // Create snapshot every 5 events for testing
-        maxSnapshotsPerSession: 3
+        snapshotInterval: 5 // Create snapshot every 5 events for testing
       }
     );
   });
@@ -236,9 +235,9 @@ describe('SnapshotManager', () => {
     });
   });
 
-  describe('pruning', () => {
-    it('should keep only max snapshots per session', async () => {
-      // Create 5 snapshots (max is 3)
+  describe('snapshot retention', () => {
+    it('should keep all snapshots (no pruning)', async () => {
+      // Create 5 snapshots — all should be retained
       for (let batch = 0; batch < 5; batch++) {
         for (let i = 0; i < 5; i++) {
           eventStore.append({
@@ -251,15 +250,13 @@ describe('SnapshotManager', () => {
         await snapshotManager.createSnapshot('session-1');
       }
 
-      // Verify pruning by querying DB directly
+      // Verify all snapshots are kept
       const stmt = db.prepare('SELECT up_to_sequence FROM snapshots WHERE session_id = ? ORDER BY up_to_sequence DESC');
       const rows = stmt.all('session-1') as any[];
 
-      expect(rows).toHaveLength(3);
-      // Should keep the most recent ones (sequences 15, 20, 25)
+      expect(rows).toHaveLength(5);
       expect(rows[0].up_to_sequence).toBe(25);
-      expect(rows[1].up_to_sequence).toBe(20);
-      expect(rows[2].up_to_sequence).toBe(15);
+      expect(rows[4].up_to_sequence).toBe(5);
     });
   });
 

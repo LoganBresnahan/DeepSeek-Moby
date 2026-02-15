@@ -80,6 +80,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
   private _currentTextContainerId: string | null = null;
   private _textSegmentCounter = 0;
   private _currentSegmentContent = '';
+  private _lastFormattedHtml = '';
   private _segmentsPaused = false;
 
   // ============================================
@@ -180,6 +181,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
     this._currentTextContainerId = null;
     this._textSegmentCounter = 0;
     this._currentSegmentContent = '';
+    this._lastFormattedHtml = '';
     this._segmentsPaused = false;
 
     // Reset thinking
@@ -336,6 +338,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
     this._textSegments.set(segmentId, segment);
     this._currentTextContainerId = container.id;
     this._currentSegmentContent = content;
+    this._lastFormattedHtml = '';
     this._segmentsPaused = false;
 
     this.renderTextSegment(segment, container);
@@ -362,7 +365,12 @@ export class MessageTurnActor extends InterleavedShadowActor {
 
     const contentEl = container.content.querySelector('.content');
     if (contentEl) {
-      contentEl.innerHTML = this.formatContent(content);
+      const formatted = this.formatContent(content);
+      // Skip DOM update if output unchanged (preserves CSS animations on placeholder)
+      if (formatted !== this._lastFormattedHtml) {
+        contentEl.innerHTML = formatted;
+        this._lastFormattedHtml = formatted;
+      }
     }
 
     this._currentSegmentContent = content;
@@ -395,6 +403,27 @@ export class MessageTurnActor extends InterleavedShadowActor {
     const container = this.getContainer(this._currentTextContainerId);
     if (container) {
       container.host.classList.remove('streaming');
+
+      // Re-render without the streaming placeholder: strip any trailing
+      // incomplete code block so the finalized segment doesn't show a stuck
+      // "Developing..." placeholder.  The gateway carries the incomplete
+      // tail forward to the next segment.
+      if (this._isStreaming && this._currentSegmentContent) {
+        const contentEl = container.content.querySelector('.content');
+        if (contentEl) {
+          // Use fence-counting: odd number of ``` = last one is an opening fence
+          const fences = [...this._currentSegmentContent.matchAll(/```/g)];
+          const hasIncompleteFence = fences.length % 2 === 1;
+          const cleaned = hasIncompleteFence
+            ? this._currentSegmentContent.substring(0, fences[fences.length - 1].index!)
+            : this._currentSegmentContent;
+          const wasStreaming = this._isStreaming;
+          this._isStreaming = false;
+          contentEl.innerHTML = this.formatContent(cleaned);
+          this._isStreaming = wasStreaming;
+          this._lastFormattedHtml = '';
+        }
+      }
     }
 
     this._currentTextContainerId = null;
@@ -431,6 +460,14 @@ export class MessageTurnActor extends InterleavedShadowActor {
    */
   startThinkingIteration(): number {
     this._currentPendingGroup = null;
+
+    // Complete the previous thinking iteration (stops pulse animation)
+    const prev = this._thinkingIterations.get(this._currentThinkingIteration);
+    if (prev && !prev.complete) {
+      prev.complete = true;
+      this.renderThinkingIteration(this._currentThinkingIteration);
+    }
+
     this._currentThinkingIteration++;
     this._thinkingBaseOffset = this._lastKnownThinkingLength;
 
@@ -481,17 +518,18 @@ export class MessageTurnActor extends InterleavedShadowActor {
     if (this._isStreaming) {
       const container = this.getContainer(iteration.containerId);
       if (container) {
-        const body = container.content.querySelector('.thinking-body');
+        const body = container.content.querySelector('.thinking-body') as HTMLElement | null;
         const preview = container.content.querySelector('.thinking-preview');
 
         if (body) {
           body.textContent = content;
+          // Auto-scroll to bottom so user follows the thinking stream
+          body.scrollTop = body.scrollHeight;
         }
 
-        // Update preview text too
+        // Show the start of thinking text (CSS ellipsis handles overflow)
         if (preview) {
-          const previewText = content.slice(0, 50).replace(/\n/g, ' ');
-          preview.textContent = previewText + (content.length > 50 ? '...' : '');
+          preview.textContent = content.replace(/\n/g, ' ').trim();
         }
         return;
       }
@@ -812,9 +850,8 @@ export class MessageTurnActor extends InterleavedShadowActor {
       ? `Thinking (${index}/${this._thinkingIterations.size})`
       : 'Thinking';
 
-    // Preview: first 50 chars
-    const preview = iteration.content.slice(0, 50).replace(/\n/g, ' ');
-    const previewText = preview + (iteration.content.length > 50 ? '...' : '');
+    // Preview: show start of thinking text (CSS ellipsis handles overflow)
+    const previewText = iteration.content.replace(/\n/g, ' ').trim();
 
     container.host.classList.toggle('expanded', isExpanded);
     container.host.classList.toggle('streaming', !iteration.complete);
@@ -894,7 +931,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
     if (!container) return;
 
     const toggle = segment.expanded ? '−' : '+';
-    const icon = '$';
+    const icon = '🔧';
     const hasErrors = segment.commands.some(c => c.status === 'error');
 
     let title: string;
@@ -1209,7 +1246,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
 
     const startExpanded = this._editMode === 'manual';
 
-    // Fenced code blocks
+    // Fenced code blocks (complete only — opening and closing ```)
     let result = content.replace(
       /```(\w*)\n([\s\S]*?)```/g,
       (_, lang, code) => {
@@ -1225,6 +1262,11 @@ export class MessageTurnActor extends InterleavedShadowActor {
       }
     );
 
+    // During streaming, hide incomplete code blocks and show animated placeholder
+    if (this._isStreaming) {
+      result = result.replace(/```\w*(?:\n[\s\S]*)?$/, this._codeGeneratingHtml);
+    }
+
     // Inline code
     result = result.replace(/`([^`\n]+)`/g, '<code class="inline-code">$1</code>');
 
@@ -1239,6 +1281,22 @@ export class MessageTurnActor extends InterleavedShadowActor {
 
     return result;
   }
+
+  /** Pre-built HTML for the code-generating placeholder (static, cached once) */
+  private readonly _codeGeneratingHtml = (() => {
+    const mobyIconUrl = document.body.dataset.mobyIcon || '';
+    const mobyHtml = mobyIconUrl
+      ? `<div class="code-gen-moby"><img src="${mobyIconUrl}" alt="Moby"><div class="code-gen-spurt">${'<span class="drop"></span>'.repeat(5)}</div></div>`
+      : '';
+    const phrases = ['Developing...', 'Diving...', 'Seeking...'];
+    const phraseHtml = phrases.map((phrase, i) => {
+      const chars = phrase.split('').map((ch, ci) =>
+        `<span class="gc" style="--d:${ci}">${ch}</span>`
+      ).join('');
+      return `<span class="gen-phrase gp-${i + 1}">${chars}</span>`;
+    }).join('');
+    return `<div class="code-generating">${mobyHtml}<div class="code-gen-phrases">${phraseHtml}</div></div>`;
+  })();
 
   private escapeHtml(text: string): string {
     const div = document.createElement('div');

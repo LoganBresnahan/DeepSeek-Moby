@@ -4,7 +4,7 @@ import { FormattingEngine } from './utils/formatting';
 import { ConfigManager } from './utils/config';
 import { logger } from './utils/logger';
 import { TokenCounter, EstimationTokenCounter, countRequestTokens } from './services/tokenCounter';
-import { ContextBuilder, ContextResult } from './context/contextBuilder';
+import { ContextBuilder, ContextResult, SnapshotSummary } from './context/contextBuilder';
 
 export type MessageContent = string | Array<{
   type: 'text';
@@ -22,6 +22,8 @@ export interface Message {
   reasoning_content?: string;
   tool_call_id?: string;
   tool_calls?: ToolCall[];
+  /** Event store ID — used by ContextBuilder for token count caching */
+  eventId?: string;
 }
 
 export interface ToolFunction {
@@ -608,7 +610,7 @@ export class DeepSeekClient {
   async buildContext(
     messages: Message[],
     systemPrompt?: string,
-    snapshotSummary?: string
+    snapshotSummary?: SnapshotSummary
   ): Promise<ContextResult> {
     return this.contextBuilder.build(messages, systemPrompt, this.getModel(), snapshotSummary);
   }

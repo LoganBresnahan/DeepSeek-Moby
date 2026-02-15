@@ -884,7 +884,7 @@ describe('ConversationManager.getLatestSnapshotSummary', () => {
   let db: Database;
   let eventStore: EventStore;
   let snapshotManager: SnapshotManager;
-  let callGetSummary: (sessionId: string) => string | undefined;
+  let callGetSummary: (sessionId: string) => { summary: string; tokenCount: number; snapshotId: string } | undefined;
   const SESSION_ID = 'test-session-snap';
 
   beforeEach(() => {
@@ -937,10 +937,11 @@ describe('ConversationManager.getLatestSnapshotSummary', () => {
 
     const result = callGetSummary(SESSION_ID);
     expect(result).toBeDefined();
-    expect(typeof result).toBe('string');
-    expect(result!.length).toBeGreaterThan(0);
+    expect(result!.summary.length).toBeGreaterThan(0);
+    expect(result!.tokenCount).toBeGreaterThan(0);
+    expect(result!.snapshotId).toBeDefined();
     // The extractive summarizer prefixes with "Conversation topics:"
-    expect(result).toContain('Conversation topics:');
+    expect(result!.summary).toContain('Conversation topics:');
   });
 
   it('returns undefined for session with no snapshots even if other sessions have them', async () => {

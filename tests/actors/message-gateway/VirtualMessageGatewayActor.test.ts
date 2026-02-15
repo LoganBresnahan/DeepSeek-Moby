@@ -661,6 +661,55 @@ describe('VirtualMessageGatewayActor', () => {
     });
   });
 
+  describe('code block carry-forward', () => {
+    it('carries forward incomplete code block to new segment after interleaving', () => {
+      dispatchMessage({ type: 'startResponse', messageId: 'msg-1' });
+
+      // Stream content that includes a complete block + start of another
+      dispatchMessage({ type: 'streamToken', token: '```python\npass\n```\n\n```javascript\nconst x' });
+
+      // Simulate interleave: diffListChanged finalizes the segment
+      dispatchMessage({
+        type: 'diffListChanged',
+        diffs: [{ filePath: 'file.py', status: 'applied' }]
+      });
+
+      // Now make getBoundActor return needsNewSegment = true (simulating post-interleave)
+      (mockActors.virtualList.getBoundActor as ReturnType<typeof vi.fn>).mockReturnValue({
+        needsNewSegment: () => true
+      });
+
+      // Next token arrives → should create new segment with carry-forward
+      dispatchMessage({ type: 'streamToken', token: ' = 1;' });
+
+      // segmentContent should start with the carried-forward incomplete block
+      expect(gateway.segmentContent).toContain('```javascript');
+      expect(gateway.segmentContent).toContain('const x');
+      expect(gateway.segmentContent).toContain(' = 1;');
+    });
+
+    it('resets segmentContent to empty when no incomplete code block exists', () => {
+      dispatchMessage({ type: 'startResponse', messageId: 'msg-1' });
+
+      // Stream content with only a complete block (no trailing incomplete)
+      dispatchMessage({ type: 'streamToken', token: 'Hello ```python\npass\n``` done' });
+
+      dispatchMessage({
+        type: 'diffListChanged',
+        diffs: [{ filePath: 'file.py', status: 'applied' }]
+      });
+
+      (mockActors.virtualList.getBoundActor as ReturnType<typeof vi.fn>).mockReturnValue({
+        needsNewSegment: () => true
+      });
+
+      dispatchMessage({ type: 'streamToken', token: ' more text' });
+
+      // No carry-forward — starts fresh
+      expect(gateway.segmentContent).toBe(' more text');
+    });
+  });
+
   describe('lifecycle', () => {
     it('removes message listener on destroy', () => {
       const removeEventListenerSpy = vi.spyOn(window, 'removeEventListener');

@@ -429,9 +429,6 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         case 'setAutoSaveHistory':
           await this.settingsManager.updateSettings({ autoSaveHistory: data.enabled });
           break;
-        case 'setMaxSessions':
-          await this.settingsManager.updateSettings({ maxSessions: data.maxSessions });
-          break;
         case 'clearAllHistory':
           await this.clearAllHistory();
           break;

@@ -261,6 +261,29 @@ Budget management for the 128K context window. Defined in [src/context/contextBu
 
 When using estimation (`isExact = false`), applies a 10% safety margin to avoid overflowing the context window. WASM counts don't need this.
 
+### Token Count Cache
+
+ContextBuilder maintains an in-memory `Map<string, number>` that caches token counts keyed by stable IDs. This avoids re-tokenizing unchanged content on each `build()` call. Two types of content are cached:
+
+**Event messages** — keyed by `eventId` (from the event store):
+- Messages with an `eventId` field are eligible for caching
+- On first encounter, the message is tokenized and the count is stored: `eventId → tokenCount`
+- On subsequent `build()` calls, cached messages skip the `countMessage()` call entirely
+- Messages without `eventId` (e.g., tool messages created during the current request) are always tokenized fresh
+
+**Snapshot summaries** — keyed by `snapshotId`:
+- `getLatestSnapshotSummary()` returns a `SnapshotSummary` object containing the summary text, a pre-computed `tokenCount`, and the `snapshotId`
+- On first encounter, the pre-computed count from the snapshot is stored in the cache
+- On subsequent requests (same snapshot), the cached count is used directly — no tokenization at all
+- When a new snapshot is created (different `snapshotId`), it gets its own cache entry
+
+**Why in-memory (not DB):**
+- Cache dies on extension restart — no staleness risk if the tokenizer changes
+- No migration needed — just a `Map` on the class instance
+- Both event IDs and snapshot IDs are immutable — content never changes for a given ID
+
+**Logging:** `logger.debug('[Context] Token cache: X hits, Y misses')` when cache hits occur.
+
 ### Snapshot Summary Injection
 
 When messages are dropped, injects a synthetic user/assistant exchange at the start:

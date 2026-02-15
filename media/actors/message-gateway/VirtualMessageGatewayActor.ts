@@ -420,8 +420,23 @@ export class VirtualMessageGatewayActor extends EventStateActor {
     const boundActor = virtualList.getBoundActor(this._currentTurnId);
     if (boundActor?.needsNewSegment()) {
       log.debug('streamToken: resuming with new segment after interleave');
+
+      // Carry forward any incomplete code block from the finalized segment.
+      // When a chunk spans the closing ``` of one block and the opening ``` of the next,
+      // the segment is finalized with the opening ``` inside it. Without carry-forward,
+      // the new segment would miss the opening ``` and render code as raw text.
+      // Use fence-counting: odd number of ``` = last one is an opening fence.
+      const isReasonerMode = session.model === 'deepseek-reasoner';
+      const displayContent = isReasonerMode
+        ? this._segmentContent.replace(/<shell>[\s\S]*?<\/shell>/gi, '').trim()
+        : this._segmentContent;
+      const fences = [...displayContent.matchAll(/```/g)];
+      const hasIncompleteFence = fences.length % 2 === 1;
+
       virtualList.resumeWithNewSegment(this._currentTurnId);
-      this._segmentContent = '';
+      this._segmentContent = hasIncompleteFence
+        ? displayContent.substring(fences[fences.length - 1].index!)
+        : '';
       this._hasInterleaved = false;
     }
 
@@ -984,8 +999,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       creditsPerPrompt: webSearch?.creditsPerPrompt,
       maxResultsPerSearch: webSearch?.maxResultsPerSearch,
       cacheDuration: webSearch?.cacheDuration,
-      autoSaveHistory: msg.autoSaveHistory,
-      maxSessions: msg.maxSessions
+      autoSaveHistory: msg.autoSaveHistory
     });
   }
 

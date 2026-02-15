@@ -8,7 +8,7 @@
  * Key concepts:
  * - Snapshots are created periodically (every N events)
  * - Each snapshot summarizes events UP TO a certain sequence
- * - Only recent snapshots are kept (old ones pruned)
+ * - All snapshots are kept (cleaned up when session is deleted)
  * - Snapshots can be generated via LLM or simple extraction
  */
 
@@ -75,14 +75,12 @@ export class SnapshotManager {
 
   // Configuration
   private readonly SNAPSHOT_INTERVAL: number;
-  private readonly MAX_SNAPSHOTS_PER_SESSION: number;
 
   // Prepared statements
   private stmtInsertSnapshot!: Statement;
   private stmtGetLatestSnapshot!: Statement;
   private stmtGetSnapshotById!: Statement;
   private stmtGetAllSnapshots!: Statement;
-  private stmtDeleteOldSnapshots!: Statement;
   private stmtDeleteSessionSnapshots!: Statement;
 
   constructor(
@@ -91,16 +89,14 @@ export class SnapshotManager {
     summarizer: SummarizerFn,
     options?: {
       snapshotInterval?: number;
-      maxSnapshotsPerSession?: number;
     }
   ) {
     this.db = db;
     this.eventStore = eventStore;
     this.summarizer = summarizer;
 
-    // Default: create snapshot every 20 events, keep max 5 per session
+    // Default: create snapshot every 20 events
     this.SNAPSHOT_INTERVAL = options?.snapshotInterval ?? 20;
-    this.MAX_SNAPSHOTS_PER_SESSION = options?.maxSnapshotsPerSession ?? 5;
 
     this.initSchema();
     this.prepareStatements();
@@ -154,17 +150,6 @@ export class SnapshotManager {
       FROM snapshots s
       LEFT JOIN sessions sess ON s.session_id = sess.id
       ORDER BY s.timestamp DESC
-    `);
-
-    this.stmtDeleteOldSnapshots = this.db.prepare(`
-      DELETE FROM snapshots
-      WHERE session_id = ?
-      AND id NOT IN (
-        SELECT id FROM snapshots
-        WHERE session_id = ?
-        ORDER BY up_to_sequence DESC
-        LIMIT ?
-      )
     `);
 
     this.stmtDeleteSessionSnapshots = this.db.prepare(`
@@ -254,9 +239,6 @@ export class SnapshotManager {
       snapshot.tokenCount
     );
 
-    // Prune old snapshots
-    this.pruneSnapshots(sessionId);
-
     return snapshot;
   }
 
@@ -305,22 +287,6 @@ export class SnapshotManager {
     this.stmtDeleteSessionSnapshots.run(sessionId);
   }
 
-  /**
-   * Keep only the most recent snapshots per session.
-   *
-   * @param sessionId - Session to prune
-   */
-  private pruneSnapshots(sessionId: string): void {
-    logger.debug(
-      `[Snapshot] Pruning snapshots (keep=${this.MAX_SNAPSHOTS_PER_SESSION})` +
-      ` | session=${sessionId.substring(0, 8)}`
-    );
-    this.stmtDeleteOldSnapshots.run(
-      sessionId,
-      sessionId,
-      this.MAX_SNAPSHOTS_PER_SESSION
-    );
-  }
 
   /**
    * Convert a database row to a Snapshot object.

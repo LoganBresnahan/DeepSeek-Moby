@@ -80,8 +80,6 @@ export interface ConversationManagerOptions {
   encryptionKey?: string;
   /** Event interval for auto-snapshot (default: 20) */
   snapshotInterval?: number;
-  /** Max snapshots to keep per session (default: 5) */
-  maxSnapshotsPerSession?: number;
   /** Custom summarizer function (default: extractive). Use createLLMSummarizer() for LLM-powered summaries. */
   summarizer?: SummarizerFn;
 }
@@ -131,8 +129,7 @@ export class ConversationManager {
       this.eventStore,
       this.options?.summarizer ?? createExtractSummarizer(),
       {
-        snapshotInterval: this.options?.snapshotInterval,
-        maxSnapshotsPerSession: this.options?.maxSnapshotsPerSession
+        snapshotInterval: this.options?.snapshotInterval
       }
     );
     // Prepare session statements
@@ -538,7 +535,7 @@ export class ConversationManager {
   /**
    * Get messages for a specific session in the old format.
    */
-  async getSessionMessagesCompat(sessionId: string): Promise<Array<{ role: 'user' | 'assistant'; content: string; timestamp: Date }>> {
+  async getSessionMessagesCompat(sessionId: string): Promise<Array<{ role: 'user' | 'assistant'; content: string; timestamp: Date; eventId: string }>> {
     const events = this.eventStore.getEventsByType(
       sessionId,
       ['user_message', 'assistant_message']
@@ -547,7 +544,8 @@ export class ConversationManager {
     return events.map(e => ({
       role: e.type === 'user_message' ? 'user' as const : 'assistant' as const,
       content: (e as any).content,
-      timestamp: new Date(e.timestamp)
+      timestamp: new Date(e.timestamp),
+      eventId: e.id
     }));
   }
 
@@ -957,9 +955,12 @@ export class ConversationManager {
   /**
    * Get the latest snapshot summary for a session.
    * Used by ContextBuilder to inject context when old messages are dropped.
+   * Returns summary text, pre-computed token count, and snapshot ID for caching.
    */
-  getLatestSnapshotSummary(sessionId: string): string | undefined {
-    return this.snapshotManager.getLatestSnapshot(sessionId)?.summary;
+  getLatestSnapshotSummary(sessionId: string): { summary: string; tokenCount: number; snapshotId: string } | undefined {
+    const snapshot = this.snapshotManager.getLatestSnapshot(sessionId);
+    if (!snapshot) return undefined;
+    return { summary: snapshot.summary, tokenCount: snapshot.tokenCount, snapshotId: snapshot.id };
   }
 
   /**
