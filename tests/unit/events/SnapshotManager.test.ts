@@ -7,7 +7,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { Database } from '../../../src/events/SqlJsWrapper';
 import { EventStore } from '../../../src/events/EventStore';
-import { SnapshotManager, createExtractSummarizer } from '../../../src/events/SnapshotManager';
+import { SnapshotManager, createExtractSummarizer, createLLMSummarizer } from '../../../src/events/SnapshotManager';
+import type { SummarizerChatFn } from '../../../src/events/SnapshotManager';
 
 describe('SnapshotManager', () => {
   let db: Database;
@@ -341,5 +342,289 @@ describe('createExtractSummarizer', () => {
     const result = await summarizer(events);
 
     expect(result.filesModified).toContain('src/auth.ts');
+  });
+
+  it('should handle empty events array', async () => {
+    const summarizer = createExtractSummarizer();
+
+    const result = await summarizer([]);
+
+    expect(result.summary).toBe('Empty conversation');
+    expect(result.keyFacts).toEqual([]);
+    expect(result.filesModified).toEqual([]);
+    expect(result.tokenCount).toBeGreaterThan(0);
+  });
+});
+
+describe('createLLMSummarizer', () => {
+  /** Helper to create a mock chat function that records calls */
+  function createMockChat(response: string = 'Summary of conversation') {
+    const calls: Array<{ messages: any[]; systemPrompt?: string; options?: any }> = [];
+    const chatFn: SummarizerChatFn = async (messages, systemPrompt, options) => {
+      calls.push({ messages, systemPrompt, options });
+      return { content: response };
+    };
+    return { chatFn, calls };
+  }
+
+  const sampleEvents = [
+    {
+      id: '1',
+      sessionId: 'session-1',
+      sequence: 1,
+      timestamp: Date.now(),
+      type: 'user_message' as const,
+      content: 'Help me fix the login bug in auth.ts'
+    },
+    {
+      id: '2',
+      sessionId: 'session-1',
+      sequence: 2,
+      timestamp: Date.now(),
+      type: 'assistant_message' as const,
+      content: 'I found the issue in the validateToken function',
+      model: 'deepseek-chat',
+      finishReason: 'stop' as const
+    },
+    {
+      id: '3',
+      sessionId: 'session-1',
+      sequence: 3,
+      timestamp: Date.now(),
+      type: 'diff_created' as const,
+      diffId: 'diff-1',
+      filePath: 'src/auth.ts',
+      originalContent: 'old code',
+      newContent: 'new code'
+    }
+  ];
+
+  it('should call chatFn with first-summary prompt when no previous summary', async () => {
+    const { chatFn, calls } = createMockChat();
+    const summarizer = createLLMSummarizer(chatFn);
+
+    await summarizer(sampleEvents);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].messages).toHaveLength(1);
+    expect(calls[0].messages[0].role).toBe('user');
+    expect(calls[0].messages[0].content).toContain('Conversation:');
+    expect(calls[0].messages[0].content).toContain('Help me fix the login bug');
+    expect(calls[0].systemPrompt).toContain('Summarize the following conversation');
+    expect(calls[0].systemPrompt).not.toContain('Previous summary');
+  });
+
+  it('should call chatFn with chained prompt when previous summary exists', async () => {
+    const { chatFn, calls } = createMockChat();
+    const summarizer = createLLMSummarizer(chatFn);
+
+    await summarizer(sampleEvents, 'Previous: user was fixing auth bugs');
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].messages[0].content).toContain('Previous summary:');
+    expect(calls[0].messages[0].content).toContain('Previous: user was fixing auth bugs');
+    expect(calls[0].messages[0].content).toContain('New messages since then:');
+    expect(calls[0].systemPrompt).toContain('updated summary');
+  });
+
+  it('should return LLM response as summary', async () => {
+    const { chatFn } = createMockChat('The user is fixing a login bug in auth.ts');
+    const summarizer = createLLMSummarizer(chatFn);
+
+    const result = await summarizer(sampleEvents);
+
+    expect(result.summary).toBe('The user is fixing a login bug in auth.ts');
+  });
+
+  it('should extract filesModified from events', async () => {
+    const { chatFn } = createMockChat();
+    const summarizer = createLLMSummarizer(chatFn);
+
+    const result = await summarizer(sampleEvents);
+
+    expect(result.filesModified).toContain('src/auth.ts');
+  });
+
+  it('should extract keyFacts from user messages', async () => {
+    const { chatFn } = createMockChat();
+    const summarizer = createLLMSummarizer(chatFn);
+
+    const result = await summarizer(sampleEvents);
+
+    expect(result.keyFacts).toHaveLength(1);
+    expect(result.keyFacts[0]).toContain('Help me fix the login bug');
+  });
+
+  it('should estimate token count from summary length', async () => {
+    const longSummary = 'A'.repeat(400); // 400 chars ≈ 100 tokens
+    const { chatFn } = createMockChat(longSummary);
+    const summarizer = createLLMSummarizer(chatFn);
+
+    const result = await summarizer(sampleEvents);
+
+    expect(result.tokenCount).toBe(100);
+  });
+
+  it('should pass maxTokens and temperature to chatFn', async () => {
+    const { chatFn, calls } = createMockChat();
+    const summarizer = createLLMSummarizer(chatFn, 2000);
+
+    await summarizer(sampleEvents);
+
+    expect(calls[0].options).toEqual({ maxTokens: 2000, temperature: 0.3 });
+  });
+
+  it('should format different event types correctly', async () => {
+    const { chatFn, calls } = createMockChat();
+    const summarizer = createLLMSummarizer(chatFn);
+
+    const events = [
+      {
+        id: '1', sessionId: 's1', sequence: 1, timestamp: Date.now(),
+        type: 'user_message' as const, content: 'Hello'
+      },
+      {
+        id: '2', sessionId: 's1', sequence: 2, timestamp: Date.now(),
+        type: 'tool_call' as const, toolCallId: 'tc1', toolName: 'read_file',
+        arguments: { path: 'test.ts' }
+      },
+      {
+        id: '3', sessionId: 's1', sequence: 3, timestamp: Date.now(),
+        type: 'tool_result' as const, toolCallId: 'tc1',
+        result: 'file contents here', success: true
+      },
+      {
+        id: '4', sessionId: 's1', sequence: 4, timestamp: Date.now(),
+        type: 'web_search' as const, query: 'typescript generics',
+        resultCount: 5, resultsPreview: ['result1']
+      },
+      {
+        id: '5', sessionId: 's1', sequence: 5, timestamp: Date.now(),
+        type: 'assistant_message' as const, content: 'Here is the answer',
+        model: 'deepseek-chat', finishReason: 'stop' as const
+      }
+    ];
+
+    await summarizer(events);
+
+    const prompt = calls[0].messages[0].content;
+    expect(prompt).toContain('User: Hello');
+    expect(prompt).toContain('[Tool: read_file]');
+    expect(prompt).toContain('[Tool result: success');
+    expect(prompt).toContain('[Web search: typescript generics]');
+    expect(prompt).toContain('Assistant: Here is the answer');
+  });
+
+  it('should truncate long tool results', async () => {
+    const { chatFn, calls } = createMockChat();
+    const summarizer = createLLMSummarizer(chatFn);
+
+    const events = [
+      {
+        id: '1', sessionId: 's1', sequence: 1, timestamp: Date.now(),
+        type: 'tool_result' as const, toolCallId: 'tc1',
+        result: 'x'.repeat(500), success: true
+      }
+    ];
+
+    await summarizer(events);
+
+    const prompt = calls[0].messages[0].content;
+    expect(prompt).toContain('...');
+    // Should be truncated, not the full 500 chars
+    expect(prompt.length).toBeLessThan(500);
+  });
+
+  it('should propagate chatFn errors', async () => {
+    const failingChatFn: SummarizerChatFn = async () => {
+      throw new Error('LLM API unavailable');
+    };
+    const summarizer = createLLMSummarizer(failingChatFn);
+
+    await expect(summarizer(sampleEvents)).rejects.toThrow('LLM API unavailable');
+  });
+
+  it('should handle empty events array', async () => {
+    const { chatFn, calls } = createMockChat();
+    const summarizer = createLLMSummarizer(chatFn);
+
+    const result = await summarizer([]);
+
+    expect(calls).toHaveLength(1);
+    expect(result.summary).toBe('Summary of conversation');
+    expect(result.filesModified).toEqual([]);
+    expect(result.keyFacts).toEqual([]);
+  });
+});
+
+describe('SnapshotManager with chaining', () => {
+  let db: Database;
+  let eventStore: EventStore;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS sessions (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        model TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        event_count INTEGER DEFAULT 0,
+        last_snapshot_sequence INTEGER DEFAULT 0,
+        tags TEXT DEFAULT '[]',
+        first_user_message TEXT,
+        last_activity_preview TEXT
+      );
+    `);
+    eventStore = new EventStore(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('should pass previous summary to summarizer on second snapshot', async () => {
+    const calls: Array<{ events: any[]; previousSummary?: string }> = [];
+    const trackingSummarizer = async (events: any[], previousSummary?: string) => {
+      calls.push({ events, previousSummary });
+      return {
+        summary: `Summary #${calls.length}`,
+        keyFacts: [],
+        filesModified: [],
+        tokenCount: 50
+      };
+    };
+
+    const snapshotManager = new SnapshotManager(
+      db, eventStore, trackingSummarizer,
+      { snapshotInterval: 3 }
+    );
+
+    // Create first batch of events + snapshot
+    for (let i = 0; i < 3; i++) {
+      eventStore.append({
+        sessionId: 'session-1', timestamp: Date.now(),
+        type: 'user_message', content: `First batch ${i}`
+      });
+    }
+    await snapshotManager.createSnapshot('session-1');
+
+    // Create second batch of events + snapshot
+    for (let i = 0; i < 3; i++) {
+      eventStore.append({
+        sessionId: 'session-1', timestamp: Date.now(),
+        type: 'user_message', content: `Second batch ${i}`
+      });
+    }
+    await snapshotManager.createSnapshot('session-1');
+
+    // First call: no previous summary
+    expect(calls[0].previousSummary).toBeUndefined();
+    expect(calls[0].events).toHaveLength(3);
+
+    // Second call: previous summary from first snapshot
+    expect(calls[1].previousSummary).toBe('Summary #1');
+    expect(calls[1].events).toHaveLength(3); // Only events since last snapshot
   });
 });

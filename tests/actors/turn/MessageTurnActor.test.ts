@@ -482,6 +482,77 @@ describe('MessageTurnActor', () => {
       const item = queryInShadow(containers[0], '.pending-item');
       expect(item?.getAttribute('data-status')).toBe('applied');
     });
+
+    it('creates separate pending containers per tool batch', () => {
+      actor.setEditMode('auto');
+
+      // First tool batch + modified file
+      actor.startToolBatch([{ name: 'apply_code_edit', detail: 'file1.ts' }]);
+      actor.completeToolBatch();
+      actor.addPendingFile({ filePath: 'src/file1.ts', status: 'applied' });
+
+      // Second tool batch + modified file
+      actor.startToolBatch([{ name: 'apply_code_edit', detail: 'file2.ts' }]);
+      actor.completeToolBatch();
+      actor.addPendingFile({ filePath: 'src/file2.ts', status: 'applied' });
+
+      const containers = findContainers('pending');
+      expect(containers.length).toBe(2);
+      // Each should have 1 file
+      containers.forEach(c => {
+        const items = c.shadowRoot?.querySelectorAll('.pending-item');
+        expect(items?.length).toBe(1);
+      });
+    });
+
+    it('groups consecutive pending files in same container', () => {
+      actor.setEditMode('auto');
+
+      actor.startToolBatch([{ name: 'apply_code_edit', detail: 'files' }]);
+      actor.completeToolBatch();
+      actor.addPendingFile({ filePath: 'src/file1.ts', status: 'applied' });
+      actor.addPendingFile({ filePath: 'src/file2.ts', status: 'applied' });
+
+      const containers = findContainers('pending');
+      expect(containers.length).toBe(1);
+      const items = containers[0].shadowRoot?.querySelectorAll('.pending-item');
+      expect(items?.length).toBe(2);
+    });
+
+    it('creates separate containers with shell segments between pending files', () => {
+      actor.setEditMode('auto');
+
+      // R1 flow: code blocks → shell → code blocks
+      actor.addPendingFile({ filePath: 'src/a.ts', status: 'applied' });
+      actor.createShellSegment([{ command: 'ls' }]);
+      actor.addPendingFile({ filePath: 'src/b.ts', status: 'applied' });
+
+      const containers = findContainers('pending');
+      expect(containers.length).toBe(2);
+    });
+
+    it('updates status across multiple pending groups', () => {
+      actor.setEditMode('auto');
+
+      actor.startToolBatch([{ name: 'edit', detail: 'f1' }]);
+      actor.completeToolBatch();
+      const id1 = actor.addPendingFile({ filePath: 'src/f1.ts', status: 'applied' });
+
+      actor.startToolBatch([{ name: 'edit', detail: 'f2' }]);
+      actor.completeToolBatch();
+      const id2 = actor.addPendingFile({ filePath: 'src/f2.ts', status: 'applied' });
+
+      // Update status of file in second group
+      actor.updatePendingStatus(id2, 'rejected');
+
+      const containers = findContainers('pending');
+      const item2 = containers[1].shadowRoot?.querySelector('.pending-item');
+      expect(item2?.getAttribute('data-status')).toBe('rejected');
+
+      // First group should be unchanged
+      const item1 = containers[0].shadowRoot?.querySelector('.pending-item');
+      expect(item1?.getAttribute('data-status')).toBe('applied');
+    });
   });
 
   // ============================================

@@ -116,44 +116,74 @@ Events are strongly typed and capture all conversation interactions:
 
 ## Snapshots: Context Compression
 
-For long conversations, we can't send all events to the LLM (context window limits). Snapshots solve this by periodically summarizing events:
+For long conversations, we can't send all events to the LLM (128K context window). Snapshots solve this by summarizing events into compact summaries that ContextBuilder injects when older messages are dropped.
+
+### Trigger: Proactive Context Pressure
+
+Snapshots are **not** created on every event append. Instead, `RequestOrchestrator` checks context usage after each response:
+
+```
+Response saved to history
+         │
+         ▼
+   usageRatio = tokenCount / budget
+         │
+         ├─► > 80% AND !hasFreshSummary()
+         │       │
+         │       ├─► _onSummarizationStarted.fire()
+         │       ├─► conversationManager.createSnapshot(sessionId)
+         │       └─► _onSummarizationCompleted.fire()
+         │
+         └─► ≤ 80% OR hasFreshSummary() → skip
+```
+
+- **File:** `src/providers/requestOrchestrator.ts` (lines 334-361)
+- **Threshold:** 80% context usage
+- **Guard:** `hasFreshSummary()` prevents re-triggering if the latest snapshot covers within 5 events of the current sequence
+
+### Summarizer Strategy: LLM with Chaining
+
+Two summarizer implementations are available (`src/events/SnapshotManager.ts`):
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                            Snapshot Strategy                                 │
+│                    LLM Summarizer (createLLMSummarizer)                       │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
-│  Events Timeline                                                             │
-│  ┌────┬────┬────┬────┬────┬────┬────┬────┬────┬────┬────┬────┬────┬────┐   │
-│  │ E1 │ E2 │ E3 │ E4 │ E5 │ E6 │ E7 │ E8 │ E9 │E10 │E11 │E12 │E13 │E14 │   │
-│  └────┴────┴────┴────┴────┴────┴────┴────┴────┴────┴────┴────┴────┴────┘   │
-│       │                   │                   │                   │          │
-│       └───────────────────┼───────────────────┼───────────────────┘          │
-│                           │                   │                              │
-│                           ▼                   ▼                              │
-│                    ┌────────────┐      ┌────────────┐                        │
-│                    │ Snapshot 1 │      │ Snapshot 2 │                        │
-│                    │ (E1-E5)    │      │ (E6-E10)   │                        │
-│                    └────────────┘      └────────────┘                        │
+│  First snapshot:                                                             │
+│  ┌────────────────────────────────────────────────────────┐                 │
+│  │  [all events E1..EN] ──► LLM ──► Snapshot 1            │                 │
+│  └────────────────────────────────────────────────────────┘                 │
 │                                                                              │
-│  Building LLM Context                                                        │
-│  ┌─────────────────────────────────────────────────────────────────┐        │
-│  │                                                                  │        │
-│  │  Option A: Recent events only (small context)                   │        │
-│  │  ├── E11, E12, E13, E14                                          │        │
-│  │                                                                  │        │
-│  │  Option B: Snapshot + recent events (medium context)            │        │
-│  │  ├── Snapshot 2 summary                                          │        │
-│  │  ├── E11, E12, E13, E14                                          │        │
-│  │                                                                  │        │
-│  │  Option C: Multiple snapshots + events (large context)          │        │
-│  │  ├── Snapshot 1 summary                                          │        │
-│  │  ├── Snapshot 2 summary                                          │        │
-│  │  ├── E11, E12, E13, E14                                          │        │
-│  │                                                                  │        │
-│  └─────────────────────────────────────────────────────────────────┘        │
+│  Subsequent snapshots (chaining):                                            │
+│  ┌────────────────────────────────────────────────────────┐                 │
+│  │  [Snapshot 1 summary] + [new events EN+1..EM]          │                 │
+│  │        ──► LLM ──► Snapshot 2                          │                 │
+│  └────────────────────────────────────────────────────────┘                 │
+│                                                                              │
+│  Bounded input: O(1) per cycle — only previous summary + delta events       │
+│                                                                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                  Extractive Summarizer (createExtractSummarizer)              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  No LLM needed — extracts key facts, user topics, and file modifications    │
+│  from events using pattern matching. Used as fallback.                       │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
+```
+
+Both implement `SummarizerFn`:
+```typescript
+type SummarizerFn = (events: ConversationEvent[], previousSummary?: string) => Promise<SnapshotContent>;
+```
+
+The `SummarizerChatFn` interface keeps the events module dependency-free from `DeepSeekClient`:
+```typescript
+interface SummarizerChatFn {
+  (messages: Array<{ role: string; content: string }>, systemPrompt?: string,
+   options?: { maxTokens?: number; temperature?: number }): Promise<{ content: string }>;
+}
 ```
 
 ### Snapshot Content
@@ -163,7 +193,7 @@ interface Snapshot {
   id: string;
   sessionId: string;
   upToSequence: number;      // Events 1..N are summarized
-  createdAt: number;
+  timestamp: number;
 
   // Summarized content
   summary: string;           // Natural language summary
@@ -173,7 +203,7 @@ interface Snapshot {
 }
 ```
 
-### Auto-Snapshot Configuration
+### Snapshot Configuration
 
 ```typescript
 // Default: snapshot every 20 events, keep max 5 per session
@@ -181,10 +211,24 @@ const snapshotManager = new SnapshotManager(db, eventStore, summarizer, {
   snapshotInterval: 20,        // Events between snapshots
   maxSnapshotsPerSession: 5    // Old snapshots are pruned
 });
-
-// On every event append, check if snapshot needed
-await snapshotManager.maybeCreateSnapshot(sessionId);
 ```
+
+### Message Queuing During Summarization
+
+When the proactive trigger fires, ChatProvider queues any incoming user messages until summarization completes:
+
+```
+User sends message during summarization
+         │
+         ├─► _summarizing === true
+         │       └─► Push to _pendingMessages[]
+         │           └─► Show "Queued — optimizing context..."
+         │
+         └─► Summarization completes
+                 └─► drainQueue() processes pending messages sequentially
+```
+
+- **File:** `src/providers/chatProvider.ts` (lines 27-28, 280-294, 590-603)
 
 ## Initialization
 

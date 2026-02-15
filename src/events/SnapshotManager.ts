@@ -15,6 +15,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { Database } from './SqlJsWrapper';
 import { EventStore } from './EventStore';
+import { logger } from '../utils/logger';
 import {
   ConversationEvent,
   isUserMessageEvent,
@@ -61,8 +62,11 @@ export interface SnapshotContent {
 /**
  * Function type for generating snapshot summaries.
  * Can be simple extraction or LLM-powered.
+ *
+ * @param events - Events to summarize (since last snapshot, or all if first)
+ * @param previousSummary - Summary from the previous snapshot, if chaining
  */
-export type SummarizerFn = (events: ConversationEvent[]) => Promise<SnapshotContent>;
+export type SummarizerFn = (events: ConversationEvent[], previousSummary?: string) => Promise<SnapshotContent>;
 
 export class SnapshotManager {
   private db: Database;
@@ -182,6 +186,11 @@ export class SnapshotManager {
     const eventsSinceSnapshot = latestSeq - (lastSnapshot?.upToSequence ?? 0);
 
     if (eventsSinceSnapshot < this.SNAPSHOT_INTERVAL) {
+      logger.debug(
+        `[Snapshot] maybeCreateSnapshot skipped` +
+        ` | events=${eventsSinceSnapshot}/${this.SNAPSHOT_INTERVAL}` +
+        ` | session=${sessionId.substring(0, 8)}`
+      );
       return null;
     }
 
@@ -202,8 +211,18 @@ export class SnapshotManager {
     // Get events since last snapshot
     const events = this.eventStore.getEvents(sessionId, fromSeq);
 
-    // Generate summary
-    const content = await this.summarizer(events);
+    logger.info(
+      `[Snapshot] Creating snapshot for session=${sessionId.substring(0, 8)}` +
+      ` | events=${events.length} (seq ${fromSeq + 1}..${latestSeq})` +
+      ` | chained=${!!lastSnapshot}`
+    );
+
+    const startTime = Date.now();
+
+    // Generate summary (pass previous summary for chaining)
+    const content = await this.summarizer(events, lastSnapshot?.summary);
+
+    const duration = Date.now() - startTime;
 
     const snapshot: Snapshot = {
       id: uuidv4(),
@@ -215,6 +234,13 @@ export class SnapshotManager {
       filesModified: content.filesModified,
       tokenCount: content.tokenCount
     };
+
+    logger.info(
+      `[Snapshot] Created in ${duration}ms` +
+      ` | summary=${content.summary.length} chars (~${content.tokenCount} tokens)` +
+      ` | files=${content.filesModified.length}` +
+      ` | facts=${content.keyFacts.length}`
+    );
 
     // Store the snapshot
     this.stmtInsertSnapshot.run(
@@ -285,6 +311,10 @@ export class SnapshotManager {
    * @param sessionId - Session to prune
    */
   private pruneSnapshots(sessionId: string): void {
+    logger.debug(
+      `[Snapshot] Pruning snapshots (keep=${this.MAX_SNAPSHOTS_PER_SESSION})` +
+      ` | session=${sessionId.substring(0, 8)}`
+    );
     this.stmtDeleteOldSnapshots.run(
       sessionId,
       sessionId,
@@ -310,6 +340,164 @@ export class SnapshotManager {
 }
 
 // ============================================================================
+// LLM-Powered Summarizer (with Chaining)
+// ============================================================================
+
+/**
+ * Minimal chat function interface for the LLM summarizer.
+ * Keeps the events module independent of DeepSeekClient.
+ */
+export interface SummarizerChatFn {
+  (messages: Array<{ role: string; content: string }>, systemPrompt?: string, options?: { maxTokens?: number; temperature?: number }): Promise<{ content: string }>;
+}
+
+const FIRST_SUMMARY_PROMPT = `Summarize the following conversation history. Your summary will be injected as context at the start of future requests in this conversation when older messages are dropped to fit the context window.
+
+Include:
+- What the user is working on and their goals
+- Key decisions made and their rationale
+- Current state of any code changes (files modified, what was done)
+- Any constraints or preferences the user expressed
+- Important technical details that would be needed to continue the conversation
+
+Be concise but thorough. Focus on information that would be lost if the original messages were dropped.`;
+
+const CHAINED_SUMMARY_PROMPT = `Below is a summary of the earlier portion of this conversation, followed by the new messages since that summary was created. Produce an updated summary that incorporates both.
+
+Your summary will be injected as context at the start of future requests when older messages are dropped to fit the context window.
+
+Preserve important details from the previous summary while integrating new information. If new messages contradict or supersede earlier decisions, reflect the current state.`;
+
+/**
+ * Format conversation events into a readable text block for the LLM.
+ * Focuses on the conversation flow: messages, tool usage, and file edits.
+ */
+function formatEventsForSummary(events: ConversationEvent[]): string {
+  const parts: string[] = [];
+
+  for (const event of events) {
+    switch (event.type) {
+      case 'user_message':
+        parts.push(`User: ${event.content}`);
+        break;
+      case 'assistant_message':
+        parts.push(`Assistant: ${event.content}`);
+        break;
+      case 'tool_call':
+        parts.push(`[Tool: ${event.toolName}]`);
+        break;
+      case 'tool_result':
+        // Truncate long tool results
+        const result = event.result.length > 200
+          ? event.result.substring(0, 200) + '...'
+          : event.result;
+        parts.push(`[Tool result: ${event.success ? 'success' : 'error'} — ${result}]`);
+        break;
+      case 'diff_created':
+        parts.push(`[File edit: ${event.filePath}]`);
+        break;
+      case 'diff_accepted':
+        parts.push(`[Change accepted]`);
+        break;
+      case 'web_search':
+        parts.push(`[Web search: ${event.query}]`);
+        break;
+      // Skip: assistant_reasoning, diff_rejected, file_read, file_write, errors, session events
+    }
+  }
+
+  return parts.join('\n');
+}
+
+/**
+ * LLM-powered summarizer with chaining support.
+ *
+ * First call: summarizes all raw events.
+ * Subsequent calls: takes previous summary + new events, produces updated summary.
+ * This bounds summarizer input to O(1) per cycle instead of O(n).
+ *
+ * @param chatFn - Function that calls the LLM (wraps DeepSeekClient.chat())
+ * @param maxTokens - Max output tokens for the summary (default: 4000)
+ */
+export function createLLMSummarizer(chatFn: SummarizerChatFn, maxTokens: number = 4000): SummarizerFn {
+  return async (events: ConversationEvent[], previousSummary?: string): Promise<SnapshotContent> => {
+    const conversationText = formatEventsForSummary(events);
+    const mode = previousSummary ? 'chained' : 'first';
+
+    let userPrompt: string;
+    if (previousSummary) {
+      // Chained summarization
+      userPrompt = `Previous summary:\n${previousSummary}\n\nNew messages since then:\n${conversationText}`;
+    } else {
+      // First summarization
+      userPrompt = `Conversation:\n${conversationText}`;
+    }
+
+    const systemPrompt = previousSummary ? CHAINED_SUMMARY_PROMPT : FIRST_SUMMARY_PROMPT;
+    const promptChars = userPrompt.length + systemPrompt.length;
+
+    logger.info(
+      `[Snapshot] LLM summarize (${mode})` +
+      ` | input=${promptChars.toLocaleString()} chars (~${Math.ceil(promptChars / 4).toLocaleString()} tokens)` +
+      ` | events=${events.length}`
+    );
+
+    const startTime = Date.now();
+
+    let response: { content: string };
+    try {
+      response = await chatFn(
+        [{ role: 'user', content: userPrompt }],
+        systemPrompt,
+        { maxTokens, temperature: 0.3 }
+      );
+    } catch (error: any) {
+      logger.error(`[Snapshot] LLM summarize failed: ${error.message}`);
+      throw error;
+    }
+
+    const duration = Date.now() - startTime;
+    const summary = response.content;
+
+    logger.info(
+      `[Snapshot] LLM summarize complete in ${duration}ms` +
+      ` | output=${summary.length} chars (~${Math.ceil(summary.length / 4)} tokens)`
+    );
+
+    // Extract files modified from the events (same logic as extractive)
+    const filesModified = new Set<string>();
+    events.forEach(event => {
+      if (event.type === 'diff_created') {
+        filesModified.add(event.filePath);
+      }
+      if ((event.type === 'diff_accepted' || event.type === 'file_write') && 'filePath' in event) {
+        const filePath = (event as any).filePath;
+        if (filePath) filesModified.add(filePath);
+      }
+    });
+
+    // Extract key facts from user messages
+    const userMessages = events.filter(isUserMessageEvent);
+    const keyFacts = userMessages
+      .slice(0, 5)
+      .map(e => {
+        const content = e.content.substring(0, 100);
+        return content + (e.content.length > 100 ? '...' : '');
+      });
+
+    // Estimate token count (~4 chars per token for DeepSeek BPE)
+    const tokenCount = Math.ceil(summary.length / 4);
+
+    return {
+      summary,
+      keyFacts,
+      filesModified: Array.from(filesModified),
+      tokenCount
+    };
+  };
+}
+
+// ============================================================================
 // Default Summarizer (Simple Extraction)
 // ============================================================================
 
@@ -319,6 +507,7 @@ export class SnapshotManager {
  */
 export function createExtractSummarizer(): SummarizerFn {
   return async (events: ConversationEvent[]): Promise<SnapshotContent> => {
+    logger.debug(`[Snapshot] Extractive summarizer called | events=${events.length}`);
     // Collect user messages
     const userMessages = events.filter(isUserMessageEvent);
 
@@ -353,6 +542,12 @@ export function createExtractSummarizer(): SummarizerFn {
 
     // Estimate token count (~4 chars per token)
     const tokenCount = Math.ceil(summary.length / 4);
+
+    logger.debug(
+      `[Snapshot] Extractive summarizer complete` +
+      ` | summary=${summary.length} chars (~${tokenCount} tokens)` +
+      ` | files=${filesModified.size} | facts=${keyFacts.length}`
+    );
 
     return {
       summary,

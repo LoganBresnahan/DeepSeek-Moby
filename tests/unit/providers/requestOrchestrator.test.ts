@@ -32,7 +32,8 @@ vi.mock('vscode', async (importOriginal) => {
           const defaults: Record<string, any> = {
             'systemPrompt': '',
             'editMode': 'manual',
-            'maxToolCalls': 25,
+            'maxToolCalls': 100,
+            'maxShellIterations': 100,
             'allowAllShellCommands': false,
           };
           return defaults[key] ?? defaultValue;
@@ -138,6 +139,8 @@ function createMockConversationManager() {
     switchToSession: vi.fn(),
     getSessionRichHistory: vi.fn(async () => []),
     getAllSessions: vi.fn(async () => []),
+    hasFreshSummary: vi.fn(() => false),
+    createSnapshot: vi.fn(async () => {}),
   };
 }
 
@@ -680,6 +683,120 @@ describe('RequestOrchestrator', () => {
 
       // chat() is used by the tool loop; it should not be called for reasoner
       expect(mockClient.chat).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── Proactive Context Compression ──
+
+  describe('handleMessage - proactive context compression', () => {
+    it('should trigger summarization when context usage exceeds 80%', async () => {
+      // Set buildContext to return >80% usage
+      mockClient.buildContext.mockResolvedValue({
+        messages: [{ role: 'user', content: 'Hello' }],
+        tokenCount: 9000,
+        budget: 10000
+      });
+      mockConversation.hasFreshSummary.mockReturnValue(false);
+
+      const startEvents: void[] = [];
+      const completeEvents: void[] = [];
+      orchestrator.onSummarizationStarted(() => startEvents.push(undefined));
+      orchestrator.onSummarizationCompleted(() => completeEvents.push(undefined));
+
+      await orchestrator.handleMessage('Hello', 'session-1', async () => '', undefined);
+
+      expect(mockConversation.createSnapshot).toHaveBeenCalledWith('session-1');
+      expect(startEvents).toHaveLength(1);
+      expect(completeEvents).toHaveLength(1);
+    });
+
+    it('should NOT trigger summarization when context usage is below 80%', async () => {
+      // Set buildContext to return <80% usage
+      mockClient.buildContext.mockResolvedValue({
+        messages: [{ role: 'user', content: 'Hello' }],
+        tokenCount: 5000,
+        budget: 10000
+      });
+
+      await orchestrator.handleMessage('Hello', 'session-1', async () => '', undefined);
+
+      expect(mockConversation.createSnapshot).not.toHaveBeenCalled();
+    });
+
+    it('should NOT trigger summarization when summary is fresh', async () => {
+      mockClient.buildContext.mockResolvedValue({
+        messages: [{ role: 'user', content: 'Hello' }],
+        tokenCount: 9000,
+        budget: 10000
+      });
+      mockConversation.hasFreshSummary.mockReturnValue(true);
+
+      await orchestrator.handleMessage('Hello', 'session-1', async () => '', undefined);
+
+      expect(mockConversation.createSnapshot).not.toHaveBeenCalled();
+    });
+
+    it('should NOT trigger summarization when budget is 0', async () => {
+      mockClient.buildContext.mockResolvedValue({
+        messages: [{ role: 'user', content: 'Hello' }],
+        tokenCount: 100,
+        budget: 0
+      });
+
+      await orchestrator.handleMessage('Hello', 'session-1', async () => '', undefined);
+
+      expect(mockConversation.createSnapshot).not.toHaveBeenCalled();
+    });
+
+    it('should handle summarization errors gracefully', async () => {
+      mockClient.buildContext.mockResolvedValue({
+        messages: [{ role: 'user', content: 'Hello' }],
+        tokenCount: 9500,
+        budget: 10000
+      });
+      mockConversation.hasFreshSummary.mockReturnValue(false);
+      mockConversation.createSnapshot.mockRejectedValue(new Error('LLM API down'));
+
+      const errors: Array<{ error: string }> = [];
+      orchestrator.onError(e => errors.push(e));
+
+      const completeEvents: void[] = [];
+      orchestrator.onSummarizationCompleted(() => completeEvents.push(undefined));
+
+      // Should not throw — error is caught internally
+      await orchestrator.handleMessage('Hello', 'session-1', async () => '', undefined);
+
+      // Summarization completed event should still fire (even on error)
+      expect(completeEvents).toHaveLength(1);
+      // The main onError should NOT fire for summarization failures
+      expect(errors).toHaveLength(0);
+    });
+
+    it('should fire at exactly 80% usage threshold', async () => {
+      mockClient.buildContext.mockResolvedValue({
+        messages: [{ role: 'user', content: 'Hello' }],
+        tokenCount: 8000,
+        budget: 10000
+      });
+      mockConversation.hasFreshSummary.mockReturnValue(false);
+
+      await orchestrator.handleMessage('Hello', 'session-1', async () => '', undefined);
+
+      // 80% is NOT > 80%, so should NOT trigger
+      expect(mockConversation.createSnapshot).not.toHaveBeenCalled();
+    });
+
+    it('should trigger at 81% usage', async () => {
+      mockClient.buildContext.mockResolvedValue({
+        messages: [{ role: 'user', content: 'Hello' }],
+        tokenCount: 8100,
+        budget: 10000
+      });
+      mockConversation.hasFreshSummary.mockReturnValue(false);
+
+      await orchestrator.handleMessage('Hello', 'session-1', async () => '', undefined);
+
+      expect(mockConversation.createSnapshot).toHaveBeenCalledWith('session-1');
     });
   });
 

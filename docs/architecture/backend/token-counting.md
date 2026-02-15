@@ -267,6 +267,25 @@ When messages are dropped, injects a synthetic user/assistant exchange at the st
 - User: `[Previous conversation context]\n{snapshotSummary}`
 - Assistant: `I understand the context from our earlier conversation. Continuing from where we left off.`
 
+### Proactive Context Compression
+
+ContextBuilder's `build()` returns a `contextResult` that includes `tokenCount` and `budget`. After each response, `RequestOrchestrator` uses this ratio to decide whether to proactively summarize:
+
+```
+ContextBuilder.build() → contextResult { tokenCount, budget }
+         │
+         └─► usageRatio = tokenCount / budget
+             │
+             └─► > 80% → trigger createSnapshot() (LLM summarizer)
+                          so the snapshot is ready BEFORE the next
+                          request needs ContextBuilder to drop messages
+```
+
+This means snapshot summaries are pre-computed and available when ContextBuilder needs them, avoiding on-the-fly summarization during request handling.
+
+- **Trigger:** `src/providers/requestOrchestrator.ts` (lines 334-361)
+- **ContextBuilder:** `src/context/contextBuilder.ts`
+
 ---
 
 ## Memory & Performance

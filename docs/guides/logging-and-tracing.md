@@ -99,6 +99,9 @@ The logging system has **three tiers** spanning both the VS Code extension (Node
 | State publication | 3a | `webviewTracer.tracePublish()` |
 | Component debugging (development) | 3b | `log.debug()`, `log.warn()` |
 | Pub/sub flow debugging | 3c | EventStateLogger (automatic) |
+| Snapshot creation/trigger | 1 | `logger.info('[Snapshot] ...')` |
+| Snapshot freshness check | 1 | `logger.debug('[Snapshot] hasFreshSummary: ...')` |
+| Message queuing during summarization | 1 | `logger.info('[ChatProvider] ...')` |
 
 **Rule of thumb:**
 - **Human reads it** → Extension Logger (Tier 1)
@@ -797,6 +800,36 @@ export class ModelSelectorActor {
     }
   }
 }
+```
+
+### Context Compression Logging (`[Snapshot]` tag)
+
+All context compression operations use the `[Snapshot]` tag prefix. These logs trace the full lifecycle of proactive summarization:
+
+| Log Message | Level | Source File | When |
+|-------------|-------|-------------|------|
+| `[Snapshot] Proactive trigger fired \| usage=...` | INFO | `requestOrchestrator.ts` | Context usage >80%, triggering summarization |
+| `[Snapshot] Proactive trigger skipped — fresh summary exists` | DEBUG | `requestOrchestrator.ts` | >80% but `hasFreshSummary()` returned true |
+| `[Snapshot] Proactive summarization complete` | INFO | `requestOrchestrator.ts` | Snapshot saved successfully |
+| `[Snapshot] Proactive summarization failed: ...` | ERROR | `requestOrchestrator.ts` | Summarizer threw an error |
+| `[Snapshot] hasFreshSummary: FRESH/STALE` | DEBUG | `ConversationManager.ts` | Freshness check result |
+| `[Snapshot] ConversationManager.createSnapshot called` | INFO | `ConversationManager.ts` | Delegating to SnapshotManager |
+| `[Snapshot] maybeCreateSnapshot skipped` | DEBUG | `SnapshotManager.ts` | Not enough events since last snapshot |
+| `[Snapshot] Creating snapshot ...` | INFO | `SnapshotManager.ts` | Starting snapshot creation |
+| `[Snapshot] Snapshot created` | INFO | `SnapshotManager.ts` | Snapshot saved to DB |
+| `[Snapshot] Pruning snapshots (keep=N)` | DEBUG | `SnapshotManager.ts` | Old snapshots being removed |
+| `[Snapshot] Extractive summarizer called` | DEBUG | `SnapshotManager.ts` | Fallback summarizer invoked |
+| `[Snapshot] Extractive summarizer complete` | DEBUG | `SnapshotManager.ts` | Fallback summarizer finished |
+| `[ChatProvider] Summarization started — queuing enabled` | INFO | `chatProvider.ts` | Messages will be queued |
+| `[ChatProvider] Summarization completed — queuing disabled` | INFO | `chatProvider.ts` | Queue processing resumes |
+| `[ChatProvider] Message queued during summarization` | INFO | `chatProvider.ts` | User message added to queue |
+| `[ChatProvider] Draining queued message` | INFO | `chatProvider.ts` | Processing a queued message |
+
+**Filtering these logs:**
+```
+# In VS Code Output channel, search for:
+[Snapshot]        # All snapshot operations
+[ChatProvider]    # All chat provider operations including queuing
 ```
 
 ---

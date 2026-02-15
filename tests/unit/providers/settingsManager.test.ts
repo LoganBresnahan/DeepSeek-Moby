@@ -33,7 +33,8 @@ vi.mock('vscode', async (importOriginal) => {
           const defaults: Record<string, any> = {
             'model': 'deepseek-chat',
             'temperature': 0.7,
-            'maxToolCalls': 25,
+            'maxToolCalls': 100,
+            'maxShellIterations': 100,
             'maxTokens': 8192,
             'logLevel': 'WARN',
             'webviewLogLevel': 'WARN',
@@ -265,7 +266,8 @@ describe('SettingsManager', () => {
 
       expect(snapshot.model).toBe('deepseek-chat');
       expect(snapshot.temperature).toBe(0.7);
-      expect(snapshot.maxToolCalls).toBe(25);
+      expect(snapshot.maxToolCalls).toBe(100);
+      expect(snapshot.maxShellIterations).toBe(100);
       expect(snapshot.maxTokens).toBe(8192);
       expect(snapshot.logLevel).toBe('WARN');
       expect(snapshot.webviewLogLevel).toBe('WARN');
@@ -320,6 +322,7 @@ describe('SettingsManager', () => {
       expect(configStore.has('systemPrompt')).toBe(false);
       expect(configStore.has('maxTokens')).toBe(false);
       expect(configStore.has('maxToolCalls')).toBe(false);
+      expect(configStore.has('maxShellIterations')).toBe(false);
       expect(configStore.has('editMode')).toBe(false);
       expect(configStore.has('autoSaveHistory')).toBe(false);
       expect(configStore.has('maxSessions')).toBe(false);

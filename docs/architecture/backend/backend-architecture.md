@@ -266,6 +266,35 @@ Stream ends
              • conversationManager.recordAssistantMessage()
 ```
 
+### Phase 5: Proactive Context Compression (RequestOrchestrator)
+
+After `saveToHistory()`, the orchestrator checks context pressure and proactively summarizes if needed. This runs **post-response** so it adds zero user-visible latency.
+
+```
+saveToHistory() completes
+         │
+         ├─► usageRatio = contextResult.tokenCount / contextResult.budget
+         │
+         ├─► IF usageRatio > 80% AND !hasFreshSummary(sessionId):
+         │   │
+         │   ├─► _onSummarizationStarted.fire()
+         │   │   └─► ChatProvider sets _summarizing = true (queues new messages)
+         │   │
+         │   ├─► conversationManager.createSnapshot(sessionId)
+         │   │   └─► LLM summarizer: [previous summary] + [new events] → snapshot
+         │   │
+         │   └─► _onSummarizationCompleted.fire()
+         │       └─► ChatProvider sets _summarizing = false, calls drainQueue()
+         │
+         └─► ELSE: no summarization needed (below threshold or fresh summary exists)
+```
+
+**Key files:**
+- Trigger: `src/providers/requestOrchestrator.ts` (lines 334-361)
+- Guard: `src/events/ConversationManager.ts` → `hasFreshSummary()`
+- Summarizer: `src/events/SnapshotManager.ts` → `createLLMSummarizer()`, `createExtractSummarizer()`
+- Queuing: `src/providers/chatProvider.ts` → `_summarizing`, `_pendingMessages`, `drainQueue()`
+
 ## Two Model Paths
 
 The system supports two models with different tool execution strategies:
@@ -344,11 +373,11 @@ The conversation state uses **Event Sourcing** - all changes are stored as an ap
 │  │  └─────┘ └─────┘ └─────┘ └─────┘ └─────┘                            │    │
 │  │  (append-only, immutable history)                                    │    │
 │  │                                                                      │    │
-│  │  SnapshotManager                                                     │    │
+│  │  SnapshotManager (LLM summarizer with chaining)                      │    │
 │  │  ┌────────────────┐                                                  │    │
-│  │  │ Snapshot 1     │  Summary of old events                           │    │
-│  │  │ (E1-E20)       │  for context compression                         │    │
-│  │  └────────────────┘                                                  │    │
+│  │  │ Snapshot 1     │  LLM summary of old events                       │    │
+│  │  │ (E1-E20)       │  Triggered proactively at >80% context usage     │    │
+│  │  └────────────────┘  hasFreshSummary() prevents re-triggering        │    │
 │  │                                                                      │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │

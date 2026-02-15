@@ -91,6 +91,11 @@ export interface PendingFile {
   iteration: number;
 }
 
+export interface PendingGroup {
+  containerId: string;
+  files: Map<string, PendingFile>;
+}
+
 // ============================================
 // Turn Configuration
 // ============================================

@@ -577,6 +577,12 @@ export class DiffManager {
       }
 
       if (!fileUri) {
+        // File doesn't exist — check if this is a "create new file" operation
+        // (empty SEARCH block means the LLM wants to create, not edit)
+        const newFileContent = this.extractNewFileContent(code);
+        if (newFileContent !== null) {
+          return this.createNewFileForAutoMode(filePath, newFileContent, description, skipNotification);
+        }
         logger.warn(`[DiffManager] Auto mode: File not found: ${filePath}`);
         this._onWarning.fire({ message: `Could not find file: ${filePath}. The file may have been moved or deleted.` });
         return false;
@@ -623,6 +629,63 @@ export class DiffManager {
 
     } catch (error: any) {
       logger.error(`[DiffManager] Auto mode: Failed to apply code to ${filePath}:`, error.message);
+      this.sendCodeAppliedStatus(false, error.message, filePath);
+      return false;
+    }
+  }
+
+  /**
+   * Extract content from the REPLACE section when SEARCH is empty (new file creation).
+   * Returns the file content if this is a create-new-file pattern, null otherwise.
+   */
+  private extractNewFileContent(code: string): string | null {
+    // Strip # File: header if present
+    const stripped = code.replace(/^#\s*File:.*\n/i, '');
+
+    // Pattern: empty SEARCH block followed by content in REPLACE block
+    // Matches: <<<<<<< SEARCH\n======= [AND]\n<content>\n>>>>>>> REPLACE
+    const createPattern = /<<<<<<< SEARCH\s*\n=======(?:\s*AND)?\s*\n([\s\S]*?)>>>>>>> REPLACE/;
+    const match = stripped.match(createPattern);
+    if (match) {
+      return match[1].trimEnd();
+    }
+
+    return null;
+  }
+
+  /**
+   * Create a new file in auto mode when the file doesn't exist yet.
+   */
+  private async createNewFileForAutoMode(filePath: string, content: string, description?: string, skipNotification = false): Promise<boolean> {
+    try {
+      const workspaceFolders = vscode.workspace.workspaceFolders;
+      if (!workspaceFolders || workspaceFolders.length === 0) {
+        logger.warn(`[DiffManager] Auto mode: No workspace folder to create file: ${filePath}`);
+        return false;
+      }
+
+      const newFileUri = vscode.Uri.joinPath(workspaceFolders[0].uri, filePath);
+      const encoder = new TextEncoder();
+      await vscode.workspace.fs.writeFile(newFileUri, encoder.encode(content));
+
+      const currentCount = this.fileEditCounts.get(filePath) || 0;
+      const iteration = currentCount + 1;
+      this.fileEditCounts.set(filePath, iteration);
+      const diffId = `${filePath}-${Date.now()}-${iteration}`;
+
+      logger.info(`[DiffManager] Auto mode: Created new file ${filePath}`);
+
+      this.autoAppliedFiles.push({ filePath, timestamp: Date.now(), description });
+      this.resolvedDiffs.push({ filePath, timestamp: Date.now(), status: 'applied', iteration, diffId });
+      this.currentResponseFileChanges.push({ filePath, status: 'applied', iteration });
+
+      if (!skipNotification) {
+        this.emitAutoAppliedChanges();
+      }
+      this.sendCodeAppliedStatus(true);
+      return true;
+    } catch (error: any) {
+      logger.error(`[DiffManager] Auto mode: Failed to create file ${filePath}:`, error.message);
       this.sendCodeAppliedStatus(false, error.message, filePath);
       return false;
     }
@@ -711,15 +774,16 @@ export class DiffManager {
 
         if (language === 'tool-output') continue;
 
-        const fileHeaderMatch = code.match(/^#\s*File:\s*(.+?)$/m);
-        if (!fileHeaderMatch) {
-          logger.info(`[DiffManager] Skipping auto-diff for code block without # File: header (likely explanatory code)`);
-          continue;
-        }
-
+        // Dedup before any logging — this method is called on every flush
         const blockId = `${match.index}-${match[0].length}`;
         if (this.processedCodeBlocks.has(blockId)) continue;
         this.processedCodeBlocks.add(blockId);
+
+        const fileHeaderMatch = code.match(/^#\s*File:\s*(.+?)$/m);
+        if (!fileHeaderMatch) {
+          logger.debug(`[DiffManager] Skipping auto-diff for code block without # File: header (likely explanatory code)`);
+          continue;
+        }
 
         if (this.editMode === 'ask') {
           this.handleDebouncedDiff(code, language);
@@ -728,7 +792,7 @@ export class DiffManager {
           const codeWithoutHeader = code.replace(/^#\s*File:.*\n/i, '');
           logger.info(`[DiffManager] Auto-applying code block for: ${filePath}`);
           if (!this.currentResponseFileChanges.some(f => f.filePath === filePath)) {
-            this.currentResponseFileChanges.push({ filePath, status: 'applied', iteration: 0 });
+            this.currentResponseFileChanges.push({ filePath, status: 'pending', iteration: 0 });
           }
           this.applyCodeDirectlyForAutoMode(filePath, codeWithoutHeader, 'Auto-applied from code block');
         }

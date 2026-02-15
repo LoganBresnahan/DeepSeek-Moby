@@ -28,8 +28,8 @@ export type { Session, ConversationManagerOptions } from './ConversationManager'
 export * from './EventTypes';
 
 // Snapshots
-export { SnapshotManager, createExtractSummarizer } from './SnapshotManager';
-export type { Snapshot, SnapshotContent, SummarizerFn } from './SnapshotManager';
+export { SnapshotManager, createExtractSummarizer, createLLMSummarizer } from './SnapshotManager';
+export type { Snapshot, SnapshotContent, SummarizerFn, SummarizerChatFn } from './SnapshotManager';
 
 // Low-level event store (usually not needed directly)
 export { EventStore } from './EventStore';

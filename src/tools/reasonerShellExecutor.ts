@@ -282,14 +282,26 @@ Commands are executed in the workspace directory.
 
 After running commands, analyze the output and continue. You can run multiple commands if needed.
 
-**CRITICAL: Code Edit Format (MANDATORY)**
-Every code edit MUST use this EXACT structure or it will NOT be applied:
+**Creating New Files:**
+Use shell commands to create new files. Use cat with heredoc:
+
+<shell>cat > path/to/newfile.ts << 'EOF'
+// file contents here
+export function hello() {
+  return "world";
+}
+EOF</shell>
+
+You can create multiple files with multiple shell commands. Always use 'EOF' (quoted) to prevent variable expansion.
+
+**Editing Existing Files (SEARCH/REPLACE format):**
+To modify code in an EXISTING file, use this EXACT format:
 
 \`\`\`<language>
 # File: path/to/file.ext
 <<<<<<< SEARCH
 exact code to find (copy verbatim from file)
-=======
+======= AND
 replacement code
 >>>>>>> REPLACE
 \`\`\`
@@ -301,33 +313,31 @@ replacement code
 export function oldFunction() {
   return "old";
 }
-=======
+======= AND
 export function newFunction() {
   return "new";
 }
 >>>>>>> REPLACE
 \`\`\`
 
-**REQUIREMENTS (all mandatory - edits FAIL without these):**
+**SEARCH/REPLACE requirements (edits FAIL without these):**
 1. ✓ Use triple backticks to create a code block
 2. ✓ First line inside MUST be "# File: <path>"
 3. ✓ SEARCH section = EXACT code from file (copy verbatim including whitespace)
 4. ✓ All markers must be INSIDE the code block
 5. ✓ ONE code block per file - NOT separate "before" and "after" blocks
 
-**WARNING:** Code shown without this format will NOT be applied. The system parses the format automatically.
+**WARNING:** SEARCH/REPLACE is ONLY for editing existing files. To create new files, use shell commands instead.
 
 **Workflow for Code Tasks:**
 1. Use shell commands to explore and understand the codebase
-2. Identify the files that need to be modified
-3. Read the current content of those files
-4. Provide the code edits in properly formatted code blocks with # File: headers
+2. For **new files**: create them with shell commands (cat > file << 'EOF')
+3. For **existing files**: read them first, then provide SEARCH/REPLACE edits
 
 **IMPORTANT: You MUST complete tasks in a single response.**
-- Do NOT stop after exploration - you must produce the code edits.
-- After running shell commands, immediately provide the code changes.
+- Do NOT stop after exploration - you must produce the code.
+- After running shell commands to explore, immediately create files or provide edits.
 - Never end your response with just shell commands or just analysis.
-- Your final output MUST include the actual code edits with # File: headers.
-- If the task involves editing code, your response is incomplete until you provide the edits.
+- If the task involves code, your response is incomplete until you create/edit the files.
 `;
 }

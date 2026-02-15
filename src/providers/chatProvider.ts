@@ -22,6 +22,10 @@ export class ChatProvider implements vscode.WebviewViewProvider {
   private currentSessionId: string | null = null;
   private disposables: vscode.Disposable[] = [];
   private tavilyClient: TavilyClient;
+
+  // Message queuing during post-response summarization
+  private _summarizing = false;
+  private _pendingMessages: Array<{ message: string; attachments?: Array<{ content: string; name: string; size: number }> }> = [];
   private webSearchManager: WebSearchManager;
   private fileContextManager: FileContextManager;
   private diffManager: DiffManager;
@@ -215,6 +219,16 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     this.requestOrchestrator.onWarning(d => {
       this._view?.webview.postMessage({ type: 'warning', message: d.message });
     });
+
+    // Summarization → message queuing flag
+    this.requestOrchestrator.onSummarizationStarted(() => {
+      this._summarizing = true;
+      logger.info('[ChatProvider] Summarization started — queuing enabled');
+    });
+    this.requestOrchestrator.onSummarizationCompleted(() => {
+      this._summarizing = false;
+      logger.info('[ChatProvider] Summarization completed — queuing disabled');
+    });
   }
 
   // ── Lifecycle ──
@@ -262,12 +276,21 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     webviewView.webview.onDidReceiveMessage(async (data) => {
       switch (data.type) {
         case 'sendMessage': {
+          // Queue messages that arrive during post-response summarization
+          if (this._summarizing) {
+            this._pendingMessages.push({ message: data.message, attachments: data.attachments });
+            logger.info(`[ChatProvider] Message queued during summarization (queue=${this._pendingMessages.length})`);
+            this._view?.webview.postMessage({ type: 'statusMessage', message: 'Queued — optimizing context...' });
+            break;
+          }
           const result = await this.requestOrchestrator.handleMessage(
             data.message, this.currentSessionId,
             () => this.fileContextManager.getEditorContext(),
             data.attachments
           );
           this.currentSessionId = result.sessionId;
+          // Drain any messages that were queued during summarization
+          await this.drainQueue();
           break;
         }
         case 'clearChat':
@@ -299,6 +322,9 @@ export class ChatProvider implements vscode.WebviewViewProvider {
           break;
         case 'setToolLimit':
           await this.settingsManager.updateSettings({ maxToolCalls: data.toolLimit });
+          break;
+        case 'setShellIterations':
+          await this.settingsManager.updateSettings({ maxShellIterations: data.shellIterations });
           break;
         case 'setMaxTokens':
           await this.settingsManager.updateSettings({ maxTokens: data.maxTokens });
@@ -553,6 +579,27 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         tavilyStats,
         tavilyApiUsage
       });
+    }
+  }
+
+  // ── Message Queue ──
+
+  /**
+   * Process messages that were queued during post-response summarization.
+   * Each queued message is handled sequentially — if a queued message
+   * triggers another summarization, further messages continue to queue
+   * and are picked up by the same while loop after the await.
+   */
+  private async drainQueue(): Promise<void> {
+    while (this._pendingMessages.length > 0) {
+      const pending = this._pendingMessages.shift()!;
+      logger.info(`[ChatProvider] Draining queued message (remaining=${this._pendingMessages.length})`);
+      const result = await this.requestOrchestrator.handleMessage(
+        pending.message, this.currentSessionId,
+        () => this.fileContextManager.getEditorContext(),
+        pending.attachments
+      );
+      this.currentSessionId = result.sessionId;
     }
   }
 

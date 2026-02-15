@@ -32,6 +32,7 @@ export interface SettingsUpdateInput {
   model?: string;
   temperature?: number;
   maxToolCalls?: number;
+  maxShellIterations?: number;
   maxTokens?: number;
   autoSaveHistory?: boolean;
   maxSessions?: number;
@@ -79,6 +80,11 @@ export class SettingsManager {
     if (settings.maxToolCalls !== undefined) {
       await config.update('maxToolCalls', settings.maxToolCalls, vscode.ConfigurationTarget.Global);
       logger.settingsChanged('maxToolCalls', settings.maxToolCalls);
+    }
+
+    if (settings.maxShellIterations !== undefined) {
+      await config.update('maxShellIterations', settings.maxShellIterations, vscode.ConfigurationTarget.Global);
+      logger.settingsChanged('maxShellIterations', settings.maxShellIterations);
     }
 
     if (settings.maxTokens !== undefined) {
@@ -197,7 +203,8 @@ export class SettingsManager {
     return {
       model: config.get<string>('model') || 'deepseek-chat',
       temperature: config.get<number>('temperature') ?? 0.7,
-      maxToolCalls: config.get<number>('maxToolCalls') ?? 25,
+      maxToolCalls: config.get<number>('maxToolCalls') ?? 100,
+      maxShellIterations: config.get<number>('maxShellIterations') ?? 100,
       maxTokens: config.get<number>('maxTokens') ?? 8192,
       logLevel: config.get<string>('logLevel') || 'WARN',
       webviewLogLevel: config.get<string>('webviewLogLevel') || 'WARN',
@@ -232,6 +239,7 @@ export class SettingsManager {
       await config.update('systemPrompt', undefined, vscode.ConfigurationTarget.Global);
       await config.update('maxTokens', undefined, vscode.ConfigurationTarget.Global);
       await config.update('maxToolCalls', undefined, vscode.ConfigurationTarget.Global);
+      await config.update('maxShellIterations', undefined, vscode.ConfigurationTarget.Global);
       await config.update('editMode', undefined, vscode.ConfigurationTarget.Global);
       await config.update('autoSaveHistory', undefined, vscode.ConfigurationTarget.Global);
       await config.update('maxSessions', undefined, vscode.ConfigurationTarget.Global);
@@ -270,13 +278,18 @@ Always be concise, accurate, and helpful.`;
   }
 
   private getReasonerDefaultPrompt(): string {
-    return `You are a highly capable AI programming assistant with shell access for exploring codebases.
+    return `You are a highly capable AI programming assistant with shell access for exploring and modifying codebases.
 
-You can run shell commands using <shell> tags to explore and understand code:
+You can run shell commands using <shell> tags:
 <shell>cat src/file.ts</shell>
 <shell>grep -rn "function" src/</shell>
 
-For code changes, use the SEARCH/REPLACE format:
+To create new files, use shell commands:
+<shell>cat > path/to/newfile.ts << 'EOF'
+// file contents
+EOF</shell>
+
+To edit existing files, use the SEARCH/REPLACE format:
 \`\`\`typescript
 # File: path/to/file.ts
 <<<<<<< SEARCH
@@ -288,8 +301,8 @@ replacement code
 
 Always:
 1. Explore the codebase first using shell commands
-2. Understand the existing code structure
-3. Make precise, targeted changes
+2. Create new files with shell commands (cat > file << 'EOF')
+3. Edit existing files with SEARCH/REPLACE
 4. Complete tasks in a single response`;
   }
 

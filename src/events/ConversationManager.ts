@@ -15,7 +15,8 @@ import { v4 as uuidv4 } from 'uuid';
 
 import { Database } from './SqlJsWrapper';
 import { EventStore } from './EventStore';
-import { SnapshotManager, createExtractSummarizer } from './SnapshotManager';
+import { SnapshotManager, SummarizerFn, createExtractSummarizer } from './SnapshotManager';
+import { logger } from '../utils/logger';
 import {
   ConversationEvent,
   Attachment,
@@ -81,6 +82,8 @@ export interface ConversationManagerOptions {
   snapshotInterval?: number;
   /** Max snapshots to keep per session (default: 5) */
   maxSnapshotsPerSession?: number;
+  /** Custom summarizer function (default: extractive). Use createLLMSummarizer() for LLM-powered summaries. */
+  summarizer?: SummarizerFn;
 }
 
 export class ConversationManager {
@@ -126,7 +129,7 @@ export class ConversationManager {
     this.snapshotManager = new SnapshotManager(
       this.db,
       this.eventStore,
-      createExtractSummarizer(),
+      this.options?.summarizer ?? createExtractSummarizer(),
       {
         snapshotInterval: this.options?.snapshotInterval,
         maxSnapshotsPerSession: this.options?.maxSnapshotsPerSession
@@ -384,9 +387,6 @@ export class ConversationManager {
 
     // Update session metadata
     this.updateSessionMetadata(session.id, event);
-
-    // Check if we should create a snapshot
-    this.snapshotManager.maybeCreateSnapshot(session.id);
 
     this.onSessionsChanged.fire();
     return event;
@@ -960,6 +960,42 @@ export class ConversationManager {
    */
   getLatestSnapshotSummary(sessionId: string): string | undefined {
     return this.snapshotManager.getLatestSnapshot(sessionId)?.summary;
+  }
+
+  /**
+   * Check if the session has a "fresh" snapshot — one that covers events
+   * within `threshold` of the latest event sequence.
+   *
+   * Used by the proactive context-pressure trigger to avoid re-summarizing
+   * on every request once context usage exceeds 80%.
+   *
+   * @param sessionId - Session to check
+   * @param threshold - Max events since last snapshot to consider "fresh" (default: 5)
+   */
+  hasFreshSummary(sessionId: string, threshold: number = 5): boolean {
+    const snapshot = this.snapshotManager.getLatestSnapshot(sessionId);
+    if (!snapshot) {
+      logger.debug(`[Snapshot] hasFreshSummary: no snapshot exists | session=${sessionId.substring(0, 8)}`);
+      return false;
+    }
+    const latestSeq = this.eventStore.getLatestSequence(sessionId);
+    const eventsSince = latestSeq - snapshot.upToSequence;
+    const fresh = eventsSince < threshold;
+    logger.debug(
+      `[Snapshot] hasFreshSummary: ${fresh ? 'FRESH' : 'STALE'}` +
+      ` | eventsSince=${eventsSince} threshold=${threshold}` +
+      ` | session=${sessionId.substring(0, 8)}`
+    );
+    return fresh;
+  }
+
+  /**
+   * Force-create a snapshot for the session.
+   * Used by the proactive context-pressure trigger in RequestOrchestrator.
+   */
+  async createSnapshot(sessionId: string): Promise<void> {
+    logger.info(`[Snapshot] ConversationManager.createSnapshot called | session=${sessionId.substring(0, 8)}`);
+    await this.snapshotManager.createSnapshot(sessionId);
   }
 
   // ==========================================================================

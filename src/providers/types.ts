@@ -69,6 +69,7 @@ export interface SettingsSnapshot {
   model: string;
   temperature: number;
   maxToolCalls: number;
+  maxShellIterations: number;
   maxTokens: number;
   logLevel: string;
   webviewLogLevel: string;

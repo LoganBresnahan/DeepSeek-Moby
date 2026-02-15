@@ -52,6 +52,10 @@ export class RequestOrchestrator {
   // ── Events (session) ──
   private readonly _onSessionCreated = new vscode.EventEmitter<{ sessionId: string; model: string }>();
 
+  // ── Events (summarization) ──
+  private readonly _onSummarizationStarted = new vscode.EventEmitter<void>();
+  private readonly _onSummarizationCompleted = new vscode.EventEmitter<void>();
+
   // ── Events (errors) ──
   private readonly _onError = new vscode.EventEmitter<{ error: string }>();
   private readonly _onWarning = new vscode.EventEmitter<{ message: string }>();
@@ -71,6 +75,8 @@ export class RequestOrchestrator {
   readonly onShellExecuting = this._onShellExecuting.event;
   readonly onShellResults = this._onShellResults.event;
   readonly onSessionCreated = this._onSessionCreated.event;
+  readonly onSummarizationStarted = this._onSummarizationStarted.event;
+  readonly onSummarizationCompleted = this._onSummarizationCompleted.event;
   readonly onError = this._onError.event;
   readonly onWarning = this._onWarning.event;
 
@@ -324,6 +330,36 @@ export class RequestOrchestrator {
 
       // Update status bar
       this.statusBar.updateLastResponse();
+
+      // ── Proactive Context Compression ──
+      // After the response is delivered and saved, check context pressure.
+      // If usage > 80%, proactively summarize so the snapshot is ready
+      // BEFORE ContextBuilder needs to drop messages on the next request.
+      if (sessionId && contextResult.budget > 0) {
+        const usageRatio = contextResult.tokenCount / contextResult.budget;
+        if (usageRatio > 0.80 && !this.conversationManager.hasFreshSummary(sessionId)) {
+          logger.info(
+            `[Snapshot] Proactive trigger fired` +
+            ` | usage=${(usageRatio * 100).toFixed(1)}%` +
+            ` (${contextResult.tokenCount.toLocaleString()}/${contextResult.budget.toLocaleString()})` +
+            ` | session=${sessionId.substring(0, 8)}`
+          );
+          this._onSummarizationStarted.fire();
+          try {
+            await this.conversationManager.createSnapshot(sessionId);
+            logger.info(`[Snapshot] Proactive summarization complete | session=${sessionId.substring(0, 8)}`);
+          } catch (summarizeError: any) {
+            logger.error(`[Snapshot] Proactive summarization failed: ${summarizeError.message}`);
+          }
+          this._onSummarizationCompleted.fire();
+        } else if (usageRatio > 0.80) {
+          logger.debug(
+            `[Snapshot] Proactive trigger skipped — fresh summary exists` +
+            ` | usage=${(usageRatio * 100).toFixed(1)}%` +
+            ` | session=${sessionId.substring(0, 8)}`
+          );
+        }
+      }
     } catch (error: any) {
       // Check if this was an abort (user stopped generation)
       if (error.name === 'CanceledError' || error.name === 'AbortError' || signal.aborted) {
@@ -401,6 +437,8 @@ export class RequestOrchestrator {
     this._onShellExecuting.dispose();
     this._onShellResults.dispose();
     this._onSessionCreated.dispose();
+    this._onSummarizationStarted.dispose();
+    this._onSummarizationCompleted.dispose();
     this._onError.dispose();
     this._onWarning.dispose();
   }
@@ -489,7 +527,9 @@ export class RequestOrchestrator {
     }
   ): Promise<void> {
     // Reasoner shell loop - run shell commands if R1 outputs them
-    const maxShellIterations = 5;
+    const shellConfig = vscode.workspace.getConfiguration('deepseek');
+    const configuredShellLimit = shellConfig.get<number>('maxShellIterations') ?? 100;
+    const maxShellIterations = configuredShellLimit >= 100 ? Infinity : configuredShellLimit;
     let shellIteration = 0;
     let currentSystemPrompt = streamingSystemPrompt;
     let currentHistoryMessages = [...contextMessages];

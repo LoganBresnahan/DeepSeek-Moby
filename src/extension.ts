@@ -5,7 +5,7 @@ import { CompletionProvider } from './providers/completionProvider';
 import { CommandProvider } from './providers/commandProvider';
 import { StatusBar } from './views/statusBar';
 import { ConfigManager } from './utils/config';
-import { ConversationManager } from './events';
+import { ConversationManager, createLLMSummarizer } from './events';
 import { TavilyClient } from './clients/tavilyClient';
 import { logger } from './utils/logger';
 import { UnifiedLogExporter } from './logging/UnifiedLogExporter';
@@ -43,8 +43,19 @@ export async function activate(context: vscode.ExtensionContext) {
   
   // Initialize conversation manager (event sourcing) with encrypted DB
   const dbEncryptionKey = await getOrCreateEncryptionKey(context);
+  // Create LLM-powered summarizer for context compression (chained summaries)
+  const llmSummarizer = createLLMSummarizer(
+    (messages, systemPrompt, options) => deepSeekClient.chat(
+      messages.map(m => ({ role: m.role as any, content: m.content })),
+      systemPrompt,
+      options
+    )
+  );
   try {
-    conversationManager = new ConversationManager(context, { encryptionKey: dbEncryptionKey });
+    conversationManager = new ConversationManager(context, {
+      encryptionKey: dbEncryptionKey,
+      summarizer: llmSummarizer
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.error(`[Database] Failed to open conversation database: ${msg}`);

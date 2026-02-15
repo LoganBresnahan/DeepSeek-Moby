@@ -19,7 +19,7 @@
 7. [Tool Definition Budget](#7-tool-definition-budget)
 8. [Logging](#8-logging)
 9. [Testing Strategy](#9-testing-strategy)
-10. [Future: LLM-Powered Summarization](#10-future-llm-powered-summarization)
+10. [Context Compression — Implemented](#10-context-compression--implemented)
 11. [Future: Token Count Caching](#11-future-token-count-caching)
 12. [Key Files](#12-key-files)
 
@@ -56,7 +56,7 @@ If a conversation exceeds 128K tokens, the API rejects the request. ContextBuild
 |-----|--------|--------|
 | ContextBuilder not called before API requests | Context overflow on long conversations | ✅ Fixed (Phase 2) |
 | No public accessor for snapshots from ConversationManager | Can't retrieve snapshot summary | ✅ Fixed (Phase 1) |
-| ContextBuilder doesn't account for tool definitions | ~730 tokens unbudgeted when tools are active | Future (Section 7) |
+| ContextBuilder doesn't account for tool definitions | ~730 tokens unbudgeted when tools are active | ✅ Not needed — `countRequestTokens()` counts tool definitions; cross-validation delta stabilized at 3.5-5% (see [token-counting.md](../../architecture/backend/token-counting.md#cross-validation)) |
 | Tool loop doesn't check budget between iterations | Context can grow unbounded (up to 25 iterations x N tool results) | ✅ Fixed (Phase 3) |
 
 ---
@@ -163,22 +163,9 @@ The current extractive summarizer collects: first 5 user messages (truncated to 
 
 ## 7. Tool Definition Budget
 
-Tool definitions cost approximately 730 tokens for all 6 workspace tools. This is a fixed cost per request when tools are active (deepseek-chat model only; deepseek-reasoner uses shell commands, no tool definitions).
+~~Originally planned to add a `toolDefinitionTokens` parameter to `ContextBuilder.build()`.~~
 
-The caller should compute tool definition tokens once and pass them to `buildContext()`:
-
-```typescript
-const toolTokens = tools
-  ? this.tokenCounter.count(JSON.stringify(tools))
-  : 0;
-
-const contextResult = await this.deepSeekClient.buildContext(
-  historyMessages,
-  systemPrompt,
-  snapshotSummary,
-  toolTokens
-);
-```
+**Status: Not needed.** Tool definitions (~730 tokens for 6 workspace tools) are already counted by `countRequestTokens()` during cross-validation. The measured delta between our local count and the API's `prompt_tokens` stabilized at 3.5-5% for chat-with-tools — and the remaining gap is the API's hidden tool-use instruction preamble (~300 tokens we never send), not unaccounted tool definitions. This consistently undercounts, meaning the budget is slightly conservative. Combined with the 95% tool loop check (Phase 3), there's no practical risk of context overflow from unbudgeted tool tokens.
 
 ---
 
@@ -224,40 +211,230 @@ Already exist at `tests/unit/context/contextBuilder.test.ts`. Cover:
 
 ---
 
-## 10. Future: LLM-Powered Summarization
+## 10. Context Compression — Implemented
 
-The current extractive summarizer is basic - it grabs the first 5 user messages and file names. An LLM-powered summarizer would produce much better context preservation.
+LLM-powered summarization with chaining, triggered proactively by context pressure. Implemented across three phases, all complete.
 
-### Design
+**Status:** All three phases implemented and tested.
 
-The key insight: **the LLM should write the summary for itself.** It knows what context it needs to continue a conversation effectively. The prompt would be something like:
+### Overview
+
+The context compression system replaces the old event-count-based snapshots with a proactive, context-pressure-driven LLM summarizer. When context usage exceeds 80%, the system automatically summarizes the conversation using DeepSeek itself, creating a high-quality summary that ContextBuilder injects when old messages are dropped.
 
 ```
-Summarize the following conversation history. Your summary will be injected
-as context at the start of future requests in this conversation when older
-messages are dropped to fit the context window. Include:
-- What the user is working on and their goals
-- Key decisions made and their rationale
-- Current state of any code changes
-- Any constraints or preferences the user expressed
+User sends message
+    → RequestOrchestrator.handleMessage()
+        → buildContext() → stream response → save to history
+        → [Post-response] Check context pressure
+            → If >80% usage AND no fresh summary:
+                → fire onSummarizationStarted
+                → ConversationManager.createSnapshot(sessionId)
+                    → SnapshotManager.createSnapshot()
+                        → createLLMSummarizer() with chaining
+                → fire onSummarizationCompleted
+    → ChatProvider.drainQueue() (if messages queued during summarization)
 ```
 
-### Implementation
+### Phase 1: LLM Summarizer with Chaining
 
-The `SummarizerFn` type already supports this - it's `(events: ConversationEvent[]) => Promise<SnapshotContent>`. Replace `createExtractSummarizer()` with an LLM-powered version that calls `deepSeekClient.chat()` with the events formatted as conversation history.
+**Files:**
+- `src/events/SnapshotManager.ts` — `createLLMSummarizer()`, `SummarizerChatFn`, `formatEventsForSummary()`
+- `src/events/ConversationManager.ts` — `summarizer` option, `hasFreshSummary()`, `createSnapshot()`
+- `src/events/index.ts` — barrel exports for `createLLMSummarizer`, `SummarizerChatFn`
+- `src/extension.ts` — wires LLM summarizer wrapping `deepSeekClient.chat()`
+
+#### SummarizerFn Interface
+
+```typescript
+type SummarizerFn = (events: ConversationEvent[], previousSummary?: string) => Promise<SnapshotContent>;
+```
+
+The `previousSummary` parameter enables chaining. On first call it's `undefined`; on subsequent calls it contains the previous snapshot's summary text.
+
+#### SummarizerChatFn Interface
+
+```typescript
+interface SummarizerChatFn {
+  (messages: Array<{ role: string; content: string }>,
+   systemPrompt?: string,
+   options?: { maxTokens?: number; temperature?: number }): Promise<{ content: string }>;
+}
+```
+
+Minimal callback wrapping `DeepSeekClient.chat()`. Keeps the events module dependency-free.
+
+#### How Chaining Works
+
+1. **First summarization** — All raw events formatted via `formatEventsForSummary()` are sent to the LLM with `FIRST_SUMMARY_PROMPT`. No previous summary exists.
+
+2. **Subsequent summarizations** — Only events since the last snapshot are sent, along with the previous snapshot's summary. Uses `CHAINED_SUMMARY_PROMPT`. This bounds input to O(1) per cycle instead of O(n).
+
+3. **SnapshotManager.createSnapshot()** — Loads the latest snapshot, calls `this.summarizer(events, lastSnapshot?.summary)`, stores the result.
+
+#### Event Formatting
+
+`formatEventsForSummary()` converts events to a readable format:
+```
+User: {content}
+Assistant: {content}
+[Tool: {toolName}]
+[Tool result: success — {truncated result}]
+[File edit: {filePath}]
+[Web search: {query}]
+```
+
+Tool results are truncated to 200 chars. Reasoning events, errors, and session events are skipped.
+
+#### Extractive Fallback
+
+`createExtractSummarizer()` remains as the fallback summarizer. If no LLM summarizer is configured (e.g., in tests or early startup), the extractive version provides basic coverage: first 5 user messages (150 chars each), file paths, and key facts (~200-500 tokens).
+
+### Phase 2: Proactive Context-Pressure Trigger
+
+**Files:**
+- `src/providers/requestOrchestrator.ts` — proactive trigger logic, `onSummarizationStarted`/`onSummarizationCompleted` events
+- `src/events/ConversationManager.ts` — `hasFreshSummary()`, `createSnapshot()`
+
+#### Trigger Logic (in `RequestOrchestrator.handleMessage()`)
+
+After the response is streamed and saved, context pressure is checked:
+
+```typescript
+if (sessionId && contextResult.budget > 0) {
+  const usageRatio = contextResult.tokenCount / contextResult.budget;
+  if (usageRatio > 0.80 && !this.conversationManager.hasFreshSummary(sessionId)) {
+    // Trigger summarization
+  }
+}
+```
+
+**Why >80%:** Leaves headroom for the next user message + response. The summary is ready before ContextBuilder needs to drop messages.
+
+**Why proactive, not reactive:** A reactive trigger creates a one-cycle coverage gap — messages are dropped before a summary exists. Proactive means zero gap.
+
+#### Freshness Check
+
+`ConversationManager.hasFreshSummary(sessionId, threshold=5)` prevents re-triggering on every request once at 80%. It checks if the latest snapshot's `upToSequence` is within `threshold` events of the current sequence.
+
+#### Event-Count Trigger Removal
+
+The old `maybeCreateSnapshot()` call was removed from `recordAssistantMessage()`. The proactive context-pressure trigger in RequestOrchestrator replaces it entirely. `maybeCreateSnapshot()` still exists in SnapshotManager for backward compatibility but is no longer called from the main path.
+
+#### Events
+
+Two new `vscode.EventEmitter` instances:
+- `_onSummarizationStarted` — fired before `createSnapshot()` call
+- `_onSummarizationCompleted` — fired after (even on error, to ensure queue release)
+
+### Phase 3: Message Queuing
+
+**Files:**
+- `src/providers/chatProvider.ts` — `_summarizing` flag, `_pendingMessages` queue, `drainQueue()`, event subscriptions in `wireEvents()`
+
+#### How It Works
+
+If the user sends a message during the 2-5 second post-response summarization window:
+
+1. **Queue:** `_summarizing` is `true`, message is pushed to `_pendingMessages` array
+2. **UI feedback:** Webview receives `statusMessage: 'Queued — optimizing context...'`
+3. **Drain:** After the normal `handleMessage()` completes, `drainQueue()` processes all queued messages sequentially
+
+```typescript
+private async drainQueue(): Promise<void> {
+  while (this._pendingMessages.length > 0) {
+    const pending = this._pendingMessages.shift()!;
+    const result = await this.requestOrchestrator.handleMessage(
+      pending.message, this.currentSessionId,
+      () => this.fileContextManager.getEditorContext(),
+      pending.attachments
+    );
+    this.currentSessionId = result.sessionId;
+  }
+}
+```
+
+#### Event Subscriptions
+
+In `wireEvents()`:
+```typescript
+this.requestOrchestrator.onSummarizationStarted(() => {
+  this._summarizing = true;
+  logger.info('[ChatProvider] Summarization started — queuing enabled');
+});
+this.requestOrchestrator.onSummarizationCompleted(() => {
+  this._summarizing = false;
+  logger.info('[ChatProvider] Summarization completed — queuing disabled');
+});
+```
+
+#### User Experience
+
+| Scenario | What happens |
+|----------|-------------|
+| Normal message | Instant render + response streams |
+| Message during summarization | Instant render + "Queued" status + response ~2-5s later |
+| Multiple messages during summarization | All render instantly, all queued, processed sequentially |
+
+User messages render optimistically in the webview before the extension receives them, so queuing is invisible.
+
+### Logging
+
+All three phases produce structured logs with the `[Snapshot]` and `[ChatProvider]` tags:
+
+| Log | Level | Location |
+|-----|-------|----------|
+| `[Snapshot] Creating snapshot for session=...` | info | `SnapshotManager.createSnapshot()` |
+| `[Snapshot] Created in Xms \| summary=N chars...` | info | `SnapshotManager.createSnapshot()` |
+| `[Snapshot] LLM summarize (first/chained) \| input=...` | info | `createLLMSummarizer()` |
+| `[Snapshot] LLM summarize complete in Xms...` | info | `createLLMSummarizer()` |
+| `[Snapshot] LLM summarize failed: ...` | error | `createLLMSummarizer()` |
+| `[Snapshot] Extractive summarizer called \| events=N` | debug | `createExtractSummarizer()` |
+| `[Snapshot] Extractive summarizer complete \| summary=...` | debug | `createExtractSummarizer()` |
+| `[Snapshot] hasFreshSummary: FRESH/STALE \| eventsSince=...` | debug | `ConversationManager.hasFreshSummary()` |
+| `[Snapshot] ConversationManager.createSnapshot called` | info | `ConversationManager.createSnapshot()` |
+| `[Snapshot] maybeCreateSnapshot skipped \| events=N/M` | debug | `SnapshotManager.maybeCreateSnapshot()` |
+| `[Snapshot] Pruning snapshots (keep=N)` | debug | `SnapshotManager.pruneSnapshots()` |
+| `[Snapshot] Proactive trigger fired \| usage=X%...` | info | `RequestOrchestrator.handleMessage()` |
+| `[Snapshot] Proactive trigger skipped — fresh summary exists` | debug | `RequestOrchestrator.handleMessage()` |
+| `[Snapshot] Proactive summarization complete` | info | `RequestOrchestrator.handleMessage()` |
+| `[Snapshot] Proactive summarization failed: ...` | error | `RequestOrchestrator.handleMessage()` |
+| `[ChatProvider] Summarization started — queuing enabled` | info | `ChatProvider.wireEvents()` |
+| `[ChatProvider] Summarization completed — queuing disabled` | info | `ChatProvider.wireEvents()` |
+| `[ChatProvider] Message queued during summarization (queue=N)` | info | `ChatProvider sendMessage handler` |
+| `[ChatProvider] Draining queued message (remaining=N)` | info | `ChatProvider.drainQueue()` |
+
+### Testing
+
+| Test file | Tests | Coverage |
+|-----------|-------|----------|
+| `tests/unit/events/SnapshotManager.test.ts` | 13 | `createLLMSummarizer` (first prompt, chained prompt, response mapping, filesModified, keyFacts, token estimation, options passthrough, event formatting, tool result truncation, error propagation, empty events), chaining integration |
+| `tests/unit/events/ConversationManager.test.ts` | 7 | `hasFreshSummary` (no snapshot, fresh, stale, custom threshold, all covered), `createSnapshot` delegation, `recordAssistantMessage` no auto-snapshot |
+| `tests/unit/providers/requestOrchestrator.test.ts` | 7 | Proactive trigger (>80%, <80%, fresh summary skip, budget=0, error handling, boundary at 80%, trigger at 81%) |
+| `tests/unit/providers/chatProvider.queuing.test.ts` | 6 | `drainQueue` (sequential processing, empty queue, sessionId updates, attachments), `_summarizing` flag toggle, queue ordering |
 
 ### Trade-offs
 
-| Factor | Extractive (current) | LLM-powered (future) |
-|--------|---------------------|---------------------|
-| Latency | ~0ms | 2-5 seconds |
-| API cost | Free | ~500-1000 tokens per snapshot |
-| Quality | Lists user messages | Understands context, goals, state |
-| Reliability | Always works | Depends on API availability |
+| Factor | Extractive (fallback) | LLM with Chaining (primary) |
+|--------|---------------------|-----------------------------------|
+| User-visible latency | 0ms | 0ms (post-response) |
+| API cost per summary | Free | ~1,000-2,000 input tokens |
+| Summary quality | Lists first 5 messages | Understands context, goals, decisions |
+| Reliability | Always works | Depends on API (extractive is fallback) |
+| Coverage gap | Yes (event-count trigger) | No (proactive pressure trigger) |
+| Summarizer scaling | N/A | O(1) per cycle (chaining) |
+| Code complexity | Minimal | ~100 lines across 3 files |
 
-### When to Implement
+### Why Not Async
 
-When users report context quality issues after truncation. The extractive summarizer is good enough for short-to-medium conversations. LLM summarization becomes important for very long sessions (50+ messages) where the dropped context contains important decisions.
+Post-response sync was chosen over async (fire-and-forget) because:
+- **Zero user-visible latency** — response is already delivered when summarization runs
+- **Zero coverage gap** — summary is ready before next request needs it
+- **Simple code** — sequential `await`, no background promise management or race conditions
+- **Same UX** — the natural reading/thinking pause hides the 2-5s summarization time
+
+### Edge Case: Oversized Single Message
+
+**TODO (UI needed):** If a single user message exceeds the entire context budget, ContextBuilder cannot fit it. Needs: detection flag on `ContextResult`, request blocking in RequestOrchestrator, UI warning in StatusPanel.
 
 ---
 

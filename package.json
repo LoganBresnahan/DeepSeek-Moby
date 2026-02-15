@@ -76,10 +76,17 @@
         },
         "deepseek.maxToolCalls": {
           "type": "number",
-          "default": 25,
+          "default": 100,
           "minimum": 5,
           "maximum": 100,
           "description": "Maximum tool calling iterations per request. Each iteration can have multiple tool calls. (100=no limit, only applies to Chat model)"
+        },
+        "deepseek.maxShellIterations": {
+          "type": "number",
+          "default": 100,
+          "minimum": 1,
+          "maximum": 100,
+          "description": "Maximum shell iterations per request for Reasoner model. (100=no limit)"
         },
         "deepseek.maxTokens": {
           "type": "number",

@@ -477,6 +477,46 @@ Tool: write_file(path, content)
      └───────────────────────────────┘
 ```
 
+## Phase 7: Post-Response Context Compression
+
+After the response is fully streamed, saved, and diffs are processed, `RequestOrchestrator` checks context pressure and proactively creates a snapshot if needed. This runs **after** the response is delivered to the user, so there is zero user-visible latency.
+
+### Flow
+
+```
+Phase 6 complete (diffs processed, response displayed)
+         │
+         ▼
+RequestOrchestrator checks contextResult from Phase 2
+         │
+         ├─► usageRatio = tokenCount / budget
+         │
+         ├─► IF > 80% AND !hasFreshSummary():
+         │   │
+         │   ├─► _onSummarizationStarted.fire()
+         │   │   └─► ChatProvider._summarizing = true
+         │   │       └─► New user messages queued in _pendingMessages[]
+         │   │           └─► Webview shows "Queued — optimizing context..."
+         │   │
+         │   ├─► conversationManager.createSnapshot(sessionId)
+         │   │   └─► LLM summarizer: [prev summary] + [new events] → snapshot
+         │   │
+         │   └─► _onSummarizationCompleted.fire()
+         │       └─► ChatProvider._summarizing = false
+         │           └─► drainQueue() → process queued messages sequentially
+         │
+         └─► ELSE → no compression needed
+```
+
+### Key Points
+
+- **Post-response sync:** Summarization happens AFTER `saveToHistory()`, not during streaming
+- **Message queuing:** If the user sends a message while summarizing, it's queued and processed when summarization completes
+- **Freshness guard:** `hasFreshSummary()` prevents redundant re-summarization (threshold: within 5 events)
+- **Event bridge:** `onSummarizationStarted` / `onSummarizationCompleted` events connect RequestOrchestrator → ChatProvider
+
+**Files:** `src/providers/requestOrchestrator.ts` (trigger), `src/providers/chatProvider.ts` (queuing), `src/events/SnapshotManager.ts` (summarizer)
+
 ## Timing Diagram
 
 Complete flow with timestamps:

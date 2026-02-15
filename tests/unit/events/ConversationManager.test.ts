@@ -650,6 +650,233 @@ describe('ConversationManager.getSessionRichHistory', () => {
   });
 });
 
+// Bind hasFreshSummary / createSnapshot to lightweight mocks
+const hasFreshSummary = ConversationManager.prototype.hasFreshSummary;
+const createSnapshot = ConversationManager.prototype.createSnapshot;
+
+describe('ConversationManager.hasFreshSummary', () => {
+  let db: Database;
+  let eventStore: EventStore;
+  let snapshotManager: SnapshotManager;
+  let callHasFreshSummary: (sessionId: string, threshold?: number) => boolean;
+  const SESSION_ID = 'test-session-fresh';
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS sessions (
+        id TEXT PRIMARY KEY, title TEXT NOT NULL, model TEXT NOT NULL,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        event_count INTEGER DEFAULT 0, last_snapshot_sequence INTEGER DEFAULT 0,
+        tags TEXT DEFAULT '[]', first_user_message TEXT, last_activity_preview TEXT
+      )
+    `);
+    eventStore = new EventStore(db);
+    snapshotManager = new SnapshotManager(db, eventStore, createExtractSummarizer());
+
+    const mockCm = { snapshotManager, eventStore };
+    callHasFreshSummary = (sessionId: string, threshold?: number) =>
+      hasFreshSummary.call(mockCm, sessionId, threshold);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('returns false when no snapshots exist', () => {
+    expect(callHasFreshSummary(SESSION_ID)).toBe(false);
+  });
+
+  it('returns true when snapshot covers recent events (within threshold)', async () => {
+    // Add 10 events
+    for (let i = 0; i < 10; i++) {
+      eventStore.append({
+        sessionId: SESSION_ID,
+        timestamp: 1000 + i * 100,
+        type: 'user_message',
+        content: `Message ${i}`
+      });
+    }
+    // Create snapshot at event 10
+    await snapshotManager.createSnapshot(SESSION_ID);
+
+    // Add 3 more events (within default threshold of 5)
+    for (let i = 0; i < 3; i++) {
+      eventStore.append({
+        sessionId: SESSION_ID,
+        timestamp: 2000 + i * 100,
+        type: 'user_message',
+        content: `New message ${i}`
+      });
+    }
+
+    expect(callHasFreshSummary(SESSION_ID)).toBe(true);
+  });
+
+  it('returns false when snapshot is stale (many events since)', async () => {
+    // Add 10 events and snapshot
+    for (let i = 0; i < 10; i++) {
+      eventStore.append({
+        sessionId: SESSION_ID,
+        timestamp: 1000 + i * 100,
+        type: 'user_message',
+        content: `Message ${i}`
+      });
+    }
+    await snapshotManager.createSnapshot(SESSION_ID);
+
+    // Add 10 more events (beyond default threshold of 5)
+    for (let i = 0; i < 10; i++) {
+      eventStore.append({
+        sessionId: SESSION_ID,
+        timestamp: 2000 + i * 100,
+        type: 'user_message',
+        content: `New message ${i}`
+      });
+    }
+
+    expect(callHasFreshSummary(SESSION_ID)).toBe(false);
+  });
+
+  it('respects custom threshold parameter', async () => {
+    for (let i = 0; i < 5; i++) {
+      eventStore.append({
+        sessionId: SESSION_ID,
+        timestamp: 1000 + i * 100,
+        type: 'user_message',
+        content: `Message ${i}`
+      });
+    }
+    await snapshotManager.createSnapshot(SESSION_ID);
+
+    // Add 2 events
+    eventStore.append({ sessionId: SESSION_ID, timestamp: 2000, type: 'user_message', content: 'new 1' });
+    eventStore.append({ sessionId: SESSION_ID, timestamp: 2100, type: 'user_message', content: 'new 2' });
+
+    // With threshold=3, 2 events since snapshot → fresh
+    expect(callHasFreshSummary(SESSION_ID, 3)).toBe(true);
+    // With threshold=1, 2 events since snapshot → stale
+    expect(callHasFreshSummary(SESSION_ID, 1)).toBe(false);
+  });
+
+  it('returns true when snapshot covers ALL events (0 since)', async () => {
+    for (let i = 0; i < 5; i++) {
+      eventStore.append({
+        sessionId: SESSION_ID,
+        timestamp: 1000 + i * 100,
+        type: 'user_message',
+        content: `Message ${i}`
+      });
+    }
+    await snapshotManager.createSnapshot(SESSION_ID);
+
+    // No new events since snapshot
+    expect(callHasFreshSummary(SESSION_ID)).toBe(true);
+  });
+});
+
+describe('ConversationManager.createSnapshot', () => {
+  let db: Database;
+  let eventStore: EventStore;
+  let snapshotManager: SnapshotManager;
+  let callCreateSnapshot: (sessionId: string) => Promise<void>;
+  const SESSION_ID = 'test-session-snap-create';
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS sessions (
+        id TEXT PRIMARY KEY, title TEXT NOT NULL, model TEXT NOT NULL,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        event_count INTEGER DEFAULT 0, last_snapshot_sequence INTEGER DEFAULT 0,
+        tags TEXT DEFAULT '[]', first_user_message TEXT, last_activity_preview TEXT
+      )
+    `);
+    eventStore = new EventStore(db);
+    snapshotManager = new SnapshotManager(db, eventStore, createExtractSummarizer());
+
+    const mockCm = { snapshotManager };
+    callCreateSnapshot = (sessionId: string) => createSnapshot.call(mockCm, sessionId);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('delegates to snapshotManager.createSnapshot()', async () => {
+    for (let i = 0; i < 5; i++) {
+      eventStore.append({
+        sessionId: SESSION_ID,
+        timestamp: 1000 + i * 100,
+        type: 'user_message',
+        content: `Message ${i}`
+      });
+    }
+
+    await callCreateSnapshot(SESSION_ID);
+
+    const snapshot = snapshotManager.getLatestSnapshot(SESSION_ID);
+    expect(snapshot).not.toBeNull();
+    expect(snapshot!.sessionId).toBe(SESSION_ID);
+    expect(snapshot!.summary).toContain('Conversation topics:');
+  });
+});
+
+// Test that recordAssistantMessage no longer auto-creates snapshots
+const recordAssistantMessage = ConversationManager.prototype.recordAssistantMessage;
+
+describe('ConversationManager.recordAssistantMessage — no auto-snapshot', () => {
+  let db: Database;
+  let eventStore: EventStore;
+  let snapshotManager: SnapshotManager;
+  const SESSION_ID = 'test-session-no-auto';
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS sessions (
+        id TEXT PRIMARY KEY, title TEXT NOT NULL, model TEXT NOT NULL,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        event_count INTEGER DEFAULT 0, last_snapshot_sequence INTEGER DEFAULT 0,
+        tags TEXT DEFAULT '[]', first_user_message TEXT, last_activity_preview TEXT
+      )
+    `);
+    db.prepare(`INSERT INTO sessions (id, title, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`)
+      .run(SESSION_ID, 'Test', 'deepseek-chat', Date.now(), Date.now());
+    eventStore = new EventStore(db);
+    // Use small interval so we can test that auto-snapshot does NOT fire
+    snapshotManager = new SnapshotManager(db, eventStore, createExtractSummarizer(), { snapshotInterval: 3 });
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('should NOT auto-create snapshots after recording assistant messages', async () => {
+    // Create a mock that has the fields recordAssistantMessage needs
+    const mockCm = {
+      currentSessionId: SESSION_ID,
+      eventStore,
+      snapshotManager,
+      onSessionsChanged: { fire: () => {} },
+      ensureCurrentSession: () => ({
+        id: SESSION_ID, title: 'Test', model: 'deepseek-chat',
+        createdAt: new Date(), updatedAt: new Date(), eventCount: 0, tags: []
+      }),
+      updateSessionMetadata: () => {},
+    };
+
+    // Add more than snapshotInterval events (3) via recordAssistantMessage
+    for (let i = 0; i < 10; i++) {
+      await recordAssistantMessage.call(mockCm, `Response ${i}`, 'deepseek-chat', 'stop');
+    }
+
+    // No snapshot should have been auto-created
+    const snapshot = snapshotManager.getLatestSnapshot(SESSION_ID);
+    expect(snapshot).toBeNull();
+  });
+});
+
 // Bind getLatestSnapshotSummary to a lightweight mock
 const getLatestSnapshotSummary = ConversationManager.prototype.getLatestSnapshotSummary;
 

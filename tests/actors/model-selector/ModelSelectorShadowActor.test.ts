@@ -222,6 +222,23 @@ describe('ModelSelectorShadowActor', () => {
       });
     });
 
+    it('updates shell iterations on slider input when R1 is selected', () => {
+      // Switch to R1 model so shell iterations slider appears
+      actor.toggle();
+      const r1Option = element.shadowRoot?.querySelector('.model-option[data-model="deepseek-reasoner"]') as HTMLElement;
+      r1Option?.click();
+
+      const slider = element.shadowRoot?.querySelector('[data-param="shellIterations"]') as HTMLInputElement;
+      expect(slider).toBeTruthy();
+      slider.value = '10';
+      slider.dispatchEvent(new Event('input', { bubbles: true }));
+
+      expect(mockVSCode.postMessage).toHaveBeenCalledWith({
+        type: 'setShellIterations',
+        shellIterations: 10
+      });
+    });
+
     it('updates max tokens on slider input', () => {
       const slider = element.shadowRoot?.querySelector('[data-param="maxTokens"]') as HTMLInputElement;
       slider.value = '4096';
@@ -255,6 +272,7 @@ describe('ModelSelectorShadowActor', () => {
         model: 'deepseek-reasoner',
         temperature: 1.2,
         toolLimit: 50,
+        shellIterations: 10,
         maxTokens: 16384
       };
 
@@ -264,6 +282,7 @@ describe('ModelSelectorShadowActor', () => {
       expect(result.model).toBe('deepseek-reasoner');
       expect(result.temperature).toBe(1.2);
       expect(result.toolLimit).toBe(50);
+      expect(result.shellIterations).toBe(10);
       expect(result.maxTokens).toBe(16384);
     });
   });
@@ -283,6 +302,7 @@ describe('ModelSelectorShadowActor', () => {
       expect(settings).toHaveProperty('model');
       expect(settings).toHaveProperty('temperature');
       expect(settings).toHaveProperty('toolLimit');
+      expect(settings).toHaveProperty('shellIterations');
       expect(settings).toHaveProperty('maxTokens');
     });
 

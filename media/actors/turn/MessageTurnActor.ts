@@ -38,7 +38,8 @@ import type {
   ShellCommand,
   ShellCommandStatus,
   PendingFile,
-  PendingFileStatus
+  PendingFileStatus,
+  PendingGroup
 } from './types';
 
 const log = createLogger('MessageTurnActor');
@@ -109,8 +110,8 @@ export class MessageTurnActor extends InterleavedShadowActor {
   // Pending Files State
   // ============================================
 
-  private _pendingContainerId: string | null = null;
-  private _pendingFiles: Map<string, PendingFile> = new Map();
+  private _pendingGroups: PendingGroup[] = [];
+  private _currentPendingGroup: PendingGroup | null = null;
   private _pendingIteration = 0;
 
   // ============================================
@@ -197,8 +198,8 @@ export class MessageTurnActor extends InterleavedShadowActor {
     this._shellSegments.clear();
 
     // Reset pending files
-    this._pendingContainerId = null;
-    this._pendingFiles.clear();
+    this._pendingGroups = [];
+    this._currentPendingGroup = null;
     this._pendingIteration = 0;
 
     // Reset streaming state
@@ -307,6 +308,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
    * For assistant messages, creates streaming structure.
    */
   createTextSegment(content: string = '', options?: { isContinuation?: boolean }): string {
+    this._currentPendingGroup = null;
     this._textSegmentCounter++;
     const segmentId = `${this._turnId}-text-${this._textSegmentCounter}`;
     const isContinuation = options?.isContinuation ?? false;
@@ -428,6 +430,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
    * Start a new thinking iteration.
    */
   startThinkingIteration(): number {
+    this._currentPendingGroup = null;
     this._currentThinkingIteration++;
     this._thinkingBaseOffset = this._lastKnownThinkingLength;
 
@@ -529,6 +532,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
    * Start a new tool batch.
    */
   startToolBatch(tools: Array<{ name: string; detail: string }>): string {
+    this._currentPendingGroup = null;
     const container = this.createContainer('message', {
       hostClasses: ['tools-container'],
       dataAttributes: { 'turn-id': this._turnId ?? '' }
@@ -607,6 +611,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
    * Create a shell segment.
    */
   createShellSegment(commands: Array<{ command: string; cwd?: string }>): string {
+    this._currentPendingGroup = null;
     log.debug(`createShellSegment: creating with ${commands.length} commands`);
 
     const container = this.createContainer('message', {
@@ -685,7 +690,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
    */
   addPendingFile(file: { filePath: string; diffId?: string; status?: PendingFileStatus }): string {
     const fileName = file.filePath.split('/').pop() ?? file.filePath;
-    const fileId = `pending-${Date.now()}-${this._pendingFiles.size}`;
+    const fileId = `pending-${Date.now()}-${this._pendingIteration}`;
 
     this._pendingIteration++;
 
@@ -698,19 +703,19 @@ export class MessageTurnActor extends InterleavedShadowActor {
       iteration: this._pendingIteration
     };
 
-    this._pendingFiles.set(fileId, pendingFile);
-
-    // Ensure pending container exists
-    if (!this._pendingContainerId) {
+    // Create new group if needed (no current group = after non-pending content)
+    if (!this._currentPendingGroup) {
       const container = this.createContainer('message', {
         hostClasses: ['pending-container', 'expanded'],
         dataAttributes: { 'turn-id': this._turnId ?? '' }
       });
-      this._pendingContainerId = container.id;
+      this._currentPendingGroup = { containerId: container.id, files: new Map() };
+      this._pendingGroups.push(this._currentPendingGroup);
       this.setupPendingHandlers(container.id);
     }
 
-    this.renderPendingFiles();
+    this._currentPendingGroup.files.set(fileId, pendingFile);
+    this.renderPendingGroup(this._currentPendingGroup);
 
     return fileId;
   }
@@ -719,20 +724,24 @@ export class MessageTurnActor extends InterleavedShadowActor {
    * Update pending file status.
    */
   updatePendingStatus(fileId: string, status: PendingFileStatus, diffId?: string, filePath?: string): void {
-    let file = this._pendingFiles.get(fileId);
-    // Fallback: VirtualListActor uses different IDs than MessageTurnActor,
-    // so look up by diffId or filePath when the fileId doesn't match.
-    if (!file && (diffId || filePath)) {
-      for (const f of this._pendingFiles.values()) {
-        if ((diffId && f.diffId === diffId) || (filePath && f.filePath === filePath)) {
-          file = f;
-          break;
+    // Search across ALL pending groups for the file
+    for (const group of this._pendingGroups) {
+      let file = group.files.get(fileId);
+      // Fallback: VirtualListActor uses different IDs than MessageTurnActor,
+      // so look up by diffId or filePath when the fileId doesn't match.
+      if (!file && (diffId || filePath)) {
+        for (const f of group.files.values()) {
+          if ((diffId && f.diffId === diffId) || (filePath && f.filePath === filePath)) {
+            file = f;
+            break;
+          }
         }
       }
-    }
-    if (file) {
-      file.status = status;
-      this.renderPendingFiles();
+      if (file) {
+        file.status = status;
+        this.renderPendingGroup(group);
+        return;
+      }
     }
   }
 
@@ -750,8 +759,10 @@ export class MessageTurnActor extends InterleavedShadowActor {
       });
     });
 
-    // Update pending files display
-    this.renderPendingFiles();
+    // Update pending files display (all groups)
+    for (const group of this._pendingGroups) {
+      this.renderPendingGroup(group);
+    }
   }
 
   // ============================================
@@ -937,13 +948,11 @@ export class MessageTurnActor extends InterleavedShadowActor {
     `;
   }
 
-  private renderPendingFiles(): void {
-    if (!this._pendingContainerId) return;
-
-    const container = this.getContainer(this._pendingContainerId);
+  private renderPendingGroup(group: PendingGroup): void {
+    const container = this.getContainer(group.containerId);
     if (!container) return;
 
-    const files = Array.from(this._pendingFiles.values());
+    const files = Array.from(group.files.values());
     const pendingCount = files.filter(f => f.status === 'pending').length;
     const appliedCount = files.filter(f => f.status === 'applied').length;
 
