@@ -67,6 +67,9 @@ export class Database {
     if (encryptionKey) {
       this.db.pragma(`key='${encryptionKey}'`);
     }
+
+    // Enable foreign key constraint enforcement
+    this.db.exec('PRAGMA foreign_keys = ON');
   }
 
   /**
@@ -89,6 +92,14 @@ export class Database {
    */
   pragma(pragma: string): void {
     this.db.exec(`PRAGMA ${pragma}`);
+  }
+
+  /**
+   * Get an integer pragma value (e.g., user_version, schema_version).
+   */
+  pragmaGet(name: string): number {
+    const result = this.db.pragma(name, { simple: true });
+    return typeof result === 'number' ? result : 0;
   }
 
   /**

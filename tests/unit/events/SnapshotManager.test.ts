@@ -6,6 +6,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { Database } from '../../../src/events/SqlJsWrapper';
+import { runMigrations } from '../../../src/events/migrations';
 import { EventStore } from '../../../src/events/EventStore';
 import { SnapshotManager, createExtractSummarizer, createLLMSummarizer } from '../../../src/events/SnapshotManager';
 import type { SummarizerChatFn } from '../../../src/events/SnapshotManager';
@@ -17,22 +18,9 @@ describe('SnapshotManager', () => {
 
   beforeEach(() => {
     db = new Database(':memory:');
-
-    // Create sessions table (normally created by ConversationManager)
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS sessions (
-        id TEXT PRIMARY KEY,
-        title TEXT NOT NULL,
-        model TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        event_count INTEGER DEFAULT 0,
-        last_snapshot_sequence INTEGER DEFAULT 0,
-        tags TEXT DEFAULT '[]',
-        first_user_message TEXT,
-        last_activity_preview TEXT
-      );
-    `);
+    runMigrations(db);
+    // FK constraints require parent session to exist
+    db.prepare('INSERT INTO sessions (id, title, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run('session-1', 'Test', 'test', 1000, 1000);
 
     eventStore = new EventStore(db);
     snapshotManager = new SnapshotManager(
@@ -560,20 +548,9 @@ describe('SnapshotManager with chaining', () => {
 
   beforeEach(() => {
     db = new Database(':memory:');
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS sessions (
-        id TEXT PRIMARY KEY,
-        title TEXT NOT NULL,
-        model TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        event_count INTEGER DEFAULT 0,
-        last_snapshot_sequence INTEGER DEFAULT 0,
-        tags TEXT DEFAULT '[]',
-        first_user_message TEXT,
-        last_activity_preview TEXT
-      );
-    `);
+    runMigrations(db);
+    // FK constraints require parent session to exist
+    db.prepare('INSERT INTO sessions (id, title, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run('session-1', 'Test', 'test', 1000, 1000);
     eventStore = new EventStore(db);
   });
 

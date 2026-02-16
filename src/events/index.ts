@@ -34,5 +34,8 @@ export type { Snapshot, SnapshotContent, SummarizerFn, SummarizerChatFn } from '
 // Low-level event store (usually not needed directly)
 export { EventStore } from './EventStore';
 
+// Schema migrations
+export { runMigrations } from './migrations';
+
 // Database wrapper (native SQLCipher)
 export { Database } from './SqlJsWrapper';

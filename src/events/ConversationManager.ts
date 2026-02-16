@@ -14,6 +14,7 @@ import * as fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 
 import { Database } from './SqlJsWrapper';
+import { runMigrations } from './migrations';
 import { EventStore } from './EventStore';
 import { SnapshotManager, SummarizerFn, createExtractSummarizer } from './SnapshotManager';
 import { logger } from '../utils/logger';
@@ -114,15 +115,15 @@ export class ConversationManager {
 
     // Setup database path
     const dbPath = this.options?.dbPath ??
-      path.join(this.context.globalStorageUri.fsPath, 'conversations.db');
+      path.join(this.context.globalStorageUri.fsPath, 'moby.db');
 
     // Initialize database (synchronous — native SQLCipher, no WASM)
     this.db = new Database(dbPath, this.options?.encryptionKey);
 
-    // Create sessions table first — SnapshotManager references it in a LEFT JOIN
-    this.initSessionsSchema();
+    // Run migrations — single source of truth for all schema
+    runMigrations(this.db);
 
-    // Initialize components
+    // Initialize components (prepareStatements only — migrations own the schema)
     this.eventStore = new EventStore(this.db);
     this.snapshotManager = new SnapshotManager(
       this.db,
@@ -158,29 +159,8 @@ export class ConversationManager {
   }
 
   // ==========================================================================
-  // Schema & Initialization
+  // Initialization
   // ==========================================================================
-
-  private initSessionsSchema(): void {
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS sessions (
-        id TEXT PRIMARY KEY,
-        title TEXT NOT NULL,
-        model TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        event_count INTEGER DEFAULT 0,
-        last_snapshot_sequence INTEGER DEFAULT 0,
-        tags TEXT DEFAULT '[]',
-        first_user_message TEXT,
-        last_activity_preview TEXT
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_sessions_updated
-        ON sessions(updated_at DESC);
-    `);
-  }
-
 
   private loadCurrentSession(): void {
     const savedId = this.context.globalState.get<string>('currentSessionId');
@@ -272,9 +252,12 @@ export class ConversationManager {
    * Delete a session and all its events.
    */
   async deleteSession(sessionId: string): Promise<void> {
-    this.eventStore.deleteSessionEvents(sessionId);
-    this.snapshotManager.deleteSessionSnapshots(sessionId);
-    this.stmtDeleteSession.run(sessionId);
+    const deleteAll = this.db.transaction(() => {
+      this.eventStore.deleteSessionEvents(sessionId);
+      this.snapshotManager.deleteSessionSnapshots(sessionId);
+      this.stmtDeleteSession.run(sessionId);
+    });
+    deleteAll();
 
     if (this.currentSessionId === sessionId) {
       this.currentSessionId = null;
@@ -313,9 +296,12 @@ export class ConversationManager {
    * Clear all sessions.
    */
   async clearAllSessions(): Promise<void> {
-    this.db.exec('DELETE FROM events');
-    this.db.exec('DELETE FROM snapshots');
-    this.db.exec('DELETE FROM sessions');
+    const clearAll = this.db.transaction(() => {
+      this.db.exec('DELETE FROM events');
+      this.db.exec('DELETE FROM snapshots');
+      this.db.exec('DELETE FROM sessions');
+    });
+    clearAll();
 
     this.currentSessionId = null;
     await this.saveCurrentSession();

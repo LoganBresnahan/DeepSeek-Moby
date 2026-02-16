@@ -7,6 +7,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { Database } from '../../../src/events/SqlJsWrapper';
+import { runMigrations } from '../../../src/events/migrations';
 import { EventStore } from '../../../src/events/EventStore';
 
 describe('EventStore', () => {
@@ -16,6 +17,10 @@ describe('EventStore', () => {
   beforeEach(() => {
     // Use in-memory database for each test
     db = new Database(':memory:');
+    runMigrations(db);
+    // FK constraints require parent sessions to exist before inserting events
+    db.prepare('INSERT INTO sessions (id, title, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run('session-1', 'Test', 'test', 1000, 1000);
+    db.prepare('INSERT INTO sessions (id, title, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run('session-2', 'Test 2', 'test', 1000, 1000);
     eventStore = new EventStore(db);
   });
 

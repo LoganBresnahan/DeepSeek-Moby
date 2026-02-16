@@ -7,6 +7,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { Database } from '../../../src/events/SqlJsWrapper';
+import { runMigrations } from '../../../src/events/migrations';
 import { EventStore } from '../../../src/events/EventStore';
 import { SnapshotManager, createExtractSummarizer } from '../../../src/events/SnapshotManager';
 import { ConversationManager, RichHistoryTurn } from '../../../src/events/ConversationManager';
@@ -23,6 +24,11 @@ describe('ConversationManager.getSessionRichHistory', () => {
 
   beforeEach(() => {
     db = new Database(':memory:');
+    runMigrations(db);
+    // FK constraints require parent sessions to exist
+    db.prepare('INSERT INTO sessions (id, title, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run(SESSION_ID, 'Test', 'test', 1000, 1000);
+    db.prepare('INSERT INTO sessions (id, title, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run('session-A', 'A', 'test', 1000, 1000);
+    db.prepare('INSERT INTO sessions (id, title, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run('session-B', 'B', 'test', 1000, 1000);
     eventStore = new EventStore(db);
 
     // Create a lightweight mock with just the fields getSessionRichHistory needs
@@ -663,14 +669,9 @@ describe('ConversationManager.hasFreshSummary', () => {
 
   beforeEach(() => {
     db = new Database(':memory:');
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS sessions (
-        id TEXT PRIMARY KEY, title TEXT NOT NULL, model TEXT NOT NULL,
-        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-        event_count INTEGER DEFAULT 0, last_snapshot_sequence INTEGER DEFAULT 0,
-        tags TEXT DEFAULT '[]', first_user_message TEXT, last_activity_preview TEXT
-      )
-    `);
+    runMigrations(db);
+    // FK constraints require parent session to exist
+    db.prepare('INSERT INTO sessions (id, title, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run(SESSION_ID, 'Test', 'test', 1000, 1000);
     eventStore = new EventStore(db);
     snapshotManager = new SnapshotManager(db, eventStore, createExtractSummarizer());
 
@@ -784,14 +785,9 @@ describe('ConversationManager.createSnapshot', () => {
 
   beforeEach(() => {
     db = new Database(':memory:');
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS sessions (
-        id TEXT PRIMARY KEY, title TEXT NOT NULL, model TEXT NOT NULL,
-        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-        event_count INTEGER DEFAULT 0, last_snapshot_sequence INTEGER DEFAULT 0,
-        tags TEXT DEFAULT '[]', first_user_message TEXT, last_activity_preview TEXT
-      )
-    `);
+    runMigrations(db);
+    // FK constraints require parent session to exist
+    db.prepare('INSERT INTO sessions (id, title, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run(SESSION_ID, 'Test', 'test', 1000, 1000);
     eventStore = new EventStore(db);
     snapshotManager = new SnapshotManager(db, eventStore, createExtractSummarizer());
 
@@ -833,14 +829,7 @@ describe('ConversationManager.recordAssistantMessage — no auto-snapshot', () =
 
   beforeEach(() => {
     db = new Database(':memory:');
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS sessions (
-        id TEXT PRIMARY KEY, title TEXT NOT NULL, model TEXT NOT NULL,
-        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-        event_count INTEGER DEFAULT 0, last_snapshot_sequence INTEGER DEFAULT 0,
-        tags TEXT DEFAULT '[]', first_user_message TEXT, last_activity_preview TEXT
-      )
-    `);
+    runMigrations(db);
     db.prepare(`INSERT INTO sessions (id, title, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`)
       .run(SESSION_ID, 'Test', 'deepseek-chat', Date.now(), Date.now());
     eventStore = new EventStore(db);
@@ -889,21 +878,11 @@ describe('ConversationManager.getLatestSnapshotSummary', () => {
 
   beforeEach(() => {
     db = new Database(':memory:');
-    // Create sessions table (SnapshotManager references it in a LEFT JOIN)
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS sessions (
-        id TEXT PRIMARY KEY,
-        title TEXT NOT NULL,
-        model TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        event_count INTEGER DEFAULT 0,
-        last_snapshot_sequence INTEGER DEFAULT 0,
-        tags TEXT DEFAULT '[]',
-        first_user_message TEXT,
-        last_activity_preview TEXT
-      )
-    `);
+    runMigrations(db);
+    // FK constraints require parent sessions to exist
+    db.prepare('INSERT INTO sessions (id, title, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run(SESSION_ID, 'Test', 'test', 1000, 1000);
+    db.prepare('INSERT INTO sessions (id, title, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run('session-A', 'A', 'test', 1000, 1000);
+    db.prepare('INSERT INTO sessions (id, title, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run('session-B', 'B', 'test', 1000, 1000);
     eventStore = new EventStore(db);
     snapshotManager = new SnapshotManager(db, eventStore, createExtractSummarizer());
 

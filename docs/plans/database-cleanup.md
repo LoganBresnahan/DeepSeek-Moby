@@ -13,15 +13,23 @@ Two phases of database infrastructure work: a migration framework and transactio
 
 ### Goal
 
-Establish `PRAGMA user_version` migration infrastructure so future schema changes (e.g., adding columns, FK constraints) are handled safely and automatically on extension startup.
+Establish `PRAGMA user_version` migration infrastructure so future schema changes (e.g., adding columns, FK constraints) are handled safely and automatically on extension startup. Migrations become the **single source of truth** for all schema — table creation moves out of scattered constructors and into versioned migration blocks.
 
 ### Background
 
-SQLite's `PRAGMA user_version` is a single integer stored in the database file header, readable in < 1 ms. It's the standard lightweight migration mechanism for embedded SQLite databases. Currently, the project has no schema versioning — tables are created via `CREATE TABLE IF NOT EXISTS`, which works for initial creation but can't handle schema evolution (adding columns, constraints, etc.).
+SQLite's `PRAGMA user_version` is a single integer stored in the database file header, readable in < 1 ms. It's the standard lightweight migration mechanism for embedded SQLite databases. Currently, the project has no schema versioning — tables are created via `CREATE TABLE IF NOT EXISTS` scattered across three places:
+
+| Location | Creates |
+|----------|---------|
+| `ConversationManager.initSessionsSchema()` | `sessions` table + 1 index |
+| `EventStore.initSchema()` (constructor) | `events` table + 3 indexes |
+| `SnapshotManager.initSchema()` (constructor) | `snapshots` table + 1 index |
+
+This works for initial creation but can't handle schema evolution (adding columns, constraints, etc.), and scatters the schema definition across multiple files.
 
 ### Design
 
-A `runMigrations(db)` function runs sequentially through version-gated blocks:
+A `runMigrations(db)` function runs sequentially through version-gated blocks. **Migration v1 creates all tables** — it is the baseline schema, not a no-op:
 
 ```typescript
 // src/events/migrations.ts
@@ -32,10 +40,56 @@ export function runMigrations(db: Database): void {
   const version = db.pragmaGet('user_version');
 
   if (version < 1) {
-    // Formalize existing schema as version 1
-    // Tables already created by CREATE TABLE IF NOT EXISTS — this just
-    // stamps the version so future migrations know the baseline.
     logger.info('[Migrations] Applying version 1: baseline schema');
+    db.exec(`
+      -- Sessions table (parent — must be created first for FK references)
+      CREATE TABLE IF NOT EXISTS sessions (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        model TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        event_count INTEGER DEFAULT 0,
+        last_snapshot_sequence INTEGER DEFAULT 0,
+        tags TEXT DEFAULT '[]',
+        first_user_message TEXT,
+        last_activity_preview TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_sessions_updated
+        ON sessions(updated_at DESC);
+
+      -- Events table (child)
+      CREATE TABLE IF NOT EXISTS events (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        timestamp INTEGER NOT NULL,
+        type TEXT NOT NULL,
+        data TEXT NOT NULL,
+        UNIQUE(session_id, sequence)
+      );
+      CREATE INDEX IF NOT EXISTS idx_events_session
+        ON events(session_id, sequence);
+      CREATE INDEX IF NOT EXISTS idx_events_type
+        ON events(session_id, type);
+      CREATE INDEX IF NOT EXISTS idx_events_timestamp
+        ON events(session_id, timestamp);
+
+      -- Snapshots table (child)
+      CREATE TABLE IF NOT EXISTS snapshots (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        up_to_sequence INTEGER NOT NULL,
+        timestamp INTEGER NOT NULL,
+        summary TEXT NOT NULL,
+        key_facts TEXT NOT NULL,
+        files_modified TEXT NOT NULL,
+        token_count INTEGER NOT NULL,
+        UNIQUE(session_id, up_to_sequence)
+      );
+      CREATE INDEX IF NOT EXISTS idx_snapshots_session
+        ON snapshots(session_id, up_to_sequence DESC);
+    `);
   }
 
   // Future migrations go here:
@@ -46,16 +100,33 @@ export function runMigrations(db: Database): void {
 }
 ```
 
+**Why `CREATE TABLE IF NOT EXISTS` in the migration?** Existing databases already have these tables (created by the old scattered constructors). The `IF NOT EXISTS` makes v1 safe for both fresh installs and existing databases — it creates tables if missing, skips if present, and stamps the version either way.
+
+### Schema Ownership: Migrations Own Tables, Constructors Own Statements
+
+After this change, the responsibility split is:
+
+| Concern | Owner |
+|---------|-------|
+| Table creation, indexes, schema changes | `migrations.ts` (versioned) |
+| Prepared statements | Constructors (`EventStore`, `SnapshotManager`, `ConversationManager`) |
+
+The scattered `initSchema()` / `initSessionsSchema()` methods are **removed**. Their constructors keep only `prepareStatements()`.
+
 ### Files to Change
 
 | File | Change |
 |------|--------|
-| **New: `src/events/migrations.ts`** | `runMigrations(db)` function |
+| **New: `src/events/migrations.ts`** | `runMigrations(db)` — creates all 3 tables + indexes in version 1 |
 | `src/events/SqlJsWrapper.ts` | Add `pragmaGet(name): number` method (current `pragma()` is void-only) |
-| `src/events/ConversationManager.ts` | Call `runMigrations(this.db)` after `new Database(...)` but before `initSessionsSchema()`. Remove stale `maxSnapshotsPerSession` from options interface and constructor. |
-| **New: `tests/unit/events/migrations.test.ts`** | Tests: fresh DB gets version 1, idempotent re-run, future migrations run in sequence |
+| `src/events/ConversationManager.ts` | Remove `initSessionsSchema()`. Call `runMigrations(this.db)` after `new Database(...)`. Remove stale `maxSnapshotsPerSession` from options interface and constructor. |
+| `src/events/EventStore.ts` | Remove `initSchema()` from constructor. Constructor calls only `prepareStatements()`. |
+| `src/events/SnapshotManager.ts` | Remove `initSchema()` from constructor. Constructor calls only `prepareStatements()`. |
+| **New: `tests/unit/events/migrations.test.ts`** | Tests: fresh DB gets version 1 with all tables, idempotent re-run, existing DB gets version stamped |
+| `tests/unit/events/EventStore.test.ts` | Add `runMigrations(db)` before `new EventStore(db)` in setup |
+| `tests/unit/events/SnapshotManager.test.ts` | Add `runMigrations(db)` before `new SnapshotManager(db, ...)` in setup |
+| `tests/unit/events/ConversationManager.test.ts` | Verify migrations run via constructor (tests may need minor adjustment) |
 | `docs/architecture/backend/database-layer.md` | Add "Schema Migrations" section |
-| `docs/plans/context-management.md` | Update Section 12 to reflect migration framework as "implemented" |
 
 ### SqlJsWrapper Addition
 
@@ -74,17 +145,14 @@ pragmaGet(name: string): number {
 ```
 ConversationManager constructor:
   1. new Database(dbPath, encryptionKey)
-  2. runMigrations(this.db)          ← NEW
-  3. initSessionsSchema()            ← CREATE TABLE IF NOT EXISTS
-  4. new EventStore(this.db)
-  5. new SnapshotManager(this.db, ...)
-  6. prepareStatements()
+  2. runMigrations(this.db)          ← creates all tables + indexes
+  3. new EventStore(this.db)         ← prepareStatements() only
+  4. new SnapshotManager(this.db, ...)  ← prepareStatements() only
+  5. prepare session statements
+  6. loadCurrentSession()
 ```
 
-Migrations run before table creation. This is safe because:
-- Version 0→1 is a no-op (tables don't exist yet on fresh install)
-- Future migrations (version 1→2, etc.) can ALTER existing tables
-- `CREATE TABLE IF NOT EXISTS` is idempotent — runs after migrations
+No more `initSessionsSchema()` step — migrations handle it.
 
 ### Release Process
 
@@ -99,6 +167,8 @@ Migrations run before table creation. This is safe because:
 While touching ConversationManager, clean up stale references:
 - Remove `maxSnapshotsPerSession` from `ConversationManagerOptions` interface
 - Remove `maxSnapshotsPerSession` from SnapshotManager constructor call
+- Remove `initSessionsSchema()` method entirely
+- Remove `initSchema()` from EventStore and SnapshotManager
 
 ---
 
@@ -165,27 +235,9 @@ if (encryptionKey) {
 this.db.exec('PRAGMA foreign_keys = ON');
 ```
 
-Add FK references to CREATE TABLE statements:
+#### Migration v2: Add FK Constraints to Existing Tables
 
-```sql
--- events table
-CREATE TABLE IF NOT EXISTS events (
-  id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  ...
-);
-
--- snapshots table
-CREATE TABLE IF NOT EXISTS snapshots (
-  id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  ...
-);
-```
-
-#### Migration for Existing Databases
-
-SQLite doesn't support `ALTER TABLE ADD FOREIGN KEY`. The migration (version 2) must recreate the tables:
+SQLite doesn't support `ALTER TABLE ADD FOREIGN KEY`. The migration must recreate the tables with FK references. Since migrations now own all schema, this is the natural place for it:
 
 ```typescript
 if (version < 2) {
@@ -240,33 +292,33 @@ if (version < 2) {
 |------|--------|
 | `src/events/SqlJsWrapper.ts` | Add `PRAGMA foreign_keys = ON` in constructor |
 | `src/events/ConversationManager.ts` | Wrap `deleteSession()` and `clearAllSessions()` in transactions |
-| `src/events/EventStore.ts` | Add `REFERENCES sessions(id) ON DELETE CASCADE` to CREATE TABLE |
-| `src/events/SnapshotManager.ts` | Add `REFERENCES sessions(id) ON DELETE CASCADE` to CREATE TABLE |
-| `src/events/migrations.ts` | Add version 2 migration (table recreation with FKs) |
+| `src/events/migrations.ts` | Add version 2 migration (table recreation with FKs), update final version stamp |
+| `tests/unit/events/migrations.test.ts` | Add tests: v2 migration adds FKs, existing data preserved, FK cascade works |
 | `tests/unit/events/ConversationManager.test.ts` | Add tests: atomic deleteSession, atomic clearAllSessions, FK cascade |
 | `docs/architecture/backend/database-layer.md` | Update schema diagrams with FK constraints, add "Transactions" section |
 | `docs/architecture/backend/event-sourcing.md` | Update component diagram, remove `prune()` reference, note FK cascade |
-| `docs/plans/context-management.md` | Update Section 12 to reflect transaction wrapping as "done" |
 
 ### Initialization Order (Updated)
 
-With FK constraints enabled, table creation order matters:
+With FK constraints enabled, table creation order matters — but since migrations own all schema and create sessions first, this is explicit:
 
 ```
 1. new Database(dbPath, encryptionKey)  → PRAGMA foreign_keys = ON
-2. runMigrations(this.db)               → version checks + table recreation
-3. initSessionsSchema()                 → sessions table (parent)
-4. new EventStore(this.db)              → events table (child, FK → sessions)
-5. new SnapshotManager(this.db, ...)    → snapshots table (child, FK → sessions)
+2. runMigrations(this.db)               → v1: create all tables, v2: recreate with FKs
+3. new EventStore(this.db)              → prepareStatements() only
+4. new SnapshotManager(this.db, ...)    → prepareStatements() only
+5. prepare session statements
+6. loadCurrentSession()
 ```
 
-This order already exists — sessions is created first because SnapshotManager's LEFT JOIN references it.
+The FK ordering constraint (sessions before events/snapshots) is handled inside migration v1's SQL, not by constructor call order.
 
 ### Testing Considerations
 
 - FK cascade test: insert session + events + snapshots, delete session, verify all three tables are clean
 - Transaction atomicity test: simulate failure mid-delete, verify rollback
 - `PRAGMA foreign_keys` test: verify it's ON after Database construction
+- Migration v1→v2 upgrade test: create v1 tables without FKs, run v2, verify FKs exist and cascade works
 
 ---
 
@@ -275,9 +327,9 @@ This order already exists — sessions is created first because SnapshotManager'
 | File | Role |
 |------|------|
 | `src/events/SqlJsWrapper.ts` | Database wrapper, PRAGMA support, transactions |
-| `src/events/migrations.ts` | Schema versioning and migrations (new) |
-| `src/events/ConversationManager.ts` | Session CRUD, delete cascading |
-| `src/events/EventStore.ts` | Event table schema and operations |
-| `src/events/SnapshotManager.ts` | Snapshot table schema and operations |
+| `src/events/migrations.ts` | Schema versioning and migrations (new) — single source of truth for schema |
+| `src/events/ConversationManager.ts` | Session CRUD, delete cascading, session prepared statements |
+| `src/events/EventStore.ts` | Event prepared statements and operations |
+| `src/events/SnapshotManager.ts` | Snapshot prepared statements and operations |
 | `docs/architecture/backend/database-layer.md` | Schema documentation |
 | `docs/architecture/backend/event-sourcing.md` | Architecture documentation |

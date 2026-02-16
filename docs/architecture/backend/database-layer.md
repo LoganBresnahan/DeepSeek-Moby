@@ -44,7 +44,7 @@ The persistence layer uses **SQLite** via **@signalapp/sqlcipher** (a native N-A
 │                                   ▼                                          │
 │  ┌─────────────────────────────────────────────────────────────────┐        │
 │  │                    File System                                   │        │
-│  │              ~/.vscode/.../conversations.db                      │        │
+│  │              ~/.vscode/.../moby.db                      │        │
 │  └─────────────────────────────────────────────────────────────────┘        │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -200,7 +200,7 @@ class StatementWrapper {
 
 ```typescript
 // Create database (synchronous — no async init needed)
-const db = new Database('/path/to/conversations.db', encryptionKey);
+const db = new Database('/path/to/moby.db', encryptionKey);
 
 // Execute schema
 db.exec(`
@@ -285,7 +285,7 @@ CREATE INDEX idx_sessions_updated ON sessions(updated_at DESC);
 
 | Path | Description |
 |------|-------------|
-| `~/.vscode/extensions/.../globalStorage/conversations.db` | Encrypted database |
+| `~/.vscode/extensions/.../globalStorage/moby.db` | Encrypted database |
 | `src/events/SqlJsWrapper.ts` | Database abstraction layer |
 
 ## Testing
@@ -317,12 +317,12 @@ describe('EventStore', () => {
 ### Database corruption
 
 SQLite is robust, but if issues occur:
-1. Delete `conversations.db`
+1. Delete `moby.db`
 2. Data is regenerated (but history is lost)
 
 ### Encryption key lost
 
-If the OS keychain is cleared, the encryption key is lost and the database cannot be opened. Delete `conversations.db` to start fresh.
+If the OS keychain is cleared, the encryption key is lost and the database cannot be opened. Delete `moby.db` to start fresh.
 
 ## Extension Storage Overview
 
@@ -330,7 +330,7 @@ The extension uses four distinct storage mechanisms, each chosen for its securit
 
 ### 1. SQLite Database (Encrypted)
 
-**Location:** `~/.vscode/extensions/.../globalStorage/conversations.db`
+**Location:** `~/.vscode/extensions/.../globalStorage/moby.db`
 **Encryption:** AES-256-CBC via @signalapp/sqlcipher
 
 All conversation data lives here:

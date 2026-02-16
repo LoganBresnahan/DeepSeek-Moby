@@ -399,7 +399,7 @@ The conversation state uses **Event Sourcing** - all changes are stored as an ap
 │                                                                              │
 │  Database File                                                               │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  ~/.vscode/extensions/.../globalStorage/conversations.db             │    │
+│  │  ~/.vscode/extensions/.../globalStorage/moby.db             │    │
 │  │                                                                      │    │
 │  │  Tables:                                                             │    │
 │  │  • sessions  - Session metadata                                      │    │

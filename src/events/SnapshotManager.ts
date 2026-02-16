@@ -98,30 +98,7 @@ export class SnapshotManager {
     // Default: create snapshot every 20 events
     this.SNAPSHOT_INTERVAL = options?.snapshotInterval ?? 20;
 
-    this.initSchema();
     this.prepareStatements();
-  }
-
-  /**
-   * Initialize the snapshots table schema.
-   */
-  private initSchema(): void {
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS snapshots (
-        id TEXT PRIMARY KEY,
-        session_id TEXT NOT NULL,
-        up_to_sequence INTEGER NOT NULL,
-        timestamp INTEGER NOT NULL,
-        summary TEXT NOT NULL,
-        key_facts TEXT NOT NULL,
-        files_modified TEXT NOT NULL,
-        token_count INTEGER NOT NULL,
-        UNIQUE(session_id, up_to_sequence)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_snapshots_session
-        ON snapshots(session_id, up_to_sequence DESC);
-    `);
   }
 
   /**

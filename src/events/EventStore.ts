@@ -36,34 +36,7 @@ export class EventStore {
 
   constructor(db: Database) {
     this.db = db;
-    this.initSchema();
     this.prepareStatements();
-  }
-
-  /**
-   * Initialize the events table schema.
-   */
-  private initSchema(): void {
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS events (
-        id TEXT PRIMARY KEY,
-        session_id TEXT NOT NULL,
-        sequence INTEGER NOT NULL,
-        timestamp INTEGER NOT NULL,
-        type TEXT NOT NULL,
-        data TEXT NOT NULL,
-        UNIQUE(session_id, sequence)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_events_session
-        ON events(session_id, sequence);
-
-      CREATE INDEX IF NOT EXISTS idx_events_type
-        ON events(session_id, type);
-
-      CREATE INDEX IF NOT EXISTS idx_events_timestamp
-        ON events(session_id, timestamp);
-    `);
   }
 
   /**
