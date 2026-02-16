@@ -8,24 +8,20 @@ export class StatusBar {
   private deepSeekClient: DeepSeekClient;
   private conversationManager: ConversationManager;
   private config: ConfigManager;
-  private context: vscode.ExtensionContext;
   private totalTokens: number = 0;
 
-  constructor(context: vscode.ExtensionContext, deepSeekClient: DeepSeekClient, conversationManager: ConversationManager) {
-    this.context = context;
+  constructor(deepSeekClient: DeepSeekClient, conversationManager: ConversationManager) {
     this.deepSeekClient = deepSeekClient;
     this.conversationManager = conversationManager;
     this.config = ConfigManager.getInstance();
-    
+
     this.statusBarItem = vscode.window.createStatusBarItem(
       vscode.StatusBarAlignment.Right,
       100
     );
-    
+
     this.statusBarItem.tooltip = 'DeepSeek Moby - Click to open chat';
     this.statusBarItem.command = 'deepseek.startChat';
-    
-    this.loadTokenCount();
   }
 
   start() {
@@ -37,11 +33,11 @@ export class StatusBar {
 
   async update() {
     const model = this.config.get<string>('model') || 'deepseek-chat';
-    
+
     // Get stats from chat history
     const stats = await this.conversationManager.getSessionStats();
     this.totalTokens = stats.totalTokens;
-    
+
     this.statusBarItem.text = `$(robot) DeepSeek Moby ${model} | $(pulse) ${this.totalTokens.toLocaleString()} tokens`;
     this.statusBarItem.tooltip = `DeepSeek Moby\nModel: ${model}\nTotal Tokens: ${this.totalTokens.toLocaleString()}\nTotal Sessions: ${stats.totalSessions}\nTotal Messages: ${stats.totalMessages}`;
   }
@@ -51,28 +47,12 @@ export class StatusBar {
   }
 
   async updateLastResponse() {
-    // Update stats from chat history
-    const stats = await this.conversationManager.getSessionStats();
-    this.totalTokens = stats.totalTokens;
-    this.saveTokenCount();
     await this.update();
   }
 
   resetTokenCount() {
     this.totalTokens = 0;
-    this.saveTokenCount();
     this.update();
-  }
-
-  private saveTokenCount() {
-    this.context.globalState.update('totalTokens', this.totalTokens);
-  }
-
-  private loadTokenCount() {
-    const saved = this.context.globalState.get<number>('totalTokens');
-    if (saved !== undefined) {
-      this.totalTokens = saved;
-    }
   }
 
   dispose() {

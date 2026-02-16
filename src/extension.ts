@@ -40,7 +40,7 @@ export async function activate(context: vscode.ExtensionContext) {
   const useWasm = tokenService.isReady;
   deepSeekClient = new DeepSeekClient(context, useWasm ? tokenService : undefined);
   logger.info(`[TokenService] Active: ${useWasm ? 'WASM (exact)' : 'Estimation (fallback)'}`);
-  
+
   // Initialize conversation manager (event sourcing) with encrypted DB
   const dbEncryptionKey = await getOrCreateEncryptionKey(context);
   // Create LLM-powered summarizer for context compression (chained summaries)
@@ -66,7 +66,7 @@ export async function activate(context: vscode.ExtensionContext) {
   }
 
   // Initialize status bar
-  statusBar = new StatusBar(context, deepSeekClient, conversationManager);
+  statusBar = new StatusBar(deepSeekClient, conversationManager);
 
   // Initialize Tavily client for web search
   tavilyClient = new TavilyClient(context);
@@ -112,7 +112,7 @@ export async function activate(context: vscode.ExtensionContext) {
   statusBar.start();
 
   // Check API key
-  await checkApiKey();
+  await checkApiKey(context);
 }
 
 function registerCommands(context: vscode.ExtensionContext) {
@@ -153,7 +153,11 @@ function registerCommands(context: vscode.ExtensionContext) {
     // Diff quick pick command
     { name: 'showDiffQuickPick', handler: async () => {
       await chatProvider.showDiffQuickPick();
-    }}
+    }},
+
+    // API Key management
+    { name: 'setApiKey', handler: () => setApiKey(context) },
+    { name: 'setTavilyApiKey', handler: () => setTavilyApiKey(context) }
   ];
 
   commands.forEach(({ name, handler }) => {
@@ -174,19 +178,58 @@ async function getOrCreateEncryptionKey(context: vscode.ExtensionContext): Promi
   return key;
 }
 
-async function checkApiKey() {
-  const config = vscode.workspace.getConfiguration('deepseek');
-  const apiKey = config.get<string>('apiKey');
-  
+async function checkApiKey(context: vscode.ExtensionContext) {
+  const apiKey = await context.secrets.get('deepseek.apiKey');
+
   if (!apiKey) {
     const result = await vscode.window.showInformationMessage(
       'DeepSeek Moby: API key is not set. Would you like to configure it now?',
       'Configure', 'Later'
     );
-    
+
     if (result === 'Configure') {
-      vscode.commands.executeCommand('workbench.action.openSettings', 'deepseek.apiKey');
+      vscode.commands.executeCommand('deepseek.setApiKey');
     }
+  }
+}
+
+async function setApiKey(context: vscode.ExtensionContext): Promise<void> {
+  const current = await context.secrets.get('deepseek.apiKey');
+  const input = await vscode.window.showInputBox({
+    prompt: 'Enter your DeepSeek API key (from platform.deepseek.com)',
+    password: true,
+    placeHolder: 'sk-...',
+    value: current ? '••••••••' : '',
+    ignoreFocusOut: true,
+    validateInput: (value) => {
+      if (!value || !value.trim()) { return 'API key cannot be empty'; }
+      if (value === '••••••••') { return null; } // unchanged
+      return null;
+    }
+  });
+  if (input && input !== '••••••••') {
+    await context.secrets.store('deepseek.apiKey', input.trim());
+    vscode.window.showInformationMessage('DeepSeek API key saved securely.');
+  }
+}
+
+async function setTavilyApiKey(context: vscode.ExtensionContext): Promise<void> {
+  const current = await context.secrets.get('deepseek.tavilyApiKey');
+  const input = await vscode.window.showInputBox({
+    prompt: 'Enter your Tavily API key (from tavily.com)',
+    password: true,
+    placeHolder: 'tvly-...',
+    value: current ? '••••••••' : '',
+    ignoreFocusOut: true,
+    validateInput: (value) => {
+      if (!value || !value.trim()) { return 'API key cannot be empty'; }
+      if (value === '••••••••') { return null; }
+      return null;
+    }
+  });
+  if (input && input !== '••••••••') {
+    await context.secrets.store('deepseek.tavilyApiKey', input.trim());
+    vscode.window.showInformationMessage('Tavily API key saved securely.');
   }
 }
 

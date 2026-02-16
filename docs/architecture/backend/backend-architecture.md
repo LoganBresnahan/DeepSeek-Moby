@@ -467,7 +467,7 @@ The conversation state uses **Event Sourcing** - all changes are stored as an ap
 | **Pattern** | Actor Model | Event-Driven Coordinator |
 | **Communication** | Pub/Sub (decentralized) | vscode.EventEmitter (typed events) |
 | **State** | Distributed across actors | Distributed across managers + Event Sourcing |
-| **Persistence** | None (transient) | SQLite database |
+| **Persistence** | None (transient) | SQLite database + context.secrets + globalState (see [Storage Overview](database-layer.md#extension-storage-overview)) |
 | **Coordination** | EventStateManager routes | ChatProvider routes messages, subscribes to events |
 | **Coupling** | Loose (actors independent) | Loose (managers independent, coordinator bridges) |
 

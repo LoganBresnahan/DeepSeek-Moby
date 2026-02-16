@@ -43,12 +43,6 @@
     "configuration": {
       "title": "DeepSeek Moby",
       "properties": {
-        "deepseek.apiKey": {
-          "type": "string",
-          "default": "",
-          "description": "Your DeepSeek API key (get from platform.deepseek.com)",
-          "scope": "application"
-        },
         "deepseek.model": {
           "type": "string",
           "default": "deepseek-chat",
@@ -173,12 +167,6 @@
           "default": "",
           "description": "Custom system prompt to prepend to all requests (leave empty for default)",
           "editPresentation": "multilineText"
-        },
-        "deepseek.tavilyApiKey": {
-          "type": "string",
-          "default": "",
-          "description": "Your Tavily API key for web search (get from tavily.com)",
-          "scope": "application"
         },
         "deepseek.tavilySearchesPerPrompt": {
           "type": "number",
@@ -364,6 +352,16 @@
       {
         "command": "deepseek.exportLogsHuman",
         "title": "DeepSeek Moby: Export Logs (Human)",
+        "category": "DeepSeek Moby"
+      },
+      {
+        "command": "deepseek.setApiKey",
+        "title": "DeepSeek Moby: Set API Key",
+        "category": "DeepSeek Moby"
+      },
+      {
+        "command": "deepseek.setTavilyApiKey",
+        "title": "DeepSeek Moby: Set Tavily API Key",
         "category": "DeepSeek Moby"
       }
     ],

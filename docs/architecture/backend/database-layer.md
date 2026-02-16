@@ -56,11 +56,13 @@ The database is encrypted using a key stored in VS Code's SecretStorage (OS keyc
 
 ```typescript
 // extension.ts — key management
+const DB_KEY_SECRET = 'deepseek-moby.db-encryption-key';
+
 async function getOrCreateEncryptionKey(context: vscode.ExtensionContext): Promise<string> {
-  let key = await context.secrets.get('deepseek.dbKey');
+  let key = await context.secrets.get(DB_KEY_SECRET);
   if (!key) {
     key = crypto.randomBytes(32).toString('hex');
-    await context.secrets.store('deepseek.dbKey', key);
+    await context.secrets.store(DB_KEY_SECRET, key);
   }
   return key;
 }
@@ -321,6 +323,77 @@ SQLite is robust, but if issues occur:
 ### Encryption key lost
 
 If the OS keychain is cleared, the encryption key is lost and the database cannot be opened. Delete `conversations.db` to start fresh.
+
+## Extension Storage Overview
+
+The extension uses four distinct storage mechanisms, each chosen for its security and persistence characteristics:
+
+### 1. SQLite Database (Encrypted)
+
+**Location:** `~/.vscode/extensions/.../globalStorage/conversations.db`
+**Encryption:** AES-256-CBC via @signalapp/sqlcipher
+
+All conversation data lives here:
+
+| Table | Contents |
+|-------|----------|
+| `sessions` | Session metadata (title, model, timestamps, event count) |
+| `events` | Append-only event log (messages, tool calls, diffs, searches) |
+| `snapshots` | Periodic conversation summaries for context compression |
+
+### 2. VS Code SecretStorage (`context.secrets`)
+
+OS keychain-backed encrypted storage for sensitive credentials:
+
+| Key | Purpose | Set By |
+|-----|---------|--------|
+| `deepseek-moby.db-encryption-key` | Database encryption key (64-char hex) | Auto-generated on first run |
+| `deepseek.apiKey` | DeepSeek API key | User via `deepseek.setApiKey` command |
+| `deepseek.tavilyApiKey` | Tavily web search API key | User via `deepseek.setTavilyApiKey` command |
+
+### 3. VS Code Settings (`workspace.getConfiguration('deepseek')`)
+
+User-facing configuration in `settings.json`. Non-sensitive values only:
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `model` | string | `deepseek-chat` | LLM model selection |
+| `temperature` | number | 0.7 | Creativity level |
+| `maxTokens` | number | 8192 | Max output tokens |
+| `maxToolCalls` | number | 100 | Tool loop iterations (Chat model) |
+| `maxShellIterations` | number | 100 | Shell iterations (Reasoner model) |
+| `editMode` | string | `manual` | Code edit mode (manual/ask/auto) |
+| `systemPrompt` | string | `""` | Custom system prompt |
+| `showStatusBar` | boolean | true | Status bar visibility |
+| `enableCompletions` | boolean | true | Inline completions |
+| `autoFormat` | boolean | true | Auto-format code |
+| `useLanguageFormatter` | boolean | true | Use VS Code formatter |
+| `autoSaveHistory` | boolean | true | Auto-save conversations |
+| `maxHistorySessions` | number | 100 | Max session retention |
+| `logLevel` | string | `WARN` | Extension output log level |
+| `webviewLogLevel` | string | `WARN` | Webview console log level |
+| `logColors` | boolean | true | Color-coded log output |
+| `tracing.enabled` | boolean | true | Trace collection |
+| `tavilySearchesPerPrompt` | number | 1 | Web searches per prompt |
+| `tavilySearchDepth` | string | `basic` | Tavily search depth |
+
+### 4. VS Code globalState (`context.globalState`)
+
+Minimal key-value store for cross-restart state:
+
+| Key | Purpose |
+|-----|---------|
+| `currentSessionId` | Active session UUID pointer |
+
+### Storage Decision Guide
+
+| Data Type | Store | Reason |
+|-----------|-------|--------|
+| Credentials, API keys | `context.secrets` | OS keychain encryption |
+| Conversation data | SQLite DB | Structured, queryable, encrypted at rest |
+| User preferences | VS Code settings | Editable in settings UI, syncs across machines |
+| Cross-restart pointers | `globalState` | Simple, lightweight |
+| Transient UI state | In-memory | Too much churn for persistence |
 
 ## Related Documentation
 

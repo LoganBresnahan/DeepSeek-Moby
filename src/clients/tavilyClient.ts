@@ -48,19 +48,24 @@ export class TavilyClient {
       }
     });
 
-    this.usageStats = this.loadUsageStats();
+    this.usageStats = {
+      totalSearches: 0,
+      basicSearches: 0,
+      advancedSearches: 0,
+      totalCreditsUsed: 0
+    };
   }
 
-  private getApiKey(): string {
-    const apiKey = this.config.get<string>('tavilyApiKey');
+  private async getApiKey(): Promise<string> {
+    const apiKey = await this.context.secrets.get('deepseek.tavilyApiKey');
     if (!apiKey) {
-      throw new Error('Tavily API key is not configured. Please set it in settings.');
+      throw new Error('Tavily API key is not configured. Use the "DeepSeek Moby: Set Tavily API Key" command.');
     }
     return apiKey;
   }
 
   async search(query: string, options?: { searchDepth?: 'basic' | 'advanced'; maxResults?: number }): Promise<TavilySearchResponse> {
-    const apiKey = this.getApiKey();
+    const apiKey = await this.getApiKey();
     const searchDepth = options?.searchDepth || this.config.get<string>('tavilySearchDepth') || 'basic';
 
     try {
@@ -106,7 +111,6 @@ export class TavilyClient {
       this.usageStats.advancedSearches++;
       this.usageStats.totalCreditsUsed += 2;
     }
-    this.saveUsageStats();
   }
 
   getUsageStats(): TavilyUsageStats {
@@ -120,30 +124,15 @@ export class TavilyClient {
       advancedSearches: 0,
       totalCreditsUsed: 0
     };
-    this.saveUsageStats();
   }
 
-  private loadUsageStats(): TavilyUsageStats {
-    const saved = this.context.globalState.get<TavilyUsageStats>('tavilyUsageStats');
-    return saved || {
-      totalSearches: 0,
-      basicSearches: 0,
-      advancedSearches: 0,
-      totalCreditsUsed: 0
-    };
-  }
-
-  private saveUsageStats() {
-    this.context.globalState.update('tavilyUsageStats', this.usageStats);
-  }
-
-  isConfigured(): boolean {
-    const key = this.config.get<string>('tavilyApiKey');
+  async isConfigured(): Promise<boolean> {
+    const key = await this.context.secrets.get('deepseek.tavilyApiKey');
     return !!key && key.trim().length > 0;
   }
 
   async getApiUsage(): Promise<TavilyApiUsage> {
-    const apiKey = this.getApiKey();
+    const apiKey = await this.getApiKey();
 
     try {
       const response = await this.httpClient.get<{

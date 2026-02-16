@@ -52,10 +52,10 @@ export class WebSearchManager {
   /**
    * Toggle web search on/off. Validates API key is configured before enabling.
    */
-  toggle(enabled: boolean): void {
+  async toggle(enabled: boolean): Promise<void> {
     this.enabled = enabled;
 
-    if (enabled && !this.tavilyClient.isConfigured()) {
+    if (enabled && !(await this.tavilyClient.isConfigured())) {
       logger.info('[WebSearch] Toggle rejected: Tavily API key not configured');
       tracer.trace('state.publish', 'webSearch.toggle.rejected', {
         data: { reason: 'api_key_not_configured' }
@@ -63,7 +63,7 @@ export class WebSearchManager {
       this.enabled = false;
       this._onToggled.fire({ enabled: false });
       this._onSearchError.fire({
-        message: 'Tavily API key not configured. Please set it in VS Code settings (deepseek.tavilyApiKey).'
+        message: 'Tavily API key not configured. Use the "DeepSeek Moby: Set Tavily API Key" command.'
       });
       return;
     }
@@ -110,11 +110,11 @@ export class WebSearchManager {
   /**
    * Get current settings snapshot for webview sync.
    */
-  getSettings(): { enabled: boolean; settings: WebSearchSettings; configured: boolean } {
+  async getSettings(): Promise<{ enabled: boolean; settings: WebSearchSettings; configured: boolean }> {
     return {
       enabled: this.enabled,
       settings: { ...this.settings },
-      configured: this.tavilyClient.isConfigured()
+      configured: await this.tavilyClient.isConfigured()
     };
   }
 
@@ -149,7 +149,7 @@ export class WebSearchManager {
    * so ChatProvider can forward status to the webview.
    */
   async searchForMessage(message: string): Promise<string> {
-    if (!this.enabled || !this.tavilyClient.isConfigured()) {
+    if (!this.enabled || !(await this.tavilyClient.isConfigured())) {
       return '';
     }
 

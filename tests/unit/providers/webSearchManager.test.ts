@@ -26,7 +26,7 @@ import type { SearchProgress } from '../../../src/providers/webSearchManager';
 // ── TavilyClient mock ──
 function createMockTavilyClient(configured = true) {
   return {
-    isConfigured: vi.fn(() => configured),
+    isConfigured: vi.fn(async () => configured),
     search: vi.fn(async (query: string, _options?: any) => ({
       results: [
         { title: 'Result 1', url: 'https://example.com/1', content: 'Content for result 1', score: 0.95 },
@@ -54,35 +54,35 @@ describe('WebSearchManager', () => {
   // ── toggle ──
 
   describe('toggle', () => {
-    it('should enable web search and fire onToggled', () => {
+    it('should enable web search and fire onToggled', async () => {
       const events: Array<{ enabled: boolean }> = [];
       manager.onToggled(e => events.push(e));
 
-      manager.toggle(true);
+      await manager.toggle(true);
 
       expect(manager.isEnabled).toBe(true);
       expect(events).toEqual([{ enabled: true }]);
     });
 
-    it('should disable web search and fire onToggled', () => {
-      manager.toggle(true); // enable first
+    it('should disable web search and fire onToggled', async () => {
+      await manager.toggle(true); // enable first
       const events: Array<{ enabled: boolean }> = [];
       manager.onToggled(e => events.push(e));
 
-      manager.toggle(false);
+      await manager.toggle(false);
 
       expect(manager.isEnabled).toBe(false);
       expect(events).toEqual([{ enabled: false }]);
     });
 
-    it('should reject toggle when API key not configured', () => {
-      mockTavily.isConfigured.mockReturnValue(false);
+    it('should reject toggle when API key not configured', async () => {
+      mockTavily.isConfigured.mockResolvedValue(false);
       const toggleEvents: Array<{ enabled: boolean }> = [];
       const errorEvents: Array<{ message: string }> = [];
       manager.onToggled(e => toggleEvents.push(e));
       manager.onSearchError(e => errorEvents.push(e));
 
-      manager.toggle(true);
+      await manager.toggle(true);
 
       expect(manager.isEnabled).toBe(false);
       expect(toggleEvents).toEqual([{ enabled: false }]);
@@ -94,17 +94,17 @@ describe('WebSearchManager', () => {
   // ── updateSettings ──
 
   describe('updateSettings', () => {
-    it('should update partial settings and fire onSettingsChanged', () => {
+    it('should update partial settings and fire onSettingsChanged', async () => {
       const events: void[] = [];
       manager.onSettingsChanged(() => events.push(undefined));
 
       manager.updateSettings({ searchDepth: 'advanced' });
 
-      expect(manager.getSettings().settings.searchDepth).toBe('advanced');
+      expect((await manager.getSettings()).settings.searchDepth).toBe('advanced');
       expect(events).toHaveLength(1);
     });
 
-    it('should update multiple fields at once', () => {
+    it('should update multiple fields at once', async () => {
       manager.updateSettings({
         searchDepth: 'advanced',
         cacheDuration: 30,
@@ -112,7 +112,7 @@ describe('WebSearchManager', () => {
         maxResultsPerSearch: 15
       });
 
-      const { settings } = manager.getSettings();
+      const { settings } = await manager.getSettings();
       expect(settings.searchDepth).toBe('advanced');
       expect(settings.cacheDuration).toBe(30);
       expect(settings.creditsPerPrompt).toBe(4);
@@ -132,8 +132,8 @@ describe('WebSearchManager', () => {
   // ── getSettings ──
 
   describe('getSettings', () => {
-    it('should return current state with new defaults', () => {
-      const result = manager.getSettings();
+    it('should return current state with new defaults', async () => {
+      const result = await manager.getSettings();
 
       expect(result.enabled).toBe(false);
       expect(result.configured).toBe(true);
@@ -143,11 +143,11 @@ describe('WebSearchManager', () => {
       expect(result.settings.maxResultsPerSearch).toBe(5);
     });
 
-    it('should return a copy of settings (not a reference)', () => {
-      const result1 = manager.getSettings();
+    it('should return a copy of settings (not a reference)', async () => {
+      const result1 = await manager.getSettings();
       result1.settings.cacheDuration = 999;
 
-      const result2 = manager.getSettings();
+      const result2 = await manager.getSettings();
       expect(result2.settings.cacheDuration).toBe(15);
     });
   });
@@ -157,7 +157,7 @@ describe('WebSearchManager', () => {
   describe('clearCache', () => {
     it('should clear cached search results', async () => {
       // Populate cache by searching
-      manager.toggle(true);
+      await manager.toggle(true);
       await manager.searchForMessage('test query');
       expect(mockTavily.search).toHaveBeenCalledTimes(1);
 
@@ -183,9 +183,9 @@ describe('WebSearchManager', () => {
     });
 
     it('should return empty string when not configured', async () => {
-      mockTavily.isConfigured.mockReturnValue(false);
+      mockTavily.isConfigured.mockResolvedValue(false);
       // Force enable without going through toggle (which would reject)
-      manager.toggle(true); // will be rejected
+      await manager.toggle(true); // will be rejected
       const result = await manager.searchForMessage('hello');
 
       expect(result).toBe('');
@@ -193,7 +193,7 @@ describe('WebSearchManager', () => {
     });
 
     it('should fetch from Tavily and return formatted results', async () => {
-      manager.toggle(true);
+      await manager.toggle(true);
       const searchingEvents: SearchProgress[] = [];
       const completeEvents: Array<{ context: string }> = [];
       manager.onSearching(e => searchingEvents.push(e));
@@ -212,7 +212,7 @@ describe('WebSearchManager', () => {
     });
 
     it('should use cached results on second call', async () => {
-      manager.toggle(true);
+      await manager.toggle(true);
 
       await manager.searchForMessage('test query');
       const cachedEvents: void[] = [];
@@ -226,7 +226,7 @@ describe('WebSearchManager', () => {
     });
 
     it('should treat cache keys case-insensitively', async () => {
-      manager.toggle(true);
+      await manager.toggle(true);
 
       await manager.searchForMessage('Test Query');
       await manager.searchForMessage('test query');
@@ -235,7 +235,7 @@ describe('WebSearchManager', () => {
     });
 
     it('should re-fetch when cache expires', async () => {
-      manager.toggle(true);
+      await manager.toggle(true);
       // Set very short cache duration
       manager.updateSettings({ cacheDuration: 0 }); // 0 minutes = always expired
 
@@ -246,7 +246,7 @@ describe('WebSearchManager', () => {
     });
 
     it('should fire onSearchError and return empty on API failure', async () => {
-      manager.toggle(true);
+      await manager.toggle(true);
       mockTavily.search.mockRejectedValueOnce(new Error('Rate limit exceeded'));
       const errorEvents: Array<{ message: string }> = [];
       manager.onSearchError(e => errorEvents.push(e));
@@ -258,7 +258,7 @@ describe('WebSearchManager', () => {
     });
 
     it('should use advanced search depth when configured', async () => {
-      manager.toggle(true);
+      await manager.toggle(true);
       manager.updateSettings({ searchDepth: 'advanced', creditsPerPrompt: 2 });
 
       await manager.searchForMessage('test query');
@@ -267,7 +267,7 @@ describe('WebSearchManager', () => {
     });
 
     it('should pass maxResults to TavilyClient', async () => {
-      manager.toggle(true);
+      await manager.toggle(true);
       manager.updateSettings({ maxResultsPerSearch: 15 });
 
       await manager.searchForMessage('test query');
@@ -276,7 +276,7 @@ describe('WebSearchManager', () => {
     });
 
     it('should make multiple API calls based on credits (basic)', async () => {
-      manager.toggle(true);
+      await manager.toggle(true);
       manager.updateSettings({ creditsPerPrompt: 3 }); // basic = 1 credit/call => 3 calls
 
       await manager.searchForMessage('test query');
@@ -285,7 +285,7 @@ describe('WebSearchManager', () => {
     });
 
     it('should make multiple API calls based on credits (advanced)', async () => {
-      manager.toggle(true);
+      await manager.toggle(true);
       manager.updateSettings({ creditsPerPrompt: 6, searchDepth: 'advanced' }); // advanced = 2 credits/call => 3 calls
 
       await manager.searchForMessage('test query');
@@ -294,7 +294,7 @@ describe('WebSearchManager', () => {
     });
 
     it('should fire onSearching with progress for multi-call', async () => {
-      manager.toggle(true);
+      await manager.toggle(true);
       manager.updateSettings({ creditsPerPrompt: 2 }); // 2 calls
       const progressEvents: SearchProgress[] = [];
       manager.onSearching(e => progressEvents.push(e));
@@ -307,7 +307,7 @@ describe('WebSearchManager', () => {
     });
 
     it('should use settings-aware cache key', async () => {
-      manager.toggle(true);
+      await manager.toggle(true);
       await manager.searchForMessage('test query');
       expect(mockTavily.search).toHaveBeenCalledTimes(1);
 
@@ -318,7 +318,7 @@ describe('WebSearchManager', () => {
     });
 
     it('should handle partial failures with Promise.allSettled', async () => {
-      manager.toggle(true);
+      await manager.toggle(true);
       manager.updateSettings({ creditsPerPrompt: 3 }); // 3 calls
 
       let callCount = 0;
@@ -464,13 +464,13 @@ describe('WebSearchManager', () => {
 
   describe('resetToDefaults', () => {
     it('should reset settings and clear cache', async () => {
-      manager.toggle(true);
+      await manager.toggle(true);
       manager.updateSettings({ searchDepth: 'advanced', cacheDuration: 60, creditsPerPrompt: 4 });
       await manager.searchForMessage('populate cache');
 
       manager.resetToDefaults();
 
-      const { settings } = manager.getSettings();
+      const { settings } = await manager.getSettings();
       expect(settings.searchDepth).toBe('basic');
       expect(settings.cacheDuration).toBe(15);
       expect(settings.creditsPerPrompt).toBe(1);
@@ -490,12 +490,12 @@ describe('WebSearchManager', () => {
       expect(() => manager.dispose()).not.toThrow();
     });
 
-    it('should not fire events after dispose', () => {
+    it('should not fire events after dispose', async () => {
       const events: Array<{ enabled: boolean }> = [];
       manager.onToggled(e => events.push(e));
       manager.dispose();
 
-      manager.toggle(true);
+      await manager.toggle(true);
 
       // After dispose, listeners are cleared — no events should fire
       expect(events).toHaveLength(0);

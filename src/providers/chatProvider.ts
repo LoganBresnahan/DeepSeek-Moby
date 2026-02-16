@@ -140,9 +140,9 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     });
 
     // SettingsManager → webview
-    this.settingsManager.onSettingsChanged(snapshot => {
+    this.settingsManager.onSettingsChanged(async snapshot => {
       if (this._view) {
-        const wsSettings = this.webSearchManager.getSettings().settings;
+        const wsSettings = (await this.webSearchManager.getSettings()).settings;
         this._view.webview.postMessage({
           type: 'settings',
           ...snapshot,
@@ -360,7 +360,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
           vscode.commands.executeCommand(data.command);
           break;
         case 'toggleWebSearch':
-          this.webSearchManager.toggle(data.enabled);
+          await this.webSearchManager.toggle(data.enabled);
           break;
         case 'updateWebSearchSettings':
           this.webSearchManager.updateSettings(data.settings);
@@ -561,7 +561,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
 
       // Get real Tavily API usage (from /usage endpoint)
       let tavilyApiUsage = null;
-      if (this.tavilyClient.isConfigured()) {
+      if (await this.tavilyClient.isConfigured()) {
         try {
           tavilyApiUsage = await this.tavilyClient.getApiUsage();
         } catch (e) {
@@ -635,9 +635,9 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private sendCurrentSettings() {
+  private async sendCurrentSettings() {
     const snapshot = this.settingsManager.getCurrentSettings();
-    const wsSettings = this.webSearchManager.getSettings().settings;
+    const wsSettings = (await this.webSearchManager.getSettings()).settings;
     const config = vscode.workspace.getConfiguration('deepseek');
     const editMode = config.get<string>('editMode') || 'manual';
 
@@ -663,8 +663,8 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private sendWebSearchSettings() {
-    const { enabled, settings, configured } = this.webSearchManager.getSettings();
+  private async sendWebSearchSettings() {
+    const { enabled, settings, configured } = await this.webSearchManager.getSettings();
     this._view?.webview.postMessage({
       type: 'webSearchSettings',
       enabled,

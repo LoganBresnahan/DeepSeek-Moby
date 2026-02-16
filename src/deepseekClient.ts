@@ -86,7 +86,6 @@ export class DeepSeekClient {
   private formattingEngine: FormattingEngine;
   private config: ConfigManager;
   private context: vscode.ExtensionContext;
-  private conversationHistory: Message[] = [];
   private modelOverride: string | null = null;
   private tokenCounter: TokenCounter;
   private contextBuilder: ContextBuilder;
@@ -116,13 +115,12 @@ export class DeepSeekClient {
       }
     });
 
-    this.loadConversationHistory();
   }
 
-  private getApiKey(): string {
-    const apiKey = this.config.get<string>('apiKey');
+  private async getApiKey(): Promise<string> {
+    const apiKey = await this.context.secrets.get('deepseek.apiKey');
     if (!apiKey) {
-      throw new Error('DeepSeek API key is not configured. Please set it in settings.');
+      throw new Error('DeepSeek API key is not configured. Use the "DeepSeek Moby: Set API Key" command.');
     }
     return apiKey;
   }
@@ -165,7 +163,7 @@ export class DeepSeekClient {
   // Standard chat completion
   async chat(messages: Message[], systemPrompt?: string, options?: ChatOptions): Promise<ChatResponse> {
     try {
-      const apiKey = this.getApiKey();
+      const apiKey = await this.getApiKey();
       const model = this.getModel();
       const temperature = options?.temperature ?? this.config.get<number>('temperature') ?? 0.7;
       const rawMaxTokens = options?.maxTokens ?? this.config.get<number>('maxTokens') ?? 8192;
@@ -241,7 +239,7 @@ export class DeepSeekClient {
     options?: ChatOptions
   ): Promise<ChatResponse> {
     try {
-      const apiKey = this.getApiKey();
+      const apiKey = await this.getApiKey();
       const model = this.getModel();
       const temperature = options?.temperature ?? this.config.get<number>('temperature') ?? 0.7;
       // Reasoner model can use up to 64K for reasoning chain + code edits
@@ -455,7 +453,7 @@ export class DeepSeekClient {
     maxTokens: number = 128
   ): Promise<FIMResponse> {
     try {
-      const apiKey = this.getApiKey();
+      const apiKey = await this.getApiKey();
 
       const response = await this.betaHttpClient.post<{
         choices: Array<{ text?: string }>;
@@ -488,7 +486,7 @@ export class DeepSeekClient {
   // Get code completions using FIM
   async getCodeCompletions(prompt: string, language: string, maxTokens: number = 100): Promise<string[]> {
     try {
-      const apiKey = this.getApiKey();
+      const apiKey = await this.getApiKey();
 
       // Use the beta endpoint for FIM
       const response = await this.betaHttpClient.post<{
@@ -664,27 +662,6 @@ export class DeepSeekClient {
     }
   }
 
-  // Conversation management (for backward compatibility)
-  getConversationHistory(): Message[] {
-    return [...this.conversationHistory];
-  }
-
-  clearConversationHistory() {
-    this.conversationHistory = [];
-    this.saveConversationHistory();
-  }
-
-  private saveConversationHistory() {
-    this.context.globalState.update('conversationHistory', this.conversationHistory);
-  }
-
-  private loadConversationHistory() {
-    const saved = this.context.globalState.get<Message[]>('conversationHistory');
-    if (saved) {
-      this.conversationHistory = saved;
-    }
-  }
-
   private handleError(error: HttpError): Error {
     if (error.response) {
       switch (error.response.status) {
@@ -709,7 +686,7 @@ export class DeepSeekClient {
   // Fetch account balance from DeepSeek API
   async getBalance(): Promise<{ available: boolean; balance: string; currency: string } | null> {
     try {
-      const apiKey = this.getApiKey();
+      const apiKey = await this.getApiKey();
       const response = await this.httpClient.get<{
         is_available: boolean;
         balance_infos: Array<{ currency: string; total_balance: string }>;
