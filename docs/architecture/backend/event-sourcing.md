@@ -52,7 +52,7 @@ Instead of storing mutable state (like a list of messages), we store an append-o
 │  │                 │      │                 │                                │
 │  │ • append()      │      │ • createSnapshot│                                │
 │  │ • getEvents()   │◄─────│ • getLatest()   │                                │
-│  │ • getByType()   │      │ • prune()       │                                │
+│  │ • getByType()   │      │ • deleteSession │                                │
 │  └────────┬────────┘      └────────┬────────┘                                │
 │           │                        │                                         │
 │           └────────────────────────┘                                         │
@@ -239,13 +239,20 @@ const dbKey = await getOrCreateEncryptionKey(context);
 conversationManager = new ConversationManager(context, dbKey);  // fully sync
 ```
 
-The constructor creates the Database, EventStore, SnapshotManager, and prepares all statements synchronously.
+The constructor performs the following sequence:
+1. Creates `Database` (sets `PRAGMA foreign_keys = ON`)
+2. Runs `runMigrations(db)` — single source of truth for all schema (v1: tables, v2: FK constraints)
+3. Creates `EventStore` and `SnapshotManager` (prepared statements only)
+4. Prepares session statements and loads the last active session
+
+FK constraints with `ON DELETE CASCADE` mean deleting a session automatically removes its events and snapshots. Delete operations (`deleteSession`, `clearAllSessions`) are wrapped in transactions for atomicity.
 
 ## File Locations
 
 | File | Description |
 |------|-------------|
 | [src/events/ConversationManager.ts](../src/events/ConversationManager.ts) | Main API, session management, history restore |
+| [src/events/migrations.ts](../src/events/migrations.ts) | Schema migrations (single source of truth for all DDL) |
 | [src/events/EventStore.ts](../src/events/EventStore.ts) | Append-only event storage with SQLite |
 | [src/events/EventTypes.ts](../src/events/EventTypes.ts) | TypeScript types for all events |
 | [src/events/SnapshotManager.ts](../src/events/SnapshotManager.ts) | Snapshot creation and retrieval |

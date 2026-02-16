@@ -20,6 +20,7 @@ import { EventStateManager } from '../../state/EventStateManager';
 import type { ActorConfig } from '../../state/types';
 import { webviewTracer } from '../../tracing';
 import { createLogger, setLogLevel, LogLevel } from '../../logging';
+import { hasIncompleteFence } from '../../utils/codeBlocks';
 
 // Import actor types for type safety
 import type { StreamingActor } from '../streaming';
@@ -291,6 +292,22 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         toolbar.setWebSearchEnabled(msg.enabled as boolean);
         break;
 
+      case 'webSearchModeChanged':
+        toolbar.setWebSearchMode(msg.mode as 'off' | 'manual' | 'auto');
+        break;
+
+      case 'webSearching':
+        statusPanel.showMessage(`Searching the web (${msg.current}/${msg.total})...`);
+        break;
+
+      case 'webSearchComplete':
+        statusPanel.showMessage('Web search complete');
+        break;
+
+      case 'webSearchCached':
+        statusPanel.showMessage('Using cached search results');
+        break;
+
       // ---- File Messages ----
       case 'openFiles':
         this._manager.publishDirect('files.openFiles', msg.files || []);
@@ -425,17 +442,16 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       // When a chunk spans the closing ``` of one block and the opening ``` of the next,
       // the segment is finalized with the opening ``` inside it. Without carry-forward,
       // the new segment would miss the opening ``` and render code as raw text.
-      // Use fence-counting: odd number of ``` = last one is an opening fence.
+      // Uses fence-length-aware detection (CommonMark spec) for nested fences.
       const isReasonerMode = session.model === 'deepseek-reasoner';
       const displayContent = isReasonerMode
         ? this._segmentContent.replace(/<shell>[\s\S]*?<\/shell>/gi, '').trim()
         : this._segmentContent;
-      const fences = [...displayContent.matchAll(/```/g)];
-      const hasIncompleteFence = fences.length % 2 === 1;
+      const fenceState = hasIncompleteFence(displayContent);
 
       virtualList.resumeWithNewSegment(this._currentTurnId);
-      this._segmentContent = hasIncompleteFence
-        ? displayContent.substring(fences[fences.length - 1].index!)
+      this._segmentContent = fenceState.incomplete
+        ? displayContent.substring(fenceState.lastOpenIndex)
         : '';
       this._hasInterleaved = false;
     }
@@ -987,7 +1003,14 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       log.debug('Tracing enabled:', msg.tracingEnabled);
     }
 
-    const webSearch = msg.webSearch as { searchDepth?: string; creditsPerPrompt?: number; maxResultsPerSearch?: number; cacheDuration?: number } | undefined;
+    const webSearch = msg.webSearch as { searchDepth?: string; creditsPerPrompt?: number; maxResultsPerSearch?: number; cacheDuration?: number; mode?: string } | undefined;
+
+    // Sync web search mode to toolbar
+    if (webSearch?.mode) {
+      const { toolbar } = this._actors;
+      toolbar.setWebSearchMode(webSearch.mode as 'off' | 'manual' | 'auto');
+    }
+
     this._manager.publishDirect('settings.values', {
       logLevel: msg.logLevel,
       webviewLogLevel: msg.webviewLogLevel,

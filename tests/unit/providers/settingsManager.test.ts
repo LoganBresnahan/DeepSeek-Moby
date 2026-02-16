@@ -290,7 +290,8 @@ describe('SettingsManager', () => {
         searchDepth: 'basic',
         creditsPerPrompt: 1,
         maxResultsPerSearch: 5,
-        cacheDuration: 15
+        cacheDuration: 15,
+        mode: 'auto'
       });
     });
   });

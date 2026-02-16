@@ -3,7 +3,8 @@ import { DeepSeekClient, Message as ApiMessage } from '../deepseekClient';
 import { StatusBar } from '../views/statusBar';
 import { ConversationManager } from '../events';
 import { logger } from '../utils/logger';
-import { workspaceTools, applyCodeEditTool, executeToolCall } from '../tools/workspaceTools';
+import { tracer } from '../tracing';
+import { workspaceTools, applyCodeEditTool, webSearchTool, executeToolCall } from '../tools/workspaceTools';
 import { parseDSMLToolCalls, stripDSML } from '../utils/dsmlParser';
 import { DiffManager } from './diffManager';
 import { WebSearchManager } from './webSearchManager';
@@ -17,6 +18,9 @@ import {
   formatShellResultsForContext,
   getReasonerShellPrompt,
   stripShellTags,
+  parseWebSearchCommands,
+  containsWebSearchCommands,
+  stripWebSearchTags,
   ShellResult
 } from '../tools/reasonerShellExecutor';
 import { ContentTransformBuffer } from '../utils/ContentTransformBuffer';
@@ -194,6 +198,9 @@ export class RequestOrchestrator {
             case 'thinking':
               logger.debug(`[ContentBuffer] Detected thinking tags, handled separately`);
               break;
+            case 'web_search':
+              logger.debug(`[ContentBuffer] Detected web_search tags, will be handled after iteration`);
+              break;
           }
         }
       }
@@ -300,9 +307,10 @@ export class RequestOrchestrator {
         this.contentBuffer.reset();
       }
 
-      // Strip any DSML markup and shell tags from the final response
+      // Strip any DSML markup, shell tags, and web search tags from the final response
       let cleanResponse = stripDSML(streamState.accumulatedResponse);
       cleanResponse = stripShellTags(cleanResponse);
+      cleanResponse = stripWebSearchTags(cleanResponse);
 
       // Unfenced SEARCH/REPLACE Detection (Fallback)
       if (this.diffManager.currentEditMode !== 'manual') {
@@ -368,7 +376,7 @@ export class RequestOrchestrator {
         // Save partial response to history if there's content
         const partialContent = streamState.accumulatedResponse || streamState.fullResponse;
         if (sessionId && (partialContent || streamState.fullReasoning)) {
-          const cleanPartialResponse = stripShellTags(stripDSML(partialContent));
+          const cleanPartialResponse = stripWebSearchTags(stripShellTags(stripDSML(partialContent)));
 
           // Record reasoning iterations that completed
           for (let i = 0; i < streamState.reasoningIterations.length; i++) {
@@ -465,10 +473,15 @@ export class RequestOrchestrator {
     }
 
     // Add exploration capabilities based on model type
+    const wsState = await this.webSearchManager.getSettings();
+    const webSearchAutoAvailable = wsState.mode === 'auto' && wsState.configured;
     if (isReasonerModel) {
-      systemPrompt += getReasonerShellPrompt();
+      systemPrompt += getReasonerShellPrompt({ webSearchAvailable: webSearchAutoAvailable });
     } else {
-      systemPrompt += `\nYou have access to tools that let you explore the codebase:\n- read_file: Read contents of any file in the workspace\n- search_files: Find files by name pattern (glob)\n- grep_content: Search for text/patterns in file contents\n- list_directory: See directory structure\n- get_file_info: Get file metadata and preview\n\nUSE THESE TOOLS to understand the codebase before making suggestions. When the user asks about code or wants changes:\n1. First explore relevant files using the tools\n2. Read the actual source code to understand the context\n3. Then provide accurate, informed responses\n`;
+      const webSearchLine = webSearchAutoAvailable
+        ? '\n- web_search: Search the web for current information (documentation, news, recent changes)\n'
+        : '';
+      systemPrompt += `\nYou have access to tools that let you explore the codebase:\n- read_file: Read contents of any file in the workspace\n- search_files: Find files by name pattern (glob)\n- grep_content: Search for text/patterns in file contents\n- list_directory: See directory structure\n- get_file_info: Get file metadata and preview${webSearchLine}\nUSE THESE TOOLS to understand the codebase before making suggestions. When the user asks about code or wants changes:\n1. First explore relevant files using the tools\n2. Read the actual source code to understand the context\n3. Then provide accurate, informed responses\n`;
     }
 
     // Add edit mode context to system prompt
@@ -542,6 +555,10 @@ export class RequestOrchestrator {
     let lastIterationHadShellCommands = false;
     let shellCreatedFiles = false;
 
+    // Token budget tracking for injected shell/web search results
+    let accumulatedIterationTokens = 0;
+    const iterationBudget = 60_000;  // Safety cap: ~60k tokens of injected context
+
     do {
       // Track iteration-specific response
       let iterationResponse = '';
@@ -593,7 +610,7 @@ export class RequestOrchestrator {
           }
 
           // Detect complete code blocks and auto-handle in "ask" or "auto" mode
-          this.diffManager.handleCodeBlockDetection(state.accumulatedResponse);
+          await this.diffManager.handleCodeBlockDetection(state.accumulatedResponse);
         },
         currentSystemPrompt,
         // Reasoning callback for deepseek-reasoner
@@ -633,79 +650,145 @@ export class RequestOrchestrator {
         }
       }
 
-      // Check for shell commands in THIS iteration's response AND reasoning
+      // Check for shell commands AND web search tags in THIS iteration's response AND reasoning
       const combinedForShellCheck = iterationResponse + (state.currentIterationReasoning || '');
-      if (isReasonerModel && containsShellCommands(combinedForShellCheck)) {
+      const hasShell = isReasonerModel && containsShellCommands(combinedForShellCheck);
+      const hasWebSearch = isReasonerModel && this.webSearchManager.getMode() === 'auto' && containsWebSearchCommands(combinedForShellCheck);
+
+      if (hasShell || hasWebSearch) {
         shellIteration++;
         lastIterationHadShellCommands = true;
-        const inReasoning = containsShellCommands(state.currentIterationReasoning || '');
-        const inContent = containsShellCommands(iterationResponse);
-        logger.info(`[R1-Shell] Iteration ${shellIteration}: found shell commands (inContent=${inContent}, inReasoning=${inReasoning})`);
 
-        // Parse and execute shell commands from both streams
-        const commands = parseShellCommands(combinedForShellCheck);
-        if (commandsCreateFiles(commands)) {
-          shellCreatedFiles = true;
-          logger.info(`[R1-Shell] Shell commands include file creation (heredoc/redirect)`);
+        let resultsContext = '';
+
+        // ── Execute shell commands ──
+        if (hasShell) {
+          const inReasoning = containsShellCommands(state.currentIterationReasoning || '');
+          const inContent = containsShellCommands(iterationResponse);
+          logger.info(`[R1-Shell] Iteration ${shellIteration}: found shell commands (inContent=${inContent}, inReasoning=${inReasoning})`);
+
+          const commands = parseShellCommands(combinedForShellCheck);
+          if (commandsCreateFiles(commands)) {
+            shellCreatedFiles = true;
+            logger.info(`[R1-Shell] Shell commands include file creation (heredoc/redirect)`);
+          }
+          const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
+          if (commands.length > 0 && workspacePath) {
+            // IMPORTANT: Flush buffer before sending shellExecuting to prevent race condition
+            if (this.contentBuffer) {
+              logger.info(`[Buffer] FLUSH before shellExecuting (${commands.length} commands)`);
+              this.contentBuffer.flush();
+            }
+
+            // Notify frontend about shell execution
+            const shellCommandsPayload = commands.map(c => ({
+              command: c.command,
+              description: c.command.length > 50 ? c.command.substring(0, 50) + '...' : c.command
+            }));
+            logger.info(`[Frontend] Sending shellExecuting message: ${shellCommandsPayload.length} commands`);
+            this._onShellExecuting.fire({ commands: shellCommandsPayload });
+
+            // Check "Walk on the Wild Side" setting
+            const shellConfig = vscode.workspace.getConfiguration('deepseek');
+            const allowAllCommands = shellConfig.get<boolean>('allowAllShellCommands') ?? false;
+
+            // Execute commands
+            const shellStartTime = Date.now();
+            logger.info(`[Timing] Shell execution started at ${new Date().toISOString()}`);
+            const results = await executeShellCommands(commands, workspacePath, {
+              allowAllCommands
+            });
+            const shellDuration = Date.now() - shellStartTime;
+            logger.info(`[Timing] Shell execution completed in ${shellDuration}ms`);
+            state.shellResultsForHistory.push(...results);
+
+            // Notify frontend of results
+            this._onShellResults.fire({
+              results: results.map(r => ({
+                command: r.command,
+                output: r.output.substring(0, 500) + (r.output.length > 500 ? '...' : ''),
+                success: r.success
+              }))
+            });
+
+            resultsContext += formatShellResultsForContext(results);
+            logger.info(`[R1-Shell] Injected ${results.length} shell results for task: "${originalUserMessage.substring(0, 50)}...", continuing...`);
+          }
         }
-        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
-        if (commands.length > 0 && workspacePath) {
-          // IMPORTANT: Flush buffer before sending shellExecuting to prevent race condition
+        // ── Execute web searches ──
+        if (hasWebSearch) {
+          const webQueries = parseWebSearchCommands(combinedForShellCheck);
+          logger.info(`[R1-WebSearch] Iteration ${shellIteration}: found ${webQueries.length} web search queries`);
+          tracer.trace('state.publish', 'reasoner.webSearch.detected', {
+            data: { iteration: shellIteration, queryCount: webQueries.length }
+          });
+
           if (this.contentBuffer) {
-            logger.info(`[Buffer] FLUSH before shellExecuting (${commands.length} commands)`);
             this.contentBuffer.flush();
           }
 
-          // Notify frontend about shell execution
-          const shellCommandsPayload = commands.map(c => ({
-            command: c.command,
-            description: c.command.length > 50 ? c.command.substring(0, 50) + '...' : c.command
+          // Notify frontend — reuse shell UI for web search display
+          const webSearchPayload = webQueries.map(q => ({
+            command: `web_search: "${q.query}"`,
+            description: `search web: "${q.query.substring(0, 50)}${q.query.length > 50 ? '...' : ''}"`
           }));
-          logger.info(`[Frontend] Sending shellExecuting message: ${shellCommandsPayload.length} commands`);
-          this._onShellExecuting.fire({ commands: shellCommandsPayload });
+          this._onShellExecuting.fire({ commands: webSearchPayload });
 
-          // Check "Walk on the Wild Side" setting
-          const shellConfig = vscode.workspace.getConfiguration('deepseek');
-          const allowAllCommands = shellConfig.get<boolean>('allowAllShellCommands') ?? false;
+          // Execute each web search query
+          const webResults: Array<{ command: string; output: string; success: boolean }> = [];
+          for (const q of webQueries) {
+            const searchResult = await this.webSearchManager.searchByQuery(q.query);
+            const success = !searchResult.startsWith('Error:');
+            webResults.push({
+              command: `web_search: "${q.query}"`,
+              output: searchResult.substring(0, 500) + (searchResult.length > 500 ? '...' : ''),
+              success
+            });
 
-          // Execute commands
-          const shellStartTime = Date.now();
-          logger.info(`[Timing] Shell execution started at ${new Date().toISOString()}`);
-          const results = await executeShellCommands(commands, workspacePath, {
-            allowAllCommands
+            // Add full result to context
+            resultsContext += `\n--- Web Search Results for: "${q.query}" ---\n${searchResult}\n--- End Web Search Results ---\n`;
+          }
+
+          // Notify frontend of web search results
+          this._onShellResults.fire({ results: webResults });
+          logger.info(`[R1-WebSearch] Completed ${webQueries.length} web searches`);
+          tracer.trace('state.publish', 'reasoner.webSearch.complete', {
+            data: {
+              iteration: shellIteration,
+              queryCount: webQueries.length,
+              successCount: webResults.filter(r => r.success).length
+            }
           });
-          const shellDuration = Date.now() - shellStartTime;
-          logger.info(`[Timing] Shell execution completed in ${shellDuration}ms`);
-          state.shellResultsForHistory.push(...results);
-
-          // Notify frontend of results
-          this._onShellResults.fire({
-            results: results.map(r => ({
-              command: r.command,
-              output: r.output.substring(0, 500) + (r.output.length > 500 ? '...' : ''),
-              success: r.success
-            }))
-          });
-
-          // Add to context and continue
-          const resultsContext = formatShellResultsForContext(results);
-
-          currentHistoryMessages.push({
-            role: 'assistant',
-            content: iterationResponse
-          });
-
-          currentHistoryMessages.push({
-            role: 'user',
-            content: `Shell command results:\n${resultsContext}\n\n---\nREMINDER - Your original task was:\n"${originalUserMessage}"\n\nYou have explored the codebase. Now you MUST either:\n1. Run additional shell commands if you need more information, OR\n2. Produce the code edits using properly formatted code blocks with # File: headers\n\nDo NOT just describe what you found. Complete the original task with actual code changes.`
-          });
-
-          // Update system prompt for continuation
-          currentSystemPrompt = streamingSystemPrompt + `\n\nThe shell commands have been executed and results are provided.\nORIGINAL TASK: "${originalUserMessage}"\n\nYou MUST now complete this task:\n- If you need more information, run additional shell commands\n- Otherwise, produce the code edits in properly formatted code blocks with # File: headers\n- Your response is NOT complete until you provide the actual code changes\n- Do NOT end with just analysis or description - include the code edits`;
-
-          logger.info(`[R1-Shell] Injected ${results.length} shell results for task: "${originalUserMessage.substring(0, 50)}...", continuing...`);
         }
+
+        // Count tokens for injected context (parity with tool loop budget tracking)
+        const injectedTokens = this.deepSeekClient.estimateTokens(resultsContext + iterationResponse);
+        accumulatedIterationTokens += injectedTokens;
+        logger.info(`[R1-Budget] Iteration ${shellIteration}: +${injectedTokens.toLocaleString()} tokens injected (total: ${accumulatedIterationTokens.toLocaleString()}/${iterationBudget.toLocaleString()})`);
+
+        if (accumulatedIterationTokens > iterationBudget) {
+          logger.warn(`[R1-Budget] Iteration budget exceeded (${accumulatedIterationTokens.toLocaleString()}/${iterationBudget.toLocaleString()} tokens) — stopping iteration loop`);
+          this._onWarning.fire({
+            message: `Shell/web search iteration budget exceeded (${accumulatedIterationTokens.toLocaleString()} tokens). The response may be incomplete.`
+          });
+          break;
+        }
+
+        // Add to context and continue
+        currentHistoryMessages.push({
+          role: 'assistant',
+          content: iterationResponse
+        });
+
+        currentHistoryMessages.push({
+          role: 'user',
+          content: `${hasShell ? 'Shell command' : 'Web search'} results:\n${resultsContext}\n\n---\nREMINDER - Your original task was:\n"${originalUserMessage}"\n\nYou have explored/searched. Now you MUST either:\n1. Run additional shell commands or web searches if you need more information, OR\n2. If the task requires code changes, produce them using properly formatted code blocks with # File: headers, OR\n3. If the task is a question, provide a clear answer based on your findings.\n\nDo NOT end with just shell commands or analysis — complete the task.`
+        });
+
+        // Update system prompt for continuation
+        currentSystemPrompt = streamingSystemPrompt + `\n\nThe ${hasShell ? 'shell commands' : 'web searches'} have been executed and results are provided.\nORIGINAL TASK: "${originalUserMessage}"\n\nYou MUST now complete this task:\n- If you need more information, run additional shell commands or web searches\n- If the task requires code changes, produce them using properly formatted code blocks with # File: headers\n- If the task is a question, provide a clear answer based on your findings\n- Do NOT end with just shell commands or analysis — finish the task`;
       } else {
         // No shell commands in this iteration
         if (isReasonerModel) {
@@ -885,8 +968,14 @@ export class RequestOrchestrator {
         break;
       }
 
-      // Build tools array
-      const tools = [...workspaceTools, applyCodeEditTool];
+      // Build tools array (include web_search only when mode is 'auto' and Tavily is configured)
+      const toolLoopWsState = await this.webSearchManager.getSettings();
+      const includeWebSearch = toolLoopWsState.mode === 'auto' && toolLoopWsState.configured;
+      const tools = [
+        ...workspaceTools,
+        applyCodeEditTool,
+        ...(includeWebSearch ? [webSearchTool] : [])
+      ];
 
       // Make a non-streaming call with tools
       const response = await this.deepSeekClient.chat(
@@ -935,6 +1024,8 @@ export class RequestOrchestrator {
           detail = `list: ${args.path || '.'}`;
         } else if (name === 'get_file_info' && args.path) {
           detail = `info: ${args.path}`;
+        } else if (name === 'web_search' && args.query) {
+          detail = `search web: "${args.query}"`;
         }
         return { name, detail, args };
       });
@@ -990,8 +1081,18 @@ export class RequestOrchestrator {
           detail: detail.detail
         });
 
-        // Execute tool
-        const result = await executeToolCall(toolCall);
+        // Execute tool — intercept web_search to route through WebSearchManager
+        let result: string;
+        if (toolCall.function.name === 'web_search') {
+          try {
+            const args = JSON.parse(toolCall.function.arguments);
+            result = await this.webSearchManager.searchByQuery(args.query || '');
+          } catch (e: any) {
+            result = `Error: Failed to execute web search — ${e.message}`;
+          }
+        } else {
+          result = await executeToolCall(toolCall);
+        }
         const success = !result.startsWith('Error:');
         logger.toolResult(toolCall.function.name, success);
 

@@ -116,6 +116,7 @@ function createMockToolbarActor() {
   return {
     setEditMode: vi.fn(),
     setWebSearchEnabled: vi.fn(),
+    setWebSearchMode: vi.fn(),
     destroy: vi.fn()
   };
 }
@@ -477,6 +478,12 @@ describe('VirtualMessageGatewayActor', () => {
       dispatchMessage({ type: 'webSearchToggled', enabled: true });
 
       expect(mockActors.toolbar.setWebSearchEnabled).toHaveBeenCalledWith(true);
+    });
+
+    it('handles webSearchModeChanged message', () => {
+      dispatchMessage({ type: 'webSearchModeChanged', mode: 'manual' });
+
+      expect(mockActors.toolbar.setWebSearchMode).toHaveBeenCalledWith('manual');
     });
   });
 

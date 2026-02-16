@@ -10,7 +10,7 @@ import * as vscode from 'vscode';
 import { TavilyClient, TavilySearchResponse, TavilySearchResult } from '../clients/tavilyClient';
 import { logger } from '../utils/logger';
 import { tracer } from '../tracing';
-import { WebSearchSettings, WebSearchResultEvent } from './types';
+import { WebSearchSettings, WebSearchResultEvent, WebSearchMode } from './types';
 
 export interface SearchProgress {
   current: number;
@@ -26,6 +26,7 @@ export class WebSearchManager {
   private readonly _onSearchError = new vscode.EventEmitter<{ message: string }>();
   private readonly _onToggled = new vscode.EventEmitter<{ enabled: boolean }>();
   private readonly _onSettingsChanged = new vscode.EventEmitter<void>();
+  private readonly _onModeChanged = new vscode.EventEmitter<{ mode: WebSearchMode }>();
 
   readonly onSearching = this._onSearching.event;
   readonly onSearchComplete = this._onSearchComplete.event;
@@ -33,9 +34,11 @@ export class WebSearchManager {
   readonly onSearchError = this._onSearchError.event;
   readonly onToggled = this._onToggled.event;
   readonly onSettingsChanged = this._onSettingsChanged.event;
+  readonly onModeChanged = this._onModeChanged.event;
 
   // ── State ──
 
+  private mode: WebSearchMode = 'auto';
   private enabled = false;
   private settings: WebSearchSettings = {
     creditsPerPrompt: 1,
@@ -50,9 +53,44 @@ export class WebSearchManager {
   // ── Public Methods ──
 
   /**
+   * Set web search mode (off/manual/auto). Persisted via VS Code settings externally.
+   */
+  setMode(newMode: WebSearchMode): void {
+    if (this.mode === newMode) return;
+    const oldMode = this.mode;
+    this.mode = newMode;
+
+    // If switching to 'off', disable manual toggle too
+    if (newMode === 'off' && this.enabled) {
+      this.enabled = false;
+      this._onToggled.fire({ enabled: false });
+    }
+
+    logger.info(`[WebSearch] Mode changed: ${oldMode} → ${newMode}`);
+    tracer.trace('state.publish', 'webSearch.modeChanged', {
+      data: { oldMode, newMode }
+    });
+    this._onModeChanged.fire({ mode: newMode });
+  }
+
+  /**
+   * Get current web search mode.
+   */
+  getMode(): WebSearchMode {
+    return this.mode;
+  }
+
+  /**
    * Toggle web search on/off. Validates API key is configured before enabling.
+   * Rejected when mode is 'off'.
    */
   async toggle(enabled: boolean): Promise<void> {
+    if (this.mode === 'off') {
+      logger.info('[WebSearch] Toggle rejected: mode is off');
+      this._onToggled.fire({ enabled: false });
+      return;
+    }
+
     this.enabled = enabled;
 
     if (enabled && !(await this.tavilyClient.isConfigured())) {
@@ -110,11 +148,12 @@ export class WebSearchManager {
   /**
    * Get current settings snapshot for webview sync.
    */
-  async getSettings(): Promise<{ enabled: boolean; settings: WebSearchSettings; configured: boolean }> {
+  async getSettings(): Promise<{ enabled: boolean; settings: WebSearchSettings; configured: boolean; mode: WebSearchMode }> {
     return {
       enabled: this.enabled,
       settings: { ...this.settings },
-      configured: await this.tavilyClient.isConfigured()
+      configured: await this.tavilyClient.isConfigured(),
+      mode: this.mode
     };
   }
 
@@ -149,7 +188,7 @@ export class WebSearchManager {
    * so ChatProvider can forward status to the webview.
    */
   async searchForMessage(message: string): Promise<string> {
-    if (!this.enabled || !(await this.tavilyClient.isConfigured())) {
+    if (this.mode === 'off' || !this.enabled || !(await this.tavilyClient.isConfigured())) {
       return '';
     }
 
@@ -291,6 +330,72 @@ export class WebSearchManager {
   }
 
   /**
+   * Execute a single web search for an LLM-provided query.
+   * Unlike searchForMessage(), this:
+   * - Bypasses the enabled toggle (only requires API key configured)
+   * - Makes a single API call per invocation
+   * - Returns error strings on failure (so the LLM can adapt)
+   * - Uses shared cache with 'tool|' prefix
+   *
+   * Used by: tool calling loop (Chat model) and <web_search> tag handling (Reasoner).
+   */
+  async searchByQuery(query: string): Promise<string> {
+    if (this.mode !== 'auto') {
+      return 'Error: Web search auto mode is not enabled.';
+    }
+
+    if (!(await this.tavilyClient.isConfigured())) {
+      tracer.trace('state.publish', 'webSearch.toolSearch.notConfigured', {
+        data: { query: query.substring(0, 80) }
+      });
+      return 'Error: Tavily API key not configured. Web search is unavailable.';
+    }
+
+    // Cache key with 'tool|' prefix to distinguish from manual searches
+    const cacheKey = `tool|${query.toLowerCase().trim()}|depth=${this.settings.searchDepth}|maxResults=${this.settings.maxResultsPerSearch}`;
+    const cached = this.cache.get(cacheKey);
+
+    if (cached) {
+      const ttlMs = this.settings.cacheDuration * 60 * 1000;
+      if (Date.now() - cached.timestamp < ttlMs) {
+        logger.info(`[WebSearch] Tool-triggered cache hit for: "${query.substring(0, 50)}"`);
+        tracer.trace('state.publish', 'webSearch.toolSearch.cacheHit', {
+          data: { query: query.substring(0, 80) }
+        });
+        return cached.results;
+      }
+      this.cache.delete(cacheKey);
+    }
+
+    try {
+      logger.info(`[WebSearch] Tool-triggered search: "${query.substring(0, 80)}"`);
+      const response = await this.tavilyClient.search(query, {
+        searchDepth: this.settings.searchDepth,
+        maxResults: this.settings.maxResultsPerSearch
+      });
+
+      const formatted = this.formatSearchResults(response);
+
+      this.cache.set(cacheKey, {
+        results: formatted,
+        timestamp: Date.now()
+      });
+
+      logger.info(`[WebSearch] Tool-triggered search complete: ${response.results.length} results`);
+      tracer.trace('state.publish', 'webSearch.toolSearch.complete', {
+        data: { query: query.substring(0, 80), resultCount: response.results.length }
+      });
+      return formatted;
+    } catch (error: any) {
+      logger.webSearchError(error.message);
+      tracer.trace('state.publish', 'webSearch.toolSearch.error', {
+        data: { query: query.substring(0, 80), error: error.message }
+      });
+      return `Error: Web search failed — ${error.message}`;
+    }
+  }
+
+  /**
    * Reset all web search state to defaults (called from ChatProvider.resetToDefaults).
    */
   resetToDefaults(): void {
@@ -318,5 +423,6 @@ export class WebSearchManager {
     this._onSearchError.dispose();
     this._onToggled.dispose();
     this._onSettingsChanged.dispose();
+    this._onModeChanged.dispose();
   }
 }

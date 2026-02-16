@@ -52,6 +52,31 @@ function commandsCreateFiles(commands: Array<{ command: string; index: number }>
   });
 }
 
+// Web search tag parsing (mirrors reasonerShellExecutor.ts)
+
+function parseWebSearchCommands(content: string): Array<{ query: string; index: number }> {
+  const queries: Array<{ query: string; index: number }> = [];
+  const regex = /<web_search>([\s\S]*?)<\/web_search>/gi;
+
+  let match;
+  while ((match = regex.exec(content)) !== null) {
+    const query = match[1].trim();
+    if (query) {
+      queries.push({ query, index: match.index });
+    }
+  }
+
+  return queries;
+}
+
+function containsWebSearchCommands(content: string): boolean {
+  return /<web_search>[\s\S]*?<\/web_search>/i.test(content);
+}
+
+function stripWebSearchTags(content: string): string {
+  return content.replace(/<web_search>[\s\S]*?<\/web_search>/gi, '').trim();
+}
+
 const BLOCKED_PATTERNS: RegExp[] = [
   /\brm\s+(-[rf]+\s+)*[\/~]/i,
   /\bsudo\s/i,
@@ -335,6 +360,125 @@ Some code here`;
         expect(validateCommand('rm -rf /').valid).toBe(false);
         expect(validateCommand('cat file.txt').valid).toBe(true);
       });
+    });
+  });
+
+  // ── Web Search Tag Parsing ──
+
+  describe('parseWebSearchCommands', () => {
+    it('parses single web search query', () => {
+      const content = 'Let me look that up:\n<web_search>latest React 19 features</web_search>';
+      const queries = parseWebSearchCommands(content);
+
+      expect(queries).toHaveLength(1);
+      expect(queries[0].query).toBe('latest React 19 features');
+    });
+
+    it('parses multiple web search queries', () => {
+      const content = `
+        <web_search>TypeScript 5.4 release notes</web_search>
+        Some analysis here.
+        <web_search>Vite 6 migration guide</web_search>
+      `;
+      const queries = parseWebSearchCommands(content);
+
+      expect(queries).toHaveLength(2);
+      expect(queries[0].query).toBe('TypeScript 5.4 release notes');
+      expect(queries[1].query).toBe('Vite 6 migration guide');
+    });
+
+    it('handles empty content', () => {
+      expect(parseWebSearchCommands('')).toEqual([]);
+    });
+
+    it('handles content without web search tags', () => {
+      expect(parseWebSearchCommands('No web search here')).toEqual([]);
+    });
+
+    it('ignores empty web search tags', () => {
+      const content = '<web_search></web_search><web_search>   </web_search><web_search>actual query</web_search>';
+      const queries = parseWebSearchCommands(content);
+
+      expect(queries).toHaveLength(1);
+      expect(queries[0].query).toBe('actual query');
+    });
+
+    it('records correct index positions', () => {
+      const content = 'prefix <web_search>query</web_search>';
+      const queries = parseWebSearchCommands(content);
+
+      expect(queries[0].index).toBe(7); // position of <web_search>
+    });
+  });
+
+  describe('containsWebSearchCommands', () => {
+    it('returns true for content with web_search tags', () => {
+      expect(containsWebSearchCommands('<web_search>test</web_search>')).toBe(true);
+    });
+
+    it('returns false for content without web_search tags', () => {
+      expect(containsWebSearchCommands('No web search')).toBe(false);
+    });
+
+    it('is case insensitive', () => {
+      expect(containsWebSearchCommands('<WEB_SEARCH>test</WEB_SEARCH>')).toBe(true);
+      expect(containsWebSearchCommands('<Web_Search>test</Web_Search>')).toBe(true);
+    });
+
+    it('does not match shell tags', () => {
+      expect(containsWebSearchCommands('<shell>ls</shell>')).toBe(false);
+    });
+  });
+
+  describe('stripWebSearchTags', () => {
+    it('removes web_search tags from content', () => {
+      const content = 'Text before <web_search>query</web_search> text after';
+      expect(stripWebSearchTags(content)).toBe('Text before  text after');
+    });
+
+    it('removes multiple web_search tags', () => {
+      const content = '<web_search>q1</web_search> middle <web_search>q2</web_search>';
+      expect(stripWebSearchTags(content)).toBe('middle');
+    });
+
+    it('handles content without web_search tags', () => {
+      expect(stripWebSearchTags('No tags')).toBe('No tags');
+    });
+
+    it('does not remove shell tags', () => {
+      const content = '<shell>ls</shell> and <web_search>query</web_search>';
+      expect(stripWebSearchTags(content)).toBe('<shell>ls</shell> and');
+    });
+  });
+
+  describe('mixed shell and web_search tags', () => {
+    it('both tag types can coexist in same content', () => {
+      const content = `
+        <shell>ls -la</shell>
+        <web_search>TypeScript docs</web_search>
+        <shell>cat package.json</shell>
+      `;
+
+      expect(containsShellCommands(content)).toBe(true);
+      expect(containsWebSearchCommands(content)).toBe(true);
+
+      const shellCmds = parseShellCommands(content);
+      expect(shellCmds).toHaveLength(2);
+
+      const webQueries = parseWebSearchCommands(content);
+      expect(webQueries).toHaveLength(1);
+    });
+
+    it('stripping each tag type is independent', () => {
+      const content = '<shell>cmd</shell> text <web_search>query</web_search>';
+
+      const strippedShell = stripShellTags(content);
+      expect(strippedShell).toContain('<web_search>');
+      expect(strippedShell).not.toContain('<shell>');
+
+      const strippedWeb = stripWebSearchTags(content);
+      expect(strippedWeb).toContain('<shell>');
+      expect(strippedWeb).not.toContain('<web_search>');
     });
   });
 });

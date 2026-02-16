@@ -206,7 +206,8 @@ describe('ToolbarShadowActor', () => {
       enableBtn.click();
 
       expect(actor.getState().webSearchEnabled).toBe(true);
-      expect(searchBtn.classList.contains('active')).toBe(true);
+      // In auto mode (default), the button shows mode-auto instead of active
+      expect(searchBtn.classList.contains('mode-auto')).toBe(true);
     });
 
     it('disables web search via disable button in popup', () => {
@@ -250,6 +251,7 @@ describe('ToolbarShadowActor', () => {
       expect(state).toEqual({
         editMode: 'manual',
         webSearchEnabled: false,
+        webSearchMode: 'auto',
         filesModalOpen: false,
         planEnabled: false,
         streaming: false

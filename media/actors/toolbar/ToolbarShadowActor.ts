@@ -24,10 +24,12 @@ import { EventStateManager } from '../../state/EventStateManager';
 import { toolbarShadowStyles } from './shadowStyles';
 
 export type EditMode = 'manual' | 'ask' | 'auto';
+export type WebSearchMode = 'off' | 'manual' | 'auto';
 
 export interface ToolbarState {
   editMode: EditMode;
   webSearchEnabled: boolean;
+  webSearchMode: WebSearchMode;
   filesModalOpen: boolean;
   planEnabled: boolean;
   streaming: boolean;
@@ -94,6 +96,7 @@ const EDIT_MODE_LETTERS: Record<EditMode, string> = {
 export class ToolbarShadowActor extends ShadowActor {
   // State
   private _editMode: EditMode = 'manual';
+  private _webSearchMode: WebSearchMode = 'auto';
   private _webSearchEnabled = false;
   private _filesModalOpen = false;
   private _planEnabled = false;
@@ -130,6 +133,7 @@ export class ToolbarShadowActor extends ShadowActor {
       publications: {
         'toolbar.editMode': () => this._editMode,
         'toolbar.webSearchEnabled': () => this._webSearchEnabled,
+        'toolbar.webSearchMode': () => this._webSearchMode,
         'toolbar.filesModalOpen': () => this._filesModalOpen,
         'toolbar.planEnabled': () => this._planEnabled
       },
@@ -301,6 +305,30 @@ export class ToolbarShadowActor extends ShadowActor {
   }
 
   // ============================================
+  // Web Search Display
+  // ============================================
+
+  private updateSearchButtonDisplay(): void {
+    const searchBtn = this.query<HTMLButtonElement>('.search-btn');
+    if (!searchBtn) return;
+
+    searchBtn.classList.remove('active', 'mode-auto', 'mode-manual');
+
+    if (this._webSearchMode === 'auto') {
+      searchBtn.classList.add('mode-auto');
+      searchBtn.title = 'Web search: Auto (LLM decides)';
+    } else if (this._webSearchMode === 'manual') {
+      if (this._webSearchEnabled) {
+        searchBtn.classList.add('active');
+      }
+      searchBtn.classList.add('mode-manual');
+      searchBtn.title = `Web search: Manual (${this._webSearchEnabled ? 'enabled' : 'disabled'})`;
+    } else {
+      searchBtn.title = 'Web search: Off';
+    }
+  }
+
+  // ============================================
   // Web Search Modal (in document.body)
   // ============================================
 
@@ -315,42 +343,59 @@ export class ToolbarShadowActor extends ShadowActor {
     const credits = this._webSearchSettings.creditsPerPrompt;
     const costPerCall = isAdvanced ? 2 : 1;
     const requestCount = Math.floor(credits / costPerCall);
+    const isOff = this._webSearchMode === 'off';
 
     const modal = document.createElement('div');
     modal.className = 'web-search-modal';
     modal.setAttribute('data-modal', 'web-search');
     modal.innerHTML = `
       <div class="web-search-modal-title">
-        <span>Web Search Settings</span>
+        <span>Web Search</span>
         <button class="web-search-modal-close">&times;</button>
       </div>
       <div class="web-search-modal-content">
         <div class="web-search-option">
-          <label>Credits per prompt: <span id="creditsValue">${credits}</span> <span id="creditsInfo">(${requestCount} request${requestCount !== 1 ? 's' : ''})</span></label>
-          <input type="range" id="creditsSlider" min="${creditsMin}" max="${creditsMax}" step="${creditsStep}" value="${credits}">
-        </div>
-        <div class="web-search-option">
-          <label>Results per request: <span id="maxResultsValue">${this._webSearchSettings.maxResultsPerSearch}</span></label>
-          <input type="range" id="maxResultsSlider" min="1" max="20" step="1" value="${this._webSearchSettings.maxResultsPerSearch}">
-        </div>
-        <div class="web-search-option">
-          <label>Search depth:</label>
-          <div class="search-depth-options">
-            <button class="depth-btn ${!isAdvanced ? 'active' : ''}" data-depth="basic">
-              <span class="depth-name">Basic</span>
-              <span class="depth-credits">1 credit</span>
+          <label>Mode:</label>
+          <div class="web-search-mode-options">
+            <button class="mode-btn${this._webSearchMode === 'off' ? ' active' : ''}" data-mode="off">
+              <span class="mode-name">Off</span>
             </button>
-            <button class="depth-btn ${isAdvanced ? 'active' : ''}" data-depth="advanced">
-              <span class="depth-name">Advanced</span>
-              <span class="depth-credits">2 credits</span>
+            <button class="mode-btn${this._webSearchMode === 'manual' ? ' active' : ''}" data-mode="manual">
+              <span class="mode-name">Manual</span>
+            </button>
+            <button class="mode-btn${this._webSearchMode === 'auto' ? ' active' : ''}" data-mode="auto">
+              <span class="mode-name">Auto</span>
             </button>
           </div>
         </div>
-        <div class="web-search-toggle-row">
-          <button class="web-search-enable-btn${this._webSearchEnabled ? ' disabled' : ''}">Enable</button>
-          <button class="web-search-disable-btn${!this._webSearchEnabled ? ' disabled' : ''}">Disable</button>
+        <div class="web-search-settings-section${isOff ? ' disabled-section' : ''}">
+          <div class="web-search-option">
+            <label>Credits per prompt: <span id="creditsValue">${credits}</span> <span id="creditsInfo">(${requestCount} request${requestCount !== 1 ? 's' : ''})</span></label>
+            <input type="range" id="creditsSlider" min="${creditsMin}" max="${creditsMax}" step="${creditsStep}" value="${credits}"${isOff ? ' disabled' : ''}>
+          </div>
+          <div class="web-search-option">
+            <label>Results per request: <span id="maxResultsValue">${this._webSearchSettings.maxResultsPerSearch}</span></label>
+            <input type="range" id="maxResultsSlider" min="1" max="20" step="1" value="${this._webSearchSettings.maxResultsPerSearch}"${isOff ? ' disabled' : ''}>
+          </div>
+          <div class="web-search-option">
+            <label>Search depth:</label>
+            <div class="search-depth-options">
+              <button class="depth-btn ${!isAdvanced ? 'active' : ''}" data-depth="basic"${isOff ? ' disabled' : ''}>
+                <span class="depth-name">Basic</span>
+                <span class="depth-credits">1 credit</span>
+              </button>
+              <button class="depth-btn ${isAdvanced ? 'active' : ''}" data-depth="advanced"${isOff ? ' disabled' : ''}>
+                <span class="depth-name">Advanced</span>
+                <span class="depth-credits">2 credits</span>
+              </button>
+            </div>
+          </div>
+          <div class="web-search-toggle-row">
+            <button class="web-search-enable-btn${this._webSearchEnabled ? ' disabled' : ''}"${isOff ? ' disabled' : ''}>Enable</button>
+            <button class="web-search-disable-btn${!this._webSearchEnabled ? ' disabled' : ''}"${isOff ? ' disabled' : ''}>Disable</button>
+          </div>
+          <button class="web-search-clear-cache-btn"${isOff ? ' disabled' : ''}>Clear Cache</button>
         </div>
-        <button class="web-search-clear-cache-btn">Clear Cache</button>
       </div>
     `;
 
@@ -360,6 +405,37 @@ export class ToolbarShadowActor extends ShadowActor {
 
     modal.querySelector('.web-search-modal-close')?.addEventListener('click', () => {
       this.closeWebSearchModal();
+    });
+
+    // Mode selector buttons
+    modal.querySelectorAll('.mode-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const newMode = (btn as HTMLElement).dataset.mode as WebSearchMode;
+        modal.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        this._webSearchMode = newMode;
+        this._vscode?.postMessage({ type: 'setWebSearchMode', mode: newMode });
+        this.updateSearchButtonDisplay();
+        this.publish({ 'toolbar.webSearchMode': newMode });
+
+        // Toggle disabled state on settings section
+        const settingsSection = modal.querySelector('.web-search-settings-section');
+        if (settingsSection) {
+          settingsSection.classList.toggle('disabled-section', newMode === 'off');
+          // Enable/disable all interactive elements
+          settingsSection.querySelectorAll('input, button').forEach(el => {
+            (el as HTMLInputElement | HTMLButtonElement).disabled = newMode === 'off';
+          });
+        }
+
+        // If switching to off, also disable manual toggle
+        if (newMode === 'off' && this._webSearchEnabled) {
+          this._webSearchEnabled = false;
+          this._onWebSearchToggle?.(false);
+          this._vscode?.postMessage({ type: 'toggleWebSearch', enabled: false });
+          this.publish({ 'toolbar.webSearchEnabled': false });
+        }
+      });
     });
 
     // Credits slider
@@ -426,7 +502,7 @@ export class ToolbarShadowActor extends ShadowActor {
     // Enable button
     modal.querySelector('.web-search-enable-btn')?.addEventListener('click', () => {
       this._webSearchEnabled = true;
-      this.query<HTMLButtonElement>('.search-btn')?.classList.add('active');
+      this.updateSearchButtonDisplay();
       this._onWebSearchToggle?.(true, this._webSearchSettings);
       this._vscode?.postMessage({ type: 'toggleWebSearch', enabled: true });
       this._vscode?.postMessage({ type: 'updateWebSearchSettings', settings: this._webSearchSettings });
@@ -437,7 +513,7 @@ export class ToolbarShadowActor extends ShadowActor {
     // Disable button
     modal.querySelector('.web-search-disable-btn')?.addEventListener('click', () => {
       this._webSearchEnabled = false;
-      this.query<HTMLButtonElement>('.search-btn')?.classList.remove('active');
+      this.updateSearchButtonDisplay();
       this._onWebSearchToggle?.(false);
       this._vscode?.postMessage({ type: 'toggleWebSearch', enabled: false });
       this.closeWebSearchModal();
@@ -508,8 +584,14 @@ export class ToolbarShadowActor extends ShadowActor {
 
   setWebSearchEnabled(enabled: boolean): void {
     this._webSearchEnabled = enabled;
-    this.query<HTMLButtonElement>('.search-btn')?.classList.toggle('active', enabled);
+    this.updateSearchButtonDisplay();
     this.publish({ 'toolbar.webSearchEnabled': enabled });
+  }
+
+  setWebSearchMode(mode: WebSearchMode): void {
+    this._webSearchMode = mode;
+    this.updateSearchButtonDisplay();
+    this.publish({ 'toolbar.webSearchMode': mode });
   }
 
   closeFilesModal(): void {
@@ -526,6 +608,7 @@ export class ToolbarShadowActor extends ShadowActor {
     return {
       editMode: this._editMode,
       webSearchEnabled: this._webSearchEnabled,
+      webSearchMode: this._webSearchMode,
       filesModalOpen: this._filesModalOpen,
       planEnabled: this._planEnabled,
       streaming: this._streaming

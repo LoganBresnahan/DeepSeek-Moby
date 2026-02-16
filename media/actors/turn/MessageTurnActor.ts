@@ -25,6 +25,7 @@ import { InterleavedShadowActor, ShadowContainer } from '../../state/Interleaved
 import { EventStateManager } from '../../state/EventStateManager';
 import { turnActorStyles } from './styles';
 import { createLogger } from '../../logging';
+import { extractCodeBlocks, hasIncompleteFence } from '../../utils/codeBlocks';
 import type {
   TurnRole,
   TurnData,
@@ -411,11 +412,10 @@ export class MessageTurnActor extends InterleavedShadowActor {
       if (this._isStreaming && this._currentSegmentContent) {
         const contentEl = container.content.querySelector('.content');
         if (contentEl) {
-          // Use fence-counting: odd number of ``` = last one is an opening fence
-          const fences = [...this._currentSegmentContent.matchAll(/```/g)];
-          const hasIncompleteFence = fences.length % 2 === 1;
-          const cleaned = hasIncompleteFence
-            ? this._currentSegmentContent.substring(0, fences[fences.length - 1].index!)
+          // Use fence-length-aware detection (CommonMark spec)
+          const fenceState = hasIncompleteFence(this._currentSegmentContent);
+          const cleaned = fenceState.incomplete
+            ? this._currentSegmentContent.substring(0, fenceState.lastOpenIndex)
             : this._currentSegmentContent;
           const wasStreaming = this._isStreaming;
           this._isStreaming = false;
@@ -1246,21 +1246,25 @@ export class MessageTurnActor extends InterleavedShadowActor {
 
     const startExpanded = this._editMode === 'manual';
 
-    // Fenced code blocks (complete only — opening and closing ```)
-    let result = content.replace(
-      /```(\w*)\n([\s\S]*?)```/g,
-      (_, lang, code) => {
-        const language = lang || 'text';
-        const escapedCode = this.escapeHtml(code.trimEnd()).replace(/\n/g, '&#10;');
-        const expandedClass = startExpanded ? ' expanded' : '';
+    // Fenced code blocks (complete only) — fence-length-aware (CommonMark spec)
+    const blocks = extractCodeBlocks(content);
+    let result = content;
 
-        const firstLine = code.trim().split('\n')[0] || '';
-        const preview = firstLine.length > 60 ? firstLine.substring(0, 60) + '...' : firstLine;
-        const escapedPreview = this.escapeHtml(preview);
+    // Replace from last to first to preserve string indices
+    for (let bi = blocks.length - 1; bi >= 0; bi--) {
+      const block = blocks[bi];
+      const language = block.language || 'text';
+      const code = block.content;
+      const escapedCode = this.escapeHtml(code.trimEnd()).replace(/\n/g, '&#10;');
+      const expandedClass = startExpanded ? ' expanded' : '';
 
-        return `<div class="code-block entering${expandedClass}" data-lang="${language}" data-edit-mode="${this._editMode}"><div class="code-header"><span class="code-toggle">▶</span><span class="code-lang">${language}</span><span class="code-preview">${escapedPreview}</span><div class="code-actions"><button class="code-action-btn diff-btn">Diff</button><button class="code-action-btn apply-btn">Apply</button><button class="code-action-btn copy-btn">Copy</button></div></div><div class="code-body"><pre><code class="language-${language}">${escapedCode}</code></pre></div></div>`;
-      }
-    );
+      const firstLine = code.trim().split('\n')[0] || '';
+      const preview = firstLine.length > 60 ? firstLine.substring(0, 60) + '...' : firstLine;
+      const escapedPreview = this.escapeHtml(preview);
+
+      const html = `<div class="code-block entering${expandedClass}" data-lang="${language}" data-edit-mode="${this._editMode}"><div class="code-header"><span class="code-toggle">▶</span><span class="code-lang">${language}</span><span class="code-preview">${escapedPreview}</span><div class="code-actions"><button class="code-action-btn diff-btn">Diff</button><button class="code-action-btn apply-btn">Apply</button><button class="code-action-btn copy-btn">Copy</button></div></div><div class="code-body"><pre><code class="language-${language}">${escapedCode}</code></pre></div></div>`;
+      result = result.substring(0, block.startIndex) + html + result.substring(block.endIndex);
+    }
 
     // During streaming, hide incomplete code blocks and show animated placeholder
     if (this._isStreaming) {

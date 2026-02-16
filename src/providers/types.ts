@@ -49,6 +49,9 @@ export interface CodeAppliedEvent {
 
 // ── Web Search Types ──
 
+/** Web search mode: off (disabled), manual (user toggle only), auto (LLM decides) */
+export type WebSearchMode = 'off' | 'manual' | 'auto';
+
 /** Web search configuration */
 export interface WebSearchSettings {
   creditsPerPrompt: number;
@@ -83,6 +86,7 @@ export interface SettingsSnapshot {
     creditsPerPrompt: number;
     maxResultsPerSearch: number;
     cacheDuration: number;
+    mode: WebSearchMode;
   };
 }
 

@@ -48,6 +48,9 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     this.webSearchManager = new WebSearchManager(this.tavilyClient);
     this.fileContextManager = new FileContextManager();
     const config = vscode.workspace.getConfiguration('deepseek');
+    // Initialize web search mode from persisted setting
+    const webSearchMode = (config.get<string>('webSearchMode') || 'auto') as 'off' | 'manual' | 'auto';
+    this.webSearchManager.setMode(webSearchMode);
     const editMode = (config.get<string>('editMode') || 'manual') as 'manual' | 'ask' | 'auto';
     this.diffManager = new DiffManager(new DiffEngine(), this.fileContextManager, editMode);
     this.settingsManager = new SettingsManager(this.deepSeekClient);
@@ -101,6 +104,9 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     this.webSearchManager.onToggled(d => {
       this._view?.webview.postMessage({ type: 'webSearchToggled', enabled: d.enabled });
     });
+    this.webSearchManager.onModeChanged(d => {
+      this._view?.webview.postMessage({ type: 'webSearchModeChanged', mode: d.mode });
+    });
 
     // FileContextManager → webview
     this.fileContextManager.onOpenFiles(data => {
@@ -142,15 +148,16 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     // SettingsManager → webview
     this.settingsManager.onSettingsChanged(async snapshot => {
       if (this._view) {
-        const wsSettings = (await this.webSearchManager.getSettings()).settings;
+        const wsState = await this.webSearchManager.getSettings();
         this._view.webview.postMessage({
           type: 'settings',
           ...snapshot,
           webSearch: {
-            searchDepth: wsSettings.searchDepth,
-            creditsPerPrompt: wsSettings.creditsPerPrompt,
-            maxResultsPerSearch: wsSettings.maxResultsPerSearch,
-            cacheDuration: wsSettings.cacheDuration
+            searchDepth: wsState.settings.searchDepth,
+            creditsPerPrompt: wsState.settings.creditsPerPrompt,
+            maxResultsPerSearch: wsState.settings.maxResultsPerSearch,
+            cacheDuration: wsState.settings.cacheDuration,
+            mode: wsState.mode
           }
         });
         const config = vscode.workspace.getConfiguration('deepseek');
@@ -362,6 +369,14 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         case 'toggleWebSearch':
           await this.webSearchManager.toggle(data.enabled);
           break;
+        case 'setWebSearchMode': {
+          const mode = data.mode as 'off' | 'manual' | 'auto';
+          this.webSearchManager.setMode(mode);
+          // Persist to VS Code settings
+          const wsConfig = vscode.workspace.getConfiguration('deepseek');
+          await wsConfig.update('webSearchMode', mode, vscode.ConfigurationTarget.Global);
+          break;
+        }
         case 'updateWebSearchSettings':
           this.webSearchManager.updateSettings(data.settings);
           break;
@@ -637,7 +652,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
 
   private async sendCurrentSettings() {
     const snapshot = this.settingsManager.getCurrentSettings();
-    const wsSettings = (await this.webSearchManager.getSettings()).settings;
+    const wsState = await this.webSearchManager.getSettings();
     const config = vscode.workspace.getConfiguration('deepseek');
     const editMode = config.get<string>('editMode') || 'manual';
 
@@ -649,10 +664,11 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         type: 'settings',
         ...snapshot,
         webSearch: {
-          searchDepth: wsSettings.searchDepth,
-          creditsPerPrompt: wsSettings.creditsPerPrompt,
-          maxResultsPerSearch: wsSettings.maxResultsPerSearch,
-          cacheDuration: wsSettings.cacheDuration
+          searchDepth: wsState.settings.searchDepth,
+          creditsPerPrompt: wsState.settings.creditsPerPrompt,
+          maxResultsPerSearch: wsState.settings.maxResultsPerSearch,
+          cacheDuration: wsState.settings.cacheDuration,
+          mode: wsState.mode
         }
       });
       // Send edit mode separately

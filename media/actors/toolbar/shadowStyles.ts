@@ -103,7 +103,7 @@ export const toolbarShadowStyles = `
   background: var(--vscode-terminal-ansiBrightMagenta, #d7a3d7);
 }
 
-/* Search button */
+/* Search button - mode states */
 .btn.search-btn.active {
   opacity: 1;
   background: var(--vscode-terminal-ansiGreen, #4ec9b0);
@@ -113,6 +113,17 @@ export const toolbarShadowStyles = `
 
 .btn.search-btn.active:hover {
   background: var(--vscode-terminal-ansiBrightGreen, #5fd7af);
+}
+
+.btn.search-btn.mode-auto {
+  opacity: 1;
+  background: var(--vscode-terminal-ansiBlue, #3b8eea);
+  color: var(--vscode-editor-background);
+  border-color: var(--vscode-terminal-ansiBlue, #3b8eea);
+}
+
+.btn.search-btn.mode-auto:hover {
+  background: var(--vscode-terminal-ansiBrightBlue, #5ca8ff);
 }
 
 /* Attach button */

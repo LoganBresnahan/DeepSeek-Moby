@@ -12,6 +12,7 @@ import { DiffEngine } from '../utils/diff';
 import { logger } from '../utils/logger';
 import { DiffMetadata, DiffInfo, DiffListChangedEvent, CodeAppliedEvent } from './types';
 import { FileContextManager } from './fileContextManager';
+import { extractCodeBlocks } from '../utils/codeBlocks';
 
 export class DiffManager {
   // ── Events ──
@@ -763,38 +764,34 @@ export class DiffManager {
    * Detect complete code blocks in the accumulated response and auto-handle in ask/auto mode.
    * Encapsulates the code block detection logic from ChatProvider handleUserMessage.
    */
-  handleCodeBlockDetection(accumulatedResponse: string): void {
+  async handleCodeBlockDetection(accumulatedResponse: string): Promise<void> {
     if (this.editMode === 'ask' || this.editMode === 'auto') {
-      const codeBlockRegex = /```(\w+)?\n([\s\S]*?)\n```/g;
-      const matches = [...accumulatedResponse.matchAll(codeBlockRegex)];
+      const blocks = extractCodeBlocks(accumulatedResponse);
 
-      for (const match of matches) {
-        const language = match[1] || 'plaintext';
-        const code = match[2];
-
-        if (language === 'tool-output') continue;
+      for (const block of blocks) {
+        if (block.language === 'tool-output') continue;
 
         // Dedup before any logging — this method is called on every flush
-        const blockId = `${match.index}-${match[0].length}`;
+        const blockId = `${block.startIndex}-${block.raw.length}`;
         if (this.processedCodeBlocks.has(blockId)) continue;
         this.processedCodeBlocks.add(blockId);
 
-        const fileHeaderMatch = code.match(/^#\s*File:\s*(.+?)$/m);
+        const fileHeaderMatch = block.content.match(/^#\s*File:\s*(.+?)$/m);
         if (!fileHeaderMatch) {
           logger.debug(`[DiffManager] Skipping auto-diff for code block without # File: header (likely explanatory code)`);
           continue;
         }
 
         if (this.editMode === 'ask') {
-          this.handleDebouncedDiff(code, language);
+          this.handleDebouncedDiff(block.content, block.language);
         } else if (this.editMode === 'auto') {
           const filePath = fileHeaderMatch[1].trim();
-          const codeWithoutHeader = code.replace(/^#\s*File:.*\n/i, '');
+          const codeWithoutHeader = block.content.replace(/^#\s*File:.*\n/i, '');
           logger.info(`[DiffManager] Auto-applying code block for: ${filePath}`);
           if (!this.currentResponseFileChanges.some(f => f.filePath === filePath)) {
             this.currentResponseFileChanges.push({ filePath, status: 'pending', iteration: 0 });
           }
-          this.applyCodeDirectlyForAutoMode(filePath, codeWithoutHeader, 'Auto-applied from code block');
+          await this.applyCodeDirectlyForAutoMode(filePath, codeWithoutHeader, 'Auto-applied from code block');
         }
       }
     }
@@ -866,11 +863,10 @@ export class DiffManager {
 
     logger.info(`[DiffManager] Detected potential unfenced SEARCH/REPLACE markers`);
 
-    const fencedBlockRegex = /```[\w]*\n[\s\S]*?```/g;
+    const fencedBlocks = extractCodeBlocks(content);
     let contentWithoutFencedBlocks = content;
-    let match;
-    while ((match = fencedBlockRegex.exec(content)) !== null) {
-      contentWithoutFencedBlocks = contentWithoutFencedBlocks.replace(match[0], '<<<FENCED_BLOCK>>>');
+    for (const block of fencedBlocks) {
+      contentWithoutFencedBlocks = contentWithoutFencedBlocks.replace(block.raw, '<<<FENCED_BLOCK>>>');
     }
 
     const unfencedHasSearch = /<<<{3,}\s*SEARCH/i.test(contentWithoutFencedBlocks);

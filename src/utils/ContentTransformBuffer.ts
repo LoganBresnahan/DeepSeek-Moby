@@ -18,7 +18,7 @@
  * - Debounce timer is a FALLBACK for releasing held-back content if stream pauses
  */
 
-export type SegmentType = 'text' | 'shell' | 'thinking' | 'codeblock';
+export type SegmentType = 'text' | 'shell' | 'thinking' | 'codeblock' | 'web_search';
 
 export interface BufferedSegment {
   type: SegmentType;
@@ -78,10 +78,18 @@ const DEFAULT_PATTERNS: TransformPattern[] = [
     extract: (raw: string): string => {
       return raw.replace(/<\/?think>/g, '').trim();
     }
+  },
+  {
+    type: 'web_search',
+    startPattern: /<web_search>/,
+    endPattern: /<\/web_search>/,
+    extract: (raw: string): string => {
+      return raw.replace(/<\/?web_search>/g, '').trim();
+    }
   }
   // NOTE: Code blocks are NOT filtered here - they flow through as normal text
-  // and are rendered by the frontend's markdown processing. Only <shell> and
-  // <think> tags need special handling because they shouldn't appear raw in the UI.
+  // and are rendered by the frontend's markdown processing. Only <shell>, <think>,
+  // and <web_search> tags need special handling because they shouldn't appear raw in the UI.
 ];
 
 export class ContentTransformBuffer {

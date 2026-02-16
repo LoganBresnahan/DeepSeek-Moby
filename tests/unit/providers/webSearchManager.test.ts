@@ -51,6 +51,71 @@ describe('WebSearchManager', () => {
     manager = new WebSearchManager(mockTavily as any);
   });
 
+  // ── setMode / getMode ──
+
+  describe('setMode / getMode', () => {
+    it('should default to auto mode', () => {
+      expect(manager.getMode()).toBe('auto');
+    });
+
+    it('should change mode and fire onModeChanged', () => {
+      const events: Array<{ mode: string }> = [];
+      manager.onModeChanged(e => events.push(e));
+
+      manager.setMode('manual');
+
+      expect(manager.getMode()).toBe('manual');
+      expect(events).toEqual([{ mode: 'manual' }]);
+    });
+
+    it('should not fire event when setting same mode', () => {
+      const events: Array<{ mode: string }> = [];
+      manager.onModeChanged(e => events.push(e));
+
+      manager.setMode('auto'); // already auto
+
+      expect(events).toHaveLength(0);
+    });
+
+    it('should disable manual toggle when switching to off', async () => {
+      await manager.toggle(true); // enable first
+      expect(manager.isEnabled).toBe(true);
+
+      const toggleEvents: Array<{ enabled: boolean }> = [];
+      manager.onToggled(e => toggleEvents.push(e));
+
+      manager.setMode('off');
+
+      expect(manager.isEnabled).toBe(false);
+      expect(toggleEvents).toEqual([{ enabled: false }]);
+    });
+
+    it('should not fire onToggled when switching to off if already disabled', () => {
+      expect(manager.isEnabled).toBe(false);
+      const toggleEvents: Array<{ enabled: boolean }> = [];
+      manager.onToggled(e => toggleEvents.push(e));
+
+      manager.setMode('off');
+
+      expect(toggleEvents).toHaveLength(0);
+    });
+
+    it('should cycle through all modes', () => {
+      const events: Array<{ mode: string }> = [];
+      manager.onModeChanged(e => events.push(e));
+
+      manager.setMode('manual');
+      manager.setMode('off');
+      manager.setMode('auto');
+
+      expect(events).toEqual([
+        { mode: 'manual' },
+        { mode: 'off' },
+        { mode: 'auto' }
+      ]);
+    });
+  });
+
   // ── toggle ──
 
   describe('toggle', () => {
@@ -73,6 +138,17 @@ describe('WebSearchManager', () => {
 
       expect(manager.isEnabled).toBe(false);
       expect(events).toEqual([{ enabled: false }]);
+    });
+
+    it('should reject toggle when mode is off', async () => {
+      manager.setMode('off');
+      const toggleEvents: Array<{ enabled: boolean }> = [];
+      manager.onToggled(e => toggleEvents.push(e));
+
+      await manager.toggle(true);
+
+      expect(manager.isEnabled).toBe(false);
+      expect(toggleEvents).toEqual([{ enabled: false }]);
     });
 
     it('should reject toggle when API key not configured', async () => {
@@ -137,10 +213,21 @@ describe('WebSearchManager', () => {
 
       expect(result.enabled).toBe(false);
       expect(result.configured).toBe(true);
+      expect(result.mode).toBe('auto');
       expect(result.settings.searchDepth).toBe('basic');
       expect(result.settings.cacheDuration).toBe(15);
       expect(result.settings.creditsPerPrompt).toBe(1);
       expect(result.settings.maxResultsPerSearch).toBe(5);
+    });
+
+    it('should reflect current mode in getSettings', async () => {
+      manager.setMode('manual');
+      const result = await manager.getSettings();
+      expect(result.mode).toBe('manual');
+
+      manager.setMode('off');
+      const result2 = await manager.getSettings();
+      expect(result2.mode).toBe('off');
     });
 
     it('should return a copy of settings (not a reference)', async () => {
@@ -175,6 +262,15 @@ describe('WebSearchManager', () => {
   // ── searchForMessage ──
 
   describe('searchForMessage', () => {
+    it('should return empty string when mode is off', async () => {
+      manager.setMode('off');
+      // Even if we somehow had it enabled before, mode=off should block
+      const result = await manager.searchForMessage('hello');
+
+      expect(result).toBe('');
+      expect(mockTavily.search).not.toHaveBeenCalled();
+    });
+
     it('should return empty string when disabled', async () => {
       const result = await manager.searchForMessage('hello');
 
@@ -480,6 +576,113 @@ describe('WebSearchManager', () => {
       mockTavily.search.mockClear();
       await manager.searchForMessage('populate cache');
       expect(mockTavily.search).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // ── searchByQuery ──
+
+  describe('searchByQuery', () => {
+    it('should return error when mode is off', async () => {
+      manager.setMode('off');
+
+      const result = await manager.searchByQuery('test query');
+
+      expect(result).toContain('Error:');
+      expect(result).toContain('auto mode is not enabled');
+      expect(mockTavily.search).not.toHaveBeenCalled();
+    });
+
+    it('should return error when mode is manual', async () => {
+      manager.setMode('manual');
+
+      const result = await manager.searchByQuery('test query');
+
+      expect(result).toContain('Error:');
+      expect(result).toContain('auto mode is not enabled');
+      expect(mockTavily.search).not.toHaveBeenCalled();
+    });
+
+    it('should return error when API key not configured', async () => {
+      mockTavily.isConfigured.mockResolvedValue(false);
+
+      const result = await manager.searchByQuery('test query');
+
+      expect(result).toContain('Error:');
+      expect(result).toContain('Tavily API key not configured');
+      expect(mockTavily.search).not.toHaveBeenCalled();
+    });
+
+    it('should fetch from Tavily without requiring enabled toggle', async () => {
+      // Do NOT toggle on — searchByQuery bypasses the toggle
+      expect(manager.isEnabled).toBe(false);
+
+      const result = await manager.searchByQuery('test query');
+
+      expect(mockTavily.search).toHaveBeenCalledWith('test query', { searchDepth: 'basic', maxResults: 5 });
+      expect(result).toContain('Result 1');
+      expect(result).toContain('Summary answer');
+    });
+
+    it('should make a single API call per invocation', async () => {
+      // Even with creditsPerPrompt > 1, searchByQuery should be 1 call
+      manager.updateSettings({ creditsPerPrompt: 5 });
+
+      await manager.searchByQuery('test query');
+
+      expect(mockTavily.search).toHaveBeenCalledTimes(1);
+    });
+
+    it('should use shared cache with tool| prefix', async () => {
+      await manager.searchByQuery('test query');
+      expect(mockTavily.search).toHaveBeenCalledTimes(1);
+
+      // Second call with same query should use cache
+      await manager.searchByQuery('test query');
+      expect(mockTavily.search).toHaveBeenCalledTimes(1);
+    });
+
+    it('should be case-insensitive for cache keys', async () => {
+      await manager.searchByQuery('Test Query');
+      await manager.searchByQuery('test query');
+
+      expect(mockTavily.search).toHaveBeenCalledTimes(1);
+    });
+
+    it('should NOT share cache with searchForMessage (different prefix)', async () => {
+      await manager.toggle(true);
+      await manager.searchForMessage('test query');
+      expect(mockTavily.search).toHaveBeenCalledTimes(1);
+
+      // searchByQuery uses 'tool|' prefix — should NOT hit searchForMessage cache
+      await manager.searchByQuery('test query');
+      expect(mockTavily.search).toHaveBeenCalledTimes(2);
+    });
+
+    it('should return error string on API failure', async () => {
+      mockTavily.search.mockRejectedValueOnce(new Error('Rate limit exceeded'));
+
+      const result = await manager.searchByQuery('test query');
+
+      expect(result).toContain('Error:');
+      expect(result).toContain('Rate limit exceeded');
+    });
+
+    it('should use current search depth and maxResults settings', async () => {
+      manager.updateSettings({ searchDepth: 'advanced', maxResultsPerSearch: 10 });
+
+      await manager.searchByQuery('test query');
+
+      expect(mockTavily.search).toHaveBeenCalledWith('test query', { searchDepth: 'advanced', maxResults: 10 });
+    });
+
+    it('should be cleared by clearCache()', async () => {
+      await manager.searchByQuery('test query');
+      expect(mockTavily.search).toHaveBeenCalledTimes(1);
+
+      manager.clearCache();
+
+      await manager.searchByQuery('test query');
+      expect(mockTavily.search).toHaveBeenCalledTimes(2);
     });
   });
 

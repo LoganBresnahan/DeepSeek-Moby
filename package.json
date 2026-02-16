@@ -188,6 +188,21 @@
           ],
           "description": "Tavily search depth mode"
         },
+        "deepseek.webSearchMode": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "off",
+            "manual",
+            "auto"
+          ],
+          "enumDescriptions": [
+            "Off: Web search is completely disabled",
+            "Manual: Web search only when manually toggled on by the user",
+            "Auto: The LLM decides when to search the web (recommended)"
+          ],
+          "description": "Controls how web search works: off (disabled), manual (user toggle only), or auto (LLM decides)"
+        },
         "deepseek.editMode": {
           "type": "string",
           "default": "manual",

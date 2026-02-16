@@ -1,8 +1,8 @@
 # LLM-Decided Web Search (Auto Web Search)
 
-**Status:** Research complete, implementation deferred (after ChatProvider refactor)
+**Status:** Complete
 
-**Depends on:** Phase 1 WebSearchManager extraction (complete), Phase 1b slider redesign (complete)
+**Depends on:** Phase 1 WebSearchManager extraction (complete), Phase 1b slider redesign (complete), ChatProvider refactor (complete)
 
 ---
 
@@ -14,7 +14,7 @@ Currently web search is manual: the user toggles it on and every message gets se
 
 ### Existing Infrastructure
 
-1. **Tool calling loop already exists** — `runToolLoop()` in `chatProvider.ts:2175` runs for the chat model with 5 workspace tools (read_file, search_files, grep_content, list_directory, get_file_info). It's a pre-streaming exploration phase.
+1. **Tool calling loop already exists** — `runToolLoop()` in `requestOrchestrator.ts:840` runs for the chat model with 5 workspace tools (read_file, search_files, grep_content, list_directory, get_file_info). It's a pre-streaming exploration phase.
 
 2. **`webSearchTool` already defined but unused** — `src/tools/workspaceTools.ts:125` exports a complete tool definition for `web_search` with query parameter. It was anticipated but never wired up.
 
@@ -67,7 +67,7 @@ No conflict — different methods, shared cache prevents duplicate API calls.
 | File | Change |
 |------|--------|
 | `src/providers/webSearchManager.ts` | Add `searchByQuery()` method (~35 lines) |
-| `src/providers/chatProvider.ts` | Import `webSearchTool`; add to tools array; intercept in tool loop; update system prompt; add web search detection in reasoner loop |
+| `src/providers/requestOrchestrator.ts` | Import `webSearchTool`; add to tools array; intercept in tool loop; update system prompt; add web search detection in reasoner loop |
 | `src/tools/workspaceTools.ts` | No changes (tool definition already exists at line 125) |
 | `src/tools/reasonerShellExecutor.ts` | Add `parseWebSearchCommands`, `containsWebSearchCommands`, `stripWebSearchTags`; update `getReasonerShellPrompt()` |
 | `src/utils/ContentTransformBuffer.ts` | Extend `SegmentType` to include `'web_search'` |
@@ -105,9 +105,76 @@ No conflict — different methods, shared cache prevents duplicate API calls.
 3. **Error strings not empty strings** — `searchByQuery()` returns `"Error: ..."` on failure so LLM knows it failed
 4. **Shared cache + settings** — tool-triggered and manual searches share Tavily settings and cache
 
-## Known Gaps
+## Post-Implementation Additions
 
-- **No web search progress indicator in UI**: `webSearching` and `webSearchComplete` messages are forwarded from ChatProvider to the webview via `postMessage`, but the webview gateway (`VirtualMessageGatewayActor`) has no handlers for them — they appear as `Unhandled message type` in logs. Could wire these up later to show a "Searching..." spinner in the chat UI.
+These were added after the core implementation:
+
+1. **Tracing** — Added `tracer.trace()` calls to `searchByQuery()` (4 events: notConfigured, cacheHit, complete, error) and R1 web search path in requestOrchestrator (2 events: detected, complete)
+2. **R1 token budget** — Added `accumulatedIterationTokens` tracking with 60k token safety cap for injected shell/web search results. Breaks iteration loop and fires warning when exceeded.
+3. **Manual search visual indicators** — Wired `webSearching`, `webSearchComplete`, `webSearchCached` messages in VirtualMessageGatewayActor to StatusPanelShadowActor.showMessage(). `webSearchError` was already handled via `warning` message type.
+4. **R1 prompt flexibility** — Updated continuation prompts to allow R1 to answer questions without forcing code edits. Added "if the task is a question, provide a clear answer" as a valid exit path in system prompt, continuation user message, and continuation system prompt.
+
+## Web Search Mode Toggle (Off / Manual / Auto)
+
+### Context
+
+With auto web search implemented, the LLM always searches when it thinks it's needed (assuming Tavily API key is configured). Users need a way to completely disable web search or restrict it to manual-only, without removing their API key.
+
+### Design
+
+A persistent `deepseek.webSearchMode` setting with three values:
+
+| Mode | Manual Toggle | LLM Auto-Search | Prompts Mention Web Search |
+|------|:------------:|:---------------:|:--------------------------:|
+| **off** | Disabled | No | No |
+| **manual** | Available | No | No |
+| **auto** | Available | Yes | Yes |
+
+**Mode (`webSearchMode`)** is a persistent VS Code setting — survives restarts.
+**Manual toggle (`enabled`)** is session-level state — controlled by Enable/Disable in the popup.
+
+### Gating Logic
+
+Current gating uses `tavilyConfigured` (API key exists) as the sole gate for auto search. This changes to `mode === 'auto' && configured`:
+
+| Gate Point | Current | New |
+|------------|---------|-----|
+| V3 system prompt web_search line | `tavilyAvailable` | `mode === 'auto' && configured` |
+| V3 tool loop webSearchTool inclusion | `tavilyConfigured` | `mode === 'auto' && configured` |
+| R1 system prompt web_search section | `tavilyConfiguredForPrompt` | `mode === 'auto' && configured` |
+| R1 iteration loop web_search tag detection | Always (for reasoner) | `mode === 'auto'` |
+| `searchForMessage()` (manual) | `this.enabled && configured` | `mode !== 'off' && this.enabled && configured` |
+| `searchByQuery()` (LLM-triggered) | `configured` | `mode === 'auto' && configured` |
+
+### UI Changes
+
+The toolbar popup replaces Enable/Disable with a three-way mode selector at the top:
+- **Off** — dim/default button
+- **Manual** — green button (like edit mode Q)
+- **Auto** — blue button (like edit mode A)
+
+Below the mode selector, the existing Enable/Disable buttons remain for the manual toggle (disabled when mode is `off`). All sliders and settings remain but are disabled when mode is `off`.
+
+The search toolbar button shows color state:
+- Off: default dim
+- Manual + disabled: default
+- Manual + enabled: green (existing `.active` class)
+- Auto: blue glow
+
+### Files to Change
+
+| File | Change |
+|------|--------|
+| `package.json` | Add `deepseek.webSearchMode` setting (enum: off/manual/auto, default: auto) |
+| `src/providers/types.ts` | Add `WebSearchMode` type, add to `SettingsSnapshot.webSearch` |
+| `src/providers/webSearchManager.ts` | Add mode state, `setMode()`, `getMode()`, gate `searchByQuery()` |
+| `src/providers/settingsManager.ts` | Read `webSearchMode` from config, include in snapshot |
+| `src/providers/chatProvider.ts` | Handle `setWebSearchMode` message |
+| `src/providers/requestOrchestrator.ts` | Gate auto search on mode at all 4 points |
+| `media/actors/toolbar/ToolbarShadowActor.ts` | Add mode selector to popup, update button states |
+| `media/actors/toolbar/shadowStyles.ts` | Add mode color states for search button |
+| `media/actors/message-gateway/VirtualMessageGatewayActor.ts` | Handle `webSearchModeChanged` message |
+| Tests | Update WebSearchManager, RequestOrchestrator tests |
 
 ## Verification
 

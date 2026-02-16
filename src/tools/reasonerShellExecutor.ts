@@ -83,6 +83,46 @@ export function stripShellTags(content: string): string {
   return content.replace(/<shell>[\s\S]*?<\/shell>/gi, '').trim();
 }
 
+// ── Web Search Tag Parsing ──
+// R1 can't use tool calling API, so it outputs <web_search> tags instead.
+
+export interface WebSearchQuery {
+  query: string;
+  index: number;
+}
+
+/**
+ * Parse <web_search> tags from R1's response content
+ */
+export function parseWebSearchCommands(content: string): WebSearchQuery[] {
+  const queries: WebSearchQuery[] = [];
+  const regex = /<web_search>([\s\S]*?)<\/web_search>/gi;
+
+  let match;
+  while ((match = regex.exec(content)) !== null) {
+    const query = match[1].trim();
+    if (query) {
+      queries.push({ query, index: match.index });
+    }
+  }
+
+  return queries;
+}
+
+/**
+ * Check if content contains any web search tags
+ */
+export function containsWebSearchCommands(content: string): boolean {
+  return /<web_search>[\s\S]*?<\/web_search>/i.test(content);
+}
+
+/**
+ * Strip web search tags from content (for display purposes)
+ */
+export function stripWebSearchTags(content: string): string {
+  return content.replace(/<web_search>[\s\S]*?<\/web_search>/gi, '').trim();
+}
+
 /**
  * Check if content contains code edit patterns (SEARCH/REPLACE blocks)
  * Used to detect if R1 has actually produced code changes vs just exploration
@@ -283,8 +323,20 @@ export function formatShellResultsForContext(results: ShellResult[]): string {
  * Get system prompt additions for reasoner model
  * This tells R1 how to use shell commands
  */
-export function getReasonerShellPrompt(): string {
+export function getReasonerShellPrompt(options?: { webSearchAvailable?: boolean }): string {
   const platform = process.platform === 'win32' ? 'Windows' : process.platform === 'darwin' ? 'macOS' : 'Linux';
+  const webSearchAvailable = options?.webSearchAvailable ?? false;
+
+  const webSearchSection = webSearchAvailable ? `
+
+**Web Search:**
+You can search the web for current information using <web_search> tags:
+
+<web_search>latest React 19 features</web_search>
+<web_search>TypeScript 5.4 release notes</web_search>
+
+Use web search when you need up-to-date information, recent documentation, news, or anything not in your training data. Search results will be provided back to you.
+` : '';
 
   return `
 You have access to shell commands for exploring and modifying the codebase. To run a command, wrap it in <shell> tags:
@@ -298,7 +350,7 @@ The system is running ${platform}. Commands are executed using the system's defa
 You can run any shell command - read files, search, list directories, run git commands, etc.
 Commands are executed in the workspace directory.
 
-After running commands, analyze the output and continue. You can run multiple commands if needed.
+After running commands, analyze the output and continue. You can run multiple commands if needed.${webSearchSection}
 
 **Creating New Files:**
 Use shell commands to create new files. Use cat with heredoc:
@@ -353,9 +405,8 @@ export function newFunction() {
 3. For **existing files**: read them first, then provide SEARCH/REPLACE edits
 
 **IMPORTANT: You MUST complete tasks in a single response.**
-- Do NOT stop after exploration - you must produce the code.
-- After running shell commands to explore, immediately create files or provide edits.
-- Never end your response with just shell commands or just analysis.
-- If the task involves code, your response is incomplete until you create/edit the files.
+- If the user asks a question or wants information, provide a clear direct answer. Do NOT create or edit files for questions.
+- If the task requires code changes, do NOT stop after exploration — produce the edits.
+- Never end your response with just shell commands or analysis — finish the task.
 `;
 }

@@ -14,7 +14,7 @@ import * as vscode from 'vscode';
 import { DeepSeekClient } from '../deepseekClient';
 import { logger } from '../utils/logger';
 import { tracer } from '../tracing';
-import { SettingsSnapshot } from './types';
+import { SettingsSnapshot, WebSearchMode } from './types';
 
 /** Payload for model change events */
 export interface ModelChangedEvent {
@@ -211,7 +211,8 @@ export class SettingsManager {
         searchDepth: 'basic',
         creditsPerPrompt: 1,
         maxResultsPerSearch: 5,
-        cacheDuration: 15
+        cacheDuration: 15,
+        mode: (config.get<string>('webSearchMode') || 'auto') as WebSearchMode
       }
     };
   }

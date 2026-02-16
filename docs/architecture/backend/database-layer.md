@@ -71,30 +71,39 @@ async function getOrCreateEncryptionKey(context: vscode.ExtensionContext): Promi
 conversationManager = new ConversationManager(context, dbKey);
 ```
 
-## Database Schema
+## Schema Migrations
 
-### Events Table
+All schema is managed by `src/events/migrations.ts` — the **single source of truth**. Schema versioning uses SQLite's `PRAGMA user_version` (a single integer in the DB file header, readable in < 1 ms).
 
-```sql
-CREATE TABLE events (
-  id TEXT PRIMARY KEY,              -- UUID
-  session_id TEXT NOT NULL,         -- FK to sessions
-  sequence INTEGER NOT NULL,        -- Per-session auto-increment
-  timestamp INTEGER NOT NULL,       -- Unix timestamp (ms)
-  type TEXT NOT NULL,               -- Event type discriminator
-  data TEXT NOT NULL,               -- JSON payload
-
-  UNIQUE(session_id, sequence)
-);
-
-CREATE INDEX idx_events_session_sequence
-  ON events(session_id, sequence);
-
-CREATE INDEX idx_events_session_type
-  ON events(session_id, type);
+```
+ConversationManager constructor:
+  1. new Database(dbPath, encryptionKey)    → PRAGMA foreign_keys = ON
+  2. runMigrations(this.db)                 → v1: create tables, v2: add FK constraints
+  3. new EventStore(this.db)               → prepareStatements() only
+  4. new SnapshotManager(this.db, ...)     → prepareStatements() only
+  5. prepare session statements
+  6. loadCurrentSession()
 ```
 
-### Sessions Table
+| Version | Migration | Description |
+|---------|-----------|-------------|
+| 1 | Baseline schema | Creates all 3 tables + 5 indexes using `CREATE TABLE IF NOT EXISTS` |
+| 2 | FK constraints | Recreates `events` and `snapshots` with `REFERENCES sessions(id) ON DELETE CASCADE` |
+
+- **Fresh installs:** all migrations run in sequence from version 0
+- **Updates:** only new migrations run (skips already-applied ones)
+- **Adding schema changes:** add a new `if (version < N)` block in `migrations.ts`
+
+### Schema Ownership
+
+| Concern | Owner |
+|---------|-------|
+| Table creation, indexes, schema changes | `migrations.ts` (versioned) |
+| Prepared statements | Constructors (`EventStore`, `SnapshotManager`, `ConversationManager`) |
+
+## Database Schema
+
+### Sessions Table (parent)
 
 ```sql
 CREATE TABLE sessions (
@@ -114,18 +123,41 @@ CREATE INDEX idx_sessions_updated
   ON sessions(updated_at DESC);
 ```
 
-### Snapshots Table
+### Events Table (child, FK → sessions)
+
+```sql
+CREATE TABLE events (
+  id TEXT PRIMARY KEY,              -- UUID
+  session_id TEXT NOT NULL          -- FK to sessions
+    REFERENCES sessions(id) ON DELETE CASCADE,
+  sequence INTEGER NOT NULL,        -- Per-session auto-increment
+  timestamp INTEGER NOT NULL,       -- Unix timestamp (ms)
+  type TEXT NOT NULL,               -- Event type discriminator
+  data TEXT NOT NULL,               -- JSON payload
+
+  UNIQUE(session_id, sequence)
+);
+
+CREATE INDEX idx_events_session ON events(session_id, sequence);
+CREATE INDEX idx_events_type ON events(session_id, type);
+CREATE INDEX idx_events_timestamp ON events(session_id, timestamp);
+```
+
+### Snapshots Table (child, FK → sessions)
 
 ```sql
 CREATE TABLE snapshots (
   id TEXT PRIMARY KEY,              -- UUID
-  session_id TEXT NOT NULL,         -- FK to sessions
+  session_id TEXT NOT NULL          -- FK to sessions
+    REFERENCES sessions(id) ON DELETE CASCADE,
   up_to_sequence INTEGER NOT NULL,  -- Events summarized
-  created_at INTEGER NOT NULL,      -- Unix timestamp
+  timestamp INTEGER NOT NULL,       -- Unix timestamp
   summary TEXT NOT NULL,            -- Natural language
   key_facts TEXT NOT NULL,          -- JSON array
   files_modified TEXT NOT NULL,     -- JSON array
-  token_count INTEGER NOT NULL      -- Estimated tokens
+  token_count INTEGER NOT NULL,     -- Estimated tokens
+
+  UNIQUE(session_id, up_to_sequence)
 );
 
 CREATE INDEX idx_snapshots_session
@@ -136,14 +168,14 @@ CREATE INDEX idx_snapshots_session
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                          Database Schema                                     │
+│                   Database Schema (FK CASCADE)                                │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
 │  ┌─────────────────────────┐         ┌─────────────────────────┐            │
 │  │       sessions          │         │        events           │            │
-│  ├─────────────────────────┤         ├─────────────────────────┤            │
-│  │ PK  id                  │◄────────│ FK  session_id          │            │
-│  │     title               │    1:N  │ PK  id                  │            │
+│  ├─────────────────────────┤  1:N    ├─────────────────────────┤            │
+│  │ PK  id                  │◄────────│ FK  session_id CASCADE  │            │
+│  │     title               │         │ PK  id                  │            │
 │  │     model               │         │     sequence            │            │
 │  │     created_at          │         │     timestamp           │            │
 │  │     updated_at          │         │     type                │            │
@@ -160,14 +192,17 @@ CREATE INDEX idx_snapshots_session
 │  │       snapshots         │                                                │
 │  ├─────────────────────────┤                                                │
 │  │ PK  id                  │                                                │
-│  │ FK  session_id          │                                                │
+│  │ FK  session_id CASCADE  │                                                │
 │  │     up_to_sequence      │                                                │
-│  │     created_at          │                                                │
+│  │     timestamp           │                                                │
 │  │     summary             │                                                │
 │  │     key_facts (JSON)    │                                                │
 │  │     files_modified (JSON)│                                               │
 │  │     token_count         │                                                │
 │  └─────────────────────────┘                                                │
+│                                                                              │
+│  PRAGMA foreign_keys = ON (set per-connection in Database constructor)       │
+│  ON DELETE CASCADE: deleting a session auto-deletes its events + snapshots  │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -180,12 +215,14 @@ The wrapper provides a synchronous API that adapts @signalapp/sqlcipher's array-
 // Database class
 class Database {
   constructor(filePath?: string, encryptionKey?: string);
+  // Constructor enables: PRAGMA foreign_keys = ON
 
-  exec(sql: string): void;         // Execute multiple statements
-  prepare(sql: string): Statement; // Prepare for repeated use
-  pragma(pragma: string): void;    // Set pragmas
-  transaction<T>(fn: () => T): () => T;  // Transaction wrapper
-  close(): void;                   // Close connection
+  exec(sql: string): void;                // Execute multiple statements
+  prepare(sql: string): Statement;        // Prepare for repeated use
+  pragma(pragma: string): void;           // Set pragmas (write-only)
+  pragmaGet(name: string): number;        // Read integer pragma (e.g., user_version)
+  transaction<T>(fn: () => T): () => T;   // Transaction wrapper
+  close(): void;                          // Close connection
 }
 
 // StatementWrapper class (adapts spread-args → array)
@@ -200,16 +237,11 @@ class StatementWrapper {
 
 ```typescript
 // Create database (synchronous — no async init needed)
+// Constructor automatically sets PRAGMA foreign_keys = ON
 const db = new Database('/path/to/moby.db', encryptionKey);
 
-// Execute schema
-db.exec(`
-  CREATE TABLE IF NOT EXISTS events (
-    id TEXT PRIMARY KEY,
-    session_id TEXT NOT NULL,
-    data TEXT NOT NULL
-  )
-`);
+// Run migrations (creates/updates all tables — single source of truth)
+runMigrations(db);
 
 // Prepared statements for performance
 const insertStmt = db.prepare(
@@ -223,13 +255,15 @@ const selectStmt = db.prepare(
 );
 const events = selectStmt.all('session-1');
 
-// Transactions
-const batchInsert = db.transaction(() => {
-  for (const event of events) {
-    insertStmt.run(event.id, event.sessionId, JSON.stringify(event));
-  }
+// Transactions (atomic — all or nothing)
+const deleteAll = db.transaction(() => {
+  db.prepare('DELETE FROM events WHERE session_id = ?').run('session-1');
+  db.prepare('DELETE FROM sessions WHERE id = ?').run('session-1');
 });
-batchInsert();  // Atomic - all or nothing
+deleteAll();
+
+// Read pragma values
+const version = db.pragmaGet('user_version');  // Returns number
 
 // Close
 db.close();
@@ -286,20 +320,26 @@ CREATE INDEX idx_sessions_updated ON sessions(updated_at DESC);
 | Path | Description |
 |------|-------------|
 | `~/.vscode/extensions/.../globalStorage/moby.db` | Encrypted database |
+| `src/events/migrations.ts` | Schema migrations (single source of truth for all DDL) |
 | `src/events/SqlJsWrapper.ts` | Database abstraction layer |
 
 ## Testing
 
-For tests, use in-memory databases:
+For tests, use in-memory databases with migrations:
 
 ```typescript
-import { Database } from './SqlJsWrapper';
+import { Database } from '../../../src/events/SqlJsWrapper';
+import { runMigrations } from '../../../src/events/migrations';
 
 describe('EventStore', () => {
   let db: Database;
 
   beforeEach(() => {
     db = new Database(':memory:');  // Fresh DB each test
+    runMigrations(db);             // Creates all tables + FK constraints
+    // FK constraints require parent sessions before inserting events
+    db.prepare('INSERT INTO sessions (id, title, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
+      .run('session-1', 'Test', 'test', 1000, 1000);
   });
 
   afterEach(() => {

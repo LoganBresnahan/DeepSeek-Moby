@@ -172,11 +172,14 @@ function createMockDiffManager() {
 function createMockWebSearchManager() {
   return {
     searchForMessage: vi.fn(async () => ''),
-    getSettings: vi.fn(() => ({
+    getSettings: vi.fn(async () => ({
       enabled: false,
       settings: { searchDepth: 'basic', creditsPerPrompt: 1, maxResultsPerSearch: 5, cacheDuration: 15 },
-      configured: false
+      configured: false,
+      mode: 'auto' as const
     })),
+    getMode: vi.fn(() => 'auto' as const),
+    searchByQuery: vi.fn(async () => ''),
     resetToDefaults: vi.fn(),
     clearCache: vi.fn(),
     toggle: vi.fn(),
