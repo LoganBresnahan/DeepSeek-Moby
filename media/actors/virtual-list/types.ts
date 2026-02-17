@@ -140,6 +140,8 @@ export interface CommandApprovalData {
   id: string;
   command: string;
   prefix: string;
+  /** The specific sub-command that triggered the approval (for compound commands) */
+  unknownSubCommand: string;
   status: 'pending' | 'allowed' | 'blocked';
   /** Actor's internal approval ID when bound */
   actorApprovalId?: string;

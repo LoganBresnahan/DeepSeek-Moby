@@ -177,6 +177,16 @@ describe('CommandApprovalManager', () => {
       expect(manager.checkCommand('ls && pwd || echo done')).toBe('allowed');
       expect(manager.checkCommand('ls && sudo rm / || echo safe')).toBe('blocked');
     });
+
+    it('should allow grep with alternation patterns (quoted \\|)', () => {
+      // This is the real bug: grep "marker\|symbol" was incorrectly split
+      // on the \| inside quotes, producing fragments that don't match rules
+      expect(manager.checkCommand('grep -rn -i "marker\\|symbol" dir/ | grep -v test | head -50')).toBe('allowed');
+    });
+
+    it('should allow grep with single-quoted alternation patterns', () => {
+      expect(manager.checkCommand("grep -rn 'foo|bar' dir/ | head -10")).toBe('allowed');
+    });
   });
 
   // ── splitCompoundCommand ──
@@ -204,6 +214,40 @@ describe('CommandApprovalManager', () => {
 
     it('should return single command as array', () => {
       expect(manager.splitCompoundCommand('ls -la')).toEqual(['ls -la']);
+    });
+
+    it('should NOT split on \\| inside double quotes (grep alternation)', () => {
+      const cmd = 'grep -rn "foo\\|bar" dir | head -5';
+      const parts = manager.splitCompoundCommand(cmd);
+      expect(parts).toEqual(['grep -rn "foo\\|bar" dir', 'head -5']);
+    });
+
+    it('should NOT split on | inside single quotes', () => {
+      const cmd = "grep -rn 'foo|bar' dir | head -5";
+      const parts = manager.splitCompoundCommand(cmd);
+      expect(parts).toEqual(["grep -rn 'foo|bar' dir", 'head -5']);
+    });
+
+    it('should NOT split on | inside double quotes', () => {
+      const cmd = 'echo "a|b" && cat file';
+      const parts = manager.splitCompoundCommand(cmd);
+      expect(parts).toEqual(['echo "a|b"', 'cat file']);
+    });
+
+    it('should handle the real-world grep alternation bug case', () => {
+      const cmd = 'grep -rn -i "marker\\|symbol\\|player" tictactoe/ --include="*.py" 2>/dev/null | grep -v test | head -50';
+      const parts = manager.splitCompoundCommand(cmd);
+      expect(parts).toEqual([
+        'grep -rn -i "marker\\|symbol\\|player" tictactoe/ --include="*.py" 2>/dev/null',
+        'grep -v test',
+        'head -50',
+      ]);
+    });
+
+    it('should handle mixed quoting styles', () => {
+      const cmd = `grep "a\\|b" file | grep 'c|d' | wc -l`;
+      const parts = manager.splitCompoundCommand(cmd);
+      expect(parts).toEqual(['grep "a\\|b" file', "grep 'c|d'", 'wc -l']);
     });
   });
 
@@ -372,6 +416,43 @@ describe('CommandApprovalManager', () => {
     });
   });
 
+  // ── findUnknownSubCommand ──
+
+  describe('findUnknownSubCommand', () => {
+    it('should return null for a simple allowed command', () => {
+      expect(manager.findUnknownSubCommand('ls -la')).toBeNull();
+    });
+
+    it('should return the command itself for a simple unknown command', () => {
+      expect(manager.findUnknownSubCommand('docker run ubuntu')).toBe('docker run ubuntu');
+    });
+
+    it('should return the unknown sub-command in a compound command', () => {
+      // "ls" is allowed, "xargs grep" is unknown
+      expect(manager.findUnknownSubCommand('ls -la | xargs grep foo'))
+        .toBe('xargs grep foo');
+    });
+
+    it('should return the first unknown when multiple are unknown', () => {
+      expect(manager.findUnknownSubCommand('curl https://a.com && wget https://b.com'))
+        .toBe('curl https://a.com');
+    });
+
+    it('should skip allowed sub-commands and find the unknown one', () => {
+      expect(manager.findUnknownSubCommand('ls && docker run ubuntu'))
+        .toBe('docker run ubuntu');
+    });
+
+    it('should return null for empty input', () => {
+      expect(manager.findUnknownSubCommand('')).toBeNull();
+      expect(manager.findUnknownSubCommand('   ')).toBeNull();
+    });
+
+    it('should return null when all sub-commands are allowed', () => {
+      expect(manager.findUnknownSubCommand('ls && pwd')).toBeNull();
+    });
+  });
+
   // ── Prefix Matching Edge Cases ──
 
   describe('prefix matching edge cases', () => {
@@ -525,6 +606,38 @@ describe('requestApproval flow', () => {
   it('resolveApproval should be safe to call with no pending approval', () => {
     // Should not throw
     manager.resolveApproval({ command: 'test', decision: 'allowed', persistent: false });
+  });
+
+  it('should fire onApprovalRequired with correct unknownSubCommand and prefix for compound commands', async () => {
+    // Access the internal mock EventEmitter's fire method
+    const fireMock = (manager as any)._onApprovalRequired.fire;
+
+    // "find" is in the default allowlist, "xargs grep" is not
+    const promise = manager.requestApproval('find . -name "*.rb" | xargs grep foo');
+
+    expect(fireMock).toHaveBeenCalledWith({
+      command: 'find . -name "*.rb" | xargs grep foo',
+      prefix: 'xargs grep',
+      unknownSubCommand: 'xargs grep foo',
+    });
+
+    manager.resolveApproval({ command: 'find . -name "*.rb" | xargs grep foo', decision: 'allowed', persistent: false });
+    await promise;
+  });
+
+  it('should use full command as unknownSubCommand for simple unknown commands', async () => {
+    const fireMock = (manager as any)._onApprovalRequired.fire;
+
+    const promise = manager.requestApproval('docker run ubuntu');
+
+    expect(fireMock).toHaveBeenCalledWith({
+      command: 'docker run ubuntu',
+      prefix: 'docker run',
+      unknownSubCommand: 'docker run ubuntu',
+    });
+
+    manager.resolveApproval({ command: 'docker run ubuntu', decision: 'allowed', persistent: false });
+    await promise;
   });
 
   it('dispose should cancel pending approval and clean up', async () => {

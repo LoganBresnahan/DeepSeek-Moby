@@ -16,6 +16,10 @@ import { ModalShadowActor, ModalConfig } from '../../state/ModalShadowActor';
 import { EventStateManager } from '../../state/EventStateManager';
 import type { VSCodeAPI } from '../../state/types';
 import { commandRulesShadowStyles } from './shadowStyles';
+import { createLogger } from '../../logging';
+import { webviewTracer } from '../../tracing';
+
+const log = createLogger('RulesModal');
 
 // ============================================
 // Types (local — mirrors extension type)
@@ -107,12 +111,16 @@ export class CommandRulesModalActor extends ModalShadowActor {
       const item = (e.target as HTMLElement).closest('.rule-item');
       const idStr = item?.getAttribute('data-rule-id');
       if (idStr) {
+        log.debug(`deleteRule: id=${idStr}`);
+        webviewTracer.trace('user.click', 'rules:delete', { level: 'info', data: { ruleId: parseInt(idStr, 10) } });
         this._vscode.postMessage({ type: 'removeCommandRule', id: parseInt(idStr, 10) });
       }
     });
 
     // Reset to defaults
     this.delegate('click', '[data-action="reset-rules"]', () => {
+      log.debug('resetToDefaults requested');
+      webviewTracer.trace('user.click', 'rules:reset', { level: 'info' });
       this._vscode.postMessage({ type: 'resetCommandRulesToDefaults' });
     });
   }
@@ -122,6 +130,7 @@ export class CommandRulesModalActor extends ModalShadowActor {
   // ============================================
 
   protected onOpen(): void {
+    log.debug('opened, requesting rules from extension');
     this._vscode.postMessage({ type: 'getCommandRules' });
   }
 
@@ -131,6 +140,9 @@ export class CommandRulesModalActor extends ModalShadowActor {
 
   private handleRulesList(rules: CommandRule[]): void {
     this._rules = rules || [];
+    const allowed = this._rules.filter(r => r.type === 'allowed').length;
+    const blocked = this._rules.filter(r => r.type === 'blocked').length;
+    log.debug(`received rules: ${allowed} allowed, ${blocked} blocked (${this._rules.length} total)`);
     this.renderRulesList();
   }
 
@@ -194,6 +206,8 @@ export class CommandRulesModalActor extends ModalShadowActor {
     if (!prefix) return;
 
     const ruleType = select.value as 'allowed' | 'blocked';
+    log.debug(`addRule: prefix="${prefix}", type=${ruleType}`);
+    webviewTracer.trace('user.click', 'rules:add', { level: 'info', data: { prefix, ruleType } });
 
     this._vscode.postMessage({ type: 'addCommandRule', prefix, ruleType });
 

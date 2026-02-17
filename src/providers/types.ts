@@ -172,6 +172,8 @@ export interface DiffApprovalResult {
 export interface CommandApprovalRequiredEvent {
   command: string;
   prefix: string;
+  /** The specific sub-command that triggered the approval (for compound commands) */
+  unknownSubCommand: string;
 }
 
 /** Payload sent from webview when user responds to a command approval */

@@ -145,7 +145,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
   private handleMessage(msg: { type: string; [key: string]: unknown }): void {
     const { streaming, session, virtualList, statusPanel, toolbar } = this._actors;
 
-    // Log key lifecycle messages (not per-chunk streaming messages)
+    // Log and trace key lifecycle messages (not per-chunk streaming messages)
     const lifecycleTypes = [
       'startResponse', 'endResponse',
       'toolCallsStart', 'toolCallsEnd',
@@ -153,6 +153,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
     ];
     if (lifecycleTypes.includes(msg.type)) {
       log.debug('Received:', msg.type);
+      webviewTracer.trace('bridge.receive', msg.type, { level: 'debug' });
     }
 
     switch (msg.type) {
@@ -643,6 +644,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
     const { virtualList } = this._actors;
     const command = msg.command as string;
     const prefix = msg.prefix as string;
+    const unknownSubCommand = (msg.unknownSubCommand as string) || command;
 
     if (!this._currentTurnId || !command) {
       log.warn('commandApprovalRequired: no current turn or missing command');
@@ -660,7 +662,8 @@ export class VirtualMessageGatewayActor extends EventStateActor {
     this._pendingApprovalId = virtualList.createCommandApproval(
       this._currentTurnId,
       command,
-      prefix
+      prefix,
+      unknownSubCommand
     );
 
     log.debug(`commandApprovalRequired: created approval ${this._pendingApprovalId} for "${command}"`);

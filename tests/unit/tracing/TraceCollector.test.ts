@@ -1228,7 +1228,7 @@ describe('TraceCollector', () => {
         originalId: 'evt-1',
         timestamp: '2026-02-09T03:00:00.000Z'
       });
-      collector.importEvent('session.load', 'complete', {
+      collector.importEvent('session.switch', 'complete', {
         originalId: 'evt-2',
         timestamp: '2026-02-09T03:01:30.000Z'
       });

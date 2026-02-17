@@ -835,6 +835,7 @@ describe('RequestOrchestrator', () => {
         resetToDefaults: vi.fn(),
         extractPrefix: vi.fn((cmd: string) => cmd.split(' ').slice(0, 2).join(' ')),
         splitCompoundCommand: vi.fn((cmd: string) => [cmd]),
+        findUnknownSubCommand: vi.fn((cmd: string) => cmd),
         requestApproval: vi.fn(async (cmd: string) => ({ command: cmd, decision: 'blocked' as const, persistent: false })),
         cancelPendingApproval: vi.fn(),
       };

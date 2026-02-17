@@ -23,15 +23,9 @@ export type WebviewTraceCategory =
   | 'bridge.send'       // postMessage to extension
   | 'bridge.receive'    // Message received from extension
 
-  // UI Rendering
-  | 'render.turn'       // Turn rendered
-  | 'render.segment'    // Segment updated
-  | 'render.scroll'     // Scroll position
-
   // User Actions
   | 'user.input'        // User typed/submitted
-  | 'user.click'        // User clicked UI element
-  | 'user.selection';   // User selected option
+  | 'user.click';       // User clicked UI element
 
 /**
  * Execution mode for the operation.

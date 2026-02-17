@@ -1027,6 +1027,13 @@ const approvalStyles = `
   word-break: break-all;
 }
 
+.approval-command .unknown-subcmd {
+  background: rgba(204, 167, 0, 0.2);
+  border-bottom: 2px solid var(--vscode-terminal-ansiYellow, #cca700);
+  padding: 1px 2px;
+  border-radius: 2px;
+}
+
 .approval-actions {
   display: flex;
   flex-wrap: wrap;

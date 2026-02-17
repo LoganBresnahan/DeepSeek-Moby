@@ -820,7 +820,7 @@ describe('MessageTurnActor', () => {
     });
 
     it('creates approval container with shadow DOM', () => {
-      actor.createCommandApproval('npm install', 'npm');
+      actor.createCommandApproval('npm install', 'npm', 'npm install');
 
       const containers = findContainers('approval');
       expect(containers.length).toBe(1);
@@ -828,8 +828,8 @@ describe('MessageTurnActor', () => {
     });
 
     it('returns a unique approval ID', () => {
-      const id1 = actor.createCommandApproval('npm install', 'npm');
-      const id2 = actor.createCommandApproval('git push', 'git');
+      const id1 = actor.createCommandApproval('npm install', 'npm', 'npm install');
+      const id2 = actor.createCommandApproval('git push', 'git', 'git push');
 
       expect(id1).toBeTruthy();
       expect(id2).toBeTruthy();
@@ -837,7 +837,7 @@ describe('MessageTurnActor', () => {
     });
 
     it('renders pending state with command and buttons', () => {
-      const approvalId = actor.createCommandApproval('npm install express', 'npm');
+      const approvalId = actor.createCommandApproval('npm install express', 'npm', 'npm install express');
 
       const containers = findContainers('approval');
       const header = queryInShadow(containers[0], '.approval-header');
@@ -851,7 +851,7 @@ describe('MessageTurnActor', () => {
     });
 
     it('renders four buttons with correct labels', () => {
-      actor.createCommandApproval('npm test', 'npm');
+      actor.createCommandApproval('npm test', 'npm', 'npm test');
 
       const containers = findContainers('approval');
       const buttons = Array.from(containers[0].shadowRoot?.querySelectorAll('.approval-btn') ?? []);
@@ -864,7 +864,7 @@ describe('MessageTurnActor', () => {
     });
 
     it('always allow/block buttons include prefix', () => {
-      actor.createCommandApproval('npm run build', 'npm');
+      actor.createCommandApproval('npm run build', 'npm', 'npm run build');
 
       const containers = findContainers('approval');
       const alwaysAllow = queryInShadow(containers[0], '.always-allow');
@@ -875,7 +875,7 @@ describe('MessageTurnActor', () => {
     });
 
     it('resolveCommandApproval updates to allowed state', () => {
-      const approvalId = actor.createCommandApproval('npm test', 'npm');
+      const approvalId = actor.createCommandApproval('npm test', 'npm', 'npm test');
       actor.resolveCommandApproval(approvalId, 'allowed');
 
       const containers = findContainers('approval');
@@ -888,7 +888,7 @@ describe('MessageTurnActor', () => {
     });
 
     it('resolveCommandApproval updates to blocked state', () => {
-      const approvalId = actor.createCommandApproval('rm -rf /', 'rm');
+      const approvalId = actor.createCommandApproval('rm -rf /', 'rm', 'rm -rf /');
       actor.resolveCommandApproval(approvalId, 'blocked');
 
       const containers = findContainers('approval');
@@ -900,7 +900,7 @@ describe('MessageTurnActor', () => {
     });
 
     it('resolved state removes action buttons', () => {
-      const approvalId = actor.createCommandApproval('npm test', 'npm');
+      const approvalId = actor.createCommandApproval('npm test', 'npm', 'npm test');
       actor.resolveCommandApproval(approvalId, 'allowed');
 
       const containers = findContainers('approval');
@@ -909,7 +909,7 @@ describe('MessageTurnActor', () => {
     });
 
     it('clicking allow once calls callback with correct args', () => {
-      actor.createCommandApproval('npm test', 'npm');
+      actor.createCommandApproval('npm test', 'npm', 'npm test');
 
       const containers = findContainers('approval');
       const allowOnce = queryInShadow(containers[0], '.allow-once') as HTMLButtonElement;
@@ -919,7 +919,7 @@ describe('MessageTurnActor', () => {
     });
 
     it('clicking always allow calls callback with persistent=true', () => {
-      actor.createCommandApproval('npm test', 'npm');
+      actor.createCommandApproval('npm test', 'npm', 'npm test');
 
       const containers = findContainers('approval');
       const alwaysAllow = queryInShadow(containers[0], '.always-allow') as HTMLButtonElement;
@@ -929,7 +929,7 @@ describe('MessageTurnActor', () => {
     });
 
     it('clicking block once calls callback with blocked decision', () => {
-      actor.createCommandApproval('npm test', 'npm');
+      actor.createCommandApproval('npm test', 'npm', 'npm test');
 
       const containers = findContainers('approval');
       const blockOnce = queryInShadow(containers[0], '.block-once') as HTMLButtonElement;
@@ -939,7 +939,7 @@ describe('MessageTurnActor', () => {
     });
 
     it('clicking always block calls callback with persistent=true', () => {
-      actor.createCommandApproval('npm test', 'npm');
+      actor.createCommandApproval('npm test', 'npm', 'npm test');
 
       const containers = findContainers('approval');
       const alwaysBlock = queryInShadow(containers[0], '.always-block') as HTMLButtonElement;
@@ -949,7 +949,7 @@ describe('MessageTurnActor', () => {
     });
 
     it('does not fire callback when approval already resolved', () => {
-      const approvalId = actor.createCommandApproval('npm test', 'npm');
+      const approvalId = actor.createCommandApproval('npm test', 'npm', 'npm test');
       actor.resolveCommandApproval(approvalId, 'allowed');
 
       // Buttons are gone after resolve, but even if somehow triggered, guard should prevent callback
@@ -957,16 +957,16 @@ describe('MessageTurnActor', () => {
     });
 
     it('multiple approvals render independently', () => {
-      actor.createCommandApproval('npm install', 'npm');
-      actor.createCommandApproval('git push', 'git');
+      actor.createCommandApproval('npm install', 'npm', 'npm install');
+      actor.createCommandApproval('git push', 'git', 'git push');
 
       const containers = findContainers('approval');
       expect(containers.length).toBe(2);
     });
 
     it('resolving one approval does not affect another', () => {
-      const id1 = actor.createCommandApproval('npm install', 'npm');
-      const id2 = actor.createCommandApproval('git push', 'git');
+      const id1 = actor.createCommandApproval('npm install', 'npm', 'npm install');
+      const id2 = actor.createCommandApproval('git push', 'git', 'git push');
 
       actor.resolveCommandApproval(id1, 'allowed');
 
@@ -982,7 +982,7 @@ describe('MessageTurnActor', () => {
     it('breaks pending group chain when approval is created', () => {
       actor.setEditMode('ask');
       actor.addPendingFile({ filePath: '/path/to/file.ts' });
-      actor.createCommandApproval('npm test', 'npm');
+      actor.createCommandApproval('npm test', 'npm', 'npm test');
       actor.addPendingFile({ filePath: '/path/to/other.ts' });
 
       // Should have 2 pending containers (not grouped) + 1 approval
@@ -993,8 +993,8 @@ describe('MessageTurnActor', () => {
     });
 
     it('reset clears all command approval state', () => {
-      actor.createCommandApproval('npm test', 'npm');
-      actor.createCommandApproval('git push', 'git');
+      actor.createCommandApproval('npm test', 'npm', 'npm test');
+      actor.createCommandApproval('git push', 'git', 'git push');
 
       expect(findContainers('approval').length).toBe(2);
 
@@ -1004,7 +1004,7 @@ describe('MessageTurnActor', () => {
     });
 
     it('resolveCommandApproval is a no-op for unknown ID', () => {
-      actor.createCommandApproval('npm test', 'npm');
+      actor.createCommandApproval('npm test', 'npm', 'npm test');
       // Should not throw
       actor.resolveCommandApproval('nonexistent-id', 'allowed');
 
@@ -1013,7 +1013,7 @@ describe('MessageTurnActor', () => {
     });
 
     it('escapes HTML in command text', () => {
-      actor.createCommandApproval('echo "<script>alert(1)</script>"', 'echo');
+      actor.createCommandApproval('echo "<script>alert(1)</script>"', 'echo', 'echo "<script>alert(1)</script>"');
 
       const containers = findContainers('approval');
       const code = queryInShadow(containers[0], '.approval-command code');
@@ -1078,7 +1078,7 @@ describe('MessageTurnActor', () => {
       actor.finalizeCurrentSegment();
       actor.startToolBatch([{ name: 'run_command', detail: 'npm test' }]);
       actor.completeToolBatch();
-      const approvalId = actor.createCommandApproval('npm test', 'npm');
+      const approvalId = actor.createCommandApproval('npm test', 'npm', 'npm test');
       actor.resolveCommandApproval(approvalId, 'allowed');
       actor.resumeWithNewSegment();
       actor.updateTextContent('Tests passed!');

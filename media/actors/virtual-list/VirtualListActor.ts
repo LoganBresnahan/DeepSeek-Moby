@@ -775,7 +775,7 @@ export class VirtualListActor extends EventStateActor {
   /**
    * Create an inline command approval widget.
    */
-  createCommandApproval(turnId: string, command: string, prefix: string): string | null {
+  createCommandApproval(turnId: string, command: string, prefix: string, unknownSubCommand: string): string | null {
     const turn = this._turnMap.get(turnId);
     if (!turn) {
       log.warn(`createCommandApproval: turn ${turnId} not found`);
@@ -789,6 +789,7 @@ export class VirtualListActor extends EventStateActor {
       id: approvalId,
       command,
       prefix,
+      unknownSubCommand,
       status: 'pending',
     };
 
@@ -797,7 +798,7 @@ export class VirtualListActor extends EventStateActor {
 
     const bound = this._boundActors.get(turnId);
     if (bound) {
-      const actorApprovalId = bound.actor.createCommandApproval(command, prefix);
+      const actorApprovalId = bound.actor.createCommandApproval(command, prefix, unknownSubCommand);
       approval.actorApprovalId = actorApprovalId;
     }
 
@@ -1139,7 +1140,7 @@ export class VirtualListActor extends EventStateActor {
         case 'approval': {
           const approval = turn.commandApprovals[entry.index];
           if (approval) {
-            const actorApprovalId = actor.createCommandApproval(approval.command, approval.prefix);
+            const actorApprovalId = actor.createCommandApproval(approval.command, approval.prefix, approval.unknownSubCommand);
             approval.actorApprovalId = actorApprovalId;
             if (approval.status !== 'pending' && actorApprovalId) {
               actor.resolveCommandApproval(actorApprovalId, approval.status);

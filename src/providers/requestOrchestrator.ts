@@ -751,11 +751,18 @@ export class RequestOrchestrator {
             let approvedCommands = commands;
             const blockedResults: ShellResult[] = [];
 
+            logger.info(`[CommandApproval] Gate entered: ${commands.length} commands, bypass=${allowAllCommands}`);
+            tracer.trace('command.check', 'gate.enter', {
+              data: { commandCount: commands.length, bypass: allowAllCommands }
+            });
+
             if (!allowAllCommands && this.commandApprovalManager) {
               approvedCommands = [];
+              let askedCount = 0;
               for (const cmd of commands) {
                 const decision = this.commandApprovalManager.checkCommand(cmd.command);
                 if (decision === 'allowed') {
+                  logger.debug(`[CommandApproval] ALLOWED (rule match): "${cmd.command}"`);
                   approvedCommands.push(cmd);
                 } else if (decision === 'blocked') {
                   logger.info(`[CommandApproval] BLOCKED: "${cmd.command}"`);
@@ -767,6 +774,7 @@ export class RequestOrchestrator {
                   });
                 } else {
                   // 'ask' — block and wait for user approval via webview
+                  askedCount++;
                   logger.info(`[CommandApproval] Requesting approval: "${cmd.command}"`);
 
                   // Flush content buffer so the approval widget appears after streamed content
@@ -790,6 +798,17 @@ export class RequestOrchestrator {
                   }
                 }
               }
+
+              // Gate summary
+              logger.info(`[CommandApproval] Gate result: ${approvedCommands.length} approved, ${blockedResults.length} blocked, ${askedCount} asked of ${commands.length} total`);
+              tracer.trace('command.check', 'gate.result', {
+                data: { total: commands.length, approved: approvedCommands.length, blocked: blockedResults.length, asked: askedCount }
+              });
+            } else if (allowAllCommands) {
+              logger.info(`[CommandApproval] Bypass active (allowAllShellCommands=true), skipping ${commands.length} commands`);
+              tracer.trace('command.check', 'gate.bypass', {
+                data: { commandCount: commands.length }
+              });
             }
 
             // Execute approved commands

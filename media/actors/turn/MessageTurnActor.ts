@@ -114,7 +114,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
   // Command Approval State
   // ============================================
 
-  private _commandApprovals: Map<string, { id: string; command: string; prefix: string; status: 'pending' | 'allowed' | 'blocked'; containerId: string }> = new Map();
+  private _commandApprovals: Map<string, { id: string; command: string; prefix: string; unknownSubCommand: string; status: 'pending' | 'allowed' | 'blocked'; containerId: string }> = new Map();
   private _approvalCounter = 0;
 
   // ============================================
@@ -1303,7 +1303,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
   /**
    * Create an inline command approval widget.
    */
-  createCommandApproval(command: string, prefix: string): string {
+  createCommandApproval(command: string, prefix: string, unknownSubCommand: string): string {
     // Break any pending group chain
     this._currentPendingGroup = null;
 
@@ -1319,6 +1319,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
       id: approvalId,
       command,
       prefix,
+      unknownSubCommand,
       status: 'pending',
       containerId: container.id,
     });
@@ -1355,13 +1356,14 @@ export class MessageTurnActor extends InterleavedShadowActor {
     container.host.classList.toggle('blocked', approval.status === 'blocked');
 
     if (isPending) {
+      const commandHtml = this.highlightUnknownSubCommand(approval.command, approval.unknownSubCommand);
       container.content.innerHTML = `
         <div class="approval-header">
           <span class="approval-icon">⚡</span>
           <span class="approval-title">Command approval required</span>
         </div>
         <div class="approval-command">
-          <code>$ ${this.escapeHtml(approval.command)}</code>
+          <code>$ ${commandHtml}</code>
         </div>
         <div class="approval-actions">
           <button class="approval-btn allow-once" data-approval-id="${approvalId}" data-decision="allowed" data-persistent="false">Allow Once</button>
@@ -1403,6 +1405,29 @@ export class MessageTurnActor extends InterleavedShadowActor {
   // ============================================
   // Utility Methods
   // ============================================
+
+  /**
+   * Render the full command with the unknown sub-command highlighted.
+   * If unknownSubCommand equals the full command (simple, non-compound),
+   * just escape and return as-is. Otherwise wrap the unknown portion
+   * in a <span class="unknown-subcmd"> highlight.
+   */
+  private highlightUnknownSubCommand(command: string, unknownSubCommand: string): string {
+    if (!unknownSubCommand || unknownSubCommand === command) {
+      return this.escapeHtml(command);
+    }
+
+    const idx = command.indexOf(unknownSubCommand);
+    if (idx === -1) {
+      return this.escapeHtml(command);
+    }
+
+    const before = command.substring(0, idx);
+    const match = command.substring(idx, idx + unknownSubCommand.length);
+    const after = command.substring(idx + unknownSubCommand.length);
+
+    return `${this.escapeHtml(before)}<span class="unknown-subcmd">${this.escapeHtml(match)}</span>${this.escapeHtml(after)}`;
+  }
 
   private getStatusIcon(status: ToolStatus | ShellCommandStatus): string {
     switch (status) {

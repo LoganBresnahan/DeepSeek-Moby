@@ -12,8 +12,6 @@
 export type TraceCategory =
   // User Actions
   | 'user.input'        // User typed/submitted
-  | 'user.click'        // User clicked UI element
-  | 'user.selection'    // User selected option
 
   // API Layer
   | 'api.request'       // Outbound to DeepSeek/Tavily
@@ -22,43 +20,25 @@ export type TraceCategory =
 
   // Tool Execution
   | 'tool.call'         // Tool invoked
-  | 'tool.result'       // Tool completed
   | 'shell.execute'     // Shell command
-  | 'shell.result'      // Shell output
 
   // State Management
   | 'state.publish'     // Pub/sub publication
-  | 'state.subscribe'   // Subscription triggered
-
-  // Actor Lifecycle
-  | 'actor.create'      // Actor instantiated
-  | 'actor.destroy'     // Actor destroyed
-  | 'actor.bind'        // Pool actor bound to turn
-  | 'actor.unbind'      // Pool actor released
-
-  // Message Bridge
-  | 'bridge.send'       // postMessage to webview
-  | 'bridge.receive'    // Message received
-
-  // UI Rendering
-  | 'render.turn'       // Turn rendered
-  | 'render.segment'    // Segment updated
-  | 'render.scroll'     // Scroll position
 
   // Session
   | 'session.create'
-  | 'session.load'
   | 'session.switch'
 
   // Webview Lifecycle
   | 'webview.resolve'  // Webview view resolved (created/recreated)
   | 'webview.visible'  // Webview visibility changed
-  | 'webview.dispose'  // Webview disposed
 
-  // Files
-  | 'file.read'
-  | 'file.write'
-  | 'file.diff';
+  // Command Approval
+  | 'command.check'      // Command checked against rules
+  | 'command.approval'   // Approval requested/resolved
+
+  // File Context
+  | 'file.context';      // File context operations (search, select, inject)
 
 /**
  * Source of the trace event.

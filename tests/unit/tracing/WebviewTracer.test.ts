@@ -105,7 +105,7 @@ describe('WebviewTracer', () => {
     });
 
     it('merges result data with start data', () => {
-      const spanId = tracer.startSpan('render.turn', 'turn-1', {
+      const spanId = tracer.startSpan('user.click', 'turn-1', {
         data: { role: 'assistant' }
       });
       tracer.endSpan(spanId, {

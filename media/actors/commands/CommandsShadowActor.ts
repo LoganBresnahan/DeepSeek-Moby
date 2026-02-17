@@ -16,6 +16,10 @@ import { PopupShadowActor, PopupConfig } from '../../state/PopupShadowActor';
 import { EventStateManager } from '../../state/EventStateManager';
 import type { VSCodeAPI } from '../../state/types';
 import { commandsShadowStyles } from './shadowStyles';
+import { createLogger } from '../../logging';
+import { webviewTracer } from '../../tracing';
+
+const log = createLogger('CommandsPopup');
 
 // ============================================
 // Types
@@ -133,6 +137,7 @@ export class CommandsShadowActor extends PopupShadowActor {
     this.delegate('click', '.command-item', (e, element) => {
       const commandId = element.getAttribute('data-command');
       if (commandId) {
+        log.debug(`command clicked: ${commandId}`);
         this.executeCommand(commandId);
         this.close();
       }
@@ -144,14 +149,19 @@ export class CommandsShadowActor extends PopupShadowActor {
   // ============================================
 
   private executeCommand(commandId: string): void {
+    log.debug(`executeCommand: ${commandId}`);
+    webviewTracer.trace('user.click', `command:${commandId}`, { level: 'info', data: { commandId } });
+
     // Special handling for history commands - open modal instead
     if (commandId === 'deepseek.showChatHistory' || commandId === 'deepseek.searchChatHistory') {
+      log.debug('routing to history modal');
       this.manager.publishDirect('history.modal.open', true, this.actorId);
       return;
     }
 
     // Special handling for command rules - open rules modal
     if (commandId === 'deepseek.openCommandRules') {
+      log.debug('routing to rules modal');
       this._vscode.postMessage({ type: 'getCommandRules' });
       this.manager.publishDirect('rules.modal.open', true, this.actorId);
       return;

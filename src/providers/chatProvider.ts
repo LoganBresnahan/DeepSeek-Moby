@@ -247,15 +247,18 @@ export class ChatProvider implements vscode.WebviewViewProvider {
 
     // CommandApprovalManager → webview
     this.commandApprovalManager.onApprovalRequired(data => {
+      logger.info(`[ChatProvider] Forwarding commandApprovalRequired to webview: command="${data.command}", prefix="${data.prefix}", unknownSubCommand="${data.unknownSubCommand}"`);
       this._view?.webview.postMessage({
         type: 'commandApprovalRequired',
         command: data.command,
         prefix: data.prefix,
+        unknownSubCommand: data.unknownSubCommand,
       });
     });
 
     // Forward rules changes to webview (for rules modal live updates)
     this.commandApprovalManager.onRulesChanged(rules => {
+      logger.debug(`[ChatProvider] Forwarding rules update to webview: ${rules.length} rules`);
       this._view?.webview.postMessage({ type: 'commandRulesList', rules });
     });
   }

@@ -10,6 +10,7 @@ import * as vscode from 'vscode';
 import * as cp from 'child_process';
 import * as path from 'path';
 import { logger } from '../utils/logger';
+import { tracer } from '../tracing';
 import { OpenFilesEvent, FileSearchResultsEvent, FileContentEvent } from './types';
 
 export class FileContextManager {
@@ -55,7 +56,7 @@ export class FileContextManager {
     const allUris = new Set<string>();
 
     const tabGroups = vscode.window.tabGroups.all;
-    logger.info(`[FileContext] Scanning ${tabGroups.length} tab groups for open files`);
+    logger.debug(`[FileContext] Scanning ${tabGroups.length} tab groups for open files`);
 
     for (const group of tabGroups) {
       for (const tab of group.tabs) {
@@ -84,6 +85,7 @@ export class FileContextManager {
     }
 
     logger.info(`[FileContext] Sending ${openFiles.length} open files (from ${allUris.size} tabs)`);
+    tracer.trace('file.context', 'sendOpenFiles', { data: { fileCount: openFiles.length, tabCount: allUris.size } });
     this._onOpenFiles.fire({ files: openFiles });
   }
 
@@ -100,7 +102,7 @@ export class FileContextManager {
         pattern = `**/*${query}*`;
       }
 
-      logger.info(`[FileContext] Searching with pattern: "${pattern}"`);
+      logger.debug(`[FileContext] Searching with pattern: "${pattern}"`);
 
       const files = await vscode.workspace.findFiles(
         pattern,
@@ -111,10 +113,11 @@ export class FileContextManager {
       for (const file of files) {
         const relativePath = vscode.workspace.asRelativePath(file);
         results.push(relativePath);
-        logger.info(`[FileContext] Found file: ${relativePath}`);
+        logger.debug(`[FileContext] Found file: ${relativePath}`);
       }
 
       logger.info(`[FileContext] File search for "${query}" returned ${results.length} results`);
+      tracer.trace('file.context', 'fileSearch', { data: { query: query.substring(0, 50), resultCount: results.length } });
     } catch (error: any) {
       logger.error(`[FileContext] File search error: ${error.message}`);
     }
@@ -156,8 +159,9 @@ export class FileContextManager {
     }
 
     logger.info(`[FileContext] Updated selected files: ${this.selectedFiles.size} files`);
+    tracer.trace('file.context', 'setSelectedFiles', { data: { fileCount: this.selectedFiles.size, paths: Array.from(this.selectedFiles.keys()) } });
     for (const path of this.selectedFiles.keys()) {
-      logger.info(`[FileContext]   - ${path}`);
+      logger.debug(`[FileContext]   - ${path}`);
     }
   }
 
@@ -180,7 +184,7 @@ export class FileContextManager {
    */
   trackReadFile(filePath: string): void {
     this.readFilesInTurn.add(filePath);
-    logger.info(`[FileContext] Tracked read file: ${filePath} (total: ${this.readFilesInTurn.size})`);
+    logger.debug(`[FileContext] Tracked read file: ${filePath} (total: ${this.readFilesInTurn.size})`);
   }
 
   /**
@@ -208,10 +212,14 @@ export class FileContextManager {
 
     let context = '\n\n--- Selected Files for Context ---\n';
     logger.info(`[FileContext] Injecting ${this.selectedFiles.size} selected files into context`);
+    const totalChars = Array.from(this.selectedFiles.values()).reduce((sum, c) => sum + c.length, 0);
+    tracer.trace('file.context', 'injectContext', {
+      data: { fileCount: this.selectedFiles.size, totalChars, paths: Array.from(this.selectedFiles.keys()) }
+    });
 
     for (const [filePath, content] of this.selectedFiles.entries()) {
       context += `\n### File: ${filePath}\n\`\`\`\n${content}\n\`\`\`\n`;
-      logger.info(`[FileContext] ✓ Added selected file to context: ${filePath} (${content.length} chars)`);
+      logger.debug(`[FileContext] ✓ Added selected file to context: ${filePath} (${content.length} chars)`);
     }
     context += '--- End Selected Files ---\n';
 
@@ -223,43 +231,43 @@ export class FileContextManager {
    * Uses multiple strategies with detailed logging.
    */
   inferFilePath(code: string, language: string): string | null {
-    logger.info(`[FileResolver] Starting file path inference (language: ${language})`);
+    logger.debug(`[FileResolver] Starting file path inference (language: ${language})`);
 
     // Strategy 1: Check user's message intent
-    logger.info(`[FileResolver] Strategy 1: Checking user message intent...`);
+    logger.debug(`[FileResolver] Strategy 1: Checking user message intent...`);
     if (this.userMessageIntent) {
-      logger.info(`[FileResolver] ✓ Strategy 1 SUCCESS: Using file intent "${this.userMessageIntent}"`);
+      logger.debug(`[FileResolver] ✓ Strategy 1 SUCCESS: Using file intent "${this.userMessageIntent}"`);
       return this.userMessageIntent;
     } else {
-      logger.warn(`[FileResolver] ✗ Strategy 1 FAILED: No user intent extracted`);
+      logger.debug(`[FileResolver] ✗ Strategy 1 FAILED: No user intent extracted`);
     }
 
     // Strategy 2: Check selected files
-    logger.info(`[FileResolver] Strategy 2: Checking selected files (${this.selectedFiles.size} selected)...`);
+    logger.debug(`[FileResolver] Strategy 2: Checking selected files (${this.selectedFiles.size} selected)...`);
     if (this.selectedFiles.size === 1) {
       const file = Array.from(this.selectedFiles.keys())[0];
-      logger.info(`[FileResolver] ✓ Strategy 2 SUCCESS: Single selected file "${file}"`);
+      logger.debug(`[FileResolver] ✓ Strategy 2 SUCCESS: Single selected file "${file}"`);
       return file;
     } else if (this.selectedFiles.size > 1) {
-      logger.warn(`[FileResolver] ✗ Strategy 2 FAILED: Multiple files selected (${this.selectedFiles.size})`);
+      logger.debug(`[FileResolver] ✗ Strategy 2 FAILED: Multiple files selected (${this.selectedFiles.size})`);
     } else {
-      logger.warn(`[FileResolver] ✗ Strategy 2 FAILED: No files selected`);
+      logger.debug(`[FileResolver] ✗ Strategy 2 FAILED: No files selected`);
     }
 
     // Strategy 3: Check read files - single file rule
-    logger.info(`[FileResolver] Strategy 3: Checking read files (${this.readFilesInTurn.size} read)...`);
+    logger.debug(`[FileResolver] Strategy 3: Checking read files (${this.readFilesInTurn.size} read)...`);
     if (this.readFilesInTurn.size === 1) {
       const file = Array.from(this.readFilesInTurn)[0];
-      logger.info(`[FileResolver] ✓ Strategy 3 SUCCESS: Single read file "${file}"`);
+      logger.debug(`[FileResolver] ✓ Strategy 3 SUCCESS: Single read file "${file}"`);
       return file;
     } else if (this.readFilesInTurn.size > 1) {
-      logger.warn(`[FileResolver] ✗ Strategy 3 FAILED: Multiple files read (${this.readFilesInTurn.size})`);
+      logger.debug(`[FileResolver] ✗ Strategy 3 FAILED: Multiple files read (${this.readFilesInTurn.size})`);
     } else {
-      logger.warn(`[FileResolver] ✗ Strategy 3 FAILED: No files read`);
+      logger.debug(`[FileResolver] ✗ Strategy 3 FAILED: No files read`);
     }
 
     // Strategy 4: Match by language/extension
-    logger.info(`[FileResolver] Strategy 4: Matching by extension for language "${language}"...`);
+    logger.debug(`[FileResolver] Strategy 4: Matching by extension for language "${language}"...`);
     const extMap: Record<string, string[]> = {
       markdown: ['.md'],
       typescript: ['.ts', '.tsx'],
@@ -275,7 +283,7 @@ export class FileContextManager {
       if (this.selectedFiles.size > 0) {
         for (const file of this.selectedFiles.keys()) {
           if (extensions.some(ext => file.endsWith(ext))) {
-            logger.info(`[FileResolver] ✓ Strategy 4 SUCCESS: Matched selected file by extension "${file}"`);
+            logger.debug(`[FileResolver] ✓ Strategy 4 SUCCESS: Matched selected file by extension "${file}"`);
             return file;
           }
         }
@@ -284,15 +292,15 @@ export class FileContextManager {
       if (this.readFilesInTurn.size > 0) {
         for (const file of this.readFilesInTurn) {
           if (extensions.some(ext => file.endsWith(ext))) {
-            logger.info(`[FileResolver] ✓ Strategy 4 SUCCESS: Matched read file by extension "${file}"`);
+            logger.debug(`[FileResolver] ✓ Strategy 4 SUCCESS: Matched read file by extension "${file}"`);
             return file;
           }
         }
       }
 
-      logger.warn(`[FileResolver] ✗ Strategy 4 FAILED: No files match extensions ${extensions.join(', ')}`);
+      logger.debug(`[FileResolver] ✗ Strategy 4 FAILED: No files match extensions ${extensions.join(', ')}`);
     } else {
-      logger.warn(`[FileResolver] ✗ Strategy 4 FAILED: Unknown language "${language}"`);
+      logger.debug(`[FileResolver] ✗ Strategy 4 FAILED: Unknown language "${language}"`);
     }
 
     logger.warn(`[FileResolver] All inference strategies failed`);
@@ -310,7 +318,7 @@ export class FileContextManager {
     }
 
     // Strategy 5: Interactive quick picker as last resort
-    logger.info(`[FileResolver] Strategy 5: Showing interactive quick picker...`);
+    logger.debug(`[FileResolver] Strategy 5: Showing interactive quick picker...`);
     const availableFiles = Array.from(new Set([
       ...this.selectedFiles.keys(),
       ...this.readFilesInTurn
@@ -323,24 +331,24 @@ export class FileContextManager {
       });
 
       if (selected) {
-        logger.info(`[FileResolver] ✓ Strategy 5 SUCCESS: User selected "${selected}"`);
+        logger.debug(`[FileResolver] ✓ Strategy 5 SUCCESS: User selected "${selected}"`);
         return selected;
       } else {
-        logger.warn(`[FileResolver] ✗ Strategy 5 FAILED: User cancelled selection`);
+        logger.debug(`[FileResolver] ✗ Strategy 5 FAILED: User cancelled selection`);
       }
     } else {
-      logger.warn(`[FileResolver] ✗ Strategy 5 FAILED: No available files to choose from`);
+      logger.debug(`[FileResolver] ✗ Strategy 5 FAILED: No available files to choose from`);
     }
 
     // Fallback: Use active editor if nothing else works
-    logger.info(`[FileResolver] Strategy 6 (Fallback): Using active editor...`);
+    logger.debug(`[FileResolver] Strategy 6 (Fallback): Using active editor...`);
     const editor = vscode.window.activeTextEditor;
     if (editor) {
       const relativePath = vscode.workspace.asRelativePath(editor.document.uri);
-      logger.info(`[FileResolver] ✓ Strategy 6 SUCCESS: Active editor "${relativePath}"`);
+      logger.debug(`[FileResolver] ✓ Strategy 6 SUCCESS: Active editor "${relativePath}"`);
       return relativePath;
     } else {
-      logger.warn(`[FileResolver] ✗ Strategy 6 FAILED: No active editor`);
+      logger.debug(`[FileResolver] ✗ Strategy 6 FAILED: No active editor`);
     }
 
     logger.error(`[FileResolver] COMPLETE FAILURE: Unable to determine target file`);
@@ -504,7 +512,7 @@ export class FileContextManager {
       const match = message.match(regex);
       if (match) {
         const resolved = file.startsWith('$') ? match[1] : file;
-        logger.info(`[FileResolver] Extracted file intent from message: "${resolved}"`);
+        logger.debug(`[FileResolver] Extracted file intent from message: "${resolved}"`);
         return resolved;
       }
     }

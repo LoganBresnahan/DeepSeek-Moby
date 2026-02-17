@@ -83,16 +83,16 @@ export class DiffManager {
       vscode.workspace.onDidCloseTextDocument((document) => {
         if (document.uri.scheme !== 'deepseek-diff') return;
 
-        logger.info(`[OVERLAY-DEBUG] Diff document closed: ${document.uri.toString()}`);
+        logger.debug(`[OVERLAY-DEBUG] Diff document closed: ${document.uri.toString()}`);
 
         for (const [uriKey, metadata] of this.activeDiffs.entries()) {
           if (metadata.proposedUri.toString() === document.uri.toString() ||
               metadata.originalUri.toString() === document.uri.toString()) {
             if (this.closingDiffsInProgress > 0) {
-              logger.info(`[OVERLAY-DEBUG] Ignoring close for ${metadata.targetFilePath} - ${this.closingDiffsInProgress} intentional close(s) in progress`);
+              logger.debug(`[OVERLAY-DEBUG] Ignoring close for ${metadata.targetFilePath} - ${this.closingDiffsInProgress} intentional close(s) in progress`);
               return;
             }
-            logger.info(`[OVERLAY-DEBUG] Removing diff for ${metadata.targetFilePath} due to manual tab close`);
+            logger.debug(`[OVERLAY-DEBUG] Removing diff for ${metadata.targetFilePath} due to manual tab close`);
             this.activeDiffs.delete(uriKey);
 
             // Resolve pending approval as rejected if one exists (blocking ask mode)
@@ -123,7 +123,7 @@ export class DiffManager {
             if (metadata.proposedUri.toString() === uriString ||
                 metadata.originalUri.toString() === uriString) {
               this._onActiveDiffChanged.fire({ filePath: metadata.targetFilePath });
-              logger.info(`[DiffManager] Active diff changed to: ${metadata.targetFilePath}`);
+              logger.debug(`[DiffManager] Active diff changed to: ${metadata.targetFilePath}`);
               break;
             }
           }
@@ -191,14 +191,14 @@ export class DiffManager {
         }
 
         if (!document) {
-          logger.info(`[DiffManager] File not found, creating new file: ${targetFilePath}`);
+          logger.debug(`[DiffManager] File not found, creating new file: ${targetFilePath}`);
           const newFileUri = vscode.Uri.joinPath(workspaceFolders[0].uri, targetFilePath);
           const parentDir = vscode.Uri.joinPath(newFileUri, '..');
           try { await vscode.workspace.fs.createDirectory(parentDir); } catch { /* exists */ }
           await vscode.workspace.fs.writeFile(newFileUri, new Uint8Array());
           document = await vscode.workspace.openTextDocument(newFileUri);
           this.lastActiveEditorUri = document.uri;
-          logger.info(`[DiffManager] Created new file for diff: ${targetFilePath}`);
+          logger.debug(`[DiffManager] Created new file for diff: ${targetFilePath}`);
         }
       } else {
         this._onWarning.fire({ message: 'No workspace folder open' });
@@ -287,13 +287,13 @@ export class DiffManager {
           { viewColumn: newViewColumn, preview: false, preserveFocus: true }
         );
         this.diffTabGroupId = newViewColumn;
-        logger.info(`Created new diff tab group at view column ${newViewColumn}`);
+        logger.debug(`Created new diff tab group at view column ${newViewColumn}`);
       } else {
         await vscode.commands.executeCommand('vscode.diff',
           originalUri, proposedUri, diffTitle,
           { viewColumn: diffTabGroup.viewColumn, preview: false, preserveFocus: true }
         );
-        logger.info(`Opened new diff tab in existing group at view column ${diffTabGroup.viewColumn}`);
+        logger.debug(`Opened new diff tab in existing group at view column ${diffTabGroup.viewColumn}`);
       }
 
       // Mark existing diffs for same file as superseded
@@ -302,7 +302,7 @@ export class DiffManager {
         if (existingMeta.targetFilePath === targetPath && !existingMeta.superseded) {
           existingMeta.superseded = true;
           supersededDiffs.push(existingMeta);
-          logger.info(`[DiffManager] Marked diff iteration ${existingMeta.iteration} for ${targetPath} as superseded`);
+          logger.debug(`[DiffManager] Marked diff iteration ${existingMeta.iteration} for ${targetPath} as superseded`);
         }
       }
 
@@ -320,7 +320,7 @@ export class DiffManager {
 
       // Close superseded diff tabs after notifying frontend
       for (const supersededMeta of supersededDiffs) {
-        logger.info(`[DiffManager] Closing superseded diff tab for ${supersededMeta.targetFilePath} (iteration ${supersededMeta.iteration})`);
+        logger.debug(`[DiffManager] Closing superseded diff tab for ${supersededMeta.targetFilePath} (iteration ${supersededMeta.iteration})`);
         await this.closeDiffTabOnly(supersededMeta);
       }
 
@@ -352,7 +352,7 @@ export class DiffManager {
     if (!targetMetadata && this.activeDiffs.size > 0) {
       const diffs = Array.from(this.activeDiffs.values()).sort((a, b) => b.timestamp - a.timestamp);
       targetMetadata = diffs[0];
-      logger.info(`[DiffManager] No active diff editor, using most recent diff: ${targetMetadata.targetFilePath}`);
+      logger.debug(`[DiffManager] No active diff editor, using most recent diff: ${targetMetadata.targetFilePath}`);
     }
 
     const filePathMatch = code.match(/^#\s*File:\s*(.+?)$/m);
@@ -360,7 +360,7 @@ export class DiffManager {
 
     if (!targetFilePath && targetMetadata) {
       targetFilePath = targetMetadata.targetFilePath;
-      logger.info(`[DiffManager] Using file path from diff metadata: ${targetFilePath}`);
+      logger.debug(`[DiffManager] Using file path from diff metadata: ${targetFilePath}`);
     }
 
     const cleanCode = code.replace(/^#\s*File:.*\n/i, '');
@@ -498,7 +498,7 @@ export class DiffManager {
       await vscode.workspace.applyEdit(edit);
       await document.save();
 
-      logger.info(`Code applied to: ${metadata.targetFilePath}`);
+      logger.debug(`Code applied to: ${metadata.targetFilePath}`);
 
       this.resolvedDiffs.push({
         filePath: metadata.targetFilePath,
@@ -735,7 +735,7 @@ export class DiffManager {
       metadata.originalUri, metadata.proposedUri,
       `${metadata.targetFilePath}${iterationLabel} ↔ With Changes`
     );
-    logger.info(`[DiffManager] Focused diff: ${diffId} (${metadata.targetFilePath})`);
+    logger.debug(`[DiffManager] Focused diff: ${diffId} (${metadata.targetFilePath})`);
   }
 
   async focusFileOrDiff(diffId: string | undefined, filePath: string | undefined): Promise<void> {
@@ -747,10 +747,10 @@ export class DiffManager {
           metadata.originalUri, metadata.proposedUri,
           `${metadata.targetFilePath}${iterationLabel} ↔ With Changes`
         );
-        logger.info(`[DiffManager] Focused diff: ${diffId} (${metadata.targetFilePath})`);
+        logger.debug(`[DiffManager] Focused diff: ${diffId} (${metadata.targetFilePath})`);
         return;
       }
-      logger.info(`[DiffManager] Diff ${diffId} not found (may have been applied), falling back to file`);
+      logger.debug(`[DiffManager] Diff ${diffId} not found (may have been applied), falling back to file`);
     }
 
     if (filePath) {
@@ -780,7 +780,7 @@ export class DiffManager {
     try {
       const doc = await vscode.workspace.openTextDocument(uri);
       await vscode.window.showTextDocument(doc, { preview: false });
-      logger.info(`[DiffManager] Opened file: ${filePath}`);
+      logger.debug(`[DiffManager] Opened file: ${filePath}`);
     } catch (error) {
       logger.warn(`[DiffManager] Failed to open file: ${filePath}: ${error}`);
       this._onWarning.fire({ message: `Could not open file: ${filePath}` });
@@ -830,19 +830,19 @@ export class DiffManager {
     try {
       logger.info(`[DiffManager] Starting auto-show diff (language: ${language}, editMode: ${this.editMode})`);
 
-      logger.info(`[FileResolver] Strategy 0: Checking # File: header in code...`);
+      logger.debug(`[FileResolver] Strategy 0: Checking # File: header in code...`);
       const filePathMatch = code.match(/^#\s*File:\s*(.+?)$/m);
       let filePath = filePathMatch ? filePathMatch[1].trim() : null;
 
       if (filePath) {
-        logger.info(`[FileResolver] ✓ Strategy 0 SUCCESS: Found # File: header "${filePath}"`);
+        logger.debug(`[FileResolver] ✓ Strategy 0 SUCCESS: Found # File: header "${filePath}"`);
       } else {
         logger.warn(`[FileResolver] ✗ Strategy 0 FAILED: No # File: header found`);
         filePath = await this.fileContextManager.resolveFilePath(code, language);
 
         if (filePath) {
           code = `# File: ${filePath}\n${code}`;
-          logger.info(`[DiffManager] Injected inferred file path: ${filePath}`);
+          logger.debug(`[DiffManager] Injected inferred file path: ${filePath}`);
         } else {
           logger.error(`[DiffManager] Could not determine target file - skipping auto-diff`);
           this._onWarning.fire({
@@ -852,7 +852,7 @@ export class DiffManager {
         }
       }
 
-      logger.info(`[DiffManager] Opening diff editor for file: ${filePath}`);
+      logger.debug(`[DiffManager] Opening diff editor for file: ${filePath}`);
       await this.showDiff(code, language);
 
       this._onEditConfirm.fire({ filePath, code, language });
@@ -886,7 +886,7 @@ export class DiffManager {
     // If there's already a pending approval for this file (superseded), reject it
     for (const [existingId, existing] of this.pendingApprovals.entries()) {
       if (existing.filePath === filePath) {
-        logger.info(`[DiffManager] Superseding pending approval for ${filePath} (old: ${existingId}, new: ${diffId})`);
+        logger.debug(`[DiffManager] Superseding pending approval for ${filePath} (old: ${existingId}, new: ${diffId})`);
         existing.resolve({ filePath, diffId: existingId, approved: false });
         this.pendingApprovals.delete(existingId);
       }
@@ -936,16 +936,16 @@ export class DiffManager {
     const filePathMatch = code.match(/^#\s*File:\s*(.+?)$/m);
     const filePath = filePathMatch ? filePathMatch[1].trim() : 'unknown';
 
-    logger.info(`[DiffManager] Debouncing diff for ${filePath} (2.5s delay)`);
+    logger.debug(`[DiffManager] Debouncing diff for ${filePath} (2.5s delay)`);
 
     const existing = this.pendingDiffs.get(filePath);
     if (existing) {
       clearTimeout(existing.timer);
-      logger.info(`[DiffManager] Replaced pending diff for ${filePath} (LLM iteration detected)`);
+      logger.debug(`[DiffManager] Replaced pending diff for ${filePath} (LLM iteration detected)`);
     }
 
     const timer = setTimeout(async () => {
-      logger.info(`[DiffManager] Debounce timer expired for ${filePath}, showing diff now`);
+      logger.debug(`[DiffManager] Debounce timer expired for ${filePath}, showing diff now`);
       this.pendingDiffs.delete(filePath);
       await this.handleAutoShowDiff(code, language);
     }, 2500);
@@ -959,7 +959,7 @@ export class DiffManager {
 
     if (!hasSearchMarker || !hasReplaceMarker) return;
 
-    logger.info(`[DiffManager] Detected potential unfenced SEARCH/REPLACE markers`);
+    logger.debug(`[DiffManager] Detected potential unfenced SEARCH/REPLACE markers`);
 
     const fencedBlocks = extractCodeBlocks(content);
     let contentWithoutFencedBlocks = content;
@@ -971,11 +971,11 @@ export class DiffManager {
     const unfencedHasReplace = />>>{3,}\s*REPLACE/i.test(contentWithoutFencedBlocks);
 
     if (!unfencedHasSearch || !unfencedHasReplace) {
-      logger.info(`[DiffManager] All SEARCH/REPLACE blocks are inside code fences (already processed)`);
+      logger.debug(`[DiffManager] All SEARCH/REPLACE blocks are inside code fences (already processed)`);
       return;
     }
 
-    logger.info(`[DiffManager] Found UNFENCED SEARCH/REPLACE blocks - attempting fallback processing`);
+    logger.debug(`[DiffManager] Found UNFENCED SEARCH/REPLACE blocks - attempting fallback processing`);
 
     const unfencedEditRegex = /#\s*File:\s*(.+?)(?:\n|\r\n)([\s\S]*?<<<{3,}\s*SEARCH[\s\S]*?>>>{3,}\s*REPLACE)/gi;
     const unfencedMatches = [...contentWithoutFencedBlocks.matchAll(unfencedEditRegex)];
@@ -985,12 +985,12 @@ export class DiffManager {
         const filePath = editMatch[1].trim();
         const codeBlock = editMatch[2];
 
-        logger.info(`[DiffManager] Processing unfenced edit for: ${filePath}`);
+        logger.debug(`[DiffManager] Processing unfenced edit for: ${filePath}`);
 
         const codeWithHeader = `# File: ${filePath}\n${codeBlock}`;
         const blockId = `unfenced-${filePath}-${codeBlock.length}`;
         if (this.processedCodeBlocks.has(blockId)) {
-          logger.info(`[DiffManager] Skipping already processed unfenced block: ${blockId}`);
+          logger.debug(`[DiffManager] Skipping already processed unfenced block: ${blockId}`);
           continue;
         }
         this.processedCodeBlocks.add(blockId);
@@ -1016,7 +1016,7 @@ export class DiffManager {
   clearPendingDiffs(): void {
     for (const [filePath, pending] of this.pendingDiffs.entries()) {
       clearTimeout(pending.timer);
-      logger.info(`[DiffManager] Cleared pending diff timer for ${filePath}`);
+      logger.debug(`[DiffManager] Cleared pending diff timer for ${filePath}`);
     }
     this.pendingDiffs.clear();
     this.cancelPendingApprovals();
@@ -1145,10 +1145,10 @@ which I already edited - would you like me to update it?"
 
       if (button.tooltip === 'Accept changes') {
         await this.acceptSpecificDiff(item.metadata.targetFilePath);
-        logger.info(`[QuickPick] Accepted diff for ${item.metadata.targetFilePath}`);
+        logger.debug(`[QuickPick] Accepted diff for ${item.metadata.targetFilePath}`);
       } else if (button.tooltip === 'Reject changes') {
         await this.rejectSpecificDiff(item.metadata.targetFilePath);
-        logger.info(`[QuickPick] Rejected diff for ${item.metadata.targetFilePath}`);
+        logger.debug(`[QuickPick] Rejected diff for ${item.metadata.targetFilePath}`);
       }
 
       const remainingItems = quickPick.items.filter(i =>
@@ -1186,7 +1186,7 @@ which I already edited - would you like me to update it?"
 
   private notifyDiffListChanged(): void {
     if (this.flushCallback) {
-      logger.info(`[Buffer] FLUSH before notifyDiffListChanged`);
+      logger.debug(`[Buffer] FLUSH before notifyDiffListChanged`);
       this.flushCallback();
     }
 
@@ -1236,7 +1236,7 @@ which I already edited - would you like me to update it?"
 
   private notifyAutoAppliedFilesChanged(): void {
     if (this.flushCallback) {
-      logger.info(`[Buffer] FLUSH before notifyAutoAppliedFilesChanged`);
+      logger.debug(`[Buffer] FLUSH before notifyAutoAppliedFilesChanged`);
       this.flushCallback();
     }
 
@@ -1254,13 +1254,13 @@ which I already edited - would you like me to update it?"
       superseded: false
     }));
 
-    logger.info(`[Frontend] Sending diffListChanged (auto-applied) message: ${diffsArray.length} new files`);
+    logger.debug(`[Frontend] Sending diffListChanged (auto-applied) message: ${diffsArray.length} new files`);
     this._onAutoAppliedFilesChanged.fire({ diffs: diffsArray, editMode: this.editMode });
   }
 
   private async closeDiffTabOnly(metadata: DiffMetadata): Promise<void> {
     this.closingDiffsInProgress++;
-    logger.info(`[OVERLAY-DEBUG] Closing tab only for ${metadata.targetFilePath} (counter: ${this.closingDiffsInProgress})`);
+    logger.debug(`[OVERLAY-DEBUG] Closing tab only for ${metadata.targetFilePath} (counter: ${this.closingDiffsInProgress})`);
 
     try {
       for (const tabGroup of vscode.window.tabGroups.all) {
@@ -1269,7 +1269,7 @@ which I already edited - would you like me to update it?"
           if (input?.original?.toString() === metadata.originalUri.toString() ||
               input?.modified?.toString() === metadata.proposedUri.toString()) {
             try { await vscode.window.tabGroups.close(tab); } catch (e) { /* tab may be closed */ }
-            logger.info(`[DiffManager] Closed superseded diff tab for: ${metadata.targetFilePath}`);
+            logger.debug(`[DiffManager] Closed superseded diff tab for: ${metadata.targetFilePath}`);
             break;
           }
         }
@@ -1277,14 +1277,14 @@ which I already edited - would you like me to update it?"
     } finally {
       setTimeout(() => {
         this.closingDiffsInProgress = Math.max(0, this.closingDiffsInProgress - 1);
-        logger.info(`[OVERLAY-DEBUG] Tab close complete, counter now: ${this.closingDiffsInProgress}`);
+        logger.debug(`[OVERLAY-DEBUG] Tab close complete, counter now: ${this.closingDiffsInProgress}`);
       }, 500);
     }
   }
 
   private async closeSingleDiff(metadata: DiffMetadata): Promise<void> {
     this.closingDiffsInProgress++;
-    logger.info(`[OVERLAY-DEBUG] Starting intentional close for ${metadata.targetFilePath} (counter: ${this.closingDiffsInProgress})`);
+    logger.debug(`[OVERLAY-DEBUG] Starting intentional close for ${metadata.targetFilePath} (counter: ${this.closingDiffsInProgress})`);
 
     try {
       for (const tabGroup of vscode.window.tabGroups.all) {
@@ -1299,13 +1299,13 @@ which I already edited - would you like me to update it?"
       }
 
       this.activeDiffs.delete(metadata.proposedUri.toString());
-      logger.info(`Closed diff for: ${metadata.targetFilePath}`);
+      logger.debug(`Closed diff for: ${metadata.targetFilePath}`);
       this.updateDiffStatusBar();
       this.notifyDiffListChanged();
     } finally {
       setTimeout(() => {
         this.closingDiffsInProgress = Math.max(0, this.closingDiffsInProgress - 1);
-        logger.info(`[OVERLAY-DEBUG] Intentional close complete, counter now: ${this.closingDiffsInProgress}`);
+        logger.debug(`[OVERLAY-DEBUG] Intentional close complete, counter now: ${this.closingDiffsInProgress}`);
       }, 500);
     }
   }
@@ -1323,7 +1323,7 @@ which I already edited - would you like me to update it?"
     }
 
     if (tabsToClose.length > 0) {
-      logger.info(`Closing ${tabsToClose.length} diff tab(s)`);
+      logger.debug(`Closing ${tabsToClose.length} diff tab(s)`);
       for (const tab of tabsToClose) {
         try { await vscode.window.tabGroups.close(tab); } catch (e) { /* tab may be closed */ }
       }
@@ -1407,7 +1407,7 @@ which I already edited - would you like me to update it?"
         );
         const viewColumn = existingEditor?.viewColumn ?? vscode.ViewColumn.One;
         await vscode.window.showTextDocument(doc, { viewColumn, preview: false, preserveFocus: false });
-        logger.info(`[DiffManager] Focused target file after apply: ${filePath}`);
+        logger.debug(`[DiffManager] Focused target file after apply: ${filePath}`);
         return;
       } catch { continue; }
     }

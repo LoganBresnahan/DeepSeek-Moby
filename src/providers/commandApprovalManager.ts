@@ -16,6 +16,7 @@
 import * as vscode from 'vscode';
 import { Database } from '../events/SqlJsWrapper';
 import { logger } from '../utils/logger';
+import { tracer } from '../tracing';
 
 // ── Types ──
 
@@ -119,7 +120,7 @@ export class CommandApprovalManager {
   private _pendingResolve: ((result: CommandApprovalResult) => void) | null = null;
 
   // ── Events ──
-  private readonly _onApprovalRequired = new vscode.EventEmitter<{ command: string; prefix: string }>();
+  private readonly _onApprovalRequired = new vscode.EventEmitter<{ command: string; prefix: string; unknownSubCommand: string }>();
   readonly onApprovalRequired = this._onApprovalRequired.event;
 
   private readonly _onRulesChanged = new vscode.EventEmitter<CommandRule[]>();
@@ -132,19 +133,36 @@ export class CommandApprovalManager {
 
   /** Block execution and wait for user approval via the webview. */
   async requestApproval(command: string): Promise<CommandApprovalResult> {
-    const prefix = this.extractPrefix(command);
+    const unknownSubCommand = this.findUnknownSubCommand(command) ?? command;
+    const prefix = this.extractPrefix(unknownSubCommand);
+    logger.info(`[CommandApproval] requestApproval: command="${command}", prefix="${prefix}", unknownSubCommand="${unknownSubCommand}"`);
+
+    const spanId = tracer.startSpan('command.approval', 'requestApproval', {
+      executionMode: 'async',
+      data: { command, prefix, unknownSubCommand }
+    });
+
     return new Promise<CommandApprovalResult>(resolve => {
-      this._pendingResolve = resolve;
-      this._onApprovalRequired.fire({ command, prefix });
+      this._pendingResolve = (result) => {
+        tracer.endSpan(spanId, {
+          status: result.decision === 'allowed' ? 'completed' : 'failed',
+          data: { decision: result.decision, persistent: result.persistent }
+        });
+        resolve(result);
+      };
+      this._onApprovalRequired.fire({ command, prefix, unknownSubCommand });
     });
   }
 
   /** Resolve a pending approval (called by ChatProvider when webview responds). */
   resolveApproval(result: CommandApprovalResult): void {
+    logger.info(`[CommandApproval] resolveApproval: decision=${result.decision}, persistent=${result.persistent}, command="${result.command}"`);
     if (this._pendingResolve) {
       const resolve = this._pendingResolve;
       this._pendingResolve = null;
       resolve(result);
+    } else {
+      logger.warn('[CommandApproval] resolveApproval called with no pending approval');
     }
   }
 
@@ -161,13 +179,24 @@ export class CommandApprovalManager {
   /** Check a command against the rules. Returns 'allowed', 'blocked', or 'ask'. */
   checkCommand(command: string): CommandDecision {
     const trimmed = command.trim();
-    if (!trimmed) { return 'blocked'; }
+    if (!trimmed) {
+      logger.debug('[CommandApproval] checkCommand: empty command, blocking');
+      return 'blocked';
+    }
 
     const subCommands = this.splitCompoundCommand(trimmed);
+    if (subCommands.length > 1) {
+      logger.debug(`[CommandApproval] Compound command split into ${subCommands.length} sub-commands: ${subCommands.map(s => `"${s}"`).join(', ')}`);
+    }
 
     // Any blocked sub-command blocks the whole thing
     for (const sub of subCommands) {
-      if (this.blocked.some(rule => sub.startsWith(rule))) {
+      const matchedRule = this.blocked.find(rule => sub.startsWith(rule));
+      if (matchedRule) {
+        logger.debug(`[CommandApproval] checkCommand: "${sub}" matched block rule "${matchedRule}"`);
+        tracer.trace('command.check', 'checkCommand', {
+          data: { command: trimmed.substring(0, 80), subCommandCount: subCommands.length, decision: 'blocked' }
+        });
         return 'blocked';
       }
     }
@@ -177,7 +206,11 @@ export class CommandApprovalManager {
       this.allowed.some(rule => sub.startsWith(rule))
     );
 
-    return allAllowed ? 'allowed' : 'ask';
+    const decision: CommandDecision = allAllowed ? 'allowed' : 'ask';
+    tracer.trace('command.check', 'checkCommand', {
+      data: { command: trimmed.substring(0, 80), subCommandCount: subCommands.length, decision }
+    });
+    return decision;
   }
 
   /** Add a rule, persist to DB, refresh cache. */
@@ -223,9 +256,71 @@ export class CommandApprovalManager {
     return `${parts[0]} ${parts[1]}`;
   }
 
-  /** Split a compound command into individual sub-commands. */
+  /** Find the first sub-command that is neither allowed nor blocked (the "ask" trigger). */
+  findUnknownSubCommand(command: string): string | null {
+    const trimmed = command.trim();
+    if (!trimmed) { return null; }
+
+    const subCommands = this.splitCompoundCommand(trimmed);
+    for (const sub of subCommands) {
+      if (this.blocked.some(rule => sub.startsWith(rule))) { continue; }
+      if (this.allowed.some(rule => sub.startsWith(rule))) { continue; }
+      return sub;
+    }
+    return null;
+  }
+
+  /** Split a compound command into individual sub-commands.
+   *  Quote-aware: respects single/double quotes and backslash escapes
+   *  so that e.g. grep "foo\|bar" is NOT split on the \| inside quotes. */
   splitCompoundCommand(command: string): string[] {
-    return command.split(/\s*(?:\|\||&&|;|\|)\s*/).map(s => s.trim()).filter(Boolean);
+    const parts: string[] = [];
+    let current = '';
+    let inSingle = false;
+    let inDouble = false;
+    let i = 0;
+
+    while (i < command.length) {
+      const ch = command[i];
+
+      // Backslash escapes (skip next char) — not active inside single quotes
+      if (ch === '\\' && !inSingle && i + 1 < command.length) {
+        current += ch + command[i + 1];
+        i += 2;
+        continue;
+      }
+
+      // Toggle quote state
+      if (ch === "'" && !inDouble) { inSingle = !inSingle; current += ch; i++; continue; }
+      if (ch === '"' && !inSingle) { inDouble = !inDouble; current += ch; i++; continue; }
+
+      // Only split on operators when outside quotes
+      if (!inSingle && !inDouble) {
+        // || (check before single |)
+        if (ch === '|' && command[i + 1] === '|') {
+          const t = current.trim(); if (t) { parts.push(t); } current = ''; i += 2; continue;
+        }
+        // &&
+        if (ch === '&' && command[i + 1] === '&') {
+          const t = current.trim(); if (t) { parts.push(t); } current = ''; i += 2; continue;
+        }
+        // single |
+        if (ch === '|') {
+          const t = current.trim(); if (t) { parts.push(t); } current = ''; i++; continue;
+        }
+        // ;
+        if (ch === ';') {
+          const t = current.trim(); if (t) { parts.push(t); } current = ''; i++; continue;
+        }
+      }
+
+      current += ch;
+      i++;
+    }
+
+    const t = current.trim();
+    if (t) { parts.push(t); }
+    return parts;
   }
 
   /** Refresh the in-memory cache from the database. */
@@ -234,6 +329,7 @@ export class CommandApprovalManager {
       .all().map((r: any) => r.prefix);
     this.blocked = this.db.prepare("SELECT prefix FROM command_rules WHERE type = 'blocked'")
       .all().map((r: any) => r.prefix);
+    logger.debug(`[CommandApproval] Cache refreshed: ${this.allowed.length} allowed, ${this.blocked.length} blocked rules`);
   }
 
   /** Seed default rules if the table is empty. */

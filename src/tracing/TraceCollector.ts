@@ -720,8 +720,9 @@ export class TraceCollector {
 
     // Key events (API requests, tool calls, session events)
     const keyCategories: TraceCategory[] = [
-      'api.request', 'api.response', 'tool.call', 'tool.result',
-      'shell.execute', 'shell.result', 'session.create', 'session.load', 'session.switch'
+      'api.request', 'api.response', 'tool.call',
+      'shell.execute', 'session.create', 'session.switch',
+      'command.check', 'command.approval'
     ];
     const keyEvents = events.filter(e =>
       keyCategories.includes(e.category) && e.status !== 'started'
@@ -746,8 +747,7 @@ export class TraceCollector {
 
     // Aggregated counts for noisy categories
     const noisyCategories: TraceCategory[] = [
-      'state.publish', 'state.subscribe', 'actor.bind', 'actor.unbind',
-      'render.turn', 'render.segment', 'api.stream'
+      'state.publish', 'api.stream'
     ];
     const noisyEvents = events.filter(e => noisyCategories.includes(e.category));
 
@@ -901,7 +901,7 @@ export class TraceCollector {
       if (hasShell) return 'API Request with Shell';
       return 'API Request';
     }
-    if (categories.has('session.create') || categories.has('session.load')) {
+    if (categories.has('session.create') || categories.has('session.switch')) {
       return 'Session';
     }
     if (categories.has('tool.call')) {
@@ -929,13 +929,13 @@ export class TraceCollector {
         milestones.push({ relativeTime: e.relativeTime, description: `API response: ${tokens} tokens` });
       } else if (e.category === 'tool.call' && e.status === 'started') {
         milestones.push({ relativeTime: e.relativeTime, description: `Tool: ${e.operation}` });
-      } else if (e.category === 'tool.result' || (e.category === 'tool.call' && e.status === 'completed')) {
+      } else if (e.category === 'tool.call' && (e.status === 'completed' || e.status === 'failed')) {
         const status = e.status === 'failed' ? 'FAILED' : 'completed';
         milestones.push({ relativeTime: e.relativeTime, description: `Tool ${status}: ${e.operation}` });
-      } else if (e.category === 'shell.execute') {
+      } else if (e.category === 'shell.execute' && e.status === 'started') {
         const cmd = e.data?.command || e.operation;
         milestones.push({ relativeTime: e.relativeTime, description: `Shell: ${cmd}` });
-      } else if (e.category === 'shell.result') {
+      } else if (e.category === 'shell.execute' && (e.status === 'completed' || e.status === 'failed')) {
         const status = e.status === 'failed' ? 'FAILED' : 'completed';
         milestones.push({ relativeTime: e.relativeTime, description: `Shell ${status}` });
       } else if (e.status === 'failed' || e.level === 'error') {

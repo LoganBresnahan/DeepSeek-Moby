@@ -32,6 +32,9 @@
 import { ShadowActor, ShadowActorConfig } from './ShadowActor';
 import { EventStateManager } from './EventStateManager';
 import type { PublicationMap, SubscriptionMap, VSCodeAPI } from './types';
+import { createLogger } from '../logging';
+
+const log = createLogger('Modal');
 
 // ============================================
 // Base Modal Styles (shared by all modals)
@@ -495,6 +498,7 @@ export abstract class ModalShadowActor extends ShadowActor {
   }
 
   private handleOpenRequest(open: boolean): void {
+    log.debug(`openRequest: ${open}, modal="${this._config.title}"`);
     if (open) {
       this.open();
     } else {
@@ -508,6 +512,7 @@ export abstract class ModalShadowActor extends ShadowActor {
 
   open(): void {
     if (this._visible) return;
+    log.debug(`open: "${this._config.title}"`);
 
     this._visible = true;
 
@@ -538,6 +543,7 @@ export abstract class ModalShadowActor extends ShadowActor {
 
   close(): void {
     if (!this._visible) return;
+    log.debug(`close: "${this._config.title}"`);
 
     this._visible = false;
 

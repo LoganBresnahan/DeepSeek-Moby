@@ -29,6 +29,9 @@
 import { ShadowActor, ShadowActorConfig } from './ShadowActor';
 import { EventStateManager } from './EventStateManager';
 import type { PublicationMap, SubscriptionMap, VSCodeAPI } from './types';
+import { createLogger } from '../logging';
+
+const log = createLogger('Popup');
 
 // ============================================
 // Base Popup Styles (shared by all popups)
@@ -455,6 +458,7 @@ export abstract class PopupShadowActor extends ShadowActor {
   }
 
   private handleOpenRequest(open: boolean): void {
+    log.debug(`openRequest: ${open}, key=${this._config.openRequestKey}`);
     if (open) {
       this.open();
     } else {
@@ -468,6 +472,7 @@ export abstract class PopupShadowActor extends ShadowActor {
 
   open(): void {
     if (this._visible) return;
+    log.debug(`open: ${this._config.openRequestKey}`);
 
     this._visible = true;
 
@@ -493,6 +498,7 @@ export abstract class PopupShadowActor extends ShadowActor {
 
   close(): void {
     if (!this._visible) return;
+    log.debug(`close: ${this._config.openRequestKey}`);
 
     this._visible = false;
 

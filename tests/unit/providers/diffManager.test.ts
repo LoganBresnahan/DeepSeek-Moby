@@ -117,6 +117,7 @@ vi.mock('vscode', async (importOriginal) => {
 vi.mock('../../../src/utils/logger', () => ({
   logger: {
     info: vi.fn(),
+    debug: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
     diffShown: vi.fn(),
