@@ -378,6 +378,20 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         this.handleCodeApplied(msg);
         break;
 
+      // ---- Drawing Server Messages ----
+      case 'drawingServerState':
+        this._manager.publishDirect('drawingServer.state', {
+          running: msg.running,
+          url: msg.url,
+          qrMatrix: msg.qrMatrix,
+          isWSL: msg.isWSL,
+        });
+        break;
+
+      case 'drawingReceived':
+        this.handleDrawingReceived(msg);
+        break;
+
       // ---- Trace Messages ----
       case 'traceCalibration':
         // Receive calibration data from extension for timeline alignment
@@ -843,6 +857,25 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       log.debug(`codeApplied failed for: ${filePath}`);
       virtualList.updatePendingFileStatusByPath(filePath, 'error');
     }
+  }
+
+  // ============================================
+  // Drawing Handlers
+  // ============================================
+
+  private handleDrawingReceived(msg: { type: string; [key: string]: unknown }): void {
+    const { virtualList } = this._actors;
+    const imageDataUrl = msg.imageDataUrl as string;
+    const timestamp = (msg.timestamp as number) || Date.now();
+
+    if (!imageDataUrl) return;
+
+    // Create a user turn for the drawing
+    const turnId = `turn-drawing-${Date.now()}`;
+    virtualList.addTurn(turnId, 'user', { timestamp });
+    virtualList.addDrawingSegment(turnId, imageDataUrl, timestamp);
+
+    log.info(`Drawing received, added to turn ${turnId}`);
   }
 
   // ============================================

@@ -368,6 +368,44 @@ body {
   opacity: 1;
 }
 
+/* Drawing server button */
+.drawing-server-selector {
+  position: relative;
+  margin-left: 4px;
+}
+
+.drawing-server-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  color: var(--vscode-foreground);
+  border: 1px solid var(--vscode-button-secondaryBackground, var(--vscode-input-border));
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.drawing-server-btn:hover {
+  background: var(--vscode-button-secondaryHoverBackground, var(--vscode-toolbar-hoverBackground));
+}
+
+.drawing-server-btn svg {
+  opacity: 0.8;
+}
+
+.drawing-server-btn:hover svg {
+  opacity: 1;
+}
+
+.drawing-server-btn.server-running {
+  color: var(--vscode-terminal-ansiGreen, #4ec9b0);
+  border-color: var(--vscode-terminal-ansiGreen, #4ec9b0);
+}
+
 /* Commands button - help/commands menu */
 .commands-selector {
   position: relative;

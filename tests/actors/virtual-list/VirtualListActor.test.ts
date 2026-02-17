@@ -893,4 +893,81 @@ describe('VirtualListActor', () => {
       expect(stats.actorsInUse).toBeLessThanOrEqual(stats.totalTurns);
     });
   });
+
+  // ============================================
+  // Drawing Segment Tests
+  // ============================================
+
+  describe('Drawing segments', () => {
+    beforeEach(() => {
+      actor = new VirtualListActor(manager, scrollContainer, {
+        config: { minPoolSize: 2, maxPoolSize: 5, defaultTurnHeight: 0, overscan: 1 },
+        postMessage: vi.fn(),
+        onPendingFileAction: vi.fn(),
+        onCommandApprovalAction: vi.fn()
+      });
+    });
+
+    it('initializes drawingSegments as empty array in addTurn', () => {
+      actor.addTurn('turn-1', 'user');
+      const turn = actor.getTurn('turn-1');
+      expect(turn?.drawingSegments).toEqual([]);
+    });
+
+    it('adds drawing segment to turn data', () => {
+      actor.addTurn('turn-1', 'user');
+      const segmentId = actor.addDrawingSegment('turn-1', 'data:image/png;base64,abc123');
+
+      expect(segmentId).toContain('drawing');
+      const turn = actor.getTurn('turn-1');
+      expect(turn?.drawingSegments.length).toBe(1);
+      expect(turn?.drawingSegments[0].imageDataUrl).toBe('data:image/png;base64,abc123');
+      expect(turn?.drawingSegments[0].timestamp).toBeGreaterThan(0);
+    });
+
+    it('adds drawing to contentOrder', () => {
+      actor.addTurn('turn-1', 'user');
+      actor.addDrawingSegment('turn-1', 'data:image/png;base64,abc123');
+
+      const turn = actor.getTurn('turn-1');
+      expect(turn?.contentOrder).toContainEqual({ type: 'drawing', index: 0 });
+    });
+
+    it('adds multiple drawing segments', () => {
+      actor.addTurn('turn-1', 'user');
+      actor.addDrawingSegment('turn-1', 'data:image/png;base64,first');
+      actor.addDrawingSegment('turn-1', 'data:image/png;base64,second');
+
+      const turn = actor.getTurn('turn-1');
+      expect(turn?.drawingSegments.length).toBe(2);
+      expect(turn?.contentOrder).toContainEqual({ type: 'drawing', index: 0 });
+      expect(turn?.contentOrder).toContainEqual({ type: 'drawing', index: 1 });
+    });
+
+    it('returns null for non-existent turn', () => {
+      const result = actor.addDrawingSegment('nonexistent', 'data:image/png;base64,abc');
+      expect(result).toBeNull();
+    });
+
+    it('uses provided timestamp', () => {
+      actor.addTurn('turn-1', 'user');
+      actor.addDrawingSegment('turn-1', 'data:image/png;base64,abc', 1234567890);
+
+      const turn = actor.getTurn('turn-1');
+      expect(turn?.drawingSegments[0].timestamp).toBe(1234567890);
+    });
+
+    it('interleaves with text segments in contentOrder', () => {
+      actor.addTurn('turn-1', 'user');
+      actor.addTextSegment('turn-1', 'Before drawing');
+      actor.addDrawingSegment('turn-1', 'data:image/png;base64,abc');
+      actor.addTextSegment('turn-1', 'After drawing');
+
+      const turn = actor.getTurn('turn-1');
+      expect(turn?.contentOrder.length).toBe(3);
+      expect(turn?.contentOrder[0].type).toBe('text');
+      expect(turn?.contentOrder[1].type).toBe('drawing');
+      expect(turn?.contentOrder[2].type).toBe('text');
+    });
+  });
 });

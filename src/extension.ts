@@ -10,6 +10,7 @@ import { TavilyClient } from './clients/tavilyClient';
 import { logger } from './utils/logger';
 import { UnifiedLogExporter } from './logging/UnifiedLogExporter';
 import { TokenService } from './services/tokenService';
+import { DrawingServer } from './providers/drawingServer';
 import * as crypto from 'crypto';
 
 let chatProvider: ChatProvider;
@@ -19,6 +20,7 @@ let statusBar: StatusBar;
 let deepSeekClient: DeepSeekClient;
 let conversationManager: ConversationManager;
 let tavilyClient: TavilyClient;
+let drawingServer: DrawingServer;
 
 export async function activate(context: vscode.ExtensionContext) {
   logger.info('DeepSeek Moby extension activated');
@@ -71,13 +73,22 @@ export async function activate(context: vscode.ExtensionContext) {
   // Initialize Tavily client for web search
   tavilyClient = new TavilyClient(context);
 
+  // Initialize drawing server (starts on-demand via command)
+  drawingServer = new DrawingServer();
+  drawingServer.onImageReceived((event) => {
+    const sizeKB = Math.round(event.imageDataUrl.length / 1024);
+    vscode.window.showInformationMessage(`Drawing received (${sizeKB} KB)`);
+  });
+  context.subscriptions.push({ dispose: () => drawingServer.dispose() });
+
   // Initialize chat provider (sidebar)
   chatProvider = new ChatProvider(
     context.extensionUri,
     deepSeekClient,
     statusBar,
     conversationManager,
-    tavilyClient
+    tavilyClient,
+    drawingServer
   );
 
   // Initialize completion provider (inline suggestions)
@@ -156,6 +167,10 @@ function registerCommands(context: vscode.ExtensionContext) {
       await chatProvider.showDiffQuickPick();
     }},
 
+    // Drawing Server
+    { name: 'startDrawingServer', handler: () => startDrawingServerCommand() },
+    { name: 'stopDrawingServer', handler: () => stopDrawingServerCommand() },
+
     // API Key management
     { name: 'setApiKey', handler: () => setApiKey(context) },
     { name: 'setTavilyApiKey', handler: () => setTavilyApiKey(context) }
@@ -232,6 +247,56 @@ async function setTavilyApiKey(context: vscode.ExtensionContext): Promise<void> 
     await context.secrets.store('deepseek.tavilyApiKey', input.trim());
     vscode.window.showInformationMessage('Tavily API key saved securely.');
   }
+}
+
+async function startDrawingServerCommand(): Promise<void> {
+  if (drawingServer.isRunning) {
+    const lanIP = DrawingServer.getLanIP();
+    const url = `http://${lanIP || 'localhost'}:${drawingServer.port}`;
+    vscode.window.showInformationMessage(`Drawing server already running: ${url}`);
+    return;
+  }
+  try {
+    const result = await drawingServer.start();
+
+    if (result.isWSL) {
+      // WSL2: phone can't reach the WSL internal IP directly
+      const phoneUrl = result.phoneIP
+        ? `http://${result.phoneIP}:${result.port}`
+        : `http://<your-pc-ip>:${result.port}`;
+      const choice = await vscode.window.showWarningMessage(
+        `Drawing server running (WSL2 detected). Port forwarding needed. ` +
+        `Copy the setup commands, run in admin PowerShell, then open ${phoneUrl} on your phone.`,
+        'Copy Setup Commands',
+        'Copy Phone URL'
+      );
+      if (choice === 'Copy Setup Commands' && result.portForwardCmd) {
+        await vscode.env.clipboard.writeText(result.portForwardCmd);
+        vscode.window.showInformationMessage('Setup commands copied. Run in an admin PowerShell on Windows.');
+      } else if (choice === 'Copy Phone URL') {
+        await vscode.env.clipboard.writeText(phoneUrl);
+      }
+    } else {
+      const choice = await vscode.window.showInformationMessage(
+        `Drawing server started. Open on your phone: ${result.url}`,
+        'Copy URL'
+      );
+      if (choice === 'Copy URL') {
+        await vscode.env.clipboard.writeText(result.url);
+      }
+    }
+  } catch (err: any) {
+    vscode.window.showErrorMessage(`Drawing server failed: ${err.message}`);
+  }
+}
+
+async function stopDrawingServerCommand(): Promise<void> {
+  if (!drawingServer.isRunning) {
+    vscode.window.showInformationMessage('Drawing server is not running.');
+    return;
+  }
+  await drawingServer.stop();
+  vscode.window.showInformationMessage('Drawing server stopped.');
 }
 
 export function deactivate() {

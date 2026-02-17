@@ -59,6 +59,9 @@ export interface TurnData {
   /** Command approval widgets */
   commandApprovals: CommandApprovalData[];
 
+  /** Drawing segments (images from phone drawing pad) */
+  drawingSegments: DrawingSegmentData[];
+
   /** Whether streaming is active for this turn */
   isStreaming: boolean;
 
@@ -74,7 +77,7 @@ export interface TurnData {
  * Used to restore content in the correct interleaved order.
  */
 export interface ContentOrderEntry {
-  type: 'text' | 'thinking' | 'tools' | 'shell' | 'pending' | 'approval';
+  type: 'text' | 'thinking' | 'tools' | 'shell' | 'pending' | 'approval' | 'drawing';
   index: number;
 }
 
@@ -145,6 +148,12 @@ export interface CommandApprovalData {
   status: 'pending' | 'allowed' | 'blocked';
   /** Actor's internal approval ID when bound */
   actorApprovalId?: string;
+}
+
+export interface DrawingSegmentData {
+  id: string;
+  imageDataUrl: string;
+  timestamp: number;
 }
 
 // ============================================

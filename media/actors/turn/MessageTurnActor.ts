@@ -126,6 +126,12 @@ export class MessageTurnActor extends InterleavedShadowActor {
   private _pendingIteration = 0;
 
   // ============================================
+  // Drawing State
+  // ============================================
+
+  private _drawingCounter = 0;
+
+  // ============================================
   // Streaming State
   // ============================================
 
@@ -226,6 +232,9 @@ export class MessageTurnActor extends InterleavedShadowActor {
     // Reset command approvals
     this._commandApprovals.clear();
     this._approvalCounter = 0;
+
+    // Reset drawing
+    this._drawingCounter = 0;
 
     // Reset streaming state
     this._isStreaming = false;
@@ -1400,6 +1409,94 @@ export class MessageTurnActor extends InterleavedShadowActor {
         this._onCommandApprovalAction(approval.command, decision, persistent, approval.prefix);
       }
     });
+  }
+
+  // ============================================
+  // Drawing Methods
+  // ============================================
+
+  /**
+   * Create a drawing segment displaying a phone drawing image.
+   */
+  createDrawingSegment(imageDataUrl: string): string {
+    this._currentPendingGroup = null;
+    this._drawingCounter++;
+    const segmentId = `${this._turnId}-drawing-${this._drawingCounter}`;
+
+    this.ensureRoleHeader();
+
+    const container = this.createContainer('message', {
+      hostClasses: ['drawing-container', 'user'],
+      dataAttributes: {
+        'segment-id': segmentId,
+        'turn-id': this._turnId ?? ''
+      }
+    });
+
+    container.content.innerHTML = `
+      <div class="drawing-wrapper">
+        <img
+          src="${imageDataUrl}"
+          alt="Phone drawing"
+          class="drawing-image"
+        />
+      </div>
+    `;
+
+    // Right-click → save drawing
+    const img = container.content.querySelector('.drawing-image') as HTMLImageElement;
+    if (img) {
+      img.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.showDrawingContextMenu(container.content, e, imageDataUrl);
+      });
+    }
+
+    return segmentId;
+  }
+
+  private showDrawingContextMenu(root: HTMLElement, e: MouseEvent, imageDataUrl: string): void {
+    // Remove any existing context menu
+    root.querySelector('.drawing-context-menu')?.remove();
+
+    const menu = document.createElement('div');
+    menu.className = 'drawing-context-menu';
+
+    const saveItem = document.createElement('div');
+    saveItem.className = 'drawing-context-menu-item';
+    saveItem.textContent = 'Save Drawing As...';
+    menu.appendChild(saveItem);
+
+    // Position relative to wrapper
+    const wrapper = root.querySelector('.drawing-wrapper') as HTMLElement;
+    const rect = wrapper.getBoundingClientRect();
+    const rootRect = root.getBoundingClientRect();
+    menu.style.left = `${e.clientX - rootRect.left}px`;
+    menu.style.top = `${e.clientY - rootRect.top}px`;
+
+    wrapper.appendChild(menu);
+
+    saveItem.addEventListener('click', () => {
+      menu.remove();
+      if (this._postMessage) {
+        this._postMessage({ type: 'saveDrawing', imageDataUrl });
+      }
+    });
+
+    // Close on click outside or escape
+    const close = () => {
+      menu.remove();
+      document.removeEventListener('click', close, true);
+      document.removeEventListener('keydown', onKey);
+    };
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') close();
+    };
+    setTimeout(() => {
+      document.addEventListener('click', close, true);
+      document.addEventListener('keydown', onKey);
+    }, 0);
   }
 
   // ============================================

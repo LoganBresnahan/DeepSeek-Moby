@@ -25,7 +25,8 @@ import {
   CommandsShadowActor,
   CommandRulesModalActor,
   ModelSelectorShadowActor,
-  SettingsShadowActor
+  SettingsShadowActor,
+  DrawingServerShadowActor
 } from './actors';
 // Dev-only actor - not included in production bundle
 import { InspectorShadowActor } from './dev/inspector';
@@ -250,6 +251,26 @@ function initializeActorSystem(): void {
     settings = new SettingsShadowActor(manager, settingsContainer, vscode);
   }
 
+  // DrawingServerShadowActor - Drawing server popup (positioned relative to button)
+  const drawingServerHost = getElementOrNull<HTMLElement>('drawingServerBtn')?.parentElement;
+  let drawingServerActor: DrawingServerShadowActor | null = null;
+  if (drawingServerHost) {
+    drawingServerHost.style.position = 'relative';
+    const drawingServerContainer = document.createElement('div');
+    drawingServerContainer.id = 'drawingServerActorHost';
+    drawingServerHost.appendChild(drawingServerContainer);
+    drawingServerActor = new DrawingServerShadowActor(manager, drawingServerContainer, vscode);
+  }
+
+  // Wire up drawing server button
+  const drawingServerBtn = getElementOrNull<HTMLButtonElement>('drawingServerBtn');
+  if (drawingServerBtn && drawingServerActor) {
+    drawingServerBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      drawingServerActor!.toggle();
+    });
+  }
+
   // Wire up inspector toggle button
   const inspectorBtn = getElementOrNull<HTMLButtonElement>('inspectorBtn');
   if (inspectorBtn) {
@@ -439,6 +460,7 @@ function initializeActorSystem(): void {
     commands,
     modelSelector,
     settings,
+    drawingServer: drawingServerActor,
     inspector,
     virtualList,
   };

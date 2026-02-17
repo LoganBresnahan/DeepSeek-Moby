@@ -93,6 +93,7 @@ function createMockVirtualListActor() {
     }),
     updatePendingStatus: vi.fn(),
     updatePendingFileStatusByPath: vi.fn(),
+    addDrawingSegment: vi.fn(),
     setEditMode: vi.fn(),
     clear: vi.fn(() => turns.clear()),
     destroy: vi.fn()
@@ -714,6 +715,61 @@ describe('VirtualMessageGatewayActor', () => {
 
       // No carry-forward — starts fresh
       expect(gateway.segmentContent).toBe(' more text');
+    });
+  });
+
+  // ============================================
+  // Drawing Message Tests
+  // ============================================
+
+  describe('drawing messages', () => {
+    it('handles drawingReceived by creating a user turn with drawing segment', () => {
+      dispatchMessage({
+        type: 'drawingReceived',
+        imageDataUrl: 'data:image/png;base64,abc123',
+        timestamp: 1700000000000
+      });
+
+      expect(mockActors.virtualList.addTurn).toHaveBeenCalledWith(
+        expect.stringContaining('turn-drawing-'),
+        'user',
+        expect.objectContaining({ timestamp: 1700000000000 })
+      );
+      expect((mockActors.virtualList as any).addDrawingSegment).toHaveBeenCalledWith(
+        expect.stringContaining('turn-drawing-'),
+        'data:image/png;base64,abc123',
+        1700000000000
+      );
+    });
+
+    it('ignores drawingReceived with no imageDataUrl', () => {
+      dispatchMessage({
+        type: 'drawingReceived',
+        timestamp: 1700000000000
+      });
+
+      expect((mockActors.virtualList as any).addDrawingSegment).not.toHaveBeenCalled();
+    });
+
+    it('publishes drawingServerState to manager', () => {
+      const publishSpy = vi.spyOn(manager, 'publishDirect');
+
+      dispatchMessage({
+        type: 'drawingServerState',
+        running: true,
+        url: 'http://192.168.0.135:8839',
+        qrMatrix: [[true, false], [false, true]],
+        isWSL: true
+      });
+
+      expect(publishSpy).toHaveBeenCalledWith(
+        'drawingServer.state',
+        expect.objectContaining({
+          running: true,
+          url: 'http://192.168.0.135:8839',
+          isWSL: true
+        })
+      );
     });
   });
 

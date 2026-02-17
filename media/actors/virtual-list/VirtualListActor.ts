@@ -37,6 +37,7 @@ import type {
   ShellSegmentData,
   PendingFileData,
   CommandApprovalData,
+  DrawingSegmentData,
   VisibleRange,
   PoolStats,
   VirtualListConfig,
@@ -293,6 +294,7 @@ export class VirtualListActor extends EventStateActor {
       shellSegments: [],
       pendingFiles: [],
       commandApprovals: [],
+      drawingSegments: [],
       isStreaming: false,
       contentOrder: []
     };
@@ -914,6 +916,40 @@ export class VirtualListActor extends EventStateActor {
   }
 
   // ============================================
+  // Drawing Segments
+  // ============================================
+
+  /**
+   * Add a drawing segment (phone drawing image) to a turn.
+   */
+  addDrawingSegment(turnId: string, imageDataUrl: string, timestamp?: number): string | null {
+    const turn = this._turnMap.get(turnId);
+    if (!turn) {
+      log.warn(`addDrawingSegment: turn ${turnId} not found`);
+      return null;
+    }
+
+    const segmentIndex = turn.drawingSegments.length;
+    const segmentId = `${turnId}-drawing-${segmentIndex}`;
+
+    const segment: DrawingSegmentData = {
+      id: segmentId,
+      imageDataUrl,
+      timestamp: timestamp ?? Date.now()
+    };
+
+    turn.drawingSegments.push(segment);
+    turn.contentOrder.push({ type: 'drawing', index: segmentIndex });
+
+    const bound = this._boundActors.get(turnId);
+    if (bound) {
+      bound.actor.createDrawingSegment(imageDataUrl);
+    }
+
+    return segmentId;
+  }
+
+  // ============================================
   // Visibility Management
   // ============================================
 
@@ -1145,6 +1181,14 @@ export class VirtualListActor extends EventStateActor {
             if (approval.status !== 'pending' && actorApprovalId) {
               actor.resolveCommandApproval(actorApprovalId, approval.status);
             }
+          }
+          break;
+        }
+
+        case 'drawing': {
+          const drawing = turn.drawingSegments[entry.index];
+          if (drawing) {
+            actor.createDrawingSegment(drawing.imageDataUrl);
           }
           break;
         }

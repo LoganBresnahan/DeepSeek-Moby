@@ -1096,4 +1096,108 @@ describe('MessageTurnActor', () => {
       expect(children[4].classList.contains('continuation')).toBe(true);
     });
   });
+
+  // ============================================
+  // Drawing Segment Tests
+  // ============================================
+
+  describe('Drawing segments', () => {
+    beforeEach(() => {
+      actor = new MessageTurnActor({ manager, element });
+      actor.bind({ turnId: 'turn-1', role: 'user', timestamp: Date.now() });
+    });
+
+    it('creates a drawing container with shadow DOM', () => {
+      actor.createDrawingSegment('data:image/png;base64,abc123');
+
+      const containers = Array.from(element.querySelectorAll('[data-actor="turn"].drawing-container'));
+      expect(containers.length).toBe(1);
+      expect(containers[0].shadowRoot).toBeTruthy();
+    });
+
+    it('renders an img element with the data URL', () => {
+      actor.createDrawingSegment('data:image/png;base64,abc123');
+
+      const containers = Array.from(element.querySelectorAll('[data-actor="turn"].drawing-container'));
+      const img = containers[0].shadowRoot?.querySelector('.drawing-image') as HTMLImageElement;
+      expect(img).toBeTruthy();
+      expect(img.src).toBe('data:image/png;base64,abc123');
+      expect(img.alt).toBe('Phone drawing');
+    });
+
+    it('returns a segment ID', () => {
+      const segmentId = actor.createDrawingSegment('data:image/png;base64,abc');
+      expect(segmentId).toContain('turn-1');
+      expect(segmentId).toContain('drawing');
+    });
+
+    it('creates multiple drawing containers', () => {
+      actor.createDrawingSegment('data:image/png;base64,first');
+      actor.createDrawingSegment('data:image/png;base64,second');
+
+      const containers = Array.from(element.querySelectorAll('[data-actor="turn"].drawing-container'));
+      expect(containers.length).toBe(2);
+    });
+
+    it('renders role header before drawing', () => {
+      actor.createDrawingSegment('data:image/png;base64,abc');
+
+      const children = Array.from(element.children) as HTMLElement[];
+      expect(children[0].classList.contains('header-container')).toBe(true);
+      expect(children[1].classList.contains('drawing-container')).toBe(true);
+    });
+
+    it('resets drawing state on reset', () => {
+      actor.createDrawingSegment('data:image/png;base64,abc');
+      actor.reset();
+
+      const containers = Array.from(element.querySelectorAll('[data-actor="turn"].drawing-container'));
+      expect(containers.length).toBe(0);
+    });
+
+    it('sends saveDrawing message on right-click save', () => {
+      const postMessage = vi.fn();
+      const pmElement = document.createElement('div');
+      document.body.appendChild(pmElement);
+      const pmActor = new MessageTurnActor({ manager, element: pmElement, postMessage });
+      pmActor.bind({ turnId: 'turn-2', role: 'user', timestamp: Date.now() });
+      pmActor.createDrawingSegment('data:image/png;base64,test123');
+
+      const containers = Array.from(pmElement.querySelectorAll('[data-actor="turn"].drawing-container'));
+      const img = containers[0].shadowRoot?.querySelector('.drawing-image') as HTMLImageElement;
+
+      // Simulate right-click
+      const contextEvent = new MouseEvent('contextmenu', { bubbles: true, clientX: 100, clientY: 100 });
+      img.dispatchEvent(contextEvent);
+
+      // Context menu should appear
+      const menu = containers[0].shadowRoot?.querySelector('.drawing-context-menu');
+      expect(menu).toBeTruthy();
+
+      // Click save item
+      const saveItem = menu?.querySelector('.drawing-context-menu-item') as HTMLElement;
+      saveItem?.click();
+
+      expect(postMessage).toHaveBeenCalledWith({
+        type: 'saveDrawing',
+        imageDataUrl: 'data:image/png;base64,test123'
+      });
+
+      pmActor.destroy();
+    });
+
+    it('adds drawing after text without error', () => {
+      // Verify text and drawing can coexist in a single turn
+      const textId = actor.createTextSegment('Before drawing');
+      expect(textId).toBeTruthy();
+      const countAfterText = element.children.length;
+
+      const segmentId = actor.createDrawingSegment('data:image/png;base64,abc');
+      expect(segmentId).toContain('drawing');
+      const countAfterDrawing = element.children.length;
+
+      // Drawing should add one more container
+      expect(countAfterDrawing).toBe(countAfterText + 1);
+    });
+  });
 });

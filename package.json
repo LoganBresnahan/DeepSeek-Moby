@@ -375,6 +375,16 @@
         "category": "DeepSeek Moby"
       },
       {
+        "command": "deepseek.startDrawingServer",
+        "title": "DeepSeek Moby: Start Drawing Server",
+        "category": "DeepSeek Moby"
+      },
+      {
+        "command": "deepseek.stopDrawingServer",
+        "title": "DeepSeek Moby: Stop Drawing Server",
+        "category": "DeepSeek Moby"
+      },
+      {
         "command": "deepseek.setApiKey",
         "title": "DeepSeek Moby: Set API Key",
         "category": "DeepSeek Moby"

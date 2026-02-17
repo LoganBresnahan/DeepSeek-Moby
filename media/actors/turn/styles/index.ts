@@ -1080,6 +1080,59 @@ const approvalStyles = `
 `;
 
 // ============================================
+// Drawing Styles
+// ============================================
+
+const drawingStyles = `
+/* Drawing container */
+:host(.drawing-container) {
+  display: block;
+  margin: 8px 0;
+}
+
+.drawing-wrapper {
+  display: inline-block;
+  position: relative;
+}
+
+.drawing-image {
+  max-width: 100%;
+  max-height: 400px;
+  border-radius: 8px;
+  border: 1px solid var(--vscode-panel-border);
+  object-fit: contain;
+  background: #ffffff;
+  cursor: pointer;
+}
+
+.drawing-context-menu {
+  position: absolute;
+  background: var(--vscode-menu-background, var(--vscode-dropdown-background));
+  border: 1px solid var(--vscode-menu-border, var(--vscode-widget-border, #454545));
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  padding: 4px 0;
+  z-index: 10000;
+  min-width: 140px;
+}
+
+.drawing-context-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  font-size: 13px;
+  color: var(--vscode-menu-foreground, var(--vscode-foreground));
+  cursor: pointer;
+}
+
+.drawing-context-menu-item:hover {
+  background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground));
+  color: var(--vscode-menu-selectionForeground, var(--vscode-foreground));
+}
+`;
+
+// ============================================
 // Export Combined Styles
 // ============================================
 
@@ -1091,4 +1144,5 @@ ${toolsStyles}
 ${shellStyles}
 ${pendingStyles}
 ${approvalStyles}
+${drawingStyles}
 `;

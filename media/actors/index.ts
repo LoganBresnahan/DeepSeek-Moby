@@ -75,5 +75,9 @@ export { turnActorStyles } from './turn';
 export { VirtualListActor } from './virtual-list';
 export type { TurnData, PoolStats, VisibleRange, VirtualListConfig } from './virtual-list/types';
 
+// Drawing Server (header popup for starting/stopping server + QR code)
+export { DrawingServerShadowActor } from './drawing-server/DrawingServerShadowActor';
+export type { DrawingServerState } from './drawing-server/DrawingServerShadowActor';
+
 // Inspector - Dev-only tool, not exported from production actors
 // Access via: import { InspectorShadowActor } from './dev/inspector'

@@ -13,6 +13,8 @@ import { DiffManager } from './diffManager';
 import { SettingsManager } from './settingsManager';
 import { RequestOrchestrator } from './requestOrchestrator';
 import { CommandApprovalManager } from './commandApprovalManager';
+import { DrawingServer } from './drawingServer';
+import { qrcodegen } from '../vendor/qrcodegen';
 
 export class ChatProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'deepseek-chat-view';
@@ -33,18 +35,21 @@ export class ChatProvider implements vscode.WebviewViewProvider {
   private settingsManager: SettingsManager;
   private requestOrchestrator: RequestOrchestrator;
   private commandApprovalManager: CommandApprovalManager;
+  private drawingServer: DrawingServer | null = null;
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
     deepSeekClient: DeepSeekClient,
     statusBar: StatusBar,
     conversationManager: ConversationManager,
-    tavilyClient: TavilyClient
+    tavilyClient: TavilyClient,
+    drawingServer?: DrawingServer
   ) {
     this.deepSeekClient = deepSeekClient;
     this.statusBar = statusBar;
     this.conversationManager = conversationManager;
     this.tavilyClient = tavilyClient;
+    this.drawingServer = drawingServer || null;
 
     // Create managers
     this.webSearchManager = new WebSearchManager(this.tavilyClient);
@@ -152,6 +157,17 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     this.diffManager.onWaitingForApproval(data => {
       this._view?.webview.postMessage({ type: 'waitingForApproval', filePaths: data.filePaths });
     });
+
+    // DrawingServer → webview
+    if (this.drawingServer) {
+      this.drawingServer.onImageReceived(event => {
+        this._view?.webview.postMessage({
+          type: 'drawingReceived',
+          imageDataUrl: event.imageDataUrl,
+          timestamp: event.timestamp
+        });
+      });
+    }
 
     // SettingsManager → webview
     this.settingsManager.onSettingsChanged(async snapshot => {
@@ -557,6 +573,24 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         // Webview ready - send calibration data and request immediate trace sync
         case 'webviewReady':
           this.sendTraceCalibration();
+          break;
+
+        // Drawing server control
+        case 'startDrawingServer':
+          await this.handleStartDrawingServer();
+          break;
+        case 'stopDrawingServer':
+          await this.handleStopDrawingServer();
+          break;
+        case 'copyToClipboard':
+          if (data.text) {
+            await vscode.env.clipboard.writeText(data.text as string);
+          }
+          break;
+        case 'saveDrawing':
+          if (data.imageDataUrl) {
+            await this.handleSaveDrawing(data.imageDataUrl as string);
+          }
           break;
       }
     });
@@ -1003,6 +1037,85 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  // ── Drawing Server ──
+
+  public setDrawingServer(server: DrawingServer): void {
+    this.drawingServer = server;
+  }
+
+  private async handleStartDrawingServer(): Promise<void> {
+    if (!this.drawingServer) return;
+
+    try {
+      const result = await this.drawingServer.start();
+      const phoneUrl = result.phoneIP
+        ? `http://${result.phoneIP}:${result.port}`
+        : result.url;
+
+      this.sendDrawingServerState(true, phoneUrl, result.isWSL);
+    } catch (err: any) {
+      logger.error(`[ChatProvider] Drawing server start failed: ${err.message}`);
+      this._view?.webview.postMessage({ type: 'error', error: `Drawing server failed: ${err.message}` });
+      this.sendDrawingServerState(false);
+    }
+  }
+
+  private async handleStopDrawingServer(): Promise<void> {
+    if (!this.drawingServer) return;
+
+    await this.drawingServer.stop();
+    this.sendDrawingServerState(false);
+  }
+
+  private sendDrawingServerState(running: boolean, url?: string, isWSL?: boolean): void {
+    let qrMatrix: boolean[][] | undefined;
+
+    if (running && url) {
+      try {
+        const qr = qrcodegen.QrCode.encodeText(url, qrcodegen.QrCode.Ecc.MEDIUM);
+        const size = qr.size;
+        qrMatrix = [];
+        for (let y = 0; y < size; y++) {
+          const row: boolean[] = [];
+          for (let x = 0; x < size; x++) {
+            row.push(qr.getModule(x, y));
+          }
+          qrMatrix.push(row);
+        }
+      } catch (err) {
+        logger.warn(`[ChatProvider] QR code generation failed: ${err}`);
+      }
+    }
+
+    this._view?.webview.postMessage({
+      type: 'drawingServerState',
+      running,
+      url,
+      qrMatrix,
+      isWSL,
+    });
+  }
+
+  private async handleSaveDrawing(imageDataUrl: string): Promise<void> {
+    const uri = await vscode.window.showSaveDialog({
+      defaultUri: vscode.Uri.file(`drawing-${Date.now()}.png`),
+      filters: { 'PNG Image': ['png'] }
+    });
+
+    if (!uri) return;
+
+    try {
+      // Strip data URL prefix to get raw base64
+      const base64 = imageDataUrl.replace(/^data:image\/\w+;base64,/, '');
+      const buffer = Buffer.from(base64, 'base64');
+      await vscode.workspace.fs.writeFile(uri, buffer);
+      vscode.window.showInformationMessage(`Drawing saved to ${uri.fsPath}`);
+    } catch (err: any) {
+      logger.error(`[ChatProvider] Failed to save drawing: ${err.message}`);
+      vscode.window.showErrorMessage(`Failed to save drawing: ${err.message}`);
+    }
+  }
+
   // ── HTML Template ──
 
   private getHtmlForWebview(webview: vscode.Webview): string {
@@ -1041,6 +1154,15 @@ export class ChatProvider implements vscode.WebviewViewProvider {
             <img src="${iconUri}" alt="DeepSeek Moby" class="header-icon">
             <div id="toastContainer" class="toast-container"></div>
             <div class="header-actions">
+              <!-- Drawing server - button acts as click target, parent is Shadow DOM host -->
+              <div class="drawing-server-selector">
+                <button id="drawingServerBtn" class="drawing-server-btn" title="Drawing Pad">
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M13.5 1.5l1 1-9 9-2.5.5.5-2.5 9-9zm-1.4.6l-8.6 8.6-.3 1.3 1.3-.3 8.6-8.6-1-1zM2 13h12v1H2v-1z"/>
+                  </svg>
+                </button>
+                <!-- Shadow DOM popup renders here via DrawingServerShadowActor -->
+              </div>
               <!-- Model selector - button acts as click target, parent is Shadow DOM host -->
               <div class="model-selector">
                 <button id="modelBtn" class="model-btn" title="Click to change model">
