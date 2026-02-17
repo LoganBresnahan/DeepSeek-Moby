@@ -818,8 +818,6 @@ All context compression operations use the `[Snapshot]` tag prefix. These logs t
 | `[Snapshot] Creating snapshot ...` | INFO | `SnapshotManager.ts` | Starting snapshot creation |
 | `[Snapshot] Snapshot created` | INFO | `SnapshotManager.ts` | Snapshot saved to DB |
 | `[Snapshot] Pruning snapshots (keep=N)` | DEBUG | `SnapshotManager.ts` | Old snapshots being removed |
-| `[Snapshot] Extractive summarizer called` | DEBUG | `SnapshotManager.ts` | Fallback summarizer invoked |
-| `[Snapshot] Extractive summarizer complete` | DEBUG | `SnapshotManager.ts` | Fallback summarizer finished |
 | `[ChatProvider] Summarization started — queuing enabled` | INFO | `chatProvider.ts` | Messages will be queued |
 | `[ChatProvider] Summarization completed — queuing disabled` | INFO | `chatProvider.ts` | Queue processing resumes |
 | `[ChatProvider] Message queued during summarization` | INFO | `chatProvider.ts` | User message added to queue |

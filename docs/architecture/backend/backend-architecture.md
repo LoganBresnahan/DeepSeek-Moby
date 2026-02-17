@@ -243,6 +243,13 @@ Stream ends
          │       • Execute tools (read_file, write_file, etc.)
          │       • _onToolCallsStart/Update/End.fire(...)
          │       • diffManager.handleAutoShowDiff() for apply_code_edit
+         │       │
+         │       ├─► [ASK MODE] If file modified in batch:
+         │       │   • Close tool batch → emit pending files
+         │       │   • diffManager.waitForPendingApprovals() [BLOCKS]
+         │       │   • Inject feedback: "User applied/rejected changes to X"
+         │       │   • Open new tool batch for next iteration
+         │       │
          │       • Append results → call API again
          │
          ├─► Reasoner model: shell detection in streamAndIterate()
@@ -251,6 +258,11 @@ Stream ends
          │       • _onShellExecuting.fire(...)
          │       • Execute commands
          │       • _onShellResults.fire(...)
+         │       │
+         │       ├─► [ASK MODE] If pending diffs at iteration boundary:
+         │       │   • diffManager.waitForPendingApprovals() [BLOCKS]
+         │       │   • Inject feedback as system message
+         │       │
          │       • Inject results → stream again
          │
          ├─► finalizeResponse()
@@ -292,7 +304,7 @@ saveToHistory() completes
 **Key files:**
 - Trigger: `src/providers/requestOrchestrator.ts` (lines 334-361)
 - Guard: `src/events/ConversationManager.ts` → `hasFreshSummary()`
-- Summarizer: `src/events/SnapshotManager.ts` → `createLLMSummarizer()`, `createExtractSummarizer()`
+- Summarizer: `src/events/SnapshotManager.ts` → `createLLMSummarizer()`
 - Queuing: `src/providers/chatProvider.ts` → `_summarizing`, `_pendingMessages`, `drainQueue()`
 
 ## Two Model Paths
@@ -385,6 +397,7 @@ The conversation state uses **Event Sourcing** - all changes are stored as an ap
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │  DiffManager:                                                        │    │
 │  │    activeDiffs: Map<diffId, DiffMetadata>                            │    │
+│  │    pendingApprovals: Map<diffId, { resolve, filePath }>  (ask mode)  │    │
 │  │    editMode, processedCodeBlocks, fileEditCounts                     │    │
 │  │                                                                      │    │
 │  │  RequestOrchestrator:                                                │    │

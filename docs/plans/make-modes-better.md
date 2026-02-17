@@ -1,6 +1,6 @@
 # Make Edit Modes Better
 
-**Status:** Research
+**Status:** Partially Implemented
 
 **Depends on:** DiffManager extraction (complete), sandbox research
 
@@ -8,146 +8,147 @@
 
 ## Context
 
-The three edit modes (manual / ask / auto) control how the LLM's code output is handled. Currently:
+The three edit modes (manual / ask / auto) control how the LLM's code output is handled:
 
 | Mode | Behavior |
 |------|----------|
 | **Manual (M)** | Code blocks rendered in chat. User manually copies/applies. |
-| **Ask (Q)** | Diff tabs auto-open. User reviews and accepts/rejects. LLM doesn't know the result. |
+| **Ask (Q)** | Diff tabs auto-open. User reviews and accepts/rejects. **LLM blocks and waits for result.** |
 | **Auto (A)** | Code applied directly to files. No user confirmation. |
 
-The gap is that **ask mode is fire-and-forget** — the LLM outputs code, diffs appear, but the LLM has no idea whether the user accepted or rejected them. This limits the LLM's ability to adapt.
+## Blocking Ask Mode — IMPLEMENTED
 
-## The Core Idea: Blocking Approval Flow
+Ask mode now **blocks** — the LLM waits for user accept/reject before continuing. This was the core feature of this plan.
 
-Make ask mode (and potentially command execution) **blocking** — the LLM waits for user input before continuing.
+### Architecture
 
-### How It Works Architecturally
-
-The LLM already stops naturally at action boundaries. It's not one continuous stream that needs interrupting:
+The blocking flow uses Promise-based pending approvals in DiffManager:
 
 **V3 (tool calls):**
 ```
-LLM turn → tool_calls in response → [APPROVAL GATE] → execute → feed result → LLM continues
+LLM turn → apply_code_edit tool → diff shown → [BLOCKS] → user accept/reject → feedback injected → LLM continues
 ```
 
 **R1 (shell/code tags):**
 ```
-LLM turn → <shell>cmd</shell> → iteration loop breaks → [APPROVAL GATE] → execute → feed result as user msg → LLM continues
+LLM turn → code block detected → diff shown → iteration ends → [BLOCKS] → user accept/reject → feedback as user msg → LLM continues
 ```
 
-The LLM finishes its turn, then waits for tool results before continuing. "Pausing" is really just **delaying the action** before sending the result back.
+### Implementation Details
 
-### Ask Mode with Feedback
+#### DiffManager (`src/providers/diffManager.ts`)
+- `pendingApprovals: Map<string, { resolve, filePath }>` — stores Promises that block until user acts
+- `registerPendingApproval(diffId, filePath)` — creates a Promise for a diff
+- `waitForPendingApprovals()` — awaits all pending Promises, returns results array
+- `cancelPendingApprovals()` — rejects all pending on abort/error
+- Auto-superseding: when the same file gets a new diff, the old pending approval is auto-rejected
+- Diff tab close → resolves as rejected
+- Accept/reject buttons → resolve as accepted/rejected
 
-Current ask mode flow:
-```
-1. LLM outputs code block
-2. Diff shown to user (fire-and-forget)
-3. LLM keeps going, unaware of user's decision
-```
+#### RequestOrchestrator (`src/providers/requestOrchestrator.ts`)
+- **V3 tool loop**: After `apply_code_edit` execution, if edit mode is "ask":
+  1. Closes the current tool batch UI
+  2. Calls `diffManager.waitForPendingApprovals()`
+  3. Injects feedback: "User applied changes to foo.ts" or "User rejected changes to foo.ts"
+  4. Opens new tool batch for next iteration
+- **R1 iteration boundary**: After iteration ends with pending diffs:
+  1. Calls `diffManager.waitForPendingApprovals()`
+  2. Injects feedback as system message before next iteration
+- Guard: `batchToolDetails` array bounds check after ask mode closes batch mid-loop
 
-Proposed blocking ask mode:
-```
-1. LLM outputs code block (turn ends or iteration ends)
-2. Diff shown to user
-3. Extension WAITS for user accept/reject
-4. Result fed back: "User applied changes to foo.ts" or "User rejected changes to foo.ts"
-5. LLM continues with that knowledge
-```
+#### Webview Pending Files UI
+- `VirtualMessageGatewayActor.handleDiffListChanged()` — routes diffs to correct pending group:
+  - Global search by diffId (prevents re-adding resolved diffs)
+  - Path-based lookup with resolved entry fall-through (retries get new groups)
+  - New diff creation for truly new files
+- `MessageTurnActor.updatePendingStatus()` — three-tier lookup for status updates:
+  - Direct fileId match
+  - Fallback by diffId (preferred, prevents wrong group match on retries)
+  - Fallback by filePath (last resort)
+- `MessageTurnActor.startStreaming()` — renders role header immediately so V3 assistant turns have visible height from the start (fixes whitespace gap)
 
-This lets the LLM:
-- Retry with a different approach if rejected
-- Build on confirmed changes for the next file
-- Ask follow-up questions if the user rejects
+#### Layout: Bottom-Push Chat Style
+- `VirtualListActor.updateContentHeight()` computes `marginTop = max(0, viewport - totalHeight)` in JS
+- CSS `margin-top: auto` was unreliable in VS Code webview; explicit JS computation is used instead
+- `defaultTurnHeight: 0` — turns start with zero height, grow when content arrives
+- `measureTurnHeight()` called synchronously (no `requestAnimationFrame` delay)
+- ResizeObserver fires before paint (no rAF wrapper)
 
-### Command Approval (Same Pattern)
+### Key Files Modified
 
-```
-1. LLM says: "I'll run `npm install express`" (turn ends with tool call)
-2. Extension checks allowlist → not found → shows approval UI
-3. UI: "Allow `npm install express`?"  [Run] [Block] [Always Allow]
-4a. User approves → execute → send result back → LLM continues
-4b. User rejects → send "Command rejected by user" as tool result → LLM adapts
-```
+| File | Changes |
+|------|---------|
+| `src/providers/requestOrchestrator.ts` | Ask mode blocking wait, feedback injection, batch guard |
+| `src/providers/diffManager.ts` | Pending approvals Map, register/wait/cancel, auto-supersede |
+| `src/providers/types.ts` | WaitingForApprovalEvent type |
+| `src/providers/chatProvider.ts` | Wiring for waitingForApproval event |
+| `media/actors/message-gateway/VirtualMessageGatewayActor.ts` | Diff reconciliation with resolved fall-through |
+| `media/actors/turn/MessageTurnActor.ts` | diffId priority in updatePendingStatus, early header render |
+| `media/actors/turn/styles/index.ts` | Removed spinning animation |
+| `media/actors/virtual-list/VirtualListActor.ts` | JS margin-top, sync measurement, no rAF in ResizeObserver |
+| `media/actors/virtual-list/types.ts` | defaultTurnHeight: 0 |
+| `media/chat.css` | Removed CSS margin-top: auto (replaced by JS) |
 
-### Blocking vs Non-Blocking Tradeoffs
+### Decisions Made
 
-| Aspect | Blocking (wait for user) | Non-blocking (fire-and-forget) |
-|--------|--------------------------|-------------------------------|
-| LLM awareness | Knows result, can adapt | Blind to user decisions |
-| Speed | Slower (waits per action) | Fast (no interruptions) |
-| Multi-file edits | Sequential, each approved | All generated at once |
-| User experience | More control, more clicks | Less friction, less control |
-| Error recovery | LLM can retry on rejection | User must manually fix |
+| Question | Decision |
+|----------|----------|
+| **Should ask mode always block?** | Yes. Non-blocking ask is what we have today (fire-and-forget). If users want non-blocking, they use auto mode. |
+| **Batch vs individual approval?** | Individual per file. Simpler, more control. |
+| **Timeout on approval?** | No timeout. If the user walks away, the LLM waits. |
+| **Ask mode UI for diffs?** | Existing diff tab with accept/reject buttons. No new UI needed. |
+| **Where does blocking happen?** | Option B — block at iteration boundaries (after each tool loop iteration for V3, after each shell iteration for R1). |
 
-### Where the Await Lives
+### Test Coverage
 
-The `requestOrchestrator` already has the async infrastructure. The tool execution callback is `async`, and the shell iteration loop already does await-execute-continue.
+| Test File | Coverage |
+|-----------|----------|
+| `tests/unit/providers/diffManager.test.ts` | Pending approvals: register, resolve, cancel, auto-supersede, waitForPendingApprovals |
+| `tests/unit/providers/requestOrchestrator.test.ts` | Tool loop, streaming, context compression |
+| `tests/actors/turn/MessageTurnActor.test.ts` | Header render on startStreaming, diffId fallback in updatePendingStatus, pending file grouping |
+| `tests/actors/virtual-list/VirtualListActor.test.ts` | Streaming turn binding, height measurement, margin-top computation |
 
-For **V3 tool calls** — the approval gate sits in `runToolLoop()` before `executeToolCall()`:
-```typescript
-// Before executing, check approval
-const approved = await this.commandApprovalManager.checkApproval(command);
-if (!approved) {
-  return { role: 'tool', content: 'Command rejected by user' };
-}
-```
+### Logging Coverage
 
-For **R1 shell iteration** — the gate sits in `reasonerShellExecutor` before shell execution.
+All critical decision points have debug/warn logging:
+- `requestOrchestrator.ts`: Batch guard skip logged when batch closed mid-loop
+- `VirtualListActor.ts`: Height deltas logged in measureTurnHeight, streaming turn binding logged
+- `MessageTurnActor.ts`: Pending status transitions logged with match type (fileId/diffId/filePath), warning on file not found
+- `VirtualMessageGatewayActor.ts`: Diff reconciliation path logged (global match / path match / resolved fall-through / new entry)
 
-For **ask mode diffs** — the gate sits in `handleCodeBlockDetection()`. Instead of immediately showing the diff (current), it would:
-1. Show the diff
-2. Create a Promise that resolves when user accepts/rejects
-3. Await the Promise
-4. Feed the result back
+---
 
-## Open Questions
+## Manual Mode — UI Fixes (NOT STARTED)
 
-1. **Should ask mode always block?** Or should there be a "blocking ask" vs "non-blocking ask" option?
-2. **Batch approval for multi-file changes** — if the LLM edits 5 files, approve each individually or show a summary?
-3. **Timeout** — what if the user walks away? Should there be a timeout that auto-rejects?
-4. **Auto mode + command approval** — in auto mode (trust all code changes), should commands still require approval? Probably yes — auto mode trusts code edits, not arbitrary shell commands.
-5. **UI design** — inline in chat? Modal? VS Code QuickPick? Diff tab with accept/reject buttons (current ask mode already has this)?
+Manual mode renders code blocks in the chat and leaves it to the user to copy/apply. The basic diff apply buttons need fixing:
 
-## Implementation Sketch
+### Current Issues
 
-### New Event Types
+| Issue | Description |
+|-------|-------------|
+| **Apply button missing/broken** | Code blocks in chat should have a clear "Apply" button that opens a diff tab or applies directly |
+| **Copy button** | Should reliably copy the code block content to clipboard |
+| **No file target** | When the LLM outputs a code block with `# File: path`, the apply button should know which file to target |
+| **No feedback after apply** | User clicks apply but gets no visual confirmation it worked |
 
-```typescript
-// In src/providers/types.ts
-interface ApprovalRequestEvent {
-  id: string;
-  type: 'command' | 'diff';
-  description: string;  // What we're asking about
-  detail?: string;       // Full command or diff preview
-}
+### TODO
 
-interface ApprovalResponseEvent {
-  id: string;
-  approved: boolean;
-  remember?: boolean;    // "Always allow/block this"
-}
-```
+- [ ] Audit the current manual mode code block buttons (copy, apply)
+- [ ] Fix apply button to open diff tab targeting the correct file
+- [ ] Add visual feedback (checkmark, "Applied" label) after successful apply
+- [ ] Ensure copy button works reliably across all code block types
 
-### Approval Flow
+---
 
-```typescript
-// In requestOrchestrator or diffManager
-async function waitForApproval(request: ApprovalRequestEvent): Promise<boolean> {
-  return new Promise((resolve) => {
-    this._onApprovalRequest.fire(request);
-    // ChatProvider forwards to webview → user sees UI
-    // User clicks approve/reject → webview posts message back
-    // ChatProvider fires approval response → we resolve
-    const disposable = this.onApprovalResponse((response) => {
-      if (response.id === request.id) {
-        disposable.dispose();
-        resolve(response.approved);
-      }
-    });
-  });
-}
-```
+## Auto Mode — Command Approval (NOT STARTED)
 
-This follows the existing EventEmitter pattern — the approval request goes out, the response comes back, and the Promise resolves.
+Auto mode trusts code edits (applies them without confirmation), but **commands should still require approval**. "I trust your code changes" is very different from "run anything on my system."
+
+This ties into the sandboxing research in `docs/plans/sandbox.md` — the tiered command approval system (safe/dev/dangerous categories, learn-as-you-go allowlists) applies specifically to auto mode's command execution path.
+
+### TODO
+
+- [ ] Define which commands auto-approve in auto mode (safe + dev tool categories)
+- [ ] Add approval gate for unknown/dangerous commands even in auto mode
+- [ ] UI for command approval — VS Code QuickPick or inline chat widget
+- [ ] Persist "always allow" / "always block" decisions to settings

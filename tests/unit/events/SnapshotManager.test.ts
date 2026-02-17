@@ -8,8 +8,16 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { Database } from '../../../src/events/SqlJsWrapper';
 import { runMigrations } from '../../../src/events/migrations';
 import { EventStore } from '../../../src/events/EventStore';
-import { SnapshotManager, createExtractSummarizer, createLLMSummarizer } from '../../../src/events/SnapshotManager';
-import type { SummarizerChatFn } from '../../../src/events/SnapshotManager';
+import { SnapshotManager, createLLMSummarizer } from '../../../src/events/SnapshotManager';
+import type { SummarizerFn, SummarizerChatFn } from '../../../src/events/SnapshotManager';
+
+/** Simple deterministic mock summarizer for tests */
+const mockSummarizer: SummarizerFn = async (events) => ({
+  summary: events.map(e => 'content' in e ? (e as any).content : `[${e.type}]`).join('; ') || 'Empty conversation',
+  filesModified: events.filter(e => e.type === 'diff_created').map(e => (e as any).filePath),
+  keyFacts: events.filter(e => e.type === 'user_message').map(e => (e as any).content),
+  tokenCount: Math.ceil(JSON.stringify(events).length / 4)
+});
 
 describe('SnapshotManager', () => {
   let db: Database;
@@ -26,7 +34,7 @@ describe('SnapshotManager', () => {
     snapshotManager = new SnapshotManager(
       db,
       eventStore,
-      createExtractSummarizer(),
+      mockSummarizer,
       {
         snapshotInterval: 5 // Create snapshot every 5 events for testing
       }
@@ -264,80 +272,6 @@ describe('SnapshotManager', () => {
 
       expect(snapshotManager.getLatestSnapshot('session-1')).toBeNull();
     });
-  });
-});
-
-describe('createExtractSummarizer', () => {
-  it('should extract summary from user messages', async () => {
-    const summarizer = createExtractSummarizer();
-
-    const events = [
-      {
-        id: '1',
-        sessionId: 'session-1',
-        sequence: 1,
-        timestamp: Date.now(),
-        type: 'user_message' as const,
-        content: 'Help me implement authentication'
-      },
-      {
-        id: '2',
-        sessionId: 'session-1',
-        sequence: 2,
-        timestamp: Date.now(),
-        type: 'assistant_message' as const,
-        content: 'Sure, I can help with that',
-        model: 'deepseek-chat',
-        finishReason: 'stop' as const
-      }
-    ];
-
-    const result = await summarizer(events);
-
-    expect(result.summary).toContain('Help me implement authentication');
-    expect(result.keyFacts.length).toBeGreaterThan(0);
-    expect(result.tokenCount).toBeGreaterThan(0);
-  });
-
-  it('should extract files modified', async () => {
-    const summarizer = createExtractSummarizer();
-
-    const events = [
-      {
-        id: '1',
-        sessionId: 'session-1',
-        sequence: 1,
-        timestamp: Date.now(),
-        type: 'diff_created' as const,
-        diffId: 'diff-1',
-        filePath: 'src/auth.ts',
-        originalContent: 'old',
-        newContent: 'new'
-      },
-      {
-        id: '2',
-        sessionId: 'session-1',
-        sequence: 2,
-        timestamp: Date.now(),
-        type: 'diff_accepted' as const,
-        diffId: 'diff-1'
-      }
-    ];
-
-    const result = await summarizer(events);
-
-    expect(result.filesModified).toContain('src/auth.ts');
-  });
-
-  it('should handle empty events array', async () => {
-    const summarizer = createExtractSummarizer();
-
-    const result = await summarizer([]);
-
-    expect(result.summary).toBe('Empty conversation');
-    expect(result.keyFacts).toEqual([]);
-    expect(result.filesModified).toEqual([]);
-    expect(result.tokenCount).toBeGreaterThan(0);
   });
 });
 

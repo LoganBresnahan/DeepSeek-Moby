@@ -294,6 +294,11 @@
         "category": "DeepSeek Moby"
       },
       {
+        "command": "deepseek.openCommandRules",
+        "title": "DeepSeek Moby: Command Rules",
+        "category": "DeepSeek Moby"
+      },
+      {
         "command": "deepseek.exportChatHistory",
         "title": "DeepSeek Moby: Export All Chat History",
         "category": "DeepSeek Moby"

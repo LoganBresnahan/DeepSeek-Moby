@@ -700,13 +700,9 @@ body {
   flex-direction: column;
 }
 
-/* Push content to bottom when there are few items */
-/* Apply to first child regardless of type (message, tools-batch, shell-segment, etc) */
-.chat-messages > *:first-child {
-  margin-top: auto;
-}
-
-
+/* Note: margin-top on .virtual-list-content is computed by VirtualListActor.updateContentHeight()
+   to push chat content to the bottom when few messages. CSS margin-top: auto was unreliable
+   in the VS Code webview context, so we use explicit JS-computed values instead. */
 
 
 

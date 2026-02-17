@@ -54,6 +54,10 @@ export type { FileData, FilesState, FilesChangeHandler } from './files';
 export { CommandsShadowActor } from './commands';
 export type { CommandItem, CommandHandler } from './commands';
 
+// Command Rules (command approval rules modal)
+export { CommandRulesModalActor } from './command-rules';
+export type { CommandRule } from './command-rules';
+
 // Model Selector (model dropdown with parameters)
 export { ModelSelectorShadowActor } from './model-selector';
 export type { ModelOption, ModelSettings, ModelChangeHandler as ModelSelectHandler, SettingsChangeHandler } from './model-selector';

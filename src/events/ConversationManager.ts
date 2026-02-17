@@ -16,7 +16,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { Database } from './SqlJsWrapper';
 import { runMigrations } from './migrations';
 import { EventStore } from './EventStore';
-import { SnapshotManager, SummarizerFn, createExtractSummarizer } from './SnapshotManager';
+import { SnapshotManager, SummarizerFn } from './SnapshotManager';
 import { logger } from '../utils/logger';
 import {
   ConversationEvent,
@@ -81,8 +81,8 @@ export interface ConversationManagerOptions {
   encryptionKey?: string;
   /** Event interval for auto-snapshot (default: 20) */
   snapshotInterval?: number;
-  /** Custom summarizer function (default: extractive). Use createLLMSummarizer() for LLM-powered summaries. */
-  summarizer?: SummarizerFn;
+  /** Summarizer function for context compression. Use createLLMSummarizer() from events module. */
+  summarizer: SummarizerFn;
 }
 
 export class ConversationManager {
@@ -92,7 +92,7 @@ export class ConversationManager {
 
   private currentSessionId: string | null = null;
   private context: vscode.ExtensionContext;
-  private options?: ConversationManagerOptions;
+  private options: ConversationManagerOptions;
 
   // Event emitter for UI updates
   private onSessionsChanged: vscode.EventEmitter<void>;
@@ -105,7 +105,12 @@ export class ConversationManager {
   private stmtUpdateSession: Statement;
   private stmtDeleteSession: Statement;
 
-  constructor(context: vscode.ExtensionContext, options?: ConversationManagerOptions) {
+  /** Expose the underlying Database for shared tables (e.g., command_rules). */
+  getDatabase(): Database {
+    return this.db;
+  }
+
+  constructor(context: vscode.ExtensionContext, options: ConversationManagerOptions) {
     this.context = context;
     this.options = options;
 
@@ -128,7 +133,7 @@ export class ConversationManager {
     this.snapshotManager = new SnapshotManager(
       this.db,
       this.eventStore,
-      this.options?.summarizer ?? createExtractSummarizer(),
+      this.options.summarizer,
       {
         snapshotInterval: this.options?.snapshotInterval
       }

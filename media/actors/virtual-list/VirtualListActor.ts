@@ -36,6 +36,7 @@ import type {
   ToolBatchData,
   ShellSegmentData,
   PendingFileData,
+  CommandApprovalData,
   VisibleRange,
   PoolStats,
   VirtualListConfig,
@@ -131,6 +132,7 @@ export class VirtualListActor extends EventStateActor {
 
   private readonly _postMessage: ((message: Record<string, unknown>) => void) | null;
   private readonly _onPendingFileAction: ((action: 'accept' | 'reject' | 'focus', fileId: string, diffId?: string, filePath?: string) => void) | null;
+  private readonly _onCommandApprovalAction: ((command: string, decision: 'allowed' | 'blocked', persistent: boolean, prefix: string) => void) | null;
 
   // ============================================
   // Constructor
@@ -143,6 +145,7 @@ export class VirtualListActor extends EventStateActor {
       config?: VirtualListConfig;
       postMessage?: (message: Record<string, unknown>) => void;
       onPendingFileAction?: (action: 'accept' | 'reject' | 'focus', fileId: string, diffId?: string, filePath?: string) => void;
+      onCommandApprovalAction?: (command: string, decision: 'allowed' | 'blocked', persistent: boolean, prefix: string) => void;
     }
   ) {
     // Create content container inside scroll container
@@ -173,6 +176,7 @@ export class VirtualListActor extends EventStateActor {
     this._contentContainer = contentContainer;
     this._postMessage = options?.postMessage ?? null;
     this._onPendingFileAction = options?.onPendingFileAction ?? null;
+    this._onCommandApprovalAction = options?.onCommandApprovalAction ?? null;
 
     this.setupScrollHandling();
     this.prewarmPool();
@@ -228,7 +232,8 @@ export class VirtualListActor extends EventStateActor {
       manager: this.manager,
       element: hostElement,
       postMessage: this._postMessage ?? undefined,
-      onPendingFileAction: this._onPendingFileAction ?? undefined
+      onPendingFileAction: this._onPendingFileAction ?? undefined,
+      onCommandApprovalAction: this._onCommandApprovalAction ?? undefined,
     };
 
     return new MessageTurnActor(config);
@@ -287,6 +292,7 @@ export class VirtualListActor extends EventStateActor {
       toolBatches: [],
       shellSegments: [],
       pendingFiles: [],
+      commandApprovals: [],
       isStreaming: false,
       contentOrder: []
     };
@@ -335,7 +341,10 @@ export class VirtualListActor extends EventStateActor {
    */
   startStreamingTurn(turnId: string): void {
     const turn = this._turnMap.get(turnId);
-    if (!turn) return;
+    if (!turn) {
+      log.warn('startStreamingTurn: turn not found:', turnId);
+      return;
+    }
 
     turn.isStreaming = true;
     this._streamingTurnId = turnId;
@@ -351,10 +360,13 @@ export class VirtualListActor extends EventStateActor {
 
     if (bound) {
       bound.actor.startStreaming();
-    }
 
-    // Auto-scroll to make the streaming turn visible
-    this.scrollToTurn(turnId);
+      // Measure height after startStreaming() renders the role header.
+      // This gives the turn immediate visible height (V3 fix: no empty gap during API wait).
+      // Forces synchronous layout so _totalHeight and margin-top are correct before paint.
+      this.measureTurnHeight(turnId);
+      log.debug('startStreamingTurn: bound and measured', turnId, `height=${turn.height}`);
+    }
   }
 
   /**
@@ -756,6 +768,62 @@ export class VirtualListActor extends EventStateActor {
     }
   }
 
+  // ============================================
+  // Command Approval Methods
+  // ============================================
+
+  /**
+   * Create an inline command approval widget.
+   */
+  createCommandApproval(turnId: string, command: string, prefix: string): string | null {
+    const turn = this._turnMap.get(turnId);
+    if (!turn) {
+      log.warn(`createCommandApproval: turn ${turnId} not found`);
+      return null;
+    }
+
+    const approvalIndex = turn.commandApprovals.length;
+    const approvalId = `${turnId}-approval-${approvalIndex}`;
+
+    const approval: CommandApprovalData = {
+      id: approvalId,
+      command,
+      prefix,
+      status: 'pending',
+    };
+
+    turn.commandApprovals.push(approval);
+    turn.contentOrder.push({ type: 'approval', index: approvalIndex });
+
+    const bound = this._boundActors.get(turnId);
+    if (bound) {
+      const actorApprovalId = bound.actor.createCommandApproval(command, prefix);
+      approval.actorApprovalId = actorApprovalId;
+    }
+
+    this.updateLayout();
+
+    return approvalId;
+  }
+
+  /**
+   * Resolve a command approval (update status in data and UI).
+   */
+  resolveCommandApproval(turnId: string, approvalId: string, decision: 'allowed' | 'blocked'): void {
+    const turn = this._turnMap.get(turnId);
+    if (!turn) return;
+
+    const approval = turn.commandApprovals.find(a => a.id === approvalId);
+    if (approval) {
+      approval.status = decision;
+
+      const bound = this._boundActors.get(turnId);
+      if (bound && approval.actorApprovalId) {
+        bound.actor.resolveCommandApproval(approval.actorApprovalId, decision);
+      }
+    }
+  }
+
   /**
    * Add a pending file.
    */
@@ -966,12 +1034,12 @@ export class VirtualListActor extends EventStateActor {
     // Restore content
     this.restoreTurnContent(actor, turn);
 
-    // Create ResizeObserver to detect height changes (e.g., code block expansion)
+    // Create ResizeObserver to detect height changes (e.g., code block expansion).
+    // Runs after layout but BEFORE paint — height updates are visible in the same frame.
+    // No requestAnimationFrame: rAF defers to the next frame, causing a 1-frame flash
+    // where margin-top: auto holds the wrong value (content rendered but container stale).
     const resizeObserver = new ResizeObserver(() => {
-      // Debounce to avoid excessive updates during animations
-      requestAnimationFrame(() => {
-        this.measureTurnHeight(turn.turnId);
-      });
+      this.measureTurnHeight(turn.turnId);
     });
     resizeObserver.observe(actor.element);
 
@@ -986,10 +1054,10 @@ export class VirtualListActor extends EventStateActor {
     // Trace actor bind
     this.manager.getTracer()?.traceActorBind(actor.actorId, turn.turnId);
 
-    // Measure height after render
-    requestAnimationFrame(() => {
-      this.measureTurnHeight(turn.turnId);
-    });
+    // Measure height synchronously after first render.
+    // Reading offsetHeight forces layout, giving us the correct initial height
+    // before the browser paints. This avoids the flash from margin-top: auto.
+    this.measureTurnHeight(turn.turnId);
   }
 
   private restoreTurnContent(actor: MessageTurnActor, turn: TurnData): void {
@@ -1067,6 +1135,18 @@ export class VirtualListActor extends EventStateActor {
           }
           break;
         }
+
+        case 'approval': {
+          const approval = turn.commandApprovals[entry.index];
+          if (approval) {
+            const actorApprovalId = actor.createCommandApproval(approval.command, approval.prefix);
+            approval.actorApprovalId = actorApprovalId;
+            if (approval.status !== 'pending' && actorApprovalId) {
+              actor.resolveCommandApproval(actorApprovalId, approval.status);
+            }
+          }
+          break;
+        }
       }
     }
   }
@@ -1083,9 +1163,12 @@ export class VirtualListActor extends EventStateActor {
     const measuredHeight = bound.actor.element.offsetHeight;
 
     if (measuredHeight > 0 && measuredHeight !== turn.height) {
-      const heightDelta = measuredHeight - turn.height;
+      const oldHeight = turn.height;
+      const heightDelta = measuredHeight - oldHeight;
       turn.height = measuredHeight;
       turn.heightMeasured = true;
+
+      log.debug(`measureTurnHeight: ${turnId} ${oldHeight}→${measuredHeight} (Δ${heightDelta > 0 ? '+' : ''}${heightDelta})`);
 
       // Update offsets for all following turns
       for (let i = turn.index + 1; i < this._turns.length; i++) {
@@ -1106,6 +1189,14 @@ export class VirtualListActor extends EventStateActor {
   private updateContentHeight(): void {
     if (this._contentContainer) {
       this._contentContainer.style.height = `${this._totalHeight}px`;
+
+      // Push content to bottom when few messages (chat-style layout).
+      // CSS margin-top: auto was unreliable in VS Code webview, so we compute explicitly.
+      if (this._scrollContainer) {
+        const viewportHeight = this._scrollContainer.clientHeight;
+        const marginTop = Math.max(0, viewportHeight - this._totalHeight);
+        this._contentContainer.style.marginTop = `${marginTop}px`;
+      }
     }
   }
 
@@ -1137,6 +1228,8 @@ export class VirtualListActor extends EventStateActor {
     if (this._scrollContainer) {
       this._visibleRange.viewportHeight = this._scrollContainer.clientHeight;
       this.updateVisibility();
+      // Recompute margin-top for bottom-push layout
+      this.updateContentHeight();
     }
   }
 

@@ -747,6 +747,165 @@ describe('DiffManager', () => {
     });
   });
 
+  // ── Blocking Ask Mode Approval ──
+
+  describe('blocking ask mode approval', () => {
+    let askManager: DiffManager;
+
+    beforeEach(() => {
+      const result = createManager('ask');
+      askManager = result.manager;
+    });
+
+    afterEach(() => {
+      askManager.dispose();
+    });
+
+    describe('waitForPendingApprovals', () => {
+      it('should return empty array when no pending approvals', async () => {
+        const results = await askManager.waitForPendingApprovals();
+        expect(results).toEqual([]);
+      });
+
+      it('should wait for approval and resolve when accepted', async () => {
+        // Access private pendingApprovals via any
+        const mgr = askManager as any;
+
+        // Register a pending approval
+        mgr.registerPendingApproval('diff-1', 'src/test.ts');
+
+        // Start waiting (non-blocking setup)
+        const waitPromise = askManager.waitForPendingApprovals();
+
+        // Simulate acceptance by resolving the pending approval
+        const pending = mgr.pendingApprovals.get('diff-1');
+        expect(pending).toBeDefined();
+        pending.resolve({ filePath: 'src/test.ts', diffId: 'diff-1', approved: true });
+
+        const results = await waitPromise;
+        expect(results).toHaveLength(1);
+        expect(results[0]).toEqual({ filePath: 'src/test.ts', diffId: 'diff-1', approved: true });
+      });
+
+      it('should wait for approval and resolve when rejected', async () => {
+        const mgr = askManager as any;
+        mgr.registerPendingApproval('diff-2', 'src/foo.ts');
+
+        const waitPromise = askManager.waitForPendingApprovals();
+
+        const pending = mgr.pendingApprovals.get('diff-2');
+        pending.resolve({ filePath: 'src/foo.ts', diffId: 'diff-2', approved: false });
+
+        const results = await waitPromise;
+        expect(results).toHaveLength(1);
+        expect(results[0].approved).toBe(false);
+      });
+
+      it('should wait for multiple approvals', async () => {
+        const mgr = askManager as any;
+        mgr.registerPendingApproval('diff-a', 'src/a.ts');
+        mgr.registerPendingApproval('diff-b', 'src/b.ts');
+
+        const waitPromise = askManager.waitForPendingApprovals();
+
+        // Resolve both
+        const pendingA = mgr.pendingApprovals.get('diff-a');
+        const pendingB = mgr.pendingApprovals.get('diff-b');
+        pendingA.resolve({ filePath: 'src/a.ts', diffId: 'diff-a', approved: true });
+        pendingB.resolve({ filePath: 'src/b.ts', diffId: 'diff-b', approved: false });
+
+        const results = await waitPromise;
+        expect(results).toHaveLength(2);
+        expect(results.find(r => r.filePath === 'src/a.ts')?.approved).toBe(true);
+        expect(results.find(r => r.filePath === 'src/b.ts')?.approved).toBe(false);
+      });
+
+      it('should fire onWaitingForApproval event', async () => {
+        const mgr = askManager as any;
+        const spy = vi.fn();
+        askManager.onWaitingForApproval(spy);
+
+        mgr.registerPendingApproval('diff-1', 'src/test.ts');
+        const waitPromise = askManager.waitForPendingApprovals();
+
+        expect(spy).toHaveBeenCalledWith({ filePaths: ['src/test.ts'] });
+
+        // Resolve to unblock
+        mgr.pendingApprovals.get('diff-1').resolve({ filePath: 'src/test.ts', diffId: 'diff-1', approved: true });
+        await waitPromise;
+      });
+    });
+
+    describe('cancelPendingApprovals', () => {
+      it('should resolve all pending approvals as rejected', async () => {
+        const mgr = askManager as any;
+        mgr.registerPendingApproval('diff-1', 'src/a.ts');
+        mgr.registerPendingApproval('diff-2', 'src/b.ts');
+
+        const waitPromise = askManager.waitForPendingApprovals();
+
+        // Cancel all
+        askManager.cancelPendingApprovals();
+
+        const results = await waitPromise;
+        expect(results).toHaveLength(2);
+        expect(results.every(r => r.approved === false)).toBe(true);
+      });
+
+      it('should clear pending approvals map', () => {
+        const mgr = askManager as any;
+        mgr.registerPendingApproval('diff-1', 'src/a.ts');
+        askManager.cancelPendingApprovals();
+        expect(mgr.pendingApprovals.size).toBe(0);
+      });
+    });
+
+    describe('registerPendingApproval (superseded diffs)', () => {
+      it('should auto-reject previous approval for same file', async () => {
+        const mgr = askManager as any;
+
+        // Register first approval for src/test.ts
+        mgr.registerPendingApproval('diff-old', 'src/test.ts');
+        const waitPromise1 = new Promise<any>((resolve) => {
+          mgr.pendingApprovals.get('diff-old').resolve = resolve;
+        });
+
+        // Register second approval for same file — should auto-reject the old one
+        mgr.registerPendingApproval('diff-new', 'src/test.ts');
+
+        const oldResult = await waitPromise1;
+        expect(oldResult.approved).toBe(false);
+        expect(oldResult.diffId).toBe('diff-old');
+
+        // Only the new approval should remain
+        expect(mgr.pendingApprovals.size).toBe(1);
+        expect(mgr.pendingApprovals.has('diff-new')).toBe(true);
+      });
+
+      it('should not affect approvals for different files', () => {
+        const mgr = askManager as any;
+        mgr.registerPendingApproval('diff-1', 'src/a.ts');
+        mgr.registerPendingApproval('diff-2', 'src/b.ts');
+        expect(mgr.pendingApprovals.size).toBe(2);
+      });
+    });
+
+    describe('clearPendingDiffs cancels approvals', () => {
+      it('should cancel pending approvals when clearing diffs', async () => {
+        const mgr = askManager as any;
+        mgr.registerPendingApproval('diff-1', 'src/test.ts');
+
+        const waitPromise = askManager.waitForPendingApprovals();
+
+        askManager.clearPendingDiffs();
+
+        const results = await waitPromise;
+        expect(results).toHaveLength(1);
+        expect(results[0].approved).toBe(false);
+      });
+    });
+  });
+
   // ── dispose ──
 
   describe('dispose', () => {

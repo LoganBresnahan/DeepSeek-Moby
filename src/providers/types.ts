@@ -156,3 +156,28 @@ export interface ShellExecutingEvent {
 export interface ShellResultsEvent {
   results: Array<{ command: string; output: string; success: boolean }>;
 }
+
+// ── Diff Approval Types ──
+
+/** Result of a blocking diff approval in ask mode */
+export interface DiffApprovalResult {
+  filePath: string;
+  diffId: string;
+  approved: boolean;
+}
+
+// ── Command Approval Types ──
+
+/** Payload sent to webview when a command needs user approval */
+export interface CommandApprovalRequiredEvent {
+  command: string;
+  prefix: string;
+}
+
+/** Payload sent from webview when user responds to a command approval */
+export interface CommandApprovalResponseEvent {
+  command: string;
+  decision: 'allowed' | 'blocked';
+  persistent: boolean;
+  prefix?: string;
+}

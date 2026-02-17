@@ -62,7 +62,7 @@ describe('runMigrations', () => {
     runMigrations(db);
 
     const version = db.pragmaGet('user_version');
-    expect(version).toBe(2);
+    expect(version).toBe(3);
   });
 
   it('is idempotent — running twice does not error', () => {
@@ -70,7 +70,7 @@ describe('runMigrations', () => {
     runMigrations(db);
 
     const version = db.pragmaGet('user_version');
-    expect(version).toBe(2);
+    expect(version).toBe(3);
 
     // Tables still exist
     const sessions = db.prepare(
@@ -122,7 +122,7 @@ describe('runMigrations', () => {
     // Run migrations — should not error (IF NOT EXISTS handles existing tables)
     runMigrations(db);
 
-    expect(db.pragmaGet('user_version')).toBe(2);
+    expect(db.pragmaGet('user_version')).toBe(3);
   });
 
   it('preserves existing data when migrating', () => {
@@ -349,7 +349,7 @@ describe('runMigrations', () => {
     // Run migrations (only v2 should run)
     runMigrations(db);
 
-    expect(db.pragmaGet('user_version')).toBe(2);
+    expect(db.pragmaGet('user_version')).toBe(3);
 
     // Verify data is preserved
     const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get('s1') as any;
@@ -390,5 +390,104 @@ describe('runMigrations', () => {
 
     const events = db.prepare('SELECT * FROM events WHERE session_id = ?').all('s1');
     expect(events).toHaveLength(0);
+  });
+
+  // ==========================================================================
+  // Phase 3: command_rules table
+  // ==========================================================================
+
+  it('v3 migration creates command_rules table', () => {
+    runMigrations(db);
+
+    const table = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='command_rules'"
+    ).get();
+    expect(table).toBeDefined();
+  });
+
+  it('v3 migration creates unique index on command_rules', () => {
+    runMigrations(db);
+
+    const indexes = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='index' AND name = 'idx_command_rules_prefix_type'"
+    ).all();
+    expect(indexes.length).toBe(1);
+  });
+
+  it('command_rules table enforces CHECK constraints', () => {
+    runMigrations(db);
+
+    // Invalid type should fail
+    expect(() => {
+      db.prepare(
+        'INSERT INTO command_rules (prefix, type, source, created_at) VALUES (?, ?, ?, ?)'
+      ).run('ls', 'invalid_type', 'user', Date.now());
+    }).toThrow();
+
+    // Invalid source should fail
+    expect(() => {
+      db.prepare(
+        'INSERT INTO command_rules (prefix, type, source, created_at) VALUES (?, ?, ?, ?)'
+      ).run('ls', 'allowed', 'invalid_source', Date.now());
+    }).toThrow();
+  });
+
+  it('command_rules unique index prevents duplicate prefix+type', () => {
+    runMigrations(db);
+
+    db.prepare(
+      'INSERT INTO command_rules (prefix, type, source, created_at) VALUES (?, ?, ?, ?)'
+    ).run('ls', 'allowed', 'default', Date.now());
+
+    // Same prefix+type should fail (unique constraint)
+    expect(() => {
+      db.prepare(
+        'INSERT INTO command_rules (prefix, type, source, created_at) VALUES (?, ?, ?, ?)'
+      ).run('ls', 'allowed', 'user', Date.now());
+    }).toThrow();
+  });
+
+  it('v3 migration runs on existing v2 database', () => {
+    // Simulate a v2 database
+    db.exec(`
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        model TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE events (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        sequence INTEGER NOT NULL,
+        timestamp INTEGER NOT NULL,
+        type TEXT NOT NULL,
+        data TEXT NOT NULL,
+        UNIQUE(session_id, sequence)
+      );
+      CREATE TABLE snapshots (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        up_to_sequence INTEGER NOT NULL,
+        timestamp INTEGER NOT NULL,
+        summary TEXT NOT NULL,
+        key_facts TEXT NOT NULL,
+        files_modified TEXT NOT NULL,
+        token_count INTEGER NOT NULL,
+        UNIQUE(session_id, up_to_sequence)
+      );
+    `);
+    db.pragma('user_version = 2');
+
+    runMigrations(db);
+
+    expect(db.pragmaGet('user_version')).toBe(3);
+
+    // command_rules table should exist
+    const table = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='command_rules'"
+    ).get();
+    expect(table).toBeDefined();
   });
 });

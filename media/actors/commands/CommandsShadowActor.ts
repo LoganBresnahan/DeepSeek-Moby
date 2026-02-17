@@ -51,7 +51,9 @@ const DEFAULT_COMMANDS: CommandItem[] = [
   { id: 'deepseek.clearTrace', name: 'Clear Trace', description: 'Clear trace buffer', icon: '🗑️', section: 'Trace' },
   // Logs section
   { id: 'deepseek.exportLogsAI', name: 'Export Logs (AI)', description: 'LLM-optimized log export', icon: '🤖', section: 'Logs' },
-  { id: 'deepseek.exportLogsHuman', name: 'Export Logs (Full)', description: 'Full detail log export', icon: '📝', section: 'Logs' }
+  { id: 'deepseek.exportLogsHuman', name: 'Export Logs (Full)', description: 'Full detail log export', icon: '📝', section: 'Logs' },
+  // Settings section
+  { id: 'deepseek.openCommandRules', name: 'Command Rules', description: 'Manage command approval rules', icon: '🛡️', section: 'Settings' }
 ];
 
 // ============================================
@@ -145,6 +147,13 @@ export class CommandsShadowActor extends PopupShadowActor {
     // Special handling for history commands - open modal instead
     if (commandId === 'deepseek.showChatHistory' || commandId === 'deepseek.searchChatHistory') {
       this.manager.publishDirect('history.modal.open', true, this.actorId);
+      return;
+    }
+
+    // Special handling for command rules - open rules modal
+    if (commandId === 'deepseek.openCommandRules') {
+      this._vscode.postMessage({ type: 'getCommandRules' });
+      this.manager.publishDirect('rules.modal.open', true, this.actorId);
       return;
     }
 

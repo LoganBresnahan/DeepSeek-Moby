@@ -9,8 +9,17 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { Database } from '../../../src/events/SqlJsWrapper';
 import { runMigrations } from '../../../src/events/migrations';
 import { EventStore } from '../../../src/events/EventStore';
-import { SnapshotManager, createExtractSummarizer } from '../../../src/events/SnapshotManager';
+import { SnapshotManager } from '../../../src/events/SnapshotManager';
+import type { SummarizerFn } from '../../../src/events/SnapshotManager';
 import { ConversationManager, RichHistoryTurn } from '../../../src/events/ConversationManager';
+
+/** Simple deterministic mock summarizer for tests */
+const mockSummarizer: SummarizerFn = async (events) => ({
+  summary: events.map(e => 'content' in e ? (e as any).content : `[${e.type}]`).join('; ') || 'Empty conversation',
+  filesModified: events.filter(e => e.type === 'diff_created').map(e => (e as any).filePath),
+  keyFacts: events.filter(e => e.type === 'user_message').map(e => (e as any).content),
+  tokenCount: Math.ceil(JSON.stringify(events).length / 4)
+});
 
 // Bind getSessionRichHistory to a lightweight mock that has just the eventStore.
 // This avoids the full ConversationManager constructor (which needs vscode context).
@@ -673,7 +682,7 @@ describe('ConversationManager.hasFreshSummary', () => {
     // FK constraints require parent session to exist
     db.prepare('INSERT INTO sessions (id, title, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run(SESSION_ID, 'Test', 'test', 1000, 1000);
     eventStore = new EventStore(db);
-    snapshotManager = new SnapshotManager(db, eventStore, createExtractSummarizer());
+    snapshotManager = new SnapshotManager(db, eventStore, mockSummarizer);
 
     const mockCm = { snapshotManager, eventStore };
     callHasFreshSummary = (sessionId: string, threshold?: number) =>
@@ -789,7 +798,7 @@ describe('ConversationManager.createSnapshot', () => {
     // FK constraints require parent session to exist
     db.prepare('INSERT INTO sessions (id, title, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run(SESSION_ID, 'Test', 'test', 1000, 1000);
     eventStore = new EventStore(db);
-    snapshotManager = new SnapshotManager(db, eventStore, createExtractSummarizer());
+    snapshotManager = new SnapshotManager(db, eventStore, mockSummarizer);
 
     const mockCm = { snapshotManager };
     callCreateSnapshot = (sessionId: string) => createSnapshot.call(mockCm, sessionId);
@@ -814,7 +823,7 @@ describe('ConversationManager.createSnapshot', () => {
     const snapshot = snapshotManager.getLatestSnapshot(SESSION_ID);
     expect(snapshot).not.toBeNull();
     expect(snapshot!.sessionId).toBe(SESSION_ID);
-    expect(snapshot!.summary).toContain('Conversation topics:');
+    expect(snapshot!.summary).toContain('Message 0');
   });
 });
 
@@ -834,7 +843,7 @@ describe('ConversationManager.recordAssistantMessage — no auto-snapshot', () =
       .run(SESSION_ID, 'Test', 'deepseek-chat', Date.now(), Date.now());
     eventStore = new EventStore(db);
     // Use small interval so we can test that auto-snapshot does NOT fire
-    snapshotManager = new SnapshotManager(db, eventStore, createExtractSummarizer(), { snapshotInterval: 3 });
+    snapshotManager = new SnapshotManager(db, eventStore, mockSummarizer, { snapshotInterval: 3 });
   });
 
   afterEach(() => {
@@ -884,7 +893,7 @@ describe('ConversationManager.getLatestSnapshotSummary', () => {
     db.prepare('INSERT INTO sessions (id, title, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run('session-A', 'A', 'test', 1000, 1000);
     db.prepare('INSERT INTO sessions (id, title, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run('session-B', 'B', 'test', 1000, 1000);
     eventStore = new EventStore(db);
-    snapshotManager = new SnapshotManager(db, eventStore, createExtractSummarizer());
+    snapshotManager = new SnapshotManager(db, eventStore, mockSummarizer);
 
     const mockCm = { snapshotManager };
     callGetSummary = (sessionId: string) => getLatestSnapshotSummary.call(mockCm, sessionId);
@@ -919,8 +928,7 @@ describe('ConversationManager.getLatestSnapshotSummary', () => {
     expect(result!.summary.length).toBeGreaterThan(0);
     expect(result!.tokenCount).toBeGreaterThan(0);
     expect(result!.snapshotId).toBeDefined();
-    // The extractive summarizer prefixes with "Conversation topics:"
-    expect(result!.summary).toContain('Conversation topics:');
+    expect(result!.summary).toContain('Message 0');
   });
 
   it('returns undefined for session with no snapshots even if other sessions have them', async () => {

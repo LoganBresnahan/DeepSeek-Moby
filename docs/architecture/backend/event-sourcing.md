@@ -163,17 +163,10 @@ Two summarizer implementations are available (`src/events/SnapshotManager.ts`):
 │                                                                              │
 │  Bounded input: O(1) per cycle — only previous summary + delta events       │
 │                                                                              │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                  Extractive Summarizer (createExtractSummarizer)              │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  No LLM needed — extracts key facts, user topics, and file modifications    │
-│  from events using pattern matching. Used as fallback.                       │
-│                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Both implement `SummarizerFn`:
+The summarizer implements `SummarizerFn`:
 ```typescript
 type SummarizerFn = (events: ConversationEvent[], previousSummary?: string) => Promise<SnapshotContent>;
 ```

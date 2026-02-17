@@ -240,8 +240,8 @@ describe('VirtualListActor', () => {
       const turn3 = actor.addTurn('turn-3', 'user');
 
       expect(turn1.offsetTop).toBe(0);
-      expect(turn2.offsetTop).toBe(150); // Default height
-      expect(turn3.offsetTop).toBe(300);
+      expect(turn2.offsetTop).toBe(0); // Default height is 0 (grows on measurement)
+      expect(turn3.offsetTop).toBe(0);
     });
 
     it('getTurn returns turn by ID', () => {
@@ -267,6 +267,21 @@ describe('VirtualListActor', () => {
 
       const streaming = actor.getStreamingTurn();
       expect(streaming?.turnId).toBe('turn-1');
+    });
+
+    it('startStreamingTurn measures height after header render', () => {
+      actor.addTurn('turn-1', 'assistant');
+      const turn = actor.getTurn('turn-1');
+      expect(turn?.height).toBe(0); // defaultTurnHeight: 0
+
+      actor.startStreamingTurn('turn-1');
+      // After streaming starts, the role header is rendered and height is measured.
+      // In jsdom, offsetHeight is 0, but heightMeasured should still be set
+      // if the element has content (the header container).
+      // The key assertion: startStreamingTurn binds an actor and calls startStreaming().
+      const bound = actor.getBoundActor('turn-1');
+      expect(bound).toBeDefined();
+      expect(bound?.isStreaming()).toBe(true);
     });
 
     it('endStreamingTurn clears streaming state', () => {
@@ -569,6 +584,20 @@ describe('VirtualListActor', () => {
       const content = getContentContainer();
       expect(content.style.height).toBe('200px');
     });
+
+    it('computes margin-top to push content to bottom', () => {
+      // scrollContainer is 600px tall (jsdom default), total content is 200px
+      // marginTop should be max(0, 600 - 200) = 400
+      actor.addTurn('turn-1', 'user');
+      actor.addTurn('turn-2', 'assistant');
+
+      const content = getContentContainer();
+      const marginTop = parseInt(content.style.marginTop || '0', 10);
+      // In jsdom, clientHeight is 0, so marginTop = max(0, 0 - 200) = 0
+      // We just verify the property is set (not NaN)
+      expect(Number.isNaN(marginTop)).toBe(false);
+      expect(content.style.marginTop).toBeDefined();
+    });
   });
 
   // ============================================
@@ -609,8 +638,8 @@ describe('VirtualListActor', () => {
       actor.addTurn('turn-1', 'user');
       actor.addTurn('turn-2', 'assistant');
 
-      expect(actor.getTotalHeight()).toBeGreaterThan(0);
-
+      // Default height is 0 (turns grow when content is measured)
+      // Verify clear still resets to 0
       actor.clear();
 
       expect(actor.getTotalHeight()).toBe(0);

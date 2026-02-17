@@ -16,7 +16,7 @@
 import { Database } from './SqlJsWrapper';
 import { logger } from '../utils/logger';
 
-const LATEST_VERSION = 2;
+const LATEST_VERSION = 3;
 
 export function runMigrations(db: Database): void {
   const version = db.pragmaGet('user_version');
@@ -114,6 +114,22 @@ export function runMigrations(db: Database): void {
 
       -- Recreate index on snapshots
       CREATE INDEX IF NOT EXISTS idx_snapshots_session ON snapshots(session_id, up_to_sequence DESC);
+    `);
+  }
+
+  if (version < 3) {
+    logger.info('[Migrations] Applying version 3: command_rules table');
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS command_rules (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        prefix TEXT NOT NULL,
+        type TEXT NOT NULL CHECK(type IN ('allowed', 'blocked')),
+        source TEXT NOT NULL DEFAULT 'user' CHECK(source IN ('default', 'user')),
+        created_at INTEGER NOT NULL
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_command_rules_prefix_type
+        ON command_rules(prefix, type);
     `);
   }
 

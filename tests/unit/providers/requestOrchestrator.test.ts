@@ -70,7 +70,24 @@ vi.mock('vscode', async (importOriginal) => {
   };
 });
 
+// Mock reasonerShellExecutor so shell commands don't actually execute
+vi.mock('../../../src/tools/reasonerShellExecutor', async (importOriginal) => {
+  const original = await importOriginal<Record<string, unknown>>();
+  return {
+    ...original,
+    executeShellCommands: vi.fn(async (commands: any[]) =>
+      commands.map((c: any) => ({
+        command: c.command,
+        output: `mock output for: ${c.command}`,
+        success: true,
+        executionTimeMs: 10,
+      }))
+    ),
+  };
+});
+
 import { RequestOrchestrator } from '../../../src/providers/requestOrchestrator';
+import { executeShellCommands } from '../../../src/tools/reasonerShellExecutor';
 import type {
   StartResponseEvent,
   EndResponseEvent,
@@ -164,8 +181,11 @@ function createMockDiffManager() {
     currentEditMode: 'manual' as 'manual' | 'ask' | 'auto',
     emitAutoAppliedChanges: vi.fn(),
     handleAutoShowDiff: vi.fn(async () => {}),
+    handleAskModeDiff: vi.fn(async () => {}),
     applyCodeDirectlyForAutoMode: vi.fn(async () => true),
     setFlushCallback: vi.fn(),
+    waitForPendingApprovals: vi.fn(async () => []),
+    cancelPendingApprovals: vi.fn(),
   };
 }
 
@@ -800,6 +820,217 @@ describe('RequestOrchestrator', () => {
       await orchestrator.handleMessage('Hello', 'session-1', async () => '', undefined);
 
       expect(mockConversation.createSnapshot).toHaveBeenCalledWith('session-1');
+    });
+  });
+
+  // ── Command Approval Gate ──
+
+  describe('command approval gate', () => {
+    function createMockCommandApprovalManager() {
+      return {
+        checkCommand: vi.fn(() => 'allowed' as 'allowed' | 'blocked' | 'ask'),
+        addRule: vi.fn(),
+        removeRule: vi.fn(),
+        getAllRules: vi.fn(() => []),
+        resetToDefaults: vi.fn(),
+        extractPrefix: vi.fn((cmd: string) => cmd.split(' ').slice(0, 2).join(' ')),
+        splitCompoundCommand: vi.fn((cmd: string) => [cmd]),
+        requestApproval: vi.fn(async (cmd: string) => ({ command: cmd, decision: 'blocked' as const, persistent: false })),
+        cancelPendingApproval: vi.fn(),
+      };
+    }
+
+    it('should accept optional CommandApprovalManager in constructor', () => {
+      const mockApproval = createMockCommandApprovalManager();
+      const orch = new RequestOrchestrator(
+        mockClient as any,
+        mockConversation as any,
+        mockStatusBar as any,
+        mockDiffManager as any,
+        mockWebSearch as any,
+        mockFileContext as any,
+        mockApproval as any,
+      );
+      expect(orch).toBeDefined();
+    });
+
+    it('should work without CommandApprovalManager (backward compatible)', () => {
+      const orch = new RequestOrchestrator(
+        mockClient as any,
+        mockConversation as any,
+        mockStatusBar as any,
+        mockDiffManager as any,
+        mockWebSearch as any,
+        mockFileContext as any,
+      );
+      expect(orch).toBeDefined();
+    });
+
+    it('should call checkCommand for each shell command when manager is present', async () => {
+      const mockApproval = createMockCommandApprovalManager();
+      mockApproval.checkCommand.mockReturnValue('allowed');
+
+      const orch = new RequestOrchestrator(
+        mockClient as any,
+        mockConversation as any,
+        mockStatusBar as any,
+        mockDiffManager as any,
+        mockWebSearch as any,
+        mockFileContext as any,
+        mockApproval as any,
+      );
+
+      // Setup reasoner model that returns shell commands
+      mockClient.isReasonerModel.mockReturnValue(true);
+      mockClient.streamChat.mockImplementation(async (
+        _messages: any,
+        onToken: (token: string) => void,
+        _systemPrompt: string,
+        _onReasoning?: (token: string) => void,
+      ) => {
+        const content = 'Let me check the files.\n<shell>ls -la</shell>\n<shell>pwd</shell>';
+        onToken(content);
+        return content;
+      });
+
+      // allowAllShellCommands = false (default) so approval gate is active
+      configStore.set('allowAllShellCommands', false);
+
+      const shellEvents: ShellResultsEvent[] = [];
+      orch.onShellResults(e => shellEvents.push(e));
+
+      await orch.handleMessage('List files', 'session-1', async () => '', undefined);
+
+      // checkCommand should have been called for each parsed shell command
+      expect(mockApproval.checkCommand).toHaveBeenCalledWith('ls -la');
+      expect(mockApproval.checkCommand).toHaveBeenCalledWith('pwd');
+    });
+
+    it('should skip blocked commands and include blocked feedback in results', async () => {
+      const mockApproval = createMockCommandApprovalManager();
+      // Block "rm" commands, allow "ls"
+      mockApproval.checkCommand.mockImplementation((cmd: string) => {
+        if (cmd.startsWith('ls')) return 'allowed';
+        if (cmd.startsWith('rm')) return 'blocked';
+        return 'ask';
+      });
+
+      const orch = new RequestOrchestrator(
+        mockClient as any,
+        mockConversation as any,
+        mockStatusBar as any,
+        mockDiffManager as any,
+        mockWebSearch as any,
+        mockFileContext as any,
+        mockApproval as any,
+      );
+
+      mockClient.isReasonerModel.mockReturnValue(true);
+      mockClient.streamChat.mockImplementation(async (
+        _messages: any,
+        onToken: (token: string) => void,
+      ) => {
+        const content = '<shell>ls</shell>\n<shell>rm -rf /tmp/test</shell>';
+        onToken(content);
+        return content;
+      });
+
+      configStore.set('allowAllShellCommands', false);
+
+      const shellResults: ShellResultsEvent[] = [];
+      orch.onShellResults(e => shellResults.push(e));
+
+      await orch.handleMessage('Clean up', 'session-1', async () => '', undefined);
+
+      // Should have results for both commands
+      expect(shellResults.length).toBeGreaterThan(0);
+      const allResults = shellResults[0].results;
+
+      // The blocked command should show up with a blocked message
+      const blockedResult = allResults.find(r => r.command === 'rm -rf /tmp/test');
+      expect(blockedResult).toBeDefined();
+      expect(blockedResult!.success).toBe(false);
+      expect(blockedResult!.output).toContain('blocked');
+    });
+
+    it('should block "ask" commands and await requestApproval', async () => {
+      const mockApproval = createMockCommandApprovalManager();
+      mockApproval.checkCommand.mockReturnValue('ask');
+      // Simulate user blocking the command
+      mockApproval.requestApproval.mockResolvedValue({
+        command: 'curl https://example.com',
+        decision: 'blocked',
+        persistent: false,
+      });
+
+      const orch = new RequestOrchestrator(
+        mockClient as any,
+        mockConversation as any,
+        mockStatusBar as any,
+        mockDiffManager as any,
+        mockWebSearch as any,
+        mockFileContext as any,
+        mockApproval as any,
+      );
+
+      mockClient.isReasonerModel.mockReturnValue(true);
+      mockClient.streamChat.mockImplementation(async (
+        _messages: any,
+        onToken: (token: string) => void,
+      ) => {
+        const content = '<shell>curl https://example.com</shell>';
+        onToken(content);
+        return content;
+      });
+
+      configStore.set('allowAllShellCommands', false);
+
+      const shellResults: ShellResultsEvent[] = [];
+      orch.onShellResults(e => shellResults.push(e));
+
+      await orch.handleMessage('Fetch data', 'session-1', async () => '', undefined);
+
+      // requestApproval should have been called
+      expect(mockApproval.requestApproval).toHaveBeenCalledWith('curl https://example.com');
+
+      // Blocked result should appear in shell results
+      expect(shellResults.length).toBeGreaterThan(0);
+      const result = shellResults[0].results.find(r => r.command.includes('curl'));
+      expect(result).toBeDefined();
+      expect(result!.success).toBe(false);
+      expect(result!.output).toContain('blocked');
+    });
+
+    it('should bypass approval gate when allowAllShellCommands is true', async () => {
+      const mockApproval = createMockCommandApprovalManager();
+
+      const orch = new RequestOrchestrator(
+        mockClient as any,
+        mockConversation as any,
+        mockStatusBar as any,
+        mockDiffManager as any,
+        mockWebSearch as any,
+        mockFileContext as any,
+        mockApproval as any,
+      );
+
+      mockClient.isReasonerModel.mockReturnValue(true);
+      mockClient.streamChat.mockImplementation(async (
+        _messages: any,
+        onToken: (token: string) => void,
+      ) => {
+        const content = '<shell>some-unknown-command</shell>';
+        onToken(content);
+        return content;
+      });
+
+      // Enable bypass mode
+      configStore.set('allowAllShellCommands', true);
+
+      await orch.handleMessage('Do something', 'session-1', async () => '', undefined);
+
+      // checkCommand should NOT have been called — bypass mode skips the gate
+      expect(mockApproval.checkCommand).not.toHaveBeenCalled();
     });
   });
 

@@ -12,6 +12,7 @@ import { FileContextManager } from './fileContextManager';
 import { DiffManager } from './diffManager';
 import { SettingsManager } from './settingsManager';
 import { RequestOrchestrator } from './requestOrchestrator';
+import { CommandApprovalManager } from './commandApprovalManager';
 
 export class ChatProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'deepseek-chat-view';
@@ -31,6 +32,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
   private diffManager: DiffManager;
   private settingsManager: SettingsManager;
   private requestOrchestrator: RequestOrchestrator;
+  private commandApprovalManager: CommandApprovalManager;
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
@@ -54,9 +56,12 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     const editMode = (config.get<string>('editMode') || 'manual') as 'manual' | 'ask' | 'auto';
     this.diffManager = new DiffManager(new DiffEngine(), this.fileContextManager, editMode);
     this.settingsManager = new SettingsManager(this.deepSeekClient);
+    // Create command approval manager (uses the same encrypted DB)
+    this.commandApprovalManager = new CommandApprovalManager(this.conversationManager.getDatabase());
     this.requestOrchestrator = new RequestOrchestrator(
       this.deepSeekClient, this.conversationManager, this.statusBar,
-      this.diffManager, this.webSearchManager, this.fileContextManager
+      this.diffManager, this.webSearchManager, this.fileContextManager,
+      this.commandApprovalManager
     );
 
     // Wire manager events → webview
@@ -143,6 +148,9 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     });
     this.diffManager.onEditRejected(data => {
       this._view?.webview.postMessage({ type: 'editRejected', filePath: data.filePath });
+    });
+    this.diffManager.onWaitingForApproval(data => {
+      this._view?.webview.postMessage({ type: 'waitingForApproval', filePaths: data.filePaths });
     });
 
     // SettingsManager → webview
@@ -236,6 +244,20 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       this._summarizing = false;
       logger.info('[ChatProvider] Summarization completed — queuing disabled');
     });
+
+    // CommandApprovalManager → webview
+    this.commandApprovalManager.onApprovalRequired(data => {
+      this._view?.webview.postMessage({
+        type: 'commandApprovalRequired',
+        command: data.command,
+        prefix: data.prefix,
+      });
+    });
+
+    // Forward rules changes to webview (for rules modal live updates)
+    this.commandApprovalManager.onRulesChanged(rules => {
+      this._view?.webview.postMessage({ type: 'commandRulesList', rules });
+    });
   }
 
   // ── Lifecycle ──
@@ -246,6 +268,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     this.diffManager.dispose();
     this.settingsManager.dispose();
     this.requestOrchestrator.dispose();
+    this.commandApprovalManager.dispose();
     this.disposables.forEach(d => d.dispose());
   }
 
@@ -469,6 +492,44 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         case 'exportAllHistory':
           await this.exportAllHistoryToFile(data.format);
           break;
+        // Command approval response from webview
+        case 'commandApprovalResponse': {
+          const decision = data.decision as 'allowed' | 'blocked';
+          const persistent = data.persistent as boolean;
+          const prefix = data.prefix as string | undefined;
+          const command = data.command as string;
+          // If "Always Allow/Block", persist the rule
+          if (persistent && prefix) {
+            this.commandApprovalManager.addRule(prefix, decision);
+          }
+          // Resolve the pending approval Promise
+          this.commandApprovalManager.resolveApproval({
+            command,
+            decision,
+            persistent,
+            prefix,
+          });
+          // Notify webview to update the approval widget UI
+          this._view?.webview.postMessage({
+            type: 'commandApprovalResolved',
+            command,
+            decision,
+          });
+          break;
+        }
+        // Command rules management (rules modal)
+        case 'getCommandRules':
+          this.sendCommandRules();
+          break;
+        case 'addCommandRule':
+          this.commandApprovalManager.addRule(data.prefix as string, data.ruleType as 'allowed' | 'blocked');
+          break;
+        case 'removeCommandRule':
+          this.commandApprovalManager.removeRule(data.id as number);
+          break;
+        case 'resetCommandRulesToDefaults':
+          this.commandApprovalManager.resetToDefaults();
+          break;
         // Webview trace events - merge into extension trace collector
         case 'traceEvents':
           // Log time alignment diagnostic if webview sent sync time
@@ -552,6 +613,23 @@ export class ChatProvider implements vscode.WebviewViewProvider {
   }
 
   /**
+   * Open the command rules modal in the chat view.
+   */
+  public async openRulesModal() {
+    this.reveal();
+    await new Promise(resolve => setTimeout(resolve, 100));
+    if (this._view) {
+      this.sendCommandRules();
+      this._view.webview.postMessage({ type: 'openRulesModal' });
+    }
+  }
+
+  private sendCommandRules(): void {
+    const rules = this.commandApprovalManager.getAllRules();
+    this._view?.webview.postMessage({ type: 'commandRulesList', rules });
+  }
+
+  /**
    * Show stats in the chat view.
    * Reveals the chat panel and displays usage statistics.
    */
@@ -628,6 +706,8 @@ export class ChatProvider implements vscode.WebviewViewProvider {
 
     // Clear diff state for new conversation
     this.diffManager.clearSession();
+    this.diffManager.cancelPendingApprovals();
+    this.commandApprovalManager.cancelPendingApproval();
 
     // Create a new session for fresh conversation
     const editor = vscode.window.activeTextEditor;

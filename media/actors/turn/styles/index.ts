@@ -76,7 +76,7 @@ const textStyles = `
 .message-divider {
   display: flex;
   align-items: center;
-  margin-bottom: 0;
+  margin-bottom: 5px;
 }
 
 .message-divider::before,
@@ -107,7 +107,7 @@ const textStyles = `
   color: var(--vscode-editor-foreground, #cccccc);
   word-wrap: break-word;
   overflow-wrap: break-word;
-  padding: 15px 0;
+  padding: 0;
 }
 
 /* File attachments */
@@ -565,16 +565,6 @@ const toolsStyles = `
   text-align: center;
 }
 
-.tool-status.spinning {
-  animation: spin 1s linear infinite;
-  display: inline-block;
-}
-
-@keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
-}
-
 .tool-item[data-status="pending"] .tool-status {
   color: var(--vscode-descriptionForeground);
 }
@@ -709,11 +699,6 @@ const shellStyles = `
   flex-shrink: 0;
   width: 14px;
   text-align: center;
-}
-
-.shell-status.spinning {
-  animation: spin 1s linear infinite;
-  display: inline-block;
 }
 
 .shell-item[data-status="pending"] .shell-status {
@@ -967,6 +952,127 @@ const pendingStyles = `
 `;
 
 // ============================================
+// Command Approval Styles
+// ============================================
+
+const approvalStyles = `
+/* Approval container */
+:host(.approval-container) {
+  display: block;
+  margin: 8px 0;
+  border: 1px solid var(--vscode-terminal-ansiYellow, #cca700);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--vscode-editorWidget-background, #252526);
+}
+
+:host(.approval-container.resolved) {
+  border-color: var(--vscode-panel-border);
+  opacity: 0.85;
+}
+
+:host(.approval-container.resolved:hover) {
+  opacity: 1;
+}
+
+:host(.approval-container.allowed) {
+  border-color: var(--vscode-terminal-ansiGreen, #89d185);
+}
+
+:host(.approval-container.blocked) {
+  border-color: var(--vscode-errorForeground, #f48771);
+}
+
+.approval-header {
+  display: flex;
+  align-items: center;
+  padding: 8px 12px;
+  gap: 8px;
+}
+
+.approval-header .approval-icon {
+  flex-shrink: 0;
+  font-size: 14px;
+}
+
+.approval-header .approval-title {
+  color: var(--vscode-foreground);
+  font-weight: 500;
+  font-size: 13px;
+}
+
+.approval-header .approval-title code {
+  font-family: var(--vscode-editor-font-family);
+  font-size: 12px;
+  padding: 1px 4px;
+  background: var(--vscode-textCodeBlock-background);
+  border-radius: 3px;
+}
+
+.approval-header.resolved .approval-title {
+  font-weight: 400;
+}
+
+.approval-command {
+  padding: 6px 12px 8px;
+  border-top: 1px solid var(--vscode-panel-border);
+  background: var(--vscode-textCodeBlock-background, #1e1e1e);
+}
+
+.approval-command code {
+  font-family: var(--vscode-editor-font-family);
+  font-size: 12px;
+  color: var(--vscode-terminal-foreground, #cccccc);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--vscode-panel-border);
+}
+
+.approval-btn {
+  padding: 4px 10px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: var(--vscode-font-family);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+  background: var(--vscode-button-secondaryBackground, #3a3d41);
+  color: var(--vscode-button-secondaryForeground, #cccccc);
+}
+
+.approval-btn:hover {
+  background: var(--vscode-button-secondaryHoverBackground, #45494e);
+}
+
+.approval-btn.allow-once {
+  background: var(--vscode-button-background, #0e639c);
+  color: var(--vscode-button-foreground, #ffffff);
+  border-color: var(--vscode-button-background, #0e639c);
+}
+
+.approval-btn.allow-once:hover {
+  background: var(--vscode-button-hoverBackground, #1177bb);
+}
+
+.approval-btn.always-allow {
+  color: var(--vscode-terminal-ansiGreen, #89d185);
+  border-color: var(--vscode-terminal-ansiGreen, #89d185);
+}
+
+.approval-btn.always-block {
+  color: var(--vscode-errorForeground, #f48771);
+  border-color: var(--vscode-errorForeground, #f48771);
+}
+`;
+
+// ============================================
 // Export Combined Styles
 // ============================================
 
@@ -977,4 +1083,5 @@ ${thinkingStyles}
 ${toolsStyles}
 ${shellStyles}
 ${pendingStyles}
+${approvalStyles}
 `;

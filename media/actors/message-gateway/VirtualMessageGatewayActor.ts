@@ -205,6 +205,15 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         }
         break;
 
+      // ---- Command Approval Messages ----
+      case 'commandApprovalRequired':
+        this.handleCommandApprovalRequired(msg);
+        break;
+
+      case 'commandApprovalResolved':
+        this.handleCommandApprovalResolved(msg);
+        break;
+
       // ---- Pending Files Messages ----
       case 'pendingFileAdd':
         this.handlePendingFileAdd(msg);
@@ -353,6 +362,15 @@ export class VirtualMessageGatewayActor extends EventStateActor {
 
       case 'openHistoryModal':
         this._manager.publishDirect('history.modal.open', true);
+        break;
+
+      // ---- Command Rules Modal Messages ----
+      case 'commandRulesList':
+        this._manager.publishDirect('rules.list', msg.rules);
+        break;
+
+      case 'openRulesModal':
+        this._manager.publishDirect('rules.modal.open', true);
         break;
 
       case 'codeApplied':
@@ -616,6 +634,49 @@ export class VirtualMessageGatewayActor extends EventStateActor {
   }
 
   // ============================================
+  // Command Approval Message Handlers
+  // ============================================
+
+  private _pendingApprovalId: string | null = null;
+
+  private handleCommandApprovalRequired(msg: { type: string; [key: string]: unknown }): void {
+    const { virtualList } = this._actors;
+    const command = msg.command as string;
+    const prefix = msg.prefix as string;
+
+    if (!this._currentTurnId || !command) {
+      log.warn('commandApprovalRequired: no current turn or missing command');
+      return;
+    }
+
+    // Finalize text segment before approval widget
+    if (!this._hasInterleaved) {
+      const finalized = virtualList.finalizeCurrentSegment(this._currentTurnId);
+      if (finalized) {
+        this._hasInterleaved = true;
+      }
+    }
+
+    this._pendingApprovalId = virtualList.createCommandApproval(
+      this._currentTurnId,
+      command,
+      prefix
+    );
+
+    log.debug(`commandApprovalRequired: created approval ${this._pendingApprovalId} for "${command}"`);
+  }
+
+  private handleCommandApprovalResolved(msg: { type: string; [key: string]: unknown }): void {
+    const { virtualList } = this._actors;
+    const decision = msg.decision as 'allowed' | 'blocked';
+
+    if (!this._currentTurnId || !this._pendingApprovalId || !decision) return;
+
+    virtualList.resolveCommandApproval(this._currentTurnId, this._pendingApprovalId, decision);
+    this._pendingApprovalId = null;
+  }
+
+  // ============================================
   // Tool Calls Message Handlers
   // ============================================
 
@@ -720,6 +781,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         const globalMatch = virtualList.findPendingFileGlobal(diff.diffId);
         if (globalMatch) {
           if (globalMatch.file.status !== status) {
+            log.debug(`diffListChanged: global match for ${diff.filePath} (diffId=${diff.diffId}) in turn ${globalMatch.turnId}, ${globalMatch.file.status}→${status}`);
             virtualList.updatePendingStatus(globalMatch.turnId, globalMatch.file.id, status);
           }
           continue;
@@ -729,16 +791,27 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       // Second: check current turn by filePath (same file re-edited with new diffId)
       const existingByPath = currentPaths.get(diff.filePath);
       if (existingByPath) {
-        if (diff.diffId && existingByPath.diffId !== diff.diffId) {
-          existingByPath.diffId = diff.diffId;
+        // If the existing entry is already resolved (rejected/applied) and this is a new diffId,
+        // treat it as a new entry so retries get their own pending group
+        const isResolved = existingByPath.status === 'rejected' || existingByPath.status === 'applied';
+        if (isResolved && diff.diffId && existingByPath.diffId !== diff.diffId) {
+          log.debug(`diffListChanged: ${diff.filePath} resolved (${existingByPath.status}) with new diffId — creating new pending entry`);
+          // Fall through to create a new pending file entry
+        } else {
+          if (diff.diffId && existingByPath.diffId !== diff.diffId) {
+            log.debug(`diffListChanged: updating diffId for ${diff.filePath}: ${existingByPath.diffId}→${diff.diffId}`);
+            existingByPath.diffId = diff.diffId;
+          }
+          if (existingByPath.status !== status) {
+            log.debug(`diffListChanged: path match for ${diff.filePath}, ${existingByPath.status}→${status}`);
+            virtualList.updatePendingStatus(turnId, existingByPath.id, status);
+          }
+          continue;
         }
-        if (existingByPath.status !== status) {
-          virtualList.updatePendingStatus(turnId, existingByPath.id, status);
-        }
-        continue;
       }
 
       // Truly new diff — add to current turn
+      log.debug(`diffListChanged: new pending file ${diff.filePath} (diffId=${diff.diffId}) status=${status}`);
       virtualList.addPendingFile(turnId, {
         filePath: diff.filePath,
         diffId: diff.diffId,

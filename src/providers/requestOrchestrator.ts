@@ -33,6 +33,7 @@ import type {
   ShellExecutingEvent,
   ShellResultsEvent,
 } from './types';
+import type { CommandApprovalManager } from './commandApprovalManager';
 
 export class RequestOrchestrator {
   // ── Events (streaming) ──
@@ -96,6 +97,7 @@ export class RequestOrchestrator {
     private diffManager: DiffManager,
     private webSearchManager: WebSearchManager,
     private fileContextManager: FileContextManager,
+    private commandApprovalManager?: CommandApprovalManager,
   ) {
     // DiffManager needs to flush the content buffer before emitting events
     this.diffManager.setFlushCallback(() => {
@@ -317,6 +319,17 @@ export class RequestOrchestrator {
         await this.diffManager.detectAndProcessUnfencedEdits(cleanResponse);
       }
 
+      // End-of-response blocking: wait for any remaining pending approvals in ask mode
+      if (this.diffManager.currentEditMode === 'ask') {
+        const finalApprovals = await this.diffManager.waitForPendingApprovals();
+        if (finalApprovals.length > 0) {
+          const feedbackLines = finalApprovals.map(r =>
+            r.approved ? `✓ User ACCEPTED changes to ${r.filePath}` : `✗ User REJECTED changes to ${r.filePath}`
+          );
+          logger.info(`[RequestOrchestrator] End-of-response approval results:\n${feedbackLines.join('\n')}`);
+        }
+      }
+
       // Finalize response
       this._onEndResponse.fire({
         role: 'assistant',
@@ -429,6 +442,8 @@ export class RequestOrchestrator {
       this.abortController = null;
       logger.apiAborted();
     }
+    this.diffManager.cancelPendingApprovals();
+    this.commandApprovalManager?.cancelPendingApproval();
     this._onGenerationStopped.fire();
   }
 
@@ -650,6 +665,43 @@ export class RequestOrchestrator {
         }
       }
 
+      // BLOCKING APPROVAL: In ask mode, wait for user to approve/reject all diffs from this iteration
+      if (this.diffManager.currentEditMode === 'ask') {
+        if (this.contentBuffer) {
+          this.contentBuffer.flush();
+        }
+
+        const approvalResults = await this.diffManager.waitForPendingApprovals();
+        if (approvalResults.length > 0) {
+          const feedbackLines = approvalResults.map(r =>
+            r.approved
+              ? `✓ User ACCEPTED changes to ${r.filePath}`
+              : `✗ User REJECTED changes to ${r.filePath}`
+          );
+          const feedback = feedbackLines.join('\n');
+          logger.info(`[RequestOrchestrator] Ask mode approval results:\n${feedback}`);
+
+          // Inject as user message so the LLM sees the results
+          currentHistoryMessages.push({
+            role: 'assistant',
+            content: iterationResponse
+          });
+          currentHistoryMessages.push({
+            role: 'user',
+            content: `Edit approval results:\n${feedback}\n\n${
+              approvalResults.some(r => !r.approved)
+                ? 'Some edits were rejected. Please adjust your approach based on this feedback.'
+                : 'All edits were accepted.'
+            }\n\nOriginal task: "${originalUserMessage}"`
+          });
+
+          // Force another iteration so the LLM can react
+          shellIteration++;
+          lastIterationHadShellCommands = true;
+          continue;
+        }
+      }
+
       // Check for shell commands AND web search tags in THIS iteration's response AND reasoning
       const combinedForShellCheck = iterationResponse + (state.currentIterationReasoning || '');
       const hasShell = isReasonerModel && containsShellCommands(combinedForShellCheck);
@@ -693,12 +745,60 @@ export class RequestOrchestrator {
             const shellConfig = vscode.workspace.getConfiguration('deepseek');
             const allowAllCommands = shellConfig.get<boolean>('allowAllShellCommands') ?? false;
 
-            // Execute commands
+            // ── Command Approval Gate ──
+            // If bypass mode is off and CommandApprovalManager is available,
+            // filter commands through the approval system before execution.
+            let approvedCommands = commands;
+            const blockedResults: ShellResult[] = [];
+
+            if (!allowAllCommands && this.commandApprovalManager) {
+              approvedCommands = [];
+              for (const cmd of commands) {
+                const decision = this.commandApprovalManager.checkCommand(cmd.command);
+                if (decision === 'allowed') {
+                  approvedCommands.push(cmd);
+                } else if (decision === 'blocked') {
+                  logger.info(`[CommandApproval] BLOCKED: "${cmd.command}"`);
+                  blockedResults.push({
+                    command: cmd.command,
+                    output: 'Command blocked by security rules.',
+                    success: false,
+                    executionTimeMs: 0,
+                  });
+                } else {
+                  // 'ask' — block and wait for user approval via webview
+                  logger.info(`[CommandApproval] Requesting approval: "${cmd.command}"`);
+
+                  // Flush content buffer so the approval widget appears after streamed content
+                  if (this.contentBuffer) {
+                    this.contentBuffer.flush();
+                  }
+
+                  const result = await this.commandApprovalManager.requestApproval(cmd.command);
+
+                  if (result.decision === 'allowed') {
+                    logger.info(`[CommandApproval] APPROVED${result.persistent ? ' (always)' : ''}: "${cmd.command}"`);
+                    approvedCommands.push(cmd);
+                  } else {
+                    logger.info(`[CommandApproval] DENIED${result.persistent ? ' (always)' : ''}: "${cmd.command}"`);
+                    blockedResults.push({
+                      command: cmd.command,
+                      output: 'Command blocked by user.',
+                      success: false,
+                      executionTimeMs: 0,
+                    });
+                  }
+                }
+              }
+            }
+
+            // Execute approved commands
             const shellStartTime = Date.now();
             logger.info(`[Timing] Shell execution started at ${new Date().toISOString()}`);
-            const results = await executeShellCommands(commands, workspacePath, {
-              allowAllCommands
-            });
+            const executedResults = approvedCommands.length > 0
+              ? await executeShellCommands(approvedCommands, workspacePath, { allowAllCommands })
+              : [];
+            const results = [...blockedResults, ...executedResults];
             const shellDuration = Date.now() - shellStartTime;
             logger.info(`[Timing] Shell execution completed in ${shellDuration}ms`);
             state.shellResultsForHistory.push(...results);
@@ -1123,10 +1223,27 @@ export class RequestOrchestrator {
 
               if (args.code) {
                 if (this.diffManager.currentEditMode === 'ask') {
-                  logger.info(`[RequestOrchestrator] Triggering auto-diff for apply_code_edit in ask mode`);
+                  logger.info(`[RequestOrchestrator] Triggering blocking diff for apply_code_edit in ask mode`);
                   const codeWithHeader = `# File: ${args.file}\n${args.code}`;
                   const language = args.language || 'plaintext';
-                  await this.diffManager.handleAutoShowDiff(codeWithHeader, language);
+                  await this.diffManager.handleAskModeDiff(codeWithHeader, language);
+
+                  // Wait for user approval before continuing tool loop
+                  const approvalResults = await this.diffManager.waitForPendingApprovals();
+                  if (approvalResults.length > 0) {
+                    const r = approvalResults[0];
+                    result = r.approved
+                      ? `Code edit applied to ${args.file}. User accepted the changes.`
+                      : `Code edit rejected for ${args.file}. User rejected the changes. Please try a different approach.`;
+                  }
+
+                  // Close the current tool batch after approval so retries render in a fresh batch
+                  if (toolContainerStarted) {
+                    this._onToolCallsEnd.fire();
+                    toolContainerStarted = false;
+                    logger.info(`[Frontend] Sent toolCallsEnd (ask mode approval, closing batch after iteration ${iterations})`);
+                    batchToolDetails = [];
+                  }
                 } else if (this.diffManager.currentEditMode === 'auto') {
                   logger.info(`[RequestOrchestrator] Auto-applying code edit for: ${args.file}`);
                   const applied = await this.diffManager.applyCodeDirectlyForAutoMode(args.file, args.code, args.description, true);
@@ -1155,15 +1272,19 @@ export class RequestOrchestrator {
           accumulatedToolTokens += this.deepSeekClient.estimateTokens(result);
         }
 
-        // Update status to done
+        // Update status to done (skip batch update if batch was closed mid-loop, e.g., ask mode approval)
         const finalStatus = success ? 'done' : 'error';
-        batchToolDetails[batchIndex].status = finalStatus;
         allToolDetails[globalIndex].status = finalStatus;
-        this._onToolCallUpdate.fire({
-          index: batchIndex,
-          status: finalStatus,
-          detail: detail.detail
-        });
+        if (batchIndex < batchToolDetails.length) {
+          batchToolDetails[batchIndex].status = finalStatus;
+          this._onToolCallUpdate.fire({
+            index: batchIndex,
+            status: finalStatus,
+            detail: detail.detail
+          });
+        } else {
+          logger.debug(`[ToolLoop] Skipping batch UI update — batch was closed (batchIndex=${batchIndex}, batchLen=${batchToolDetails.length})`);
+        }
       }
 
       // Update global index for next iteration

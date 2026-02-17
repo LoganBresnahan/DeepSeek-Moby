@@ -56,6 +56,8 @@ export interface MessageTurnActorConfig {
   postMessage?: (message: Record<string, unknown>) => void;
   /** Callback when pending file action is triggered */
   onPendingFileAction?: (action: 'accept' | 'reject' | 'focus', fileId: string, diffId?: string, filePath?: string) => void;
+  /** Callback when command approval action is triggered */
+  onCommandApprovalAction?: (command: string, decision: 'allowed' | 'blocked', persistent: boolean, prefix: string) => void;
 }
 
 // ============================================
@@ -109,6 +111,13 @@ export class MessageTurnActor extends InterleavedShadowActor {
   private _shellSegments: Map<string, ShellSegment> = new Map();
 
   // ============================================
+  // Command Approval State
+  // ============================================
+
+  private _commandApprovals: Map<string, { id: string; command: string; prefix: string; status: 'pending' | 'allowed' | 'blocked'; containerId: string }> = new Map();
+  private _approvalCounter = 0;
+
+  // ============================================
   // Pending Files State
   // ============================================
 
@@ -124,12 +133,20 @@ export class MessageTurnActor extends InterleavedShadowActor {
   private _hasInterleaved = false;
 
   // ============================================
+  // Header State
+  // ============================================
+
+  /** Whether the role header ("DEEPSEEK MOBY" / "YOU") has been rendered */
+  private _headerRendered = false;
+
+  // ============================================
   // Configuration
   // ============================================
 
   private _editMode: EditMode = 'manual';
   private readonly _postMessage: ((message: Record<string, unknown>) => void) | null;
   private readonly _onPendingFileAction: ((action: 'accept' | 'reject' | 'focus', fileId: string, diffId?: string, filePath?: string) => void) | null;
+  private readonly _onCommandApprovalAction: ((command: string, decision: 'allowed' | 'blocked', persistent: boolean, prefix: string) => void) | null;
 
   // ============================================
   // Constructor
@@ -156,6 +173,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
 
     this._postMessage = config.postMessage ?? null;
     this._onPendingFileAction = config.onPendingFileAction ?? null;
+    this._onCommandApprovalAction = config.onCommandApprovalAction ?? null;
   }
 
   // ============================================
@@ -205,9 +223,14 @@ export class MessageTurnActor extends InterleavedShadowActor {
     this._currentPendingGroup = null;
     this._pendingIteration = 0;
 
+    // Reset command approvals
+    this._commandApprovals.clear();
+    this._approvalCounter = 0;
+
     // Reset streaming state
     this._isStreaming = false;
     this._hasInterleaved = false;
+    this._headerRendered = false;
 
     // Remove data attributes
     this.element.removeAttribute('data-turn-id');
@@ -264,6 +287,14 @@ export class MessageTurnActor extends InterleavedShadowActor {
     this._isStreaming = true;
     this._hasInterleaved = false;
     this.publish({ 'turn.streaming': true });
+
+    // Render role header immediately so the turn has visible height from the start.
+    // Without this, V3 (Chat) assistant turns stay empty until the first API chunk arrives,
+    // creating a visible gap. R1 doesn't have this issue because iterationStart fires
+    // before the API call, triggering startThinkingIteration → ensureRoleHeader().
+    // ensureRoleHeader() is idempotent (checks _headerRendered), so subsequent calls are no-ops.
+    this.ensureRoleHeader();
+    log.debug('startStreaming:', this._turnId, `role=${this._role}`);
   }
 
   endStreaming(): void {
@@ -452,6 +483,36 @@ export class MessageTurnActor extends InterleavedShadowActor {
   }
 
   // ============================================
+  // Role Header
+  // ============================================
+
+  /**
+   * Ensure the role header divider ("DEEPSEEK MOBY" / "YOU") is rendered.
+   * Called before thinking/tool containers so the header always appears first.
+   * If a text segment is created first, it renders the header itself.
+   */
+  private ensureRoleHeader(): void {
+    if (this._headerRendered) return;
+
+    const roleLabel = this._role === 'user' ? 'YOU' : 'DEEPSEEK MOBY';
+
+    const container = this.createContainer('header', {
+      hostClasses: ['header-container', this._role === 'user' ? 'user' : 'assistant'],
+      skipAnimation: true
+    });
+
+    container.content.innerHTML = `
+      <div class="message ${this._role}">
+        <div class="message-divider">
+          <span class="message-divider-label">${roleLabel}</span>
+        </div>
+      </div>
+    `;
+
+    this._headerRendered = true;
+  }
+
+  // ============================================
   // Thinking Methods
   // ============================================
 
@@ -459,6 +520,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
    * Start a new thinking iteration.
    */
   startThinkingIteration(): number {
+    this.ensureRoleHeader();
     this._currentPendingGroup = null;
 
     // Complete the previous thinking iteration (stops pulse animation)
@@ -570,6 +632,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
    * Start a new tool batch.
    */
   startToolBatch(tools: Array<{ name: string; detail: string }>): string {
+    this.ensureRoleHeader();
     this._currentPendingGroup = null;
     const container = this.createContainer('message', {
       hostClasses: ['tools-container'],
@@ -765,22 +828,39 @@ export class MessageTurnActor extends InterleavedShadowActor {
     // Search across ALL pending groups for the file
     for (const group of this._pendingGroups) {
       let file = group.files.get(fileId);
+      let matchedBy = file ? 'fileId' : '';
       // Fallback: VirtualListActor uses different IDs than MessageTurnActor,
       // so look up by diffId or filePath when the fileId doesn't match.
+      // IMPORTANT: Prefer diffId over filePath to avoid matching the wrong group
+      // when multiple groups have files with the same path (e.g., retries).
       if (!file && (diffId || filePath)) {
         for (const f of group.files.values()) {
-          if ((diffId && f.diffId === diffId) || (filePath && f.filePath === filePath)) {
+          if (diffId) {
+            if (f.diffId === diffId) {
+              file = f;
+              matchedBy = 'diffId';
+              break;
+            }
+          } else if (filePath && f.filePath === filePath) {
             file = f;
+            matchedBy = 'filePath';
             break;
           }
         }
       }
       if (file) {
+        const oldStatus = file.status;
         file.status = status;
+        if (diffId && file.diffId !== diffId) {
+          log.debug(`updatePendingStatus: updating diffId ${file.diffId}→${diffId}`);
+          file.diffId = diffId;
+        }
+        log.debug(`updatePendingStatus: ${file.filePath} ${oldStatus}→${status} (matched by ${matchedBy})`);
         this.renderPendingGroup(group);
         return;
       }
     }
+    log.warn(`updatePendingStatus: file not found — fileId=${fileId} diffId=${diffId} filePath=${filePath}`);
   }
 
   /**
@@ -810,14 +890,18 @@ export class MessageTurnActor extends InterleavedShadowActor {
   private renderTextSegment(segment: TextSegment, container: ShadowContainer): void {
     const isUser = this._role === 'user';
     const roleLabel = isUser ? 'YOU' : 'DEEPSEEK MOBY';
+    // Show divider unless it's a continuation or the header was already rendered
+    // (e.g., by ensureRoleHeader() before a thinking iteration)
+    const showDivider = !segment.isContinuation && !this._headerRendered;
 
     let html = `<div class="message ${this._role}${segment.isContinuation ? ' continuation' : ''}">`;
 
-    // Divider (not for continuations)
-    if (!segment.isContinuation) {
+    // Divider (not for continuations, not if header already rendered)
+    if (showDivider) {
       html += `<div class="message-divider">`;
       html += `<span class="message-divider-label">${roleLabel}</span>`;
       html += `</div>`;
+      this._headerRendered = true;
     }
 
     // Files (user messages only)
@@ -900,12 +984,10 @@ export class MessageTurnActor extends InterleavedShadowActor {
     batch.calls.forEach((call, i) => {
       const tree = i === batch.calls.length - 1 ? '└─' : '├─';
       const statusIcon = this.getStatusIcon(call.status);
-      const spinning = call.status === 'running' ? ' spinning' : '';
-
       itemsHtml += `
         <div class="tool-item" data-status="${call.status}">
           <span class="tool-tree">${tree}</span>
-          <span class="tool-status${spinning}">${statusIcon}</span>
+          <span class="tool-status">${statusIcon}</span>
           <span class="tool-name">${this.escapeHtml(call.name)}</span>
           <span class="tool-detail">${this.escapeHtml(call.detail)}</span>
         </div>
@@ -954,8 +1036,6 @@ export class MessageTurnActor extends InterleavedShadowActor {
     segment.commands.forEach((cmd, i) => {
       const tree = i === segment.commands.length - 1 ? '└─' : '├─';
       const statusIcon = this.getStatusIcon(cmd.status);
-      const spinning = cmd.status === 'running' ? ' spinning' : '';
-
       let outputHtml = '';
       if (cmd.output) {
         const outputClass = cmd.success ? 'success' : 'error';
@@ -966,7 +1046,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
         <div class="shell-item" data-status="${cmd.status}">
           <div class="shell-item-row">
             <span class="shell-tree">${tree}</span>
-            <span class="shell-status${spinning}">${statusIcon}</span>
+            <span class="shell-status">${statusIcon}</span>
             <span class="shell-command">${this.escapeHtml(cmd.command)}</span>
           </div>
           ${outputHtml}
@@ -1212,6 +1292,110 @@ export class MessageTurnActor extends InterleavedShadowActor {
       const diffId = btn.getAttribute('data-diff-id');
       if (fileId && this._onPendingFileAction) {
         this._onPendingFileAction('reject', fileId, diffId || undefined);
+      }
+    });
+  }
+
+  // ============================================
+  // Command Approval Methods
+  // ============================================
+
+  /**
+   * Create an inline command approval widget.
+   */
+  createCommandApproval(command: string, prefix: string): string {
+    // Break any pending group chain
+    this._currentPendingGroup = null;
+
+    const container = this.createContainer('message', {
+      hostClasses: ['approval-container'],
+      dataAttributes: { 'turn-id': this._turnId ?? '' }
+    });
+
+    const approvalId = container.id;
+    this._approvalCounter++;
+
+    this._commandApprovals.set(approvalId, {
+      id: approvalId,
+      command,
+      prefix,
+      status: 'pending',
+      containerId: container.id,
+    });
+
+    this.renderCommandApproval(approvalId);
+    this.setupApprovalHandlers(container.id);
+
+    return approvalId;
+  }
+
+  /**
+   * Resolve a command approval (update status).
+   */
+  resolveCommandApproval(approvalId: string, decision: 'allowed' | 'blocked'): void {
+    const approval = this._commandApprovals.get(approvalId);
+    if (!approval) return;
+
+    approval.status = decision;
+    this.renderCommandApproval(approvalId);
+  }
+
+  private renderCommandApproval(approvalId: string): void {
+    const approval = this._commandApprovals.get(approvalId);
+    if (!approval) return;
+
+    const container = this.getContainer(approval.containerId);
+    if (!container) return;
+
+    const isPending = approval.status === 'pending';
+    const isAllowed = approval.status === 'allowed';
+
+    container.host.classList.toggle('resolved', !isPending);
+    container.host.classList.toggle('allowed', isAllowed);
+    container.host.classList.toggle('blocked', approval.status === 'blocked');
+
+    if (isPending) {
+      container.content.innerHTML = `
+        <div class="approval-header">
+          <span class="approval-icon">⚡</span>
+          <span class="approval-title">Command approval required</span>
+        </div>
+        <div class="approval-command">
+          <code>$ ${this.escapeHtml(approval.command)}</code>
+        </div>
+        <div class="approval-actions">
+          <button class="approval-btn allow-once" data-approval-id="${approvalId}" data-decision="allowed" data-persistent="false">Allow Once</button>
+          <button class="approval-btn always-allow" data-approval-id="${approvalId}" data-decision="allowed" data-persistent="true">Always Allow "${this.escapeHtml(approval.prefix)}"</button>
+          <button class="approval-btn block-once" data-approval-id="${approvalId}" data-decision="blocked" data-persistent="false">Block Once</button>
+          <button class="approval-btn always-block" data-approval-id="${approvalId}" data-decision="blocked" data-persistent="true">Always Block "${this.escapeHtml(approval.prefix)}"</button>
+        </div>
+      `;
+    } else {
+      const icon = isAllowed ? '✓' : '✗';
+      const label = isAllowed ? 'Allowed' : 'Blocked';
+      container.content.innerHTML = `
+        <div class="approval-header resolved">
+          <span class="approval-icon">${icon}</span>
+          <span class="approval-title">${label}: <code>${this.escapeHtml(approval.command)}</code></span>
+        </div>
+      `;
+    }
+  }
+
+  private setupApprovalHandlers(containerId: string): void {
+    this.delegateInContainer(containerId, 'click', '.approval-btn', (e, btn) => {
+      e.stopPropagation();
+      const approvalId = btn.getAttribute('data-approval-id');
+      const decision = btn.getAttribute('data-decision') as 'allowed' | 'blocked';
+      const persistent = btn.getAttribute('data-persistent') === 'true';
+
+      if (!approvalId || !decision) return;
+
+      const approval = this._commandApprovals.get(approvalId);
+      if (!approval || approval.status !== 'pending') return;
+
+      if (this._onCommandApprovalAction) {
+        this._onCommandApprovalAction(approval.command, decision, persistent, approval.prefix);
       }
     });
   }

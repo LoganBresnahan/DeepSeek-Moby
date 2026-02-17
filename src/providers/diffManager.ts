@@ -10,7 +10,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { DiffEngine } from '../utils/diff';
 import { logger } from '../utils/logger';
-import { DiffMetadata, DiffInfo, DiffListChangedEvent, CodeAppliedEvent } from './types';
+import { DiffMetadata, DiffInfo, DiffListChangedEvent, CodeAppliedEvent, DiffApprovalResult } from './types';
 import { FileContextManager } from './fileContextManager';
 import { extractCodeBlocks } from '../utils/codeBlocks';
 
@@ -25,6 +25,7 @@ export class DiffManager {
   private readonly _onWarning = new vscode.EventEmitter<{ message: string }>();
   private readonly _onEditConfirm = new vscode.EventEmitter<{ filePath: string; code: string; language: string }>();
   private readonly _onEditRejected = new vscode.EventEmitter<{ filePath: string }>();
+  private readonly _onWaitingForApproval = new vscode.EventEmitter<{ filePaths: string[] }>();
 
   readonly onDiffListChanged = this._onDiffListChanged.event;
   readonly onAutoAppliedFilesChanged = this._onAutoAppliedFilesChanged.event;
@@ -34,6 +35,7 @@ export class DiffManager {
   readonly onWarning = this._onWarning.event;
   readonly onEditConfirm = this._onEditConfirm.event;
   readonly onEditRejected = this._onEditRejected.event;
+  readonly onWaitingForApproval = this._onWaitingForApproval.event;
 
   // ── State ──
 
@@ -50,6 +52,10 @@ export class DiffManager {
   private fileEditCounts = new Map<string, number>();
   private currentResponseFileChanges: Array<{ filePath: string; status: 'applied' | 'rejected' | 'pending'; iteration: number }> = [];
   private closingDiffsInProgress: number = 0;
+  private pendingApprovals = new Map<string, {
+    resolve: (result: DiffApprovalResult) => void;
+    filePath: string;
+  }>();
 
   private disposables: vscode.Disposable[] = [];
   private flushCallback: (() => void) | null = null;
@@ -88,6 +94,15 @@ export class DiffManager {
             }
             logger.info(`[OVERLAY-DEBUG] Removing diff for ${metadata.targetFilePath} due to manual tab close`);
             this.activeDiffs.delete(uriKey);
+
+            // Resolve pending approval as rejected if one exists (blocking ask mode)
+            const pendingApproval = this.pendingApprovals.get(metadata.diffId);
+            if (pendingApproval) {
+              logger.info(`[DiffManager] Manual tab close resolves pending approval as rejected: ${metadata.diffId}`);
+              pendingApproval.resolve({ filePath: metadata.targetFilePath, diffId: metadata.diffId, approved: false });
+              this.pendingApprovals.delete(metadata.diffId);
+            }
+
             this.updateDiffStatusBar();
             this.notifyDiffListChanged();
             break;
@@ -498,6 +513,13 @@ export class DiffManager {
       await this.focusTargetFile(metadata.targetFilePath);
       this.sendCodeAppliedStatus(true);
 
+      // Resolve pending approval if one exists (blocking ask mode)
+      const pendingApproval = this.pendingApprovals.get(diffId);
+      if (pendingApproval) {
+        pendingApproval.resolve({ filePath: metadata.targetFilePath, diffId, approved: true });
+        this.pendingApprovals.delete(diffId);
+      }
+
     } catch (error: any) {
       logger.error(`[DiffManager] Failed to accept diff ${diffId}:`, error.message);
       this.sendCodeAppliedStatus(false, error.message);
@@ -523,6 +545,13 @@ export class DiffManager {
 
     this.updateFileChangeStatus(metadata.targetFilePath, metadata.iteration, 'rejected');
     await this.closeSingleDiff(metadata);
+
+    // Resolve pending approval if one exists (blocking ask mode)
+    const pendingApproval = this.pendingApprovals.get(diffId);
+    if (pendingApproval) {
+      pendingApproval.resolve({ filePath: metadata.targetFilePath, diffId, approved: false });
+      this.pendingApprovals.delete(diffId);
+    }
   }
 
   async acceptAllDiffs(): Promise<void> {
@@ -783,7 +812,7 @@ export class DiffManager {
         }
 
         if (this.editMode === 'ask') {
-          this.handleDebouncedDiff(block.content, block.language);
+          await this.handleAskModeDiff(block.content, block.language);
         } else if (this.editMode === 'auto') {
           const filePath = fileHeaderMatch[1].trim();
           const codeWithoutHeader = block.content.replace(/^#\s*File:.*\n/i, '');
@@ -832,6 +861,75 @@ export class DiffManager {
       logger.error('[DiffManager] Failed to auto-show diff:', error.message);
       this._onWarning.fire({ message: `Failed to show diff: ${error.message}` });
     }
+  }
+
+  // ── Blocking Ask Mode Approval ──
+
+  /**
+   * Show a diff immediately and register it for blocking approval.
+   * Used in ask mode instead of handleDebouncedDiff().
+   */
+  async handleAskModeDiff(code: string, language: string): Promise<void> {
+    await this.handleAutoShowDiff(code, language);
+
+    const filePath = code.match(/^#\s*File:\s*(.+?)$/m)?.[1]?.trim();
+    if (!filePath) return;
+
+    const metadata = Array.from(this.activeDiffs.values())
+      .find(m => m.targetFilePath === filePath && !m.superseded);
+    if (!metadata) return;
+
+    this.registerPendingApproval(metadata.diffId, filePath);
+  }
+
+  private registerPendingApproval(diffId: string, filePath: string): void {
+    // If there's already a pending approval for this file (superseded), reject it
+    for (const [existingId, existing] of this.pendingApprovals.entries()) {
+      if (existing.filePath === filePath) {
+        logger.info(`[DiffManager] Superseding pending approval for ${filePath} (old: ${existingId}, new: ${diffId})`);
+        existing.resolve({ filePath, diffId: existingId, approved: false });
+        this.pendingApprovals.delete(existingId);
+      }
+    }
+
+    this.pendingApprovals.set(diffId, {
+      resolve: () => {},  // placeholder, replaced by waitForPendingApprovals
+      filePath
+    });
+  }
+
+  /**
+   * Wait for all pending approvals to be resolved (accept/reject/tab-close).
+   * Called by RequestOrchestrator at iteration boundaries.
+   */
+  async waitForPendingApprovals(): Promise<DiffApprovalResult[]> {
+    if (this.pendingApprovals.size === 0) return [];
+
+    const filePaths = Array.from(this.pendingApprovals.values()).map(p => p.filePath);
+    this._onWaitingForApproval.fire({ filePaths });
+    logger.info(`[DiffManager] Waiting for ${this.pendingApprovals.size} pending approval(s): ${filePaths.join(', ')}`);
+
+    const promises: Promise<DiffApprovalResult>[] = [];
+    for (const [diffId, pending] of this.pendingApprovals.entries()) {
+      promises.push(new Promise<DiffApprovalResult>((resolve) => {
+        pending.resolve = resolve;
+      }));
+    }
+
+    const results = await Promise.all(promises);
+    this.pendingApprovals.clear();
+    return results;
+  }
+
+  /**
+   * Cancel all pending approvals (resolves them as rejected).
+   * Called on stop generation, new conversation, etc.
+   */
+  cancelPendingApprovals(): void {
+    for (const [diffId, pending] of this.pendingApprovals.entries()) {
+      pending.resolve({ filePath: pending.filePath, diffId, approved: false });
+    }
+    this.pendingApprovals.clear();
   }
 
   handleDebouncedDiff(code: string, language: string): void {
@@ -921,6 +1019,7 @@ export class DiffManager {
       logger.info(`[DiffManager] Cleared pending diff timer for ${filePath}`);
     }
     this.pendingDiffs.clear();
+    this.cancelPendingApprovals();
   }
 
   clearResponseFileChanges(): void {
@@ -1079,6 +1178,7 @@ which I already edited - would you like me to update it?"
     this._onWarning.dispose();
     this._onEditConfirm.dispose();
     this._onEditRejected.dispose();
+    this._onWaitingForApproval.dispose();
     this.disposables.forEach(d => d.dispose());
   }
 

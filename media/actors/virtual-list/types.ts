@@ -56,6 +56,9 @@ export interface TurnData {
   /** Pending files content */
   pendingFiles: PendingFileData[];
 
+  /** Command approval widgets */
+  commandApprovals: CommandApprovalData[];
+
   /** Whether streaming is active for this turn */
   isStreaming: boolean;
 
@@ -71,7 +74,7 @@ export interface TurnData {
  * Used to restore content in the correct interleaved order.
  */
 export interface ContentOrderEntry {
-  type: 'text' | 'thinking' | 'tools' | 'shell' | 'pending';
+  type: 'text' | 'thinking' | 'tools' | 'shell' | 'pending' | 'approval';
   index: number;
 }
 
@@ -133,6 +136,15 @@ export interface PendingFileData {
   iteration: number;
 }
 
+export interface CommandApprovalData {
+  id: string;
+  command: string;
+  prefix: string;
+  status: 'pending' | 'allowed' | 'blocked';
+  /** Actor's internal approval ID when bound */
+  actorApprovalId?: string;
+}
+
 // ============================================
 // Visibility Range
 // ============================================
@@ -185,7 +197,7 @@ export interface VirtualListConfig {
 export const DEFAULT_CONFIG: Required<VirtualListConfig> = {
   minPoolSize: 5,
   maxPoolSize: 20,
-  defaultTurnHeight: 150,
+  defaultTurnHeight: 0,
   overscan: 2,
   scrollDebounce: 16
 };

@@ -131,6 +131,7 @@ function registerCommands(context: vscode.ExtensionContext) {
     
     // Chat History Commands
     { name: 'showChatHistory', handler: () => chatProvider.openHistoryModal() },
+    { name: 'openCommandRules', handler: () => chatProvider.openRulesModal() },
     { name: 'exportChatHistory', handler: () => commandProvider.exportChatHistory() },
     { name: 'importChatHistory', handler: () => commandProvider.importChatHistory() },
     { name: 'clearChatHistory', handler: () => commandProvider.clearChatHistory() },

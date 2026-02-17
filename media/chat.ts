@@ -23,6 +23,7 @@ import {
   HistoryShadowActor,
   FilesShadowActor,
   CommandsShadowActor,
+  CommandRulesModalActor,
   ModelSelectorShadowActor,
   SettingsShadowActor
 } from './actors';
@@ -165,6 +166,15 @@ function initializeActorSystem(): void {
         // to opening the file directly if the diff was already applied/closed
         vscode.postMessage({ type: 'focusFile', diffId, filePath });
       }
+    },
+    onCommandApprovalAction: (command, decision, persistent, prefix) => {
+      vscode.postMessage({
+        type: 'commandApprovalResponse',
+        command,
+        decision,
+        persistent,
+        prefix,
+      });
     }
   });
 
@@ -199,6 +209,13 @@ function initializeActorSystem(): void {
   filesHost.style.cssText = 'position: fixed; top: 0; left: 0; width: 0; height: 0;';
   document.body.appendChild(filesHost);
   const files = new FilesShadowActor(manager, filesHost, vscode);
+
+  // CommandRulesModalActor - Command rules management modal
+  const rulesHost = document.createElement('div');
+  rulesHost.id = 'rulesHost';
+  rulesHost.style.cssText = 'position: fixed; top: 0; left: 0; width: 0; height: 0;';
+  document.body.appendChild(rulesHost);
+  const commandRules = new CommandRulesModalActor(manager, rulesHost, vscode);
 
   // CommandsShadowActor - Commands dropdown (positioned relative to button)
   const commandsHost = getElementOrNull<HTMLElement>('commandsBtn')?.parentElement;
@@ -418,6 +435,7 @@ function initializeActorSystem(): void {
     toolbar,
     history,
     files,
+    commandRules,
     commands,
     modelSelector,
     settings,
