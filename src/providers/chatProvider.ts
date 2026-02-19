@@ -670,7 +670,8 @@ export class ChatProvider implements vscode.WebviewViewProvider {
 
   private sendCommandRules(): void {
     const rules = this.commandApprovalManager.getAllRules();
-    this._view?.webview.postMessage({ type: 'commandRulesList', rules });
+    const allowAll = vscode.workspace.getConfiguration('deepseek').get<boolean>('allowAllShellCommands') ?? false;
+    this._view?.webview.postMessage({ type: 'commandRulesList', rules, allowAll });
   }
 
   /**

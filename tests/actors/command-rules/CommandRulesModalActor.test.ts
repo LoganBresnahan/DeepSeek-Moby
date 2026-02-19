@@ -3,9 +3,11 @@
  *
  * Tests the Shadow DOM modal for command rules management including:
  * - Modal structure rendering
- * - Rules list display (allowed/blocked sections)
+ * - Allow-all toggle switch
+ * - Filter chips (All / Approved / Blocked)
+ * - Search filtering
+ * - Unified rules list with checkboxes and delete buttons
  * - Add rule form
- * - Delete rule button
  * - Reset to defaults
  * - Pub/sub integration
  */
@@ -17,6 +19,21 @@ import { EventStateManager } from '../../../media/state/EventStateManager';
 const createMockVSCode = () => ({
   postMessage: vi.fn()
 });
+
+const sampleRules: CommandRule[] = [
+  { id: 1, prefix: 'ls', type: 'allowed', source: 'default', created_at: 1000 },
+  { id: 2, prefix: 'cat', type: 'allowed', source: 'default', created_at: 1000 },
+  { id: 3, prefix: 'npm install', type: 'allowed', source: 'user', created_at: 2000 },
+  { id: 4, prefix: 'rm -rf', type: 'blocked', source: 'default', created_at: 1000 },
+  { id: 5, prefix: 'sudo', type: 'blocked', source: 'default', created_at: 1000 },
+  { id: 6, prefix: 'curl', type: 'blocked', source: 'user', created_at: 2000 },
+];
+
+/** Helper: publish rules and return the items */
+function publishAndGetItems(manager: EventStateManager, element: HTMLElement, rules: CommandRule[] = sampleRules) {
+  manager.publishDirect('rules.list', rules);
+  return element.shadowRoot?.querySelectorAll('.rule-item');
+}
 
 describe('CommandRulesModalActor', () => {
   let manager: EventStateManager;
@@ -53,7 +70,7 @@ describe('CommandRulesModalActor', () => {
       expect(sheets?.length).toBeGreaterThan(0);
     });
 
-    it('renders modal structure', () => {
+    it('renders modal structure with search', () => {
       actor = new CommandRulesModalActor(manager, element, mockVSCode);
 
       const backdrop = element.shadowRoot?.querySelector('.modal-backdrop');
@@ -61,12 +78,14 @@ describe('CommandRulesModalActor', () => {
       const header = element.shadowRoot?.querySelector('.modal-header');
       const body = element.shadowRoot?.querySelector('.modal-body');
       const footer = element.shadowRoot?.querySelector('.modal-footer');
+      const search = element.shadowRoot?.querySelector('.modal-search');
 
       expect(backdrop).toBeTruthy();
       expect(modal).toBeTruthy();
       expect(header).toBeTruthy();
       expect(body).toBeTruthy();
       expect(footer).toBeTruthy();
+      expect(search).toBeTruthy();
     });
 
     it('renders title with shield icon', () => {
@@ -74,6 +93,14 @@ describe('CommandRulesModalActor', () => {
 
       const title = element.shadowRoot?.querySelector('.modal-title');
       expect(title?.textContent).toContain('Command Rules');
+    });
+
+    it('renders allow-all bar, filter row, and rules list in body', () => {
+      actor = new CommandRulesModalActor(manager, element, mockVSCode);
+
+      expect(element.shadowRoot?.querySelector('.allow-all-bar')).toBeTruthy();
+      expect(element.shadowRoot?.querySelector('.filter-row')).toBeTruthy();
+      expect(element.shadowRoot?.querySelector('.rules-list')).toBeTruthy();
     });
   });
 
@@ -122,57 +149,130 @@ describe('CommandRulesModalActor', () => {
   });
 
   // ============================================
-  // Rules list rendering
+  // Allow-all toggle
   // ============================================
 
-  describe('Rules list rendering', () => {
-    const sampleRules: CommandRule[] = [
-      { id: 1, prefix: 'ls', type: 'allowed', source: 'default', created_at: 1000 },
-      { id: 2, prefix: 'cat', type: 'allowed', source: 'default', created_at: 1000 },
-      { id: 3, prefix: 'npm install', type: 'allowed', source: 'user', created_at: 2000 },
-      { id: 4, prefix: 'rm -rf', type: 'blocked', source: 'default', created_at: 1000 },
-      { id: 5, prefix: 'sudo', type: 'blocked', source: 'default', created_at: 1000 },
-      { id: 6, prefix: 'curl', type: 'blocked', source: 'user', created_at: 2000 },
-    ];
-
+  describe('Allow-all toggle', () => {
     beforeEach(() => {
       actor = new CommandRulesModalActor(manager, element, mockVSCode);
     });
 
-    it('renders allowed and blocked sections', () => {
-      manager.publishDirect('rules.list', sampleRules);
+    it('renders allow-all toggle bar', () => {
+      const bar = element.shadowRoot?.querySelector('.allow-all-bar');
+      const toggle = element.shadowRoot?.querySelector('[data-allow-all]') as HTMLInputElement;
 
-      const sections = element.shadowRoot?.querySelectorAll('.rules-section');
-      expect(sections?.length).toBe(2);
+      expect(bar).toBeTruthy();
+      expect(toggle).toBeTruthy();
+      expect(toggle?.type).toBe('checkbox');
     });
 
-    it('shows correct section headers with counts', () => {
-      manager.publishDirect('rules.list', sampleRules);
-
-      const headers = element.shadowRoot?.querySelectorAll('.rules-section-header');
-      expect(headers?.[0]?.textContent).toContain('Allowed');
-      expect(headers?.[0]?.textContent).toContain('3');
-      expect(headers?.[1]?.textContent).toContain('Blocked');
-      expect(headers?.[1]?.textContent).toContain('3');
+    it('toggle is unchecked by default', () => {
+      const toggle = element.shadowRoot?.querySelector('[data-allow-all]') as HTMLInputElement;
+      expect(toggle.checked).toBe(false);
     });
 
-    it('renders rule items with prefix', () => {
-      manager.publishDirect('rules.list', sampleRules);
+    it('sends setAllowAllCommands message when toggled on', () => {
+      const toggle = element.shadowRoot?.querySelector('[data-allow-all]') as HTMLInputElement;
+      mockVSCode.postMessage.mockClear();
+
+      toggle.checked = true;
+      toggle.dispatchEvent(new Event('change', { bubbles: true }));
+
+      expect(mockVSCode.postMessage).toHaveBeenCalledWith({
+        type: 'setAllowAllCommands',
+        enabled: true,
+      });
+    });
+
+    it('sends setAllowAllCommands message when toggled off', () => {
+      // First enable
+      manager.publishDirect('rules.allowAll', true);
+      mockVSCode.postMessage.mockClear();
+
+      const toggle = element.shadowRoot?.querySelector('[data-allow-all]') as HTMLInputElement;
+      toggle.checked = false;
+      toggle.dispatchEvent(new Event('change', { bubbles: true }));
+
+      expect(mockVSCode.postMessage).toHaveBeenCalledWith({
+        type: 'setAllowAllCommands',
+        enabled: false,
+      });
+    });
+
+    it('updates toggle state when receiving rules.allowAll', () => {
+      manager.publishDirect('rules.allowAll', true);
+
+      const toggle = element.shadowRoot?.querySelector('[data-allow-all]') as HTMLInputElement;
+      expect(toggle.checked).toBe(true);
+      expect(actor.getAllowAll()).toBe(true);
+    });
+
+    it('applies rules-disabled class to container when allow-all is enabled', () => {
+      manager.publishDirect('rules.allowAll', true);
+
+      const container = element.shadowRoot?.querySelector('.modal-container');
+      expect(container?.classList.contains('rules-disabled')).toBe(true);
+    });
+
+    it('removes rules-disabled class when allow-all is disabled', () => {
+      manager.publishDirect('rules.allowAll', true);
+      manager.publishDirect('rules.allowAll', false);
+
+      const container = element.shadowRoot?.querySelector('.modal-container');
+      expect(container?.classList.contains('rules-disabled')).toBe(false);
+    });
+  });
+
+  // ============================================
+  // Rules list rendering
+  // ============================================
+
+  describe('Rules list rendering', () => {
+    beforeEach(() => {
+      actor = new CommandRulesModalActor(manager, element, mockVSCode);
+    });
+
+    it('renders rules in a single unified list', () => {
+      const items = publishAndGetItems(manager, element);
+      expect(items?.length).toBe(6);
+    });
+
+    it('sorts rules alphabetically by prefix', () => {
+      const items = publishAndGetItems(manager, element);
+      const prefixes = Array.from(items!).map(i => i.querySelector('.rule-prefix')?.textContent?.trim());
+
+      // cat, curl, ls, npm install, rm -rf, sudo
+      expect(prefixes).toEqual(['cat', 'curl', 'ls', 'npm install', 'rm -rf', 'sudo']);
+    });
+
+    it('renders checkbox for each rule (checked = allowed)', () => {
+      publishAndGetItems(manager, element);
 
       const items = element.shadowRoot?.querySelectorAll('.rule-item');
-      expect(items?.length).toBe(6);
+      const checkedMap: Record<string, boolean> = {};
+      items?.forEach(item => {
+        const prefix = item.querySelector('.rule-prefix')?.textContent?.trim() || '';
+        const cb = item.querySelector('.rule-checkbox') as HTMLInputElement;
+        checkedMap[prefix] = cb.checked;
+      });
 
-      const prefixes = Array.from(items!).map(i =>
-        i.querySelector('.rule-prefix')?.textContent?.trim()
-      );
-      expect(prefixes).toContain('ls');
-      expect(prefixes).toContain('npm install');
-      expect(prefixes).toContain('rm -rf');
-      expect(prefixes).toContain('curl');
+      expect(checkedMap['ls']).toBe(true);
+      expect(checkedMap['cat']).toBe(true);
+      expect(checkedMap['npm install']).toBe(true);
+      expect(checkedMap['rm -rf']).toBe(false);
+      expect(checkedMap['sudo']).toBe(false);
+      expect(checkedMap['curl']).toBe(false);
+    });
+
+    it('renders delete button for ALL rules', () => {
+      publishAndGetItems(manager, element);
+
+      const deleteButtons = element.shadowRoot?.querySelectorAll('.rule-delete');
+      expect(deleteButtons?.length).toBe(6);
     });
 
     it('shows source badges', () => {
-      manager.publishDirect('rules.list', sampleRules);
+      publishAndGetItems(manager, element);
 
       const badges = element.shadowRoot?.querySelectorAll('.source-badge');
       expect(badges?.length).toBe(6);
@@ -183,45 +283,19 @@ describe('CommandRulesModalActor', () => {
       expect(userBadges?.length).toBe(2);
     });
 
-    it('shows delete button only for user rules', () => {
-      manager.publishDirect('rules.list', sampleRules);
-
-      const deleteButtons = element.shadowRoot?.querySelectorAll('.rule-delete');
-      expect(deleteButtons?.length).toBe(2); // Only npm install and curl
-
-      // Verify they are in user rule items
-      deleteButtons?.forEach(btn => {
-        const item = btn.closest('.rule-item');
-        expect(item?.getAttribute('data-source')).toBe('user');
-      });
-    });
-
-    it('shows empty state when no rules in a section', () => {
-      const onlyAllowed: CommandRule[] = [
-        { id: 1, prefix: 'ls', type: 'allowed', source: 'default', created_at: 1000 },
-      ];
-
-      manager.publishDirect('rules.list', onlyAllowed);
-
-      const empties = element.shadowRoot?.querySelectorAll('.rules-empty');
-      // Blocked section should show empty state
-      expect(empties?.length).toBe(1);
-      expect(empties?.[0]?.textContent).toContain('No blocked rules');
-    });
-
-    it('shows both empty states when no rules at all', () => {
+    it('shows empty state when no rules', () => {
       manager.publishDirect('rules.list', []);
 
       const empties = element.shadowRoot?.querySelectorAll('.rules-empty');
-      expect(empties?.length).toBe(2);
+      expect(empties?.length).toBe(1);
+      expect(empties?.[0]?.textContent).toContain('No command rules');
     });
 
     it('updates getRules() after receiving data', () => {
-      manager.publishDirect('rules.list', sampleRules);
+      publishAndGetItems(manager, element);
 
       const rules = actor.getRules();
       expect(rules.length).toBe(6);
-      expect(rules[0].prefix).toBe('ls');
     });
 
     it('escapes HTML in rule prefixes', () => {
@@ -234,6 +308,268 @@ describe('CommandRulesModalActor', () => {
       const prefix = element.shadowRoot?.querySelector('.rule-prefix');
       expect(prefix?.innerHTML).not.toContain('<script>');
       expect(prefix?.textContent).toContain('<script>');
+    });
+  });
+
+  // ============================================
+  // Filter chips
+  // ============================================
+
+  describe('Filter chips', () => {
+    beforeEach(() => {
+      actor = new CommandRulesModalActor(manager, element, mockVSCode);
+    });
+
+    it('renders three filter chips (All, Approved, Blocked)', () => {
+      const chips = element.shadowRoot?.querySelectorAll('.filter-chip');
+      expect(chips?.length).toBe(3);
+    });
+
+    it('shows correct counts after receiving rules', () => {
+      publishAndGetItems(manager, element);
+
+      const allChip = element.shadowRoot?.querySelector('[data-filter="all"]');
+      const approvedChip = element.shadowRoot?.querySelector('[data-filter="allowed"]');
+      const blockedChip = element.shadowRoot?.querySelector('[data-filter="blocked"]');
+
+      expect(allChip?.textContent).toContain('(6)');
+      expect(approvedChip?.textContent).toContain('(3)');
+      expect(blockedChip?.textContent).toContain('(3)');
+    });
+
+    it('"All" chip is active after receiving rules', () => {
+      publishAndGetItems(manager, element);
+
+      const allChip = element.shadowRoot?.querySelector('[data-filter="all"]');
+      expect(allChip?.classList.contains('active')).toBe(true);
+    });
+
+    it('clicking "Approved" chip filters to allowed rules only', () => {
+      publishAndGetItems(manager, element);
+
+      const approvedChip = element.shadowRoot?.querySelector('[data-filter="allowed"]') as HTMLElement;
+      approvedChip.click();
+
+      const items = element.shadowRoot?.querySelectorAll('.rule-item');
+      expect(items?.length).toBe(3);
+
+      const prefixes = Array.from(items!).map(i => i.querySelector('.rule-prefix')?.textContent?.trim());
+      expect(prefixes).toContain('ls');
+      expect(prefixes).toContain('cat');
+      expect(prefixes).toContain('npm install');
+      expect(prefixes).not.toContain('rm -rf');
+    });
+
+    it('clicking "Blocked" chip filters to blocked rules only', () => {
+      publishAndGetItems(manager, element);
+
+      const blockedChip = element.shadowRoot?.querySelector('[data-filter="blocked"]') as HTMLElement;
+      blockedChip.click();
+
+      const items = element.shadowRoot?.querySelectorAll('.rule-item');
+      expect(items?.length).toBe(3);
+
+      const prefixes = Array.from(items!).map(i => i.querySelector('.rule-prefix')?.textContent?.trim());
+      expect(prefixes).toContain('rm -rf');
+      expect(prefixes).toContain('sudo');
+      expect(prefixes).toContain('curl');
+    });
+
+    it('clicking "All" chip shows all rules again', () => {
+      publishAndGetItems(manager, element);
+
+      // First filter to blocked
+      const blockedChip = element.shadowRoot?.querySelector('[data-filter="blocked"]') as HTMLElement;
+      blockedChip.click();
+
+      // Back to all
+      const allChip = element.shadowRoot?.querySelector('[data-filter="all"]') as HTMLElement;
+      allChip.click();
+
+      const items = element.shadowRoot?.querySelectorAll('.rule-item');
+      expect(items?.length).toBe(6);
+    });
+
+    it('getFilter() reflects current filter', () => {
+      expect(actor.getFilter()).toBe('all');
+
+      publishAndGetItems(manager, element);
+
+      const approvedChip = element.shadowRoot?.querySelector('[data-filter="allowed"]') as HTMLElement;
+      approvedChip.click();
+      expect(actor.getFilter()).toBe('allowed');
+    });
+  });
+
+  // ============================================
+  // Search
+  // ============================================
+
+  describe('Search', () => {
+    beforeEach(() => {
+      actor = new CommandRulesModalActor(manager, element, mockVSCode);
+    });
+
+    it('renders search input', () => {
+      const search = element.shadowRoot?.querySelector('[data-search-input]') as HTMLInputElement;
+      expect(search).toBeTruthy();
+      expect(search.placeholder).toContain('Search');
+    });
+
+    it('filters rules by search query', () => {
+      publishAndGetItems(manager, element);
+
+      const search = element.shadowRoot?.querySelector('[data-search-input]') as HTMLInputElement;
+      search.value = 'npm';
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+
+      const items = element.shadowRoot?.querySelectorAll('.rule-item');
+      expect(items?.length).toBe(1);
+      expect(items?.[0]?.querySelector('.rule-prefix')?.textContent?.trim()).toBe('npm install');
+    });
+
+    it('search is case-insensitive', () => {
+      publishAndGetItems(manager, element);
+
+      const search = element.shadowRoot?.querySelector('[data-search-input]') as HTMLInputElement;
+      search.value = 'LS';
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+
+      const items = element.shadowRoot?.querySelectorAll('.rule-item');
+      expect(items?.length).toBe(1);
+    });
+
+    it('shows empty state for no matches', () => {
+      publishAndGetItems(manager, element);
+
+      const search = element.shadowRoot?.querySelector('[data-search-input]') as HTMLInputElement;
+      search.value = 'nonexistent';
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+
+      const empty = element.shadowRoot?.querySelector('.rules-empty');
+      expect(empty?.textContent).toContain('No commands match');
+    });
+
+    it('clearing search shows all rules again', () => {
+      publishAndGetItems(manager, element);
+
+      const search = element.shadowRoot?.querySelector('[data-search-input]') as HTMLInputElement;
+      search.value = 'npm';
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+
+      search.value = '';
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+
+      const items = element.shadowRoot?.querySelectorAll('.rule-item');
+      expect(items?.length).toBe(6);
+    });
+  });
+
+  // ============================================
+  // Checkbox toggle (change rule type)
+  // ============================================
+
+  describe('Checkbox toggle', () => {
+    beforeEach(() => {
+      actor = new CommandRulesModalActor(manager, element, mockVSCode);
+    });
+
+    it('toggling checkbox sends remove + add messages to change type', () => {
+      publishAndGetItems(manager, element);
+      mockVSCode.postMessage.mockClear();
+
+      // Find the "sudo" rule (blocked, id=5) — sorted alphabetically it's the last item
+      const items = element.shadowRoot?.querySelectorAll('.rule-item');
+      const sudoItem = Array.from(items!).find(
+        item => item.querySelector('.rule-prefix')?.textContent?.trim() === 'sudo'
+      );
+      expect(sudoItem).toBeTruthy();
+
+      const cb = sudoItem!.querySelector('.rule-checkbox') as HTMLInputElement;
+      expect(cb.checked).toBe(false);
+
+      cb.checked = true;
+      cb.dispatchEvent(new Event('change', { bubbles: true }));
+
+      expect(mockVSCode.postMessage).toHaveBeenCalledWith({
+        type: 'removeCommandRule',
+        id: 5,
+      });
+      expect(mockVSCode.postMessage).toHaveBeenCalledWith({
+        type: 'addCommandRule',
+        prefix: 'sudo',
+        ruleType: 'allowed',
+      });
+    });
+
+    it('unchecking a checked rule changes type to blocked', () => {
+      publishAndGetItems(manager, element);
+      mockVSCode.postMessage.mockClear();
+
+      // Find the "ls" rule (allowed, id=1)
+      const items = element.shadowRoot?.querySelectorAll('.rule-item');
+      const lsItem = Array.from(items!).find(
+        item => item.querySelector('.rule-prefix')?.textContent?.trim() === 'ls'
+      );
+      expect(lsItem).toBeTruthy();
+
+      const cb = lsItem!.querySelector('.rule-checkbox') as HTMLInputElement;
+      expect(cb.checked).toBe(true);
+
+      cb.checked = false;
+      cb.dispatchEvent(new Event('change', { bubbles: true }));
+
+      expect(mockVSCode.postMessage).toHaveBeenCalledWith({
+        type: 'removeCommandRule',
+        id: 1,
+      });
+      expect(mockVSCode.postMessage).toHaveBeenCalledWith({
+        type: 'addCommandRule',
+        prefix: 'ls',
+        ruleType: 'blocked',
+      });
+    });
+  });
+
+  // ============================================
+  // Delete rule
+  // ============================================
+
+  describe('Delete rule', () => {
+    beforeEach(() => {
+      actor = new CommandRulesModalActor(manager, element, mockVSCode);
+    });
+
+    it('clicking delete sends removeCommandRule message', () => {
+      const rules: CommandRule[] = [
+        { id: 42, prefix: 'npm install', type: 'allowed', source: 'user', created_at: 1000 },
+      ];
+      manager.publishDirect('rules.list', rules);
+      mockVSCode.postMessage.mockClear();
+
+      const deleteBtn = element.shadowRoot?.querySelector('.rule-delete') as HTMLButtonElement;
+      deleteBtn.click();
+
+      expect(mockVSCode.postMessage).toHaveBeenCalledWith({
+        type: 'removeCommandRule',
+        id: 42,
+      });
+    });
+
+    it('can delete default rules too', () => {
+      const rules: CommandRule[] = [
+        { id: 99, prefix: 'ls', type: 'allowed', source: 'default', created_at: 1000 },
+      ];
+      manager.publishDirect('rules.list', rules);
+      mockVSCode.postMessage.mockClear();
+
+      const deleteBtn = element.shadowRoot?.querySelector('.rule-delete') as HTMLButtonElement;
+      deleteBtn.click();
+
+      expect(mockVSCode.postMessage).toHaveBeenCalledWith({
+        type: 'removeCommandRule',
+        id: 99,
+      });
     });
   });
 
@@ -256,7 +592,12 @@ describe('CommandRulesModalActor', () => {
       expect(addBtn).toBeTruthy();
     });
 
-    it('select has allowed and blocked options', () => {
+    it('select defaults to "allowed" (Approved)', () => {
+      const select = element.shadowRoot?.querySelector('[data-rule-type]') as HTMLSelectElement;
+      expect(select.value).toBe('allowed');
+    });
+
+    it('select has Approved and Blocked options', () => {
       const select = element.shadowRoot?.querySelector('[data-rule-type]') as HTMLSelectElement;
       const options = Array.from(select.options).map(o => o.value);
       expect(options).toContain('allowed');
@@ -311,32 +652,6 @@ describe('CommandRulesModalActor', () => {
         type: 'addCommandRule',
         prefix: 'npm test',
         ruleType: 'allowed', // default
-      });
-    });
-  });
-
-  // ============================================
-  // Delete rule
-  // ============================================
-
-  describe('Delete rule', () => {
-    beforeEach(() => {
-      actor = new CommandRulesModalActor(manager, element, mockVSCode);
-    });
-
-    it('clicking delete sends removeCommandRule message', () => {
-      const rules: CommandRule[] = [
-        { id: 42, prefix: 'npm install', type: 'allowed', source: 'user', created_at: 1000 },
-      ];
-      manager.publishDirect('rules.list', rules);
-      mockVSCode.postMessage.mockClear();
-
-      const deleteBtn = element.shadowRoot?.querySelector('.rule-delete') as HTMLButtonElement;
-      deleteBtn.click();
-
-      expect(mockVSCode.postMessage).toHaveBeenCalledWith({
-        type: 'removeCommandRule',
-        id: 42,
       });
     });
   });

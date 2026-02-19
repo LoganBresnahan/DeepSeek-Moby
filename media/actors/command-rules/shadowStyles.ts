@@ -6,39 +6,129 @@
  */
 
 export const commandRulesShadowStyles = `
-  /* Rules sections */
-  .rules-section {
-    padding: 12px 16px;
+  /* Allow-all toggle bar */
+  .allow-all-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 16px;
     border-bottom: 1px solid var(--vscode-panel-border);
   }
 
-  .rules-section:last-child {
-    border-bottom: none;
-  }
-
-  .rules-section-header {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--vscode-descriptionForeground);
-    margin-bottom: 8px;
+  .allow-all-label {
     display: flex;
     align-items: center;
     gap: 8px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--vscode-foreground);
+    cursor: pointer;
+    user-select: none;
   }
 
-  .rules-section-count {
-    font-weight: normal;
+  .allow-all-icon {
+    font-size: 15px;
+  }
+
+  /* Toggle switch */
+  .toggle-switch {
+    position: relative;
+    width: 36px;
+    height: 20px;
+    flex-shrink: 0;
+  }
+
+  .toggle-switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+  }
+
+  .toggle-slider {
+    position: absolute;
+    cursor: pointer;
+    inset: 0;
+    background: var(--vscode-input-background);
+    border: 1px solid var(--vscode-input-border, #3c3c3c);
+    border-radius: 10px;
+    transition: background 0.2s, border-color 0.2s;
+  }
+
+  .toggle-slider::before {
+    content: '';
+    position: absolute;
+    height: 14px;
+    width: 14px;
+    left: 2px;
+    bottom: 2px;
+    background: var(--vscode-foreground);
+    border-radius: 50%;
+    transition: transform 0.2s;
+  }
+
+  .toggle-switch input:checked + .toggle-slider {
+    background: var(--vscode-button-background);
+    border-color: var(--vscode-button-background);
+  }
+
+  .toggle-switch input:checked + .toggle-slider::before {
+    transform: translateX(16px);
+    background: var(--vscode-button-foreground);
+  }
+
+  /* Filter chips row */
+  .filter-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--vscode-panel-border);
+  }
+
+  .filter-chip {
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-size: 11px;
+    cursor: pointer;
+    border: 1px solid var(--vscode-widget-border, #3c3c3c);
+    background: transparent;
+    color: var(--vscode-descriptionForeground);
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+    user-select: none;
+  }
+
+  .filter-chip:hover {
+    background: var(--vscode-list-hoverBackground, rgba(255, 255, 255, 0.04));
+  }
+
+  .filter-chip.active {
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    border-color: var(--vscode-button-background);
+  }
+
+  .filter-count {
+    margin-left: 2px;
     opacity: 0.7;
   }
 
-  /* Rule items */
+  /* Rules list (multi-column grid) */
+  .rules-list {
+    padding: 8px 12px;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 2px 12px;
+  }
+
+  /* Rule item row */
   .rule-item {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 5px 8px;
+    gap: 6px;
+    padding: 4px 6px;
     border-radius: 4px;
     transition: background-color 0.1s;
+    min-width: 0;
   }
 
   .rule-item:hover {
@@ -48,18 +138,20 @@ export const commandRulesShadowStyles = `
   .rule-prefix {
     flex: 1;
     font-family: var(--vscode-editor-font-family);
-    font-size: 13px;
+    font-size: 12px;
     color: var(--vscode-foreground);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    min-width: 0;
   }
 
   .source-badge {
-    font-size: 10px;
-    padding: 1px 6px;
+    font-size: 9px;
+    padding: 1px 4px;
     border-radius: 3px;
     flex-shrink: 0;
+    opacity: 0.7;
   }
 
   .source-badge.default {
@@ -72,17 +164,29 @@ export const commandRulesShadowStyles = `
     color: var(--vscode-button-foreground, #ffffff);
   }
 
+  /* Checkbox (approved/blocked toggle) */
+  .rule-checkbox {
+    flex-shrink: 0;
+    width: 14px;
+    height: 14px;
+    accent-color: var(--vscode-button-background, #0e639c);
+    cursor: pointer;
+    margin: 0;
+  }
+
+  /* Delete button */
   .rule-delete {
     background: none;
     border: none;
     color: var(--vscode-descriptionForeground);
     cursor: pointer;
-    padding: 2px 6px;
-    font-size: 14px;
+    padding: 1px 4px;
+    font-size: 13px;
     opacity: 0;
     border-radius: 3px;
     transition: opacity 0.1s, color 0.1s, background-color 0.1s;
     flex-shrink: 0;
+    line-height: 1;
   }
 
   .rule-item:hover .rule-delete {
@@ -97,19 +201,28 @@ export const commandRulesShadowStyles = `
 
   /* Empty state */
   .rules-empty {
-    padding: 12px 8px;
+    padding: 24px 16px;
     text-align: center;
     color: var(--vscode-descriptionForeground);
     font-size: 12px;
     font-style: italic;
+    grid-column: 1 / -1;
   }
 
   /* Footer form */
+  .footer-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+  }
+
   .add-rule-form {
     display: flex;
     align-items: center;
     gap: 6px;
     flex: 1;
+    min-width: 0;
   }
 
   .add-rule-input {
@@ -146,14 +259,17 @@ export const commandRulesShadowStyles = `
     flex-shrink: 0;
   }
 
-  .footer-actions {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
+  /* Grayed-out state when allow-all is enabled */
+  .rules-disabled .filter-row,
+  .rules-disabled .rules-list,
+  .rules-disabled .modal-footer {
+    opacity: 0.35;
+    pointer-events: none;
+    user-select: none;
   }
 
-  .footer-spacer {
-    flex-shrink: 0;
+  .rules-disabled .modal-search {
+    opacity: 0.35;
+    pointer-events: none;
   }
 `;

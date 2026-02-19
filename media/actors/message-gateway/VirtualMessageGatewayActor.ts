@@ -368,6 +368,9 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       // ---- Command Rules Modal Messages ----
       case 'commandRulesList':
         this._manager.publishDirect('rules.list', msg.rules);
+        if (msg.allowAll !== undefined) {
+          this._manager.publishDirect('rules.allowAll', msg.allowAll);
+        }
         break;
 
       case 'openRulesModal':
