@@ -268,7 +268,7 @@ context.subscriptions.push({ dispose: () => drawingServer.stop() });
 - [x] Health check endpoint (`/health`)
 - [x] 30 unit tests (`tests/unit/providers/drawingServer.test.ts`)
 
-### Phase 2: Chat Integration — COMPLETE
+### Phase 2: Chat Integration + ASCII Editor — COMPLETE
 - [x] Header popup button with start/stop server + QR code display
 - [x] QR code generation via vendored nayuki qrcodegen (zero dependencies)
 - [x] WSL2 real IP detection via `powershell.exe` for correct phone URL
@@ -277,7 +277,14 @@ context.subscriptions.push({ dispose: () => drawingServer.stop() });
 - [x] White background on drawings for visibility in dark themes
 - [x] `DrawingServerShadowActor` popup (extends `PopupShadowActor`)
 - [x] Full message pipeline: DrawingServer → ChatProvider → Gateway → VirtualList → MessageTurnActor
-- [x] 26 new tests (qrcodegen, VirtualListActor, MessageTurnActor, VirtualMessageGatewayActor)
+- [x] ASCII art editor at `/` with box, arrow, text, and move tools
+- [x] Shape registry: undo/redo (50 entries), layer operations, duplicate, delete, resize handles
+- [x] Single top toolbar layout with icon-only buttons, modifier buttons visible in Move mode
+- [x] Tool-specific cursors (crosshair, text, grab) and hand icon for Move
+- [x] Dynamic grid sizing (16px font, fills container)
+- [x] Color drawing page redesigned: single top toolbar, undo/redo via ImageData (15 entries)
+- [x] Navigation between modes: ✎ (ASCII→Draw) and A (Draw→ASCII)
+- [x] 70 tests in drawingServer.test.ts (server + HTML content coverage)
 
 ### Phase 3: Real-Time (Optional, Future)
 - WebSocket for live stroke streaming
@@ -291,9 +298,13 @@ context.subscriptions.push({ dispose: () => drawingServer.stop() });
 - **Drawings are ephemeral** — not stored in the database or on disk. They exist only in memory for the current session.
 - **Single device** — one phone at a time. No multi-device support needed.
 - **Port** — default 8839, any open port works.
-- **Drawing tools** — freehand with 7-color picker and adjustable stroke size.
+- **Two modes** — ASCII editor (default, outputs plain text) and color drawing (outputs PNG).
+- **ASCII editor** — shape registry with undo/redo, box/arrow/text tools, move/resize, layer operations.
+- **Drawing tools** — freehand with 7-color picker, adjustable stroke size, undo/redo via ImageData snapshots.
 - **Image format** — PNG via `canvas.toDataURL('image/png')`.
 - **Size limits** — 5 MB max POST body (`MAX_BODY_SIZE`).
+- **No text resizing** — text shapes are single-line, move and edit only.
+- **No circles** — boxes + arrows + text covers 90% of diagram use cases.
 
 ---
 

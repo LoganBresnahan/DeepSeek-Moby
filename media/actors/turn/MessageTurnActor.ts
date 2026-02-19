@@ -1550,7 +1550,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
   private formatContent(content: string): string {
     if (!content) return '';
 
-    const startExpanded = this._editMode === 'manual';
+    const startExpanded = this._editMode === 'manual' || this._role === 'user';
 
     // Fenced code blocks (complete only) — fence-length-aware (CommonMark spec)
     const blocks = extractCodeBlocks(content);

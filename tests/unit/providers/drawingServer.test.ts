@@ -366,8 +366,17 @@ describe('DrawingServer', () => {
       expect(capturedRequestHandler).not.toBeNull();
     });
 
-    describe('GET /', () => {
-      it('should serve the drawing HTML page', () => {
+    describe('GET / (ASCII editor — default)', () => {
+      let html: string;
+
+      beforeEach(() => {
+        const req = createMockRequest('GET', '/');
+        const res = createMockResponse();
+        capturedRequestHandler!(req, res);
+        html = res.end.mock.calls[0][0] as string;
+      });
+
+      it('should serve the ASCII editor HTML page at /', () => {
         const req = createMockRequest('GET', '/');
         const res = createMockResponse();
 
@@ -377,13 +386,11 @@ describe('DrawingServer', () => {
           'Content-Type': 'text/html; charset=utf-8',
         });
         expect(res.end).toHaveBeenCalled();
-        const html = res.end.mock.calls[0][0] as string;
-        expect(html).toContain('Moby Drawing Pad');
-        expect(html).toContain('<canvas');
-        expect(html).toContain('touchstart');
+        const h = res.end.mock.calls[0][0] as string;
+        expect(h).toContain('Moby ASCII Editor');
       });
 
-      it('should also serve at /index.html', () => {
+      it('should also serve ASCII editor at /index.html', () => {
         const req = createMockRequest('GET', '/index.html');
         const res = createMockResponse();
 
@@ -392,6 +399,246 @@ describe('DrawingServer', () => {
         expect(res.writeHead).toHaveBeenCalledWith(200, {
           'Content-Type': 'text/html; charset=utf-8',
         });
+        const h = res.end.mock.calls[0][0] as string;
+        expect(h).toContain('Moby ASCII Editor');
+      });
+
+      it('should include a navigation link to the drawing page', () => {
+        expect(html).toContain('/draw');
+      });
+
+      // ── Tool buttons ──
+
+      it('should include all four tool buttons', () => {
+        expect(html).toContain('toolBox');
+        expect(html).toContain('toolArrow');
+        expect(html).toContain('toolText');
+        expect(html).toContain('toolMove');
+      });
+
+      it('should use hand icon for move button', () => {
+        expect(html).toContain('&#9995;');
+      });
+
+      it('should set tool-specific cursors', () => {
+        expect(html).toContain("box: 'crosshair'");
+        expect(html).toContain("text: 'text'");
+        expect(html).toContain("move: 'grab'");
+      });
+
+      // ── Modifier buttons (move mode) ──
+
+      it('should include modifier button group with all operations', () => {
+        expect(html).toContain('modGroup');
+        expect(html).toContain('layerFront');
+        expect(html).toContain('layerUp');
+        expect(html).toContain('layerDown');
+        expect(html).toContain('layerBack');
+        expect(html).toContain('dupShape');
+        expect(html).toContain('delShape');
+      });
+
+      it('should include updateModButtons for show/hide and enable/disable logic', () => {
+        expect(html).toContain('updateModButtons');
+      });
+
+      // ── Shape drawing functions ──
+
+      it('should include shape drawing functions', () => {
+        expect(html).toContain('drawBox');
+        expect(html).toContain('drawArrow');
+        expect(html).toContain('placeText');
+        expect(html).toContain('rebuildGrid');
+      });
+
+      // ── Shape helpers ──
+
+      it('should include shape management helpers', () => {
+        expect(html).toContain('shapeBounds');
+        expect(html).toContain('hitTest');
+        expect(html).toContain('findShape');
+        expect(html).toContain('clampShape');
+      });
+
+      it('should include resize handle support', () => {
+        expect(html).toContain('getHandlePositions');
+        expect(html).toContain('hitTestHandlePx');
+        expect(html).toContain('applyResize');
+      });
+
+      // ── Undo/Redo ──
+
+      it('should include undo and redo support', () => {
+        expect(html).toContain('undoStack');
+        expect(html).toContain('redoStack');
+        expect(html).toContain('function undo()');
+        expect(html).toContain('function redo()');
+        expect(html).toContain('pushUndo');
+      });
+
+      // ── Text overlay ──
+
+      it('should include text input overlay', () => {
+        expect(html).toContain('textOverlay');
+        expect(html).toContain('textInput');
+        expect(html).toContain('confirmText');
+        expect(html).toContain('cancelText');
+      });
+
+      it('should support text editing on tap', () => {
+        expect(html).toContain('editingTextId');
+      });
+
+      // ── Grid sizing ──
+
+      it('should include dynamic grid sizing', () => {
+        expect(html).toContain('sizeGrid');
+        expect(html).toContain('cellW');
+        expect(html).toContain('cellH');
+        expect(html).toContain('devicePixelRatio');
+      });
+
+      // ── Send ──
+
+      it('should send ASCII text via POST to /upload', () => {
+        expect(html).toContain("type: 'ascii'");
+        expect(html).toContain('/upload');
+        expect(html).toContain('function send()');
+      });
+
+      // ── Canvas rendering ──
+
+      it('should include canvas rendering with layer badges', () => {
+        expect(html).toContain('function render(');
+        expect(html).toContain('badgeFont');
+      });
+    });
+
+    describe('GET /draw (color drawing page)', () => {
+      let html: string;
+
+      beforeEach(() => {
+        const req = createMockRequest('GET', '/draw');
+        const res = createMockResponse();
+        capturedRequestHandler!(req, res);
+        html = res.end.mock.calls[0][0] as string;
+      });
+
+      it('should serve the color drawing HTML page', () => {
+        const req = createMockRequest('GET', '/draw');
+        const res = createMockResponse();
+
+        capturedRequestHandler!(req, res);
+
+        expect(res.writeHead).toHaveBeenCalledWith(200, {
+          'Content-Type': 'text/html; charset=utf-8',
+        });
+        expect(res.end).toHaveBeenCalled();
+        const h = res.end.mock.calls[0][0] as string;
+        expect(h).toContain('Moby Drawing Pad');
+        expect(h).toContain('<canvas');
+        expect(h).toContain('touchstart');
+      });
+
+      it('should include a navigation link back to ASCII editor', () => {
+        expect(html).toContain('ASCII');
+      });
+
+      // ── Color picker ──
+
+      it('should include color swatches', () => {
+        expect(html).toContain('color-swatch');
+        expect(html).toContain('strokeColor');
+        expect(html).toContain('#000000');
+        expect(html).toContain('#ff0000');
+        expect(html).toContain('#0066ff');
+      });
+
+      // ── Stroke size ──
+
+      it('should include stroke size slider', () => {
+        expect(html).toContain('strokeSize');
+        expect(html).toContain('type="range"');
+        expect(html).toContain('min="1"');
+        expect(html).toContain('max="20"');
+      });
+
+      // ── Undo/Redo ──
+
+      it('should include undo and redo with ImageData snapshots', () => {
+        expect(html).toContain('undoStack');
+        expect(html).toContain('redoStack');
+        expect(html).toContain('function undo()');
+        expect(html).toContain('function redo()');
+        expect(html).toContain('getImageData');
+        expect(html).toContain('putImageData');
+        expect(html).toContain('MAX_UNDO');
+      });
+
+      // ── Clear ──
+
+      it('should include clear canvas function', () => {
+        expect(html).toContain('clearCanvas');
+        expect(html).toContain('clearRect');
+      });
+
+      // ── HiDPI ──
+
+      it('should handle HiDPI displays', () => {
+        expect(html).toContain('devicePixelRatio');
+      });
+
+      // ── Touch + mouse input ──
+
+      it('should support both touch and mouse input', () => {
+        expect(html).toContain('touchstart');
+        expect(html).toContain('touchmove');
+        expect(html).toContain('touchend');
+        expect(html).toContain('mousedown');
+        expect(html).toContain('mousemove');
+        expect(html).toContain('mouseup');
+      });
+
+      // ── Send ──
+
+      it('should send image via POST to /upload', () => {
+        expect(html).toContain('/upload');
+        expect(html).toContain('toDataURL');
+        expect(html).toContain('function send()');
+      });
+
+      // ── Single toolbar layout ──
+
+      it('should have a single top toolbar', () => {
+        expect(html).toContain('tool-bar');
+        expect(html).toContain('spacer');
+      });
+
+      // ── Mobile viewport fix ──
+
+      it('should fix mobile viewport height', () => {
+        expect(html).toContain('fixViewport');
+        expect(html).toContain('innerHeight');
+      });
+    });
+
+    describe('page serve logging', () => {
+      it('should log serving the ASCII editor page', () => {
+        const req = createMockRequest('GET', '/');
+        capturedRequestHandler!(req, createMockResponse());
+
+        expect(logger.debug).toHaveBeenCalledWith(
+          '[DrawingServer] Served ASCII editor page'
+        );
+      });
+
+      it('should log serving the drawing page', () => {
+        const req = createMockRequest('GET', '/draw');
+        capturedRequestHandler!(req, createMockResponse());
+
+        expect(logger.debug).toHaveBeenCalledWith(
+          '[DrawingServer] Served drawing page'
+        );
       });
     });
 
@@ -468,7 +715,7 @@ describe('DrawingServer', () => {
         );
       });
 
-      it('should reject invalid image data (missing image field)', async () => {
+      it('should reject invalid upload data (missing image and ascii fields)', async () => {
         const body = JSON.stringify({ notImage: 'hello' });
         const req = createMockRequest('POST', '/upload', body);
         const res = createMockResponse();
@@ -480,7 +727,7 @@ describe('DrawingServer', () => {
           'Content-Type': 'application/json',
         });
         expect(JSON.parse(res.end.mock.calls[0][0])).toEqual({
-          error: 'Invalid image data',
+          error: 'Invalid upload data',
         });
       });
 
@@ -537,6 +784,77 @@ describe('DrawingServer', () => {
           '[DrawingServer] Upload rejected: body too large',
           expect.any(String)
         );
+      });
+    });
+
+    describe('POST /upload (ASCII)', () => {
+      it('should accept a valid ASCII upload and fire onAsciiReceived', async () => {
+        const events: Array<{ text: string; timestamp: number }> = [];
+        server.onAsciiReceived(e => events.push(e));
+
+        const body = JSON.stringify({ type: 'ascii', text: '┌──┐\n│Hi│\n└──┘' });
+        const req = createMockRequest('POST', '/upload', body);
+        const res = createMockResponse();
+
+        capturedRequestHandler!(req, res);
+        await new Promise(r => setTimeout(r, 10));
+
+        expect(res.writeHead).toHaveBeenCalledWith(200, {
+          'Content-Type': 'application/json',
+        });
+        expect(JSON.parse(res.end.mock.calls[0][0])).toEqual({ ok: true });
+        expect(events).toHaveLength(1);
+        expect(events[0].text).toBe('┌──┐\n│Hi│\n└──┘');
+        expect(events[0].timestamp).toBeGreaterThan(0);
+      });
+
+      it('should log and trace ASCII receipt', async () => {
+        const body = JSON.stringify({ type: 'ascii', text: 'hello' });
+        const req = createMockRequest('POST', '/upload', body);
+        const res = createMockResponse();
+
+        capturedRequestHandler!(req, res);
+        await new Promise(r => setTimeout(r, 10));
+
+        expect(logger.info).toHaveBeenCalledWith(
+          '[DrawingServer] ASCII diagram received',
+          expect.any(String)
+        );
+        expect(tracer.trace).toHaveBeenCalledWith(
+          'state.publish',
+          'drawingServer.asciiReceived',
+          expect.objectContaining({
+            data: expect.objectContaining({ sizeB: expect.any(Number) })
+          })
+        );
+      });
+
+      it('should reject empty ASCII text', async () => {
+        const body = JSON.stringify({ type: 'ascii', text: '   ' });
+        const req = createMockRequest('POST', '/upload', body);
+        const res = createMockResponse();
+
+        capturedRequestHandler!(req, res);
+        await new Promise(r => setTimeout(r, 10));
+
+        expect(res.writeHead).toHaveBeenCalledWith(400, {
+          'Content-Type': 'application/json',
+        });
+        expect(JSON.parse(res.end.mock.calls[0][0])).toEqual({
+          error: 'Empty ASCII text',
+        });
+      });
+
+      it('should not fire onImageReceived for ASCII uploads', async () => {
+        const imageEvents: DrawingReceivedEvent[] = [];
+        server.onImageReceived(e => imageEvents.push(e));
+
+        const body = JSON.stringify({ type: 'ascii', text: 'test diagram' });
+        const req = createMockRequest('POST', '/upload', body);
+        capturedRequestHandler!(req, createMockResponse());
+        await new Promise(r => setTimeout(r, 10));
+
+        expect(imageEvents).toHaveLength(0);
       });
     });
   });
@@ -602,6 +920,28 @@ describe('DrawingServer', () => {
 
       expect(events1).toHaveLength(1);
       expect(events2).toHaveLength(1);
+    });
+
+    it('should allow subscribing and unsubscribing from onAsciiReceived', async () => {
+      await server.start();
+
+      const events: Array<{ text: string; timestamp: number }> = [];
+      const sub = server.onAsciiReceived(e => events.push(e));
+
+      const body = JSON.stringify({ type: 'ascii', text: 'test' });
+      const req1 = createMockRequest('POST', '/upload', body);
+      capturedRequestHandler!(req1, createMockResponse());
+      await new Promise(r => setTimeout(r, 10));
+
+      expect(events).toHaveLength(1);
+
+      sub.dispose();
+
+      const req2 = createMockRequest('POST', '/upload', body);
+      capturedRequestHandler!(req2, createMockResponse());
+      await new Promise(r => setTimeout(r, 10));
+
+      expect(events).toHaveLength(1);
     });
   });
 });

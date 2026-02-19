@@ -14,6 +14,14 @@ export interface DrawingReceivedEvent {
   timestamp: number;
 }
 
+/** Data emitted when an ASCII diagram is received from the phone */
+export interface AsciiReceivedEvent {
+  /** The ASCII art text */
+  text: string;
+  /** Timestamp when the text was received */
+  timestamp: number;
+}
+
 /** Result from starting the drawing server */
 export interface StartResult {
   port: number;
@@ -45,32 +53,31 @@ const DRAWING_HTML = `<!DOCTYPE html>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { background: #1e1e1e; overflow: hidden; touch-action: none; display: flex; flex-direction: column; height: 100vh; height: 100dvh; font-family: -apple-system, system-ui, sans-serif; }
-    canvas { flex: 1; background: #fff; display: block; cursor: crosshair; }
-    .toolbar { display: flex; gap: 8px; padding: 6px 8px; background: #252526; flex-shrink: 0; }
-    .toolbar button { flex: 1; padding: 12px; font-size: 1.1em; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; }
-    .btn-clear { background: #3c3c3c; color: #ccc; }
-    .btn-send { background: #0e639c; color: #fff; }
-    .btn-send:active { background: #1177bb; }
-    .btn-send.sent { background: #16825d; }
-    .color-row { display: flex; gap: 4px; padding: 6px 8px; background: #252526; flex-shrink: 0; }
-    .color-swatch { width: 32px; height: 32px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; }
+    .tool-bar { display: flex; gap: 4px; padding: 6px 8px; background: #252526; flex-shrink: 0; align-items: center; }
+    .tool-bar button { padding: 8px 12px; font-size: 1.1em; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; background: #3c3c3c; color: #ccc; min-width: 36px; text-align: center; }
+    .tool-bar button.btn-send { background: #0e639c; color: #fff; }
+    .tool-bar button.btn-send:active { background: #1177bb; }
+    .tool-bar button.btn-send.sent { background: #16825d; }
+    #colors { display: flex; gap: 4px; align-items: center; }
+    .color-swatch { width: 28px; height: 28px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; flex-shrink: 0; }
     .color-swatch.active { border-color: #fff; }
-    .stroke-row { display: flex; align-items: center; gap: 8px; padding: 4px 8px; background: #252526; flex-shrink: 0; }
-    .stroke-row label { color: #ccc; font-size: 0.85em; }
-    .stroke-row input { flex: 1; }
+    #strokeSize { width: 80px; flex-shrink: 0; margin-left: 4px; }
+    .spacer { flex: 1; }
+    canvas { flex: 1; min-height: 0; background: #fff; display: block; cursor: crosshair; }
   </style>
 </head>
 <body>
+  <div class="tool-bar">
+    <span id="colors"></span>
+    <input type="range" id="strokeSize" min="1" max="20" value="3" title="Brush Size">
+    <span class="spacer"></span>
+    <button onclick="undo()" title="Undo">&#8617;</button>
+    <button onclick="redo()" title="Redo">&#8618;</button>
+    <button onclick="clearCanvas()" title="Clear All">&#10006;</button>
+    <button onclick="location.href='/'" title="ASCII Mode">A</button>
+    <button class="btn-send" id="sendBtn" onclick="send()" title="Send">&#9654;</button>
+  </div>
   <canvas id="c"></canvas>
-  <div class="color-row" id="colors"></div>
-  <div class="stroke-row">
-    <label>Size</label>
-    <input type="range" id="strokeSize" min="1" max="20" value="3">
-  </div>
-  <div class="toolbar">
-    <button class="btn-clear" onclick="clearCanvas()">Clear</button>
-    <button class="btn-send" id="sendBtn" onclick="send()">Send</button>
-  </div>
   <script>
     const c = document.getElementById('c');
     const ctx = c.getContext('2d');
@@ -78,6 +85,9 @@ const DRAWING_HTML = `<!DOCTYPE html>
     const strokeInput = document.getElementById('strokeSize');
     let drawing = false;
     let strokeColor = '#000000';
+    let undoStack = [];
+    let redoStack = [];
+    const MAX_UNDO = 15;
 
     const COLORS = ['#000000','#ff0000','#0066ff','#00aa00','#ff8800','#8800cc','#ffffff'];
     const colorsEl = document.getElementById('colors');
@@ -106,6 +116,8 @@ const DRAWING_HTML = `<!DOCTYPE html>
       c.width = rect.width * devicePixelRatio;
       c.height = rect.height * devicePixelRatio;
       ctx.scale(devicePixelRatio, devicePixelRatio);
+      undoStack = [];
+      redoStack = [];
     }
     resizeCanvas();
     window.addEventListener('resize', resizeCanvas);
@@ -117,6 +129,9 @@ const DRAWING_HTML = `<!DOCTYPE html>
     }
 
     function startDraw(e) {
+      undoStack.push(ctx.getImageData(0, 0, c.width, c.height));
+      if (undoStack.length > MAX_UNDO) undoStack.shift();
+      redoStack = [];
       drawing = true;
       const pos = getPos(e);
       ctx.beginPath();
@@ -144,13 +159,26 @@ const DRAWING_HTML = `<!DOCTYPE html>
     c.addEventListener('mouseup', endDraw);
     c.addEventListener('mouseleave', endDraw);
 
+    function undo() {
+      if (undoStack.length === 0) return;
+      redoStack.push(ctx.getImageData(0, 0, c.width, c.height));
+      ctx.putImageData(undoStack.pop(), 0, 0);
+    }
+    function redo() {
+      if (redoStack.length === 0) return;
+      undoStack.push(ctx.getImageData(0, 0, c.width, c.height));
+      ctx.putImageData(redoStack.pop(), 0, 0);
+    }
     function clearCanvas() {
+      undoStack.push(ctx.getImageData(0, 0, c.width, c.height));
+      if (undoStack.length > MAX_UNDO) undoStack.shift();
+      redoStack = [];
       ctx.clearRect(0, 0, c.width / devicePixelRatio, c.height / devicePixelRatio);
     }
 
     function send() {
       sendBtn.disabled = true;
-      sendBtn.textContent = 'Sending...';
+      sendBtn.innerHTML = '&#8943;';
       fetch('/upload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -158,20 +186,619 @@ const DRAWING_HTML = `<!DOCTYPE html>
       })
       .then(r => r.json())
       .then(() => {
-        sendBtn.textContent = 'Sent!';
+        sendBtn.innerHTML = '&#10003;';
         sendBtn.classList.add('sent');
         setTimeout(() => {
-          sendBtn.textContent = 'Send';
+          sendBtn.innerHTML = '&#9654;';
           sendBtn.classList.remove('sent');
           sendBtn.disabled = false;
         }, 1500);
       })
       .catch(() => {
-        sendBtn.textContent = 'Failed';
+        sendBtn.innerHTML = '!';
         setTimeout(() => {
-          sendBtn.textContent = 'Send';
+          sendBtn.innerHTML = '&#9654;';
           sendBtn.disabled = false;
         }, 2000);
+      });
+    }
+  </script>
+</body>
+</html>`;
+
+/**
+ * HTML page for the ASCII art editor.
+ * Provides a monospace grid with box, arrow, and text tools.
+ * Output is plain text sent via POST to /upload.
+ */
+const ASCII_HTML = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Moby ASCII Editor</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #1e1e1e; overflow: hidden; touch-action: none; display: flex; flex-direction: column; height: 100vh; height: 100dvh; font-family: -apple-system, system-ui, sans-serif; }
+    .tool-bar { display: flex; gap: 4px; padding: 6px 8px; background: #252526; flex-shrink: 0; align-items: center; }
+    .tool-bar button { padding: 8px 12px; font-size: 1.1em; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; background: #3c3c3c; color: #ccc; min-width: 36px; text-align: center; }
+    .tool-bar button.active { background: #0e639c; color: #fff; }
+    .tool-bar button:disabled { opacity: 0.3; cursor: default; }
+    .tool-bar button.btn-del { background: #a1260d; color: #fff; }
+    .tool-bar button.btn-send { background: #0e639c; color: #fff; }
+    .tool-bar button.btn-send:active { background: #1177bb; }
+    .tool-bar button.btn-send.sent { background: #16825d; }
+    .mod-group { display: none; gap: 4px; margin-left: 4px; }
+    .spacer { flex: 1; }
+    .grid-wrap { flex: 1; min-height: 0; overflow: hidden; display: flex; align-items: center; justify-content: center; background: #181818; position: relative; }
+    #gridCanvas { cursor: crosshair; border: 1px solid #444; background: #1e1e1e; }
+    .text-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: none; align-items: center; justify-content: center; background: rgba(0,0,0,0.6); z-index: 10; }
+    .text-overlay.visible { display: flex; }
+    .text-box { background: #2d2d2d; border: 1px solid #555; border-radius: 8px; padding: 16px; width: 80%; max-width: 300px; }
+    .text-box input { width: 100%; padding: 8px; font-family: 'Courier New', monospace; font-size: 16px; background: #1e1e1e; color: #d4d4d4; border: 1px solid #555; border-radius: 4px; }
+    .text-box .tactions { display: flex; gap: 8px; margin-top: 8px; }
+    .text-box .tactions button { flex: 1; padding: 8px; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; }
+    .tok { background: #0e639c; color: #fff; }
+    .tcancel { background: #3c3c3c; color: #ccc; }
+  </style>
+</head>
+<body>
+  <div class="tool-bar">
+    <button id="toolBox" class="active" onclick="setTool('box')" title="Box">&#9633;</button>
+    <button id="toolArrow" onclick="setTool('arrow')" title="Arrow">&#8599;</button>
+    <button id="toolText" onclick="setTool('text')" title="Text">A</button>
+    <button id="toolMove" onclick="setTool('move')" title="Move">&#9995;</button>
+    <span class="mod-group" id="modGroup">
+      <button class="btn-mod" onclick="layerFront()" title="To Front" disabled>&#9650;</button>
+      <button class="btn-mod" onclick="layerUp()" title="Up" disabled>&#9651;</button>
+      <button class="btn-mod" onclick="layerDown()" title="Down" disabled>&#9661;</button>
+      <button class="btn-mod" onclick="layerBack()" title="To Back" disabled>&#9660;</button>
+      <button class="btn-mod" onclick="dupShape()" title="Duplicate" disabled>&#8853;</button>
+      <button class="btn-mod btn-del" onclick="delShape()" title="Delete" disabled>&#10005;</button>
+    </span>
+    <span class="spacer"></span>
+    <button onclick="undo()" title="Undo">&#8617;</button>
+    <button onclick="redo()" title="Redo">&#8618;</button>
+    <button onclick="clearGrid()" title="Clear All">&#10006;</button>
+    <button onclick="location.href='/draw'" title="Draw Mode">&#9998;</button>
+    <button class="btn-send" id="sendBtn" onclick="send()" title="Send">&#9654;</button>
+  </div>
+  <div class="grid-wrap" id="gridWrap">
+    <canvas id="gridCanvas"></canvas>
+    <div class="text-overlay" id="textOverlay">
+      <div class="text-box">
+        <input type="text" id="textInput" placeholder="Type text..." autocomplete="off" />
+        <div class="tactions">
+          <button class="tcancel" onclick="cancelText()">Cancel</button>
+          <button class="tok" onclick="confirmText()">Place</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script>
+    // ── State ──
+    var COLS, ROWS;
+    var shapes = [];
+    var nextId = 1;
+    var undoStack = [];
+    var redoStack = [];
+    var curTool = 'box';
+    var dragStart = null;
+    var textPos = null;
+    var selectedId = null;
+    var moveOffset = null;
+    var resizeHandle = -1;
+    var dragUndoPushed = false;
+    var editingTextId = null;
+
+    // ── Grid Helpers ──
+    function makeGrid(w, h) {
+      return Array.from({ length: h }, function() { return Array(w).fill(' '); });
+    }
+    function gridStr(g) {
+      return g.map(function(r) { return r.join(''); }).join('\\n');
+    }
+
+    // ── Shape Registry ──
+    function rebuildGrid() {
+      var g = makeGrid(COLS, ROWS);
+      for (var i = 0; i < shapes.length; i++) {
+        var s = shapes[i];
+        if (s.type === 'box') drawBox(g, s.r1, s.c1, s.r2, s.c2);
+        else if (s.type === 'arrow') drawArrow(g, s.r1, s.c1, s.r2, s.c2);
+        else if (s.type === 'text') placeText(g, s);
+      }
+      return g;
+    }
+    function pushUndo() {
+      undoStack.push(JSON.parse(JSON.stringify(shapes)));
+      if (undoStack.length > 50) undoStack.shift();
+      redoStack = [];
+    }
+
+    // ── Drawing Functions ──
+    function drawBox(g, r1, c1, r2, c2) {
+      var minR = Math.min(r1, r2), maxR = Math.max(r1, r2);
+      var minC = Math.min(c1, c2), maxC = Math.max(c1, c2);
+      if (maxR - minR < 1 || maxC - minC < 1) return;
+      g[minR][minC] = '\\u250c'; g[minR][maxC] = '\\u2510';
+      g[maxR][minC] = '\\u2514'; g[maxR][maxC] = '\\u2518';
+      for (var c = minC + 1; c < maxC; c++) { g[minR][c] = '\\u2500'; g[maxR][c] = '\\u2500'; }
+      for (var r = minR + 1; r < maxR; r++) { g[r][minC] = '\\u2502'; g[r][maxC] = '\\u2502'; }
+    }
+    function drawArrow(g, r1, c1, r2, c2) {
+      if (r1 === r2 && c1 === c2) return;
+      var dh = c2 > c1 ? 1 : c2 < c1 ? -1 : 0;
+      var dv = r2 > r1 ? 1 : r2 < r1 ? -1 : 0;
+      if (r1 === r2) {
+        for (var c = c1; c !== c2; c += dh) g[r1][c] = '\\u2500';
+        g[r2][c2] = dh > 0 ? '>' : '<';
+      } else if (c1 === c2) {
+        for (var r = r1; r !== r2; r += dv) g[r][c1] = '\\u2502';
+        g[r2][c2] = dv > 0 ? 'v' : '^';
+      } else {
+        for (var c = c1; c !== c2; c += dh) g[r1][c] = '\\u2500';
+        if (dh > 0 && dv > 0) g[r1][c2] = '\\u2510';
+        else if (dh > 0 && dv < 0) g[r1][c2] = '\\u2518';
+        else if (dh < 0 && dv > 0) g[r1][c2] = '\\u250c';
+        else g[r1][c2] = '\\u2514';
+        for (var r = r1 + dv; r !== r2; r += dv) g[r][c2] = '\\u2502';
+        g[r2][c2] = dv > 0 ? 'v' : '^';
+      }
+    }
+    function placeText(g, s) {
+      for (var i = 0; i < s.text.length && s.col + i < COLS; i++) {
+        if (s.row < ROWS) g[s.row][s.col + i] = s.text[i];
+      }
+    }
+
+    // ── Canvas ──
+    var cv = document.getElementById('gridCanvas');
+    var ctx = cv.getContext('2d');
+    var wrap = document.getElementById('gridWrap');
+    var cellW = 1, cellH = 1, fontSize = 12;
+    var FONT = '"Courier New", Courier, monospace';
+
+    function render(g) {
+      var data = g || rebuildGrid();
+      var dpr = window.devicePixelRatio || 1;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, cv.width / dpr, cv.height / dpr);
+      ctx.font = fontSize + 'px ' + FONT;
+      ctx.textBaseline = 'top';
+      ctx.fillStyle = '#d4d4d4';
+      for (var r = 0; r < ROWS; r++) {
+        for (var c = 0; c < COLS; c++) {
+          var ch = data[r][c];
+          if (ch !== ' ') ctx.fillText(ch, c * cellW, r * cellH);
+        }
+      }
+      // Selection highlight + handles
+      if (selectedId !== null) {
+        var sel = findShape(selectedId);
+        if (sel) {
+          var b = shapeBounds(sel);
+          ctx.strokeStyle = '#0e639c';
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([4, 3]);
+          ctx.strokeRect(b.minC * cellW, b.minR * cellH,
+            (b.maxC - b.minC + 1) * cellW, (b.maxR - b.minR + 1) * cellH);
+          ctx.setLineDash([]);
+          var handles = getHandlePositions(sel);
+          var hs = Math.max(4, Math.min(8, cellW * 0.4));
+          ctx.fillStyle = '#fff';
+          for (var hi = 0; hi < handles.length; hi++) {
+            ctx.fillRect(handles[hi].x - hs / 2, handles[hi].y - hs / 2, hs, hs);
+          }
+        }
+      }
+      // Layer number badges (Move mode only, drawn last so they superimpose)
+      if (curTool === 'move' && shapes.length > 0) {
+        var badgeFont = Math.max(8, Math.round(fontSize * 0.55));
+        ctx.font = badgeFont + 'px sans-serif';
+        ctx.textBaseline = 'top';
+        for (var si = 0; si < shapes.length; si++) {
+          var sb = shapeBounds(shapes[si]);
+          var label = '' + (si + 1);
+          var tw = ctx.measureText(label).width;
+          var bx = sb.minC * cellW + 1;
+          var by = shapes[si].type === 'text' ? sb.minR * cellH - badgeFont - 2 : sb.minR * cellH + 1;
+          ctx.fillStyle = 'rgba(0,0,0,0.75)';
+          ctx.fillRect(bx - 1, by - 1, tw + 5, badgeFont + 3);
+          ctx.fillStyle = shapes[si].id === selectedId ? '#4fc3f7' : '#fff';
+          ctx.fillText(label, bx + 1, by);
+        }
+      }
+    }
+
+    function sizeGrid() {
+      fontSize = 16;
+      ctx.font = fontSize + 'px ' + FONT;
+      cellW = ctx.measureText('M').width;
+      cellH = fontSize;
+      COLS = Math.max(10, Math.floor(wrap.clientWidth / cellW));
+      ROWS = Math.max(5, Math.floor(wrap.clientHeight / cellH));
+      var dpr = window.devicePixelRatio || 1;
+      var gridW = cellW * COLS;
+      var gridH = cellH * ROWS;
+      cv.width = gridW * dpr;
+      cv.height = gridH * dpr;
+      cv.style.width = gridW + 'px';
+      cv.style.height = gridH + 'px';
+      render();
+    }
+
+    function fixVP() { document.body.style.height = window.innerHeight + 'px'; }
+    fixVP();
+    window.addEventListener('resize', function() { fixVP(); sizeGrid(); });
+    sizeGrid();
+
+    // ── Input Helpers ──
+    function toCell(e) {
+      var t = e.touches ? e.touches[0] : e;
+      var rect = cv.getBoundingClientRect();
+      return {
+        col: Math.max(0, Math.min(COLS - 1, Math.floor((t.clientX - rect.left) / cellW))),
+        row: Math.max(0, Math.min(ROWS - 1, Math.floor((t.clientY - rect.top) / cellH)))
+      };
+    }
+    function toPx(e) {
+      var t = e.touches ? e.touches[0] : e;
+      var rect = cv.getBoundingClientRect();
+      return { x: t.clientX - rect.left, y: t.clientY - rect.top };
+    }
+
+    function setTool(tool) {
+      curTool = tool;
+      if (tool !== 'move') selectedId = null;
+      updateModButtons();
+      var cursors = { box: 'crosshair', arrow: 'crosshair', text: 'text', move: 'grab' };
+      cv.style.cursor = cursors[tool] || 'crosshair';
+      document.querySelectorAll('#toolBox,#toolArrow,#toolText,#toolMove').forEach(function(b) { b.classList.remove('active'); });
+      document.getElementById('tool' + tool.charAt(0).toUpperCase() + tool.slice(1)).classList.add('active');
+      render();
+    }
+
+    // ── Shape Helpers ──
+    function findShape(id) {
+      for (var i = 0; i < shapes.length; i++) { if (shapes[i].id === id) return shapes[i]; }
+      return null;
+    }
+    function shapeIndex(id) {
+      for (var i = 0; i < shapes.length; i++) { if (shapes[i].id === id) return i; }
+      return -1;
+    }
+    function shapeBounds(s) {
+      if (s.type === 'text') {
+        return { minR: s.row, maxR: s.row, minC: s.col, maxC: s.col + s.text.length - 1 };
+      }
+      return { minR: Math.min(s.r1, s.r2), maxR: Math.max(s.r1, s.r2),
+               minC: Math.min(s.c1, s.c2), maxC: Math.max(s.c1, s.c2) };
+    }
+    function hitTest(row, col) {
+      for (var i = shapes.length - 1; i >= 0; i--) {
+        var b = shapeBounds(shapes[i]);
+        if (row >= b.minR && row <= b.maxR && col >= b.minC && col <= b.maxC) return shapes[i].id;
+      }
+      return null;
+    }
+    function getHandlePositions(s) {
+      if (s.type === 'arrow') {
+        return [
+          { x: s.c1 * cellW + cellW / 2, y: s.r1 * cellH + cellH / 2 },
+          { x: s.c2 * cellW + cellW / 2, y: s.r2 * cellH + cellH / 2 }
+        ];
+      }
+      var b = shapeBounds(s);
+      if (s.type === 'text') return [];
+      return [
+        { x: b.minC * cellW, y: b.minR * cellH },
+        { x: (b.maxC + 1) * cellW, y: b.minR * cellH },
+        { x: b.minC * cellW, y: (b.maxR + 1) * cellH },
+        { x: (b.maxC + 1) * cellW, y: (b.maxR + 1) * cellH }
+      ];
+    }
+    function hitTestHandlePx(px, py) {
+      if (selectedId === null) return -1;
+      var s = findShape(selectedId);
+      if (!s) return -1;
+      var handles = getHandlePositions(s);
+      var thr = Math.max(cellW, cellH) * 0.5;
+      for (var i = 0; i < handles.length; i++) {
+        var dx = px - handles[i].x, dy = py - handles[i].y;
+        if (dx * dx + dy * dy < thr * thr) return i;
+      }
+      return -1;
+    }
+    function applyResize(s, idx, row, col) {
+      row = Math.max(0, Math.min(ROWS - 1, row));
+      col = Math.max(0, Math.min(COLS - 1, col));
+      if (s.type === 'arrow') {
+        if (idx === 0) { s.r1 = row; s.c1 = col; }
+        else { s.r2 = row; s.c2 = col; }
+        return;
+      }
+      var b = shapeBounds(s);
+      var fixR, fixC;
+      if (idx === 0) { fixR = b.maxR; fixC = b.maxC; }
+      else if (idx === 1) { fixR = b.maxR; fixC = b.minC; }
+      else if (idx === 2) { fixR = b.minR; fixC = b.maxC; }
+      else { fixR = b.minR; fixC = b.minC; }
+      if (s.type === 'box') { s.r1 = fixR; s.c1 = fixC; s.r2 = row; s.c2 = col; }
+    }
+    function clampShape(s) {
+      if (s.type === 'box' || s.type === 'arrow') {
+        s.r1 = Math.max(0, Math.min(ROWS - 1, s.r1));
+        s.c1 = Math.max(0, Math.min(COLS - 1, s.c1));
+        s.r2 = Math.max(0, Math.min(ROWS - 1, s.r2));
+        s.c2 = Math.max(0, Math.min(COLS - 1, s.c2));
+      } else {
+        s.row = Math.max(0, Math.min(ROWS - 1, s.row));
+        s.col = Math.max(0, Math.min(COLS - s.text.length, s.col));
+        if (s.col < 0) s.col = 0;
+      }
+    }
+
+    // ── Touch Handling ──
+    var gw = document.getElementById('gridWrap');
+    function onStart(e) {
+      var target = e.target || e.srcElement;
+      if (target.closest && target.closest('.text-overlay')) return;
+      e.preventDefault();
+      var cell = toCell(e);
+
+      if (curTool === 'text') {
+        textPos = cell;
+        editingTextId = null;
+        document.getElementById('textOverlay').classList.add('visible');
+        var inp = document.getElementById('textInput');
+        inp.value = '';
+        inp.focus();
+        return;
+      }
+
+      if (curTool === 'move') {
+        // Check resize handles first
+        var px = toPx(e);
+        var hIdx = hitTestHandlePx(px.x, px.y);
+        if (hIdx >= 0) {
+          resizeHandle = hIdx;
+          dragUndoPushed = false;
+          return;
+        }
+        // Check shape hit
+        var hit = hitTest(cell.row, cell.col);
+        if (hit !== null) {
+          // Tap on already-selected text → edit it
+          if (hit === selectedId) {
+            var s = findShape(hit);
+            if (s && s.type === 'text') {
+              editingTextId = s.id;
+              textPos = { row: s.row, col: s.col };
+              var inp = document.getElementById('textInput');
+              inp.value = s.text;
+              document.getElementById('textOverlay').classList.add('visible');
+              inp.focus();
+              return;
+            }
+          }
+          selectedId = hit;
+          moveOffset = { row: cell.row, col: cell.col };
+          dragUndoPushed = false;
+          render();
+          updateModButtons();
+        } else {
+          selectedId = null;
+          render();
+          updateModButtons();
+        }
+        return;
+      }
+
+      dragStart = cell;
+    }
+    function onMove(e) {
+      e.preventDefault();
+      if (curTool === 'move') {
+        // Resize
+        if (resizeHandle >= 0 && selectedId !== null) {
+          if (!dragUndoPushed) { pushUndo(); dragUndoPushed = true; }
+          var cell = toCell(e);
+          var s = findShape(selectedId);
+          if (s) { applyResize(s, resizeHandle, cell.row, cell.col); render(); }
+          return;
+        }
+        // Move
+        if (selectedId !== null && moveOffset) {
+          var cell = toCell(e);
+          var dr = cell.row - moveOffset.row, dc = cell.col - moveOffset.col;
+          if (dr === 0 && dc === 0) return;
+          if (!dragUndoPushed) { pushUndo(); dragUndoPushed = true; }
+          var s = findShape(selectedId);
+          if (!s) return;
+          if (s.type === 'box' || s.type === 'arrow') {
+            s.r1 += dr; s.r2 += dr; s.c1 += dc; s.c2 += dc;
+          } else {
+            s.row += dr; s.col += dc;
+          }
+          clampShape(s);
+          moveOffset = { row: cell.row, col: cell.col };
+          render();
+        }
+        return;
+      }
+      if (!dragStart) return;
+      var cell = toCell(e);
+      var pv = rebuildGrid();
+      if (curTool === 'box') drawBox(pv, dragStart.row, dragStart.col, cell.row, cell.col);
+      else if (curTool === 'arrow') drawArrow(pv, dragStart.row, dragStart.col, cell.row, cell.col);
+      render(pv);
+    }
+    function onEnd(e) {
+      if (curTool === 'move') {
+        resizeHandle = -1;
+        moveOffset = null;
+        return;
+      }
+      if (!dragStart) return;
+      var t = e.changedTouches ? e.changedTouches[0] : e;
+      var rect = cv.getBoundingClientRect();
+      var col = Math.max(0, Math.min(COLS - 1, Math.floor((t.clientX - rect.left) / cellW)));
+      var row = Math.max(0, Math.min(ROWS - 1, Math.floor((t.clientY - rect.top) / cellH)));
+      pushUndo();
+      if (curTool === 'box') {
+        if (Math.abs(row - dragStart.row) >= 1 && Math.abs(col - dragStart.col) >= 1) {
+          shapes.push({ id: nextId++, type: 'box', r1: dragStart.row, c1: dragStart.col, r2: row, c2: col });
+        }
+      } else if (curTool === 'arrow') {
+        if (row !== dragStart.row || col !== dragStart.col) {
+          shapes.push({ id: nextId++, type: 'arrow', r1: dragStart.row, c1: dragStart.col, r2: row, c2: col });
+        }
+      }
+      dragStart = null;
+      render();
+    }
+
+    gw.addEventListener('touchstart', onStart);
+    gw.addEventListener('touchmove', onMove);
+    gw.addEventListener('touchend', onEnd);
+    gw.addEventListener('mousedown', onStart);
+    gw.addEventListener('mousemove', onMove);
+    gw.addEventListener('mouseup', onEnd);
+
+    // ── Text Tool ──
+    function confirmText() {
+      var text = document.getElementById('textInput').value;
+      if (!text) { cancelText(); return; }
+      pushUndo();
+      if (editingTextId !== null) {
+        var s = findShape(editingTextId);
+        if (s) s.text = text;
+      } else if (textPos) {
+        shapes.push({ id: nextId++, type: 'text', row: textPos.row, col: textPos.col, text: text });
+      }
+      cancelText();
+      render();
+    }
+    function cancelText() {
+      textPos = null;
+      editingTextId = null;
+      document.getElementById('textOverlay').classList.remove('visible');
+    }
+    document.getElementById('textInput').addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') confirmText();
+      if (e.key === 'Escape') cancelText();
+    });
+
+    // ── Layer Operations ──
+    function layerFront() {
+      if (selectedId === null) return;
+      var idx = shapeIndex(selectedId);
+      if (idx === -1 || idx === shapes.length - 1) return;
+      pushUndo(); shapes.push(shapes.splice(idx, 1)[0]); render();
+    }
+    function layerBack() {
+      if (selectedId === null) return;
+      var idx = shapeIndex(selectedId);
+      if (idx <= 0) return;
+      pushUndo(); shapes.unshift(shapes.splice(idx, 1)[0]); render();
+    }
+    function layerUp() {
+      if (selectedId === null) return;
+      var idx = shapeIndex(selectedId);
+      if (idx === -1 || idx === shapes.length - 1) return;
+      pushUndo();
+      var tmp = shapes[idx]; shapes[idx] = shapes[idx + 1]; shapes[idx + 1] = tmp;
+      render();
+    }
+    function layerDown() {
+      if (selectedId === null) return;
+      var idx = shapeIndex(selectedId);
+      if (idx <= 0) return;
+      pushUndo();
+      var tmp = shapes[idx]; shapes[idx] = shapes[idx - 1]; shapes[idx - 1] = tmp;
+      render();
+    }
+    function dupShape() {
+      if (selectedId === null) return;
+      var s = findShape(selectedId);
+      if (!s) return;
+      pushUndo();
+      var d = JSON.parse(JSON.stringify(s));
+      d.id = nextId++;
+      if (d.type === 'box' || d.type === 'arrow') { d.r1 += 2; d.r2 += 2; d.c1 += 2; d.c2 += 2; }
+      else { d.row += 2; d.col += 2; }
+      clampShape(d);
+      shapes.push(d);
+      selectedId = d.id;
+      render();
+      updateModButtons();
+    }
+    function delShape() {
+      if (selectedId === null) return;
+      var idx = shapeIndex(selectedId);
+      if (idx === -1) return;
+      pushUndo();
+      shapes.splice(idx, 1);
+      selectedId = null;
+      updateModButtons();
+      render();
+    }
+    function updateModButtons() {
+      var mg = document.getElementById('modGroup');
+      mg.style.display = curTool === 'move' ? 'flex' : 'none';
+      var btns = mg.querySelectorAll('button');
+      var enabled = selectedId !== null && curTool === 'move';
+      for (var i = 0; i < btns.length; i++) btns[i].disabled = !enabled;
+    }
+
+    // ── Actions ──
+    function undo() {
+      if (undoStack.length === 0) return;
+      redoStack.push(JSON.parse(JSON.stringify(shapes)));
+      shapes = undoStack.pop();
+      selectedId = null;
+      updateModButtons();
+      render();
+    }
+    function redo() {
+      if (redoStack.length === 0) return;
+      undoStack.push(JSON.parse(JSON.stringify(shapes)));
+      shapes = redoStack.pop();
+      selectedId = null;
+      updateModButtons();
+      render();
+    }
+    function clearGrid() {
+      pushUndo();
+      shapes = [];
+      selectedId = null;
+      nextId = 1;
+      updateModButtons();
+      render();
+    }
+
+    var sendBtn = document.getElementById('sendBtn');
+    function send() {
+      var g = rebuildGrid();
+      var text = gridStr(g).replace(/[\\t ]+$/gm, '').replace(/\\n+$/, '');
+      if (!text.trim()) return;
+      sendBtn.disabled = true;
+      sendBtn.textContent = 'Sending...';
+      fetch('/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'ascii', text: text })
+      })
+      .then(function(r) { return r.json(); })
+      .then(function() {
+        sendBtn.textContent = 'Sent!';
+        sendBtn.classList.add('sent');
+        setTimeout(function() { sendBtn.textContent = 'Send'; sendBtn.classList.remove('sent'); sendBtn.disabled = false; }, 1500);
+      })
+      .catch(function() {
+        sendBtn.textContent = 'Failed';
+        setTimeout(function() { sendBtn.textContent = 'Send'; sendBtn.disabled = false; }, 2000);
       });
     }
   </script>
@@ -192,10 +819,12 @@ export class DrawingServer {
 
   // ── Events ──
   private readonly _onImageReceived = new vscode.EventEmitter<DrawingReceivedEvent>();
+  private readonly _onAsciiReceived = new vscode.EventEmitter<AsciiReceivedEvent>();
   private readonly _onServerStarted = new vscode.EventEmitter<{ port: number; url: string }>();
   private readonly _onServerStopped = new vscode.EventEmitter<void>();
 
   readonly onImageReceived = this._onImageReceived.event;
+  readonly onAsciiReceived = this._onAsciiReceived.event;
   readonly onServerStarted = this._onServerStarted.event;
   readonly onServerStopped = this._onServerStopped.event;
 
@@ -410,15 +1039,21 @@ export class DrawingServer {
 
   /**
    * Route incoming HTTP requests.
+   * Default route (/) serves the ASCII editor. /draw serves the color drawing page.
    */
   private handleRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
     if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
+      this.serveAsciiPage(res);
+      return;
+    }
+
+    if (req.method === 'GET' && req.url === '/draw') {
       this.serveDrawingPage(res);
       return;
     }
 
     if (req.method === 'POST' && req.url === '/upload') {
-      this.handleImageUpload(req, res);
+      this.handleUpload(req, res);
       return;
     }
 
@@ -434,6 +1069,15 @@ export class DrawingServer {
   }
 
   /**
+   * Serve the ASCII art editor page (default).
+   */
+  private serveAsciiPage(res: http.ServerResponse): void {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(ASCII_HTML);
+    logger.debug('[DrawingServer] Served ASCII editor page');
+  }
+
+  /**
    * Serve the HTML drawing page.
    */
   private serveDrawingPage(res: http.ServerResponse): void {
@@ -443,10 +1087,12 @@ export class DrawingServer {
   }
 
   /**
-   * Handle an image upload from the phone.
-   * Expects JSON body: { image: "data:image/png;base64,..." }
+   * Handle an upload from the phone.
+   * Supports two formats:
+   * - Image: { image: "data:image/png;base64,..." }
+   * - ASCII: { type: "ascii", text: "..." }
    */
-  private handleImageUpload(req: http.IncomingMessage, res: http.ServerResponse): void {
+  private handleUpload(req: http.IncomingMessage, res: http.ServerResponse): void {
     let body = '';
     let bodySize = 0;
 
@@ -465,12 +1111,38 @@ export class DrawingServer {
     req.on('end', () => {
       try {
         const parsed = JSON.parse(body);
-        const imageDataUrl = parsed.image;
 
+        // ASCII diagram upload
+        if (parsed.type === 'ascii' && typeof parsed.text === 'string') {
+          if (!parsed.text.trim()) {
+            logger.warn('[DrawingServer] Upload rejected: empty ASCII text');
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Empty ASCII text' }));
+            return;
+          }
+
+          const sizeB = Buffer.byteLength(parsed.text, 'utf-8');
+          logger.info('[DrawingServer] ASCII diagram received', `${sizeB} bytes`);
+          tracer.trace('state.publish', 'drawingServer.asciiReceived', {
+            data: { sizeB }
+          });
+
+          this._onAsciiReceived.fire({
+            text: parsed.text,
+            timestamp: Date.now()
+          });
+
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+          return;
+        }
+
+        // Image upload (existing flow)
+        const imageDataUrl = parsed.image;
         if (!imageDataUrl || typeof imageDataUrl !== 'string' || !imageDataUrl.startsWith('data:image/')) {
-          logger.warn('[DrawingServer] Upload rejected: invalid image data');
+          logger.warn('[DrawingServer] Upload rejected: invalid upload data');
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Invalid image data' }));
+          res.end(JSON.stringify({ error: 'Invalid upload data' }));
           return;
         }
 
@@ -510,6 +1182,7 @@ export class DrawingServer {
       this.server = null;
     }
     this._onImageReceived.dispose();
+    this._onAsciiReceived.dispose();
     this._onServerStarted.dispose();
     this._onServerStopped.dispose();
     logger.debug('[DrawingServer] Disposed');

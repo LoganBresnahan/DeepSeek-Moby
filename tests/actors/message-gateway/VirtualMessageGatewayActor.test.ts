@@ -751,6 +751,45 @@ describe('VirtualMessageGatewayActor', () => {
       expect((mockActors.virtualList as any).addDrawingSegment).not.toHaveBeenCalled();
     });
 
+    it('handles asciiDrawingReceived by creating user turn and sending message', () => {
+      dispatchMessage({
+        type: 'asciiDrawingReceived',
+        text: '┌──┐\n│Hi│\n└──┘',
+        timestamp: 1700000000000
+      });
+
+      // Should create a visible user turn with the ASCII art
+      expect(mockActors.virtualList.addTurn).toHaveBeenCalledWith(
+        expect.stringContaining('turn-ascii-'),
+        'user',
+        expect.objectContaining({ timestamp: expect.any(Number) })
+      );
+      expect(mockActors.virtualList.addTextSegment).toHaveBeenCalledWith(
+        expect.stringContaining('turn-ascii-'),
+        '```\n┌──┐\n│Hi│\n└──┘\n```'
+      );
+
+      // Should also send to extension for LLM processing
+      expect(mockVSCode.postMessage).toHaveBeenCalledWith({
+        type: 'sendMessage',
+        message: '```\n┌──┐\n│Hi│\n└──┘\n```'
+      });
+    });
+
+    it('ignores asciiDrawingReceived with no text', () => {
+      dispatchMessage({
+        type: 'asciiDrawingReceived',
+        timestamp: 1700000000000
+      });
+
+      expect(mockVSCode.postMessage).not.toHaveBeenCalled();
+      expect(mockActors.virtualList.addTurn).not.toHaveBeenCalledWith(
+        expect.stringContaining('turn-ascii-'),
+        expect.anything(),
+        expect.anything()
+      );
+    });
+
     it('publishes drawingServerState to manager', () => {
       const publishSpy = vi.spyOn(manager, 'publishDirect');
 

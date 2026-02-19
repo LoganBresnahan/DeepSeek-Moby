@@ -167,6 +167,13 @@ export class ChatProvider implements vscode.WebviewViewProvider {
           timestamp: event.timestamp
         });
       });
+      this.drawingServer.onAsciiReceived(event => {
+        this._view?.webview.postMessage({
+          type: 'asciiDrawingReceived',
+          text: event.text,
+          timestamp: event.timestamp
+        });
+      });
     }
 
     // SettingsManager → webview

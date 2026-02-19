@@ -392,6 +392,10 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         this.handleDrawingReceived(msg);
         break;
 
+      case 'asciiDrawingReceived':
+        this.handleAsciiDrawingReceived(msg);
+        break;
+
       // ---- Trace Messages ----
       case 'traceCalibration':
         // Receive calibration data from extension for timeline alignment
@@ -876,6 +880,24 @@ export class VirtualMessageGatewayActor extends EventStateActor {
     virtualList.addDrawingSegment(turnId, imageDataUrl, timestamp);
 
     log.info(`Drawing received, added to turn ${turnId}`);
+  }
+
+  private handleAsciiDrawingReceived(msg: { type: string; [key: string]: unknown }): void {
+    const { virtualList } = this._actors;
+    const text = msg.text as string;
+    if (!text) return;
+
+    const codeFenced = '```\n' + text + '\n```';
+
+    // Create a visible user turn showing the ASCII art in the chat stream
+    const turnId = `turn-ascii-${Date.now()}`;
+    virtualList.addTurn(turnId, 'user', { timestamp: Date.now() });
+    virtualList.addTextSegment(turnId, codeFenced);
+
+    // Send to extension as a regular user message (stored in history, sent to LLM)
+    this._vscode.postMessage({ type: 'sendMessage', message: codeFenced });
+
+    log.info(`ASCII diagram received, added to turn ${turnId}`);
   }
 
   // ============================================
