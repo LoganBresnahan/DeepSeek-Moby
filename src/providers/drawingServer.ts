@@ -37,8 +37,8 @@ export interface StartResult {
 /** Maximum allowed POST body size (5 MB) */
 const MAX_BODY_SIZE = 5 * 1024 * 1024;
 
-/** Default port for the drawing server */
-const DEFAULT_PORT = 8839;
+/** Default port for the drawing server (0 = OS assigns a free port) */
+const DEFAULT_PORT = 0;
 
 /**
  * HTML page served to the phone browser.
@@ -965,10 +965,9 @@ export class DrawingServer {
       throw new Error('Drawing server is already running');
     }
 
-    const networkInfo = DrawingServer.getNetworkInfo(this._port);
     const spanId = tracer.startSpan('state.publish', 'drawingServer.start', {
       executionMode: 'async',
-      data: { port: this._port, isWSL: networkInfo.isWSL }
+      data: { requestedPort: this._port }
     });
 
     return new Promise((resolve, reject) => {
@@ -988,6 +987,13 @@ export class DrawingServer {
       });
 
       this.server.listen(this._port, () => {
+        // Read the actual port assigned by the OS (important when _port is 0)
+        const addr = this.server!.address();
+        if (addr && typeof addr === 'object') {
+          this._port = addr.port;
+        }
+
+        const networkInfo = DrawingServer.getNetworkInfo(this._port);
         const lanIP = DrawingServer.getLanIP();
         const host = lanIP || 'localhost';
         const localUrl = `http://${host}:${this._port}`;
@@ -1000,7 +1006,7 @@ export class DrawingServer {
 
         tracer.endSpan(spanId, {
           status: 'completed',
-          data: { localUrl, lanIP: lanIP || 'none', isWSL: networkInfo.isWSL }
+          data: { localUrl, port: this._port, lanIP: lanIP || 'none', isWSL: networkInfo.isWSL }
         });
 
         this._onServerStarted.fire({ port: this._port, url: localUrl });

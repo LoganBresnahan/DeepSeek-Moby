@@ -364,73 +364,100 @@ export class DiffManager {
     }
 
     const cleanCode = code.replace(/^#\s*File:.*\n/i, '');
-    let editor = vscode.window.activeTextEditor;
 
-    if (targetFilePath) {
-      const workspaceFolders = vscode.workspace.workspaceFolders;
-      if (workspaceFolders && workspaceFolders.length > 0) {
-        let foundDoc: vscode.TextDocument | undefined;
+    try {
+      if (targetFilePath) {
+        // Target file known — apply via WorkspaceEdit (no visible editor needed)
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        if (!workspaceFolders || workspaceFolders.length === 0) {
+          this._onWarning.fire({ message: 'No workspace folder open' });
+          this.sendCodeAppliedStatus(false, 'No workspace folder open');
+          return;
+        }
+
+        let document: vscode.TextDocument | undefined;
+        let fileUri: vscode.Uri | undefined;
         for (const folder of workspaceFolders) {
           const fullPath = vscode.Uri.joinPath(folder.uri, targetFilePath);
           try {
-            foundDoc = await vscode.workspace.openTextDocument(fullPath);
+            document = await vscode.workspace.openTextDocument(fullPath);
+            fileUri = fullPath;
             break;
           } catch (error) { continue; }
         }
-        if (foundDoc) {
-          editor = await vscode.window.showTextDocument(foundDoc, { preview: false });
-        } else {
+
+        if (!document || !fileUri) {
           this._onWarning.fire({ message: `File not found in workspace: ${targetFilePath}` });
           this.sendCodeAppliedStatus(false, `File not found: ${targetFilePath}`);
           return;
         }
-      }
-    } else {
-      if (editor && (editor.document.uri.scheme === 'deepseek-diff' || editor.document.uri.scheme === 'git')) {
-        const realEditor = vscode.window.visibleTextEditors.find(e =>
-          e.document.uri.scheme === 'file' && !e.document.uri.path.includes('deepseek-diff')
+
+        const currentContent = document.getText();
+        const result = this.diffEngine.applyChanges(currentContent, cleanCode);
+        const fullRange = new vscode.Range(
+          document.positionAt(0),
+          document.positionAt(currentContent.length)
         );
-        if (realEditor) {
-          editor = realEditor;
-        } else if (this.lastActiveEditorUri) {
-          const doc = await vscode.workspace.openTextDocument(this.lastActiveEditorUri);
-          editor = await vscode.window.showTextDocument(doc);
+
+        const edit = new vscode.WorkspaceEdit();
+        edit.replace(fileUri, fullRange, result.content);
+        await vscode.workspace.applyEdit(edit);
+        this.sendCodeAppliedStatus(result.success, result.success ? undefined : 'Patch applied with fallback');
+
+        // Open file in background so user can check the result
+        await vscode.window.showTextDocument(document, { preview: false, preserveFocus: true });
+      } else {
+        // No target file — fall back to active editor
+        let editor = activeEditor;
+
+        if (editor && (editor.document.uri.scheme === 'deepseek-diff' || editor.document.uri.scheme === 'git')) {
+          const realEditor = vscode.window.visibleTextEditors.find(e =>
+            e.document.uri.scheme === 'file' && !e.document.uri.path.includes('deepseek-diff')
+          );
+          if (realEditor) {
+            editor = realEditor;
+          } else if (this.lastActiveEditorUri) {
+            const doc = await vscode.workspace.openTextDocument(this.lastActiveEditorUri);
+            editor = await vscode.window.showTextDocument(doc);
+          }
         }
+
+        if (!editor || editor.document.uri.scheme !== 'file') {
+          const doc = await vscode.workspace.openTextDocument({
+            content: cleanCode,
+            language: this.mapLanguage(language)
+          });
+          await vscode.window.showTextDocument(doc);
+          this.sendCodeAppliedStatus(true);
+          return;
+        }
+
+        const document = editor.document;
+        const currentContent = document.getText();
+        const selection = editor.selection;
+
+        if (!selection.isEmpty) {
+          const edit = new vscode.WorkspaceEdit();
+          edit.replace(document.uri, selection, cleanCode);
+          await vscode.workspace.applyEdit(edit);
+          this.sendCodeAppliedStatus(true);
+          return;
+        }
+
+        const result = this.diffEngine.applyChanges(currentContent, cleanCode);
+        const fullRange = new vscode.Range(
+          document.positionAt(0),
+          document.positionAt(currentContent.length)
+        );
+
+        const edit = new vscode.WorkspaceEdit();
+        edit.replace(document.uri, fullRange, result.content);
+        await vscode.workspace.applyEdit(edit);
+        this.sendCodeAppliedStatus(result.success, result.success ? undefined : 'Patch applied with fallback');
       }
-    }
-
-    try {
-      if (!editor || editor.document.uri.scheme !== 'file') {
-        const doc = await vscode.workspace.openTextDocument({
-          content: cleanCode,
-          language: this.mapLanguage(language)
-        });
-        await vscode.window.showTextDocument(doc);
-        this.sendCodeAppliedStatus(true);
-        return;
-      }
-
-      const document = editor.document;
-      const currentContent = document.getText();
-      const selection = editor.selection;
-
-      if (!targetFilePath && !selection.isEmpty) {
-        await editor.edit((editBuilder) => { editBuilder.replace(selection, cleanCode); });
-        this.sendCodeAppliedStatus(true);
-        return;
-      }
-
-      const result = this.diffEngine.applyChanges(currentContent, cleanCode);
-      const fullRange = new vscode.Range(
-        document.positionAt(0),
-        document.positionAt(currentContent.length)
-      );
-      await editor.edit((editBuilder) => { editBuilder.replace(fullRange, result.content); });
-      this.sendCodeAppliedStatus(result.success, result.success ? undefined : 'Patch applied with fallback');
 
       if (targetMetadata) {
         await this.closeSingleDiff(targetMetadata);
-        await this.focusTargetFile(targetMetadata.targetFilePath);
       } else {
         await this.closeDiffEditor();
       }

@@ -10,7 +10,10 @@
  * All sub-commands must be allowed for the compound to be allowed.
  *
  * The manager maintains an in-memory cache of rules for fast lookups,
- * refreshed on every write operation.
+ * refreshed on every write operation. A globalState version counter
+ * enables cross-instance cache invalidation: when one instance adds
+ * a rule, other instances detect the version change on their next
+ * checkCommand() and refresh from the database.
  */
 
 import * as vscode from 'vscode';
@@ -115,6 +118,7 @@ export function getDefaultRules(platform?: string): DefaultRules {
 export class CommandApprovalManager {
   private allowed: string[] = [];
   private blocked: string[] = [];
+  private _lastSeenVersion: number = 0;
 
   // Pending approval promise (one at a time — orchestrator awaits each sequentially)
   private _pendingResolve: ((result: CommandApprovalResult) => void) | null = null;
@@ -126,9 +130,15 @@ export class CommandApprovalManager {
   private readonly _onRulesChanged = new vscode.EventEmitter<CommandRule[]>();
   readonly onRulesChanged = this._onRulesChanged.event;
 
-  constructor(private readonly db: Database, private readonly platform?: string) {
+  constructor(
+    private readonly db: Database,
+    private readonly globalState?: vscode.Memento,
+    private readonly platform?: string
+  ) {
     this.seedDefaultsIfEmpty();
     this.refreshCache();
+    // Sync version counter on init
+    this._lastSeenVersion = this.globalState?.get<number>('commandRulesVersion') ?? 0;
   }
 
   /** Block execution and wait for user approval via the webview. */
@@ -178,6 +188,10 @@ export class CommandApprovalManager {
 
   /** Check a command against the rules. Returns 'allowed', 'blocked', or 'ask'. */
   checkCommand(command: string): CommandDecision {
+    // Cross-instance cache invalidation: if another instance changed rules,
+    // the globalState version counter will differ from our last-seen version.
+    this.refreshCacheIfStale();
+
     const trimmed = command.trim();
     if (!trimmed) {
       logger.debug('[CommandApproval] checkCommand: empty command, blocking');
@@ -213,7 +227,7 @@ export class CommandApprovalManager {
     return decision;
   }
 
-  /** Add a rule, persist to DB, refresh cache. */
+  /** Add a rule, persist to DB, refresh cache, bump version. */
   addRule(prefix: string, type: 'allowed' | 'blocked'): void {
     const trimmed = prefix.trim();
     if (!trimmed) { return; }
@@ -222,14 +236,16 @@ export class CommandApprovalManager {
       'INSERT OR REPLACE INTO command_rules (prefix, type, source, created_at) VALUES (?, ?, ?, ?)'
     ).run(trimmed, type, 'user', Date.now());
     this.refreshCache();
+    this.bumpVersion();
     this._onRulesChanged.fire(this.getAllRules());
     logger.info(`[CommandApproval] Added rule: ${type} "${trimmed}"`);
   }
 
-  /** Remove a rule by id, refresh cache. */
+  /** Remove a rule by id, refresh cache, bump version. */
   removeRule(id: number): void {
     this.db.prepare('DELETE FROM command_rules WHERE id = ?').run(id);
     this.refreshCache();
+    this.bumpVersion();
     this._onRulesChanged.fire(this.getAllRules());
     logger.info(`[CommandApproval] Removed rule id=${id}`);
   }
@@ -239,11 +255,12 @@ export class CommandApprovalManager {
     return this.db.prepare('SELECT * FROM command_rules ORDER BY type, prefix').all() as unknown as CommandRule[];
   }
 
-  /** Reset to defaults — delete all rules, re-seed defaults. */
+  /** Reset to defaults — delete all rules, re-seed defaults, bump version. */
   resetToDefaults(): void {
     this.db.prepare('DELETE FROM command_rules').run();
     this.seedDefaultsIfEmpty();
     this.refreshCache();
+    this.bumpVersion();
     this._onRulesChanged.fire(this.getAllRules());
     logger.info('[CommandApproval] Reset to defaults');
   }
@@ -321,6 +338,25 @@ export class CommandApprovalManager {
     const t = current.trim();
     if (t) { parts.push(t); }
     return parts;
+  }
+
+  /** Bump the globalState version counter so other instances know rules changed. */
+  private bumpVersion(): void {
+    if (!this.globalState) { return; }
+    const next = (this.globalState.get<number>('commandRulesVersion') ?? 0) + 1;
+    this._lastSeenVersion = next;
+    this.globalState.update('commandRulesVersion', next);
+  }
+
+  /** Refresh cache if another instance has changed rules (version counter mismatch). */
+  private refreshCacheIfStale(): void {
+    if (!this.globalState) { return; }
+    const current = this.globalState.get<number>('commandRulesVersion') ?? 0;
+    if (current !== this._lastSeenVersion) {
+      logger.debug(`[CommandApproval] Stale cache detected (local=${this._lastSeenVersion}, global=${current}), refreshing`);
+      this.refreshCache();
+      this._lastSeenVersion = current;
+    }
   }
 
   /** Refresh the in-memory cache from the database. */

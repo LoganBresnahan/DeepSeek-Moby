@@ -70,6 +70,12 @@ export class Database {
 
     // Enable foreign key constraint enforcement
     this.db.exec('PRAGMA foreign_keys = ON');
+
+    // WAL mode: allows concurrent readers while one connection writes
+    this.db.exec('PRAGMA journal_mode = WAL');
+
+    // Retry for up to 5 seconds when the database is locked instead of failing immediately
+    this.db.exec('PRAGMA busy_timeout = 5000');
   }
 
   /**

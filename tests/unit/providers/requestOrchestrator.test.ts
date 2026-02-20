@@ -183,6 +183,7 @@ function createMockDiffManager() {
     handleAutoShowDiff: vi.fn(async () => {}),
     handleAskModeDiff: vi.fn(async () => {}),
     applyCodeDirectlyForAutoMode: vi.fn(async () => true),
+    showDiff: vi.fn(async () => {}),
     setFlushCallback: vi.fn(),
     waitForPendingApprovals: vi.fn(async () => []),
     cancelPendingApprovals: vi.fn(),
@@ -706,6 +707,116 @@ describe('RequestOrchestrator', () => {
 
       // chat() is used by the tool loop; it should not be called for reasoner
       expect(mockClient.chat).not.toHaveBeenCalled();
+    });
+
+    it('should call showDiff for apply_code_edit in manual mode', async () => {
+      mockDiffManager.currentEditMode = 'manual';
+
+      let callCount = 0;
+      mockClient.chat.mockImplementation(async () => {
+        callCount++;
+        if (callCount === 1) {
+          return {
+            content: '',
+            tool_calls: [{
+              id: 'tc-1',
+              type: 'function',
+              function: {
+                name: 'apply_code_edit',
+                arguments: JSON.stringify({
+                  file: 'src/index.ts',
+                  code: 'console.log("hello")',
+                  language: 'typescript'
+                })
+              }
+            }]
+          };
+        }
+        return { content: 'Done', tool_calls: null };
+      });
+
+      await orchestrator.handleMessage('Edit the file', null, async () => '', undefined);
+
+      expect(mockDiffManager.showDiff).toHaveBeenCalledWith(
+        '# File: src/index.ts\nconsole.log("hello")',
+        'typescript'
+      );
+      expect(mockDiffManager.applyCodeDirectlyForAutoMode).not.toHaveBeenCalled();
+      expect(mockDiffManager.handleAskModeDiff).not.toHaveBeenCalled();
+    });
+
+    it('should call applyCodeDirectlyForAutoMode for apply_code_edit in auto mode', async () => {
+      mockDiffManager.currentEditMode = 'auto';
+
+      let callCount = 0;
+      mockClient.chat.mockImplementation(async () => {
+        callCount++;
+        if (callCount === 1) {
+          return {
+            content: '',
+            tool_calls: [{
+              id: 'tc-1',
+              type: 'function',
+              function: {
+                name: 'apply_code_edit',
+                arguments: JSON.stringify({
+                  file: 'src/index.ts',
+                  code: 'console.log("hello")',
+                  language: 'typescript'
+                })
+              }
+            }]
+          };
+        }
+        return { content: 'Done', tool_calls: null };
+      });
+
+      await orchestrator.handleMessage('Edit the file', null, async () => '', undefined);
+
+      expect(mockDiffManager.applyCodeDirectlyForAutoMode).toHaveBeenCalledWith(
+        'src/index.ts',
+        'console.log("hello")',
+        undefined,
+        true
+      );
+      expect(mockDiffManager.showDiff).not.toHaveBeenCalled();
+    });
+
+    it('should call handleAskModeDiff for apply_code_edit in ask mode', async () => {
+      mockDiffManager.currentEditMode = 'ask';
+      mockDiffManager.waitForPendingApprovals.mockResolvedValue([{ approved: true, filePath: 'src/index.ts' }]);
+
+      let callCount = 0;
+      mockClient.chat.mockImplementation(async () => {
+        callCount++;
+        if (callCount === 1) {
+          return {
+            content: '',
+            tool_calls: [{
+              id: 'tc-1',
+              type: 'function',
+              function: {
+                name: 'apply_code_edit',
+                arguments: JSON.stringify({
+                  file: 'src/index.ts',
+                  code: 'console.log("hello")',
+                  language: 'typescript'
+                })
+              }
+            }]
+          };
+        }
+        return { content: 'Done', tool_calls: null };
+      });
+
+      await orchestrator.handleMessage('Edit the file', null, async () => '', undefined);
+
+      expect(mockDiffManager.handleAskModeDiff).toHaveBeenCalledWith(
+        '# File: src/index.ts\nconsole.log("hello")',
+        'typescript'
+      );
+      expect(mockDiffManager.showDiff).not.toHaveBeenCalled();
+      expect(mockDiffManager.applyCodeDirectlyForAutoMode).not.toHaveBeenCalled();
     });
   });
 

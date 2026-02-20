@@ -1,8 +1,8 @@
 # Make Edit Modes Better
 
-**Status:** Partially Implemented
+**Status:** Complete — all three modes implemented and verified
 
-**Depends on:** DiffManager extraction (complete), sandbox research
+**Depends on:** DiffManager extraction (complete), sandbox research (complete)
 
 ---
 
@@ -118,37 +118,74 @@ All critical decision points have debug/warn logging:
 
 ---
 
-## Manual Mode — UI Fixes (NOT STARTED)
+## Manual Mode — UI Fixes — IMPLEMENTED
 
-Manual mode renders code blocks in the chat and leaves it to the user to copy/apply. The basic diff apply buttons need fixing:
+Manual mode renders code blocks in the chat with Diff, Apply, and Copy buttons.
 
-### Current Issues
+### Issues Resolved
 
-| Issue | Description |
-|-------|-------------|
-| **Apply button missing/broken** | Code blocks in chat should have a clear "Apply" button that opens a diff tab or applies directly |
-| **Copy button** | Should reliably copy the code block content to clipboard |
-| **No file target** | When the LLM outputs a code block with `# File: path`, the apply button should know which file to target |
-| **No feedback after apply** | User clicks apply but gets no visual confirmation it worked |
+| Issue | Resolution |
+|-------|------------|
+| **`apply_code_edit` tool calls did nothing in manual mode** | Added manual mode handler in `requestOrchestrator.ts` that calls `diffManager.showDiff()` — opens diff tab for user review |
+| **Copy button** | Already worked correctly — copies code block text content to clipboard |
+| **No file target** | `# File: path` header in code blocks is parsed by both `showDiff` and `applyCode` to target the correct file |
+| **No feedback after apply** | Permanent "✓ Applied" state with green background; Diff button greyed out |
+| **Code block header layout** | Buttons (Diff/Apply/Copy) stay right-aligned when expanded via `margin-left: auto` on `.code-actions` |
+| **Diff tab didn't close after Apply** | `applyCode` closes the diff via `closeSingleDiff`; removed `focusTargetFile` which was opening unwanted file tabs |
+| **Apply stole focus from chat** | `applyCode` refactored to use `WorkspaceEdit` (no visible editor needed); file opened in background with `preserveFocus: true` |
+| **No syntax highlighting** | Custom syntax highlighter (`media/utils/syntaxHighlight.ts`) with ~40 languages, replaced unused `highlight.js` dependency |
 
-### TODO
+### Implementation Details
 
-- [ ] Audit the current manual mode code block buttons (copy, apply)
-- [ ] Fix apply button to open diff tab targeting the correct file
-- [ ] Add visual feedback (checkmark, "Applied" label) after successful apply
-- [ ] Ensure copy button works reliably across all code block types
+#### Manual mode `apply_code_edit` handler (`src/providers/requestOrchestrator.ts`)
+- When edit mode is "manual" and a V3 `apply_code_edit` tool call arrives, constructs code with `# File:` header and calls `diffManager.showDiff()` to open a diff tab for user review
+
+#### Permanent applied state (`media/actors/turn/MessageTurnActor.ts`)
+- Apply button click handler: adds `.applied` class to code block, sets text to "✓ Applied"
+- `.applied` class: green background on Apply button (non-clickable), greyed-out Diff button
+- Requires `.diffed` class (must click Diff first) — prevents applying without reviewing
+
+#### `applyCode` refactored to `WorkspaceEdit` (`src/providers/diffManager.ts`)
+- Target file path known: `openTextDocument` → `WorkspaceEdit` → `applyEdit` → `showTextDocument(preserveFocus: true)`
+- No target file path: falls back to active editor, also uses `WorkspaceEdit`
+- Diff auto-closes via `closeSingleDiff` after apply; no `focusTargetFile` call
+
+#### Syntax highlighter (`media/utils/syntaxHighlight.ts`)
+- Left-to-right scanner: comments > strings > numbers > keywords
+- Three tokenizer modes: standard (keyword-based), markup (HTML/XML), CSS
+- ~40 language definitions with keyword/type/builtin lists, 40+ aliases
+- Dark/light/high-contrast theme support via `:host-context(.vscode-light)`
+- Lazy-cached keyword Sets; logging via `createLogger('SyntaxHL')` with deduped warnings
+
+### Key Files Modified
+
+| File | Changes |
+|------|---------|
+| `src/providers/requestOrchestrator.ts` | Manual mode `apply_code_edit` handler |
+| `src/providers/diffManager.ts` | `applyCode` refactored to `WorkspaceEdit`, removed `focusTargetFile` |
+| `media/actors/turn/MessageTurnActor.ts` | Permanent applied state, syntax highlighting integration |
+| `media/actors/turn/styles/index.ts` | `.applied` CSS, `margin-left: auto` on `.code-actions`, syntax highlight styles |
+| `media/utils/syntaxHighlight.ts` | **New** — custom syntax highlighter (~550 lines) |
+| `tests/unit/utils/syntaxHighlight.test.ts` | **New** — 92 tests for highlighter |
+| `package.json` | Removed unused `highlight.js` dependency |
+
+### Test Coverage
+
+| Test File | Coverage |
+|-----------|----------|
+| `tests/unit/providers/requestOrchestrator.test.ts` | Manual/auto/ask mode `apply_code_edit` handling |
+| `tests/unit/utils/syntaxHighlight.test.ts` | All tokenizer modes, 26 language spot checks, edge cases, text preservation |
 
 ---
 
-## Auto Mode — Command Approval (NOT STARTED)
+## Auto Mode — Command Approval — IMPLEMENTED
 
-Auto mode trusts code edits (applies them without confirmation), but **commands should still require approval**. "I trust your code changes" is very different from "run anything on my system."
+Auto mode trusts code edits (applies them without confirmation), but **commands require approval**. Implemented as a full sandboxing system — see `docs/plans/completed/sandbox.md` for the complete plan.
 
-This ties into the sandboxing research in `docs/plans/sandbox.md` — the tiered command approval system (safe/dev/dangerous categories, learn-as-you-go allowlists) applies specifically to auto mode's command execution path.
+### What Was Built
 
-### TODO
-
-- [ ] Define which commands auto-approve in auto mode (safe + dev tool categories)
-- [ ] Add approval gate for unknown/dangerous commands even in auto mode
-- [ ] UI for command approval — VS Code QuickPick or inline chat widget
-- [ ] Persist "always allow" / "always block" decisions to settings
+- **CommandApprovalManager** (`src/providers/commandApprovalManager.ts`) — prefix-based rule engine with encrypted SQLite storage, platform-aware defaults (Unix/Windows)
+- **Inline approval widget** — appears in chat when a command needs approval, with Allow / Block / Always Allow / Always Block buttons
+- **Rules modal** (`media/actors/command-rules/CommandRulesModalActor.ts`) — unified alphabetical list with checkboxes (checked=approved), filter chips, search, add/delete, reset to defaults
+- **`allowAllShellCommands` bypass** — setting that skips all approval checks when enabled
+- **Edge cases** — cancel pending approvals on stop/new conversation, generation abort handling

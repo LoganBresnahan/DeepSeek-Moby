@@ -49,6 +49,7 @@ const mockServerInstance = {
   }),
   on: vi.fn(),
   listening: true,
+  address: vi.fn(() => ({ port: 0, family: 'IPv4', address: '0.0.0.0' })),
 };
 
 vi.mock('http', () => ({
@@ -111,7 +112,10 @@ describe('DrawingServer', () => {
     vi.clearAllMocks();
     capturedRequestHandler = null;
     mockServerInstance.listening = true;
-    mockServerInstance.listen.mockImplementation((_port: number, cb?: () => void) => {
+    mockServerInstance.listen.mockImplementation((port: number, cb?: () => void) => {
+      // Simulate OS port assignment: if port is 0, assign a dynamic port
+      const assignedPort = port === 0 ? 49152 : port;
+      mockServerInstance.address.mockReturnValue({ port: assignedPort, family: 'IPv4', address: '0.0.0.0' });
       if (cb) cb();
       return mockServerInstance;
     });
@@ -137,19 +141,20 @@ describe('DrawingServer', () => {
       expect(server.port).toBe(9999);
     });
 
-    it('should use default port when none provided', () => {
+    it('should use default port 0 (OS-assigned) when none provided', () => {
       const defaultServer = new DrawingServer();
-      expect(defaultServer.port).toBe(8839);
+      expect(defaultServer.port).toBe(0);
       defaultServer.dispose();
     });
 
-    it('should not be running initially', () => {
-      // Server not started yet, internal server is null
-      const freshServer = new DrawingServer();
-      // Before start(), the internal server is null, so isRunning checks null
-      // We need to check this before start() is called
-      expect(freshServer.port).toBe(8839);
-      freshServer.dispose();
+    it('should assign actual port after start when using default port 0', async () => {
+      const defaultServer = new DrawingServer();
+      expect(defaultServer.port).toBe(0);
+      const result = await defaultServer.start();
+      // After start, port should be the OS-assigned port (49152 in our mock)
+      expect(defaultServer.port).toBe(49152);
+      expect(result.port).toBe(49152);
+      defaultServer.dispose();
     });
   });
 
@@ -195,9 +200,9 @@ describe('DrawingServer', () => {
 
   describe('getNetworkInfo', () => {
     it('should return non-WSL info by default', () => {
-      const info = DrawingServer.getNetworkInfo(8839);
+      const info = DrawingServer.getNetworkInfo(5000);
       expect(info.isWSL).toBe(false);
-      expect(info.phoneURL).toBe('http://192.168.1.42:8839');
+      expect(info.phoneURL).toBe('http://192.168.1.42:5000');
       expect(info.phoneIP).toBe('192.168.1.42');
       expect(info.portForwardCmd).toBeUndefined();
     });
@@ -206,12 +211,12 @@ describe('DrawingServer', () => {
       vi.mocked(DrawingServer.isWSL).mockReturnValue(true);
       vi.mocked(DrawingServer.getWSLHostIP).mockReturnValue('172.30.16.1');
 
-      const info = DrawingServer.getNetworkInfo(8839);
+      const info = DrawingServer.getNetworkInfo(5000);
       expect(info.isWSL).toBe(true);
       expect(info.portForwardCmd).toContain('netsh interface portproxy');
       expect(info.portForwardCmd).toContain('netsh advfirewall firewall');
       expect(info.portForwardCmd).toContain('Moby Drawing Pad');
-      expect(info.portForwardCmd).toContain('8839');
+      expect(info.portForwardCmd).toContain('5000');
       expect(info.portForwardCmd).toContain('192.168.1.42');
     });
 
@@ -228,18 +233,18 @@ describe('DrawingServer', () => {
       vi.mocked(DrawingServer.isWSL).mockReturnValue(true);
       vi.mocked(DrawingServer.getWindowsLanIP).mockReturnValue('192.168.0.135');
 
-      const info = DrawingServer.getNetworkInfo(8839);
+      const info = DrawingServer.getNetworkInfo(5000);
       expect(info.phoneIP).toBe('192.168.0.135');
-      expect(info.phoneURL).toBe('http://192.168.0.135:8839');
+      expect(info.phoneURL).toBe('http://192.168.0.135:5000');
     });
 
     it('should fall back to placeholder when Windows LAN IP unavailable in WSL2', () => {
       vi.mocked(DrawingServer.isWSL).mockReturnValue(true);
       vi.mocked(DrawingServer.getWindowsLanIP).mockReturnValue(null);
 
-      const info = DrawingServer.getNetworkInfo(8839);
+      const info = DrawingServer.getNetworkInfo(5000);
       expect(info.phoneIP).toBeNull();
-      expect(info.phoneURL).toBe('http://<your-pc-ip>:8839');
+      expect(info.phoneURL).toBe('http://<your-pc-ip>:5000');
     });
   });
 
@@ -278,7 +283,7 @@ describe('DrawingServer', () => {
       expect(tracer.startSpan).toHaveBeenCalledWith(
         'state.publish',
         'drawingServer.start',
-        expect.objectContaining({ data: { port: 9999, isWSL: false } })
+        expect.objectContaining({ data: { requestedPort: 9999 } })
       );
       expect(tracer.endSpan).toHaveBeenCalledWith(
         'span-1',

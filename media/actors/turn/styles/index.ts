@@ -191,6 +191,7 @@ const textStyles = `
   display: flex;
   gap: 4px;
   flex-shrink: 0;
+  margin-left: auto;
 }
 
 .code-action-btn {
@@ -228,6 +229,21 @@ const textStyles = `
   pointer-events: auto;
   background: var(--vscode-terminal-ansiGreen);
   color: var(--vscode-editor-background);
+}
+
+/* Permanent applied state */
+.code-block.applied .code-action-btn.apply-btn {
+  opacity: 1;
+  pointer-events: none;
+  background: var(--vscode-terminal-ansiGreen);
+  color: var(--vscode-editor-background);
+  cursor: default;
+}
+
+.code-block.applied .code-action-btn.diff-btn {
+  opacity: 0.4;
+  pointer-events: none;
+  cursor: default;
 }
 
 /* Hide diff/apply buttons when not in manual mode */
@@ -1133,6 +1149,12 @@ const drawingStyles = `
 `;
 
 // ============================================
+// Syntax Highlighting (imported)
+// ============================================
+
+import { syntaxHighlightStyles } from '../../../utils/syntaxHighlight';
+
+// ============================================
 // Export Combined Styles
 // ============================================
 
@@ -1145,4 +1167,5 @@ ${shellStyles}
 ${pendingStyles}
 ${approvalStyles}
 ${drawingStyles}
+${syntaxHighlightStyles}
 `;

@@ -297,7 +297,7 @@ context.subscriptions.push({ dispose: () => drawingServer.stop() });
 
 - **Drawings are ephemeral** — not stored in the database or on disk. They exist only in memory for the current session.
 - **Single device** — one phone at a time. No multi-device support needed.
-- **Port** — default 8839, any open port works.
+- **Port** — OS-assigned (dynamic), supports multiple instances without port conflicts.
 - **Two modes** — ASCII editor (default, outputs plain text) and color drawing (outputs PNG).
 - **ASCII editor** — shape registry with undo/redo, box/arrow/text tools, move/resize, layer operations.
 - **Drawing tools** — freehand with 7-color picker, adjustable stroke size, undo/redo via ImageData snapshots.

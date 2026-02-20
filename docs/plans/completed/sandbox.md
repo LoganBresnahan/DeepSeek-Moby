@@ -1,6 +1,6 @@
 # Command Execution Sandboxing
 
-**Status:** Research Complete — Ready for Implementation
+**Status:** Complete — all 5 phases implemented and verified.
 
 **Depends on:** Shell execution pipeline (requestOrchestrator + reasonerShellExecutor)
 
@@ -693,8 +693,8 @@ This maintains backward compatibility while the new system is the default.
 **Goal:** A shield icon in the chat top bar opens a modal overlay listing all rules. Users can add, remove, and reset rules.
 
 **Files:**
-- `media/actors/command-rules/CommandRulesModalActor.ts` — new Shadow DOM actor: renders the two-column rules list (allowed/blocked), add/remove buttons, reset to defaults
-- `media/actors/command-rules/styles.ts` — modal styling
+- `media/actors/command-rules/CommandRulesModalActor.ts` — Shadow DOM actor: unified alphabetical list with checkboxes (checked=approved, unchecked=blocked), filter chips (All/Approved/Blocked), search, add form, delete buttons, Allow All toggle, reset to defaults
+- `media/actors/command-rules/shadowStyles.ts` — modal styling (multi-column grid, toggle switch, filter chips, disabled overlay)
 - `src/providers/chatProvider.ts` — handle `openCommandRules` / `addCommandRule` / `removeCommandRule` / `resetCommandRules` messages. Send `commandRulesList` message with full rules on open and after mutations.
 - `package.json` — add `deepseek.openCommandRules` command (registered in `src/extension.ts`)
 - `media/actors/commands/CommandsShadowActor.ts` — add shield button to DEFAULT_COMMANDS

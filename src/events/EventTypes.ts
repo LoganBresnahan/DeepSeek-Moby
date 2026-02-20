@@ -226,6 +226,22 @@ export interface ErrorEvent extends BaseEvent {
 }
 
 // ============================================================================
+// Fork Events
+// ============================================================================
+
+/**
+ * Session forked from another session.
+ * Recorded as the first event after linked events in a forked session.
+ */
+export interface ForkCreatedEvent extends BaseEvent {
+  type: 'fork_created';
+  /** The session this fork was created from */
+  parentSessionId: string;
+  /** The sequence number in the parent where the fork happened */
+  forkPointSequence: number;
+}
+
+// ============================================================================
 // Union Type
 // ============================================================================
 
@@ -247,7 +263,8 @@ export type ConversationEvent =
   | SessionCreatedEvent
   | SessionRenamedEvent
   | ContextImportedEvent
-  | ErrorEvent;
+  | ErrorEvent
+  | ForkCreatedEvent;
 
 /**
  * All possible event type strings.
@@ -275,4 +292,8 @@ export function isAssistantMessageEvent(event: ConversationEvent): event is Assi
 
 export function isDiffAcceptedEvent(event: ConversationEvent): event is DiffAcceptedEvent {
   return event.type === 'diff_accepted';
+}
+
+export function isForkCreatedEvent(event: ConversationEvent): event is ForkCreatedEvent {
+  return event.type === 'fork_created';
 }

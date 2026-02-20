@@ -1269,6 +1269,11 @@ export class RequestOrchestrator {
                   if (applied) {
                     fileModifiedInBatch = true;
                   }
+                } else if (this.diffManager.currentEditMode === 'manual') {
+                  logger.info(`[RequestOrchestrator] Opening diff for manual review: ${args.file}`);
+                  const codeWithHeader = `# File: ${args.file}\n${args.code}`;
+                  const language = args.language || 'plaintext';
+                  await this.diffManager.showDiff(codeWithHeader, language);
                 }
               }
             } else {

@@ -21,7 +21,7 @@ describe('CommandApprovalManager', () => {
   beforeEach(() => {
     db = new Database(':memory:');
     runMigrations(db);
-    manager = new CommandApprovalManager(db, 'linux');
+    manager = new CommandApprovalManager(db, undefined, 'linux');
   });
 
   afterEach(() => {
@@ -50,7 +50,7 @@ describe('CommandApprovalManager', () => {
       const countBefore = manager.getAllRules().length;
 
       // Create a new manager against the same DB — should not re-seed
-      const manager2 = new CommandApprovalManager(db, 'linux');
+      const manager2 = new CommandApprovalManager(db, undefined, 'linux');
       const countAfter = manager2.getAllRules().length;
 
       expect(countAfter).toBe(countBefore);
@@ -75,7 +75,7 @@ describe('CommandApprovalManager', () => {
     it('should seed Windows defaults on win32', () => {
       const winDb = new Database(':memory:');
       runMigrations(winDb);
-      const winManager = new CommandApprovalManager(winDb, 'win32');
+      const winManager = new CommandApprovalManager(winDb, undefined, 'win32');
 
       const rules = winManager.getAllRules();
       const prefixes = rules.map(r => r.prefix);
@@ -492,14 +492,14 @@ describe('CommandApprovalManager', () => {
       manager.addRule('docker run', 'allowed');
 
       // Create new manager on the same DB
-      const manager2 = new CommandApprovalManager(db, 'linux');
+      const manager2 = new CommandApprovalManager(db, undefined, 'linux');
       expect(manager2.checkCommand('docker run ubuntu')).toBe('allowed');
     });
 
     it('should preserve default + user rules together', () => {
       manager.addRule('docker run', 'allowed');
 
-      const manager2 = new CommandApprovalManager(db, 'linux');
+      const manager2 = new CommandApprovalManager(db, undefined, 'linux');
       const rules = manager2.getAllRules();
 
       // Should have both default and user rules
@@ -549,7 +549,7 @@ describe('requestApproval flow', () => {
   beforeEach(() => {
     db = new Database(':memory:');
     runMigrations(db);
-    manager = new CommandApprovalManager(db, 'linux');
+    manager = new CommandApprovalManager(db, undefined, 'linux');
   });
 
   afterEach(() => {
@@ -647,5 +647,110 @@ describe('requestApproval flow', () => {
 
     const result = await promise;
     expect(result.decision).toBe('blocked');
+  });
+});
+
+// ── Cross-Instance Version Counter ──
+
+describe('cross-instance version counter', () => {
+  let db: Database;
+
+  function createMockGlobalState(store: Record<string, any> = {}): any {
+    return {
+      get: (key: string) => store[key],
+      update: async (key: string, value: any) => { store[key] = value; },
+    };
+  }
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    runMigrations(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('should bump version counter when adding a rule', () => {
+    const store: Record<string, any> = {};
+    const gs = createMockGlobalState(store);
+    const manager = new CommandApprovalManager(db, gs, 'linux');
+
+    manager.addRule('docker run', 'allowed');
+
+    expect(store['commandRulesVersion']).toBe(1);
+  });
+
+  it('should bump version counter when removing a rule', () => {
+    const store: Record<string, any> = {};
+    const gs = createMockGlobalState(store);
+    const manager = new CommandApprovalManager(db, gs, 'linux');
+
+    const rules = manager.getAllRules();
+    manager.removeRule(rules[0].id);
+
+    expect(store['commandRulesVersion']).toBe(1);
+  });
+
+  it('should bump version counter on resetToDefaults', () => {
+    const store: Record<string, any> = {};
+    const gs = createMockGlobalState(store);
+    const manager = new CommandApprovalManager(db, gs, 'linux');
+
+    manager.resetToDefaults();
+
+    expect(store['commandRulesVersion']).toBe(1);
+  });
+
+  it('should refresh cache when another instance bumps the version', () => {
+    const store: Record<string, any> = {};
+    const gs = createMockGlobalState(store);
+
+    // Instance A adds a rule and bumps version
+    const instanceA = new CommandApprovalManager(db, gs, 'linux');
+    instanceA.addRule('docker run', 'allowed');
+    expect(store['commandRulesVersion']).toBe(1);
+
+    // Instance B starts with the same DB and globalState
+    const instanceB = new CommandApprovalManager(db, gs, 'linux');
+    // Instance B's initial version matches (loaded in constructor)
+    expect(instanceB.checkCommand('docker run ubuntu')).toBe('allowed');
+
+    // Instance A adds another rule
+    instanceA.addRule('kubectl', 'blocked');
+    expect(store['commandRulesVersion']).toBe(2);
+
+    // Instance B's cache is stale, but checkCommand refreshes it
+    expect(instanceB.checkCommand('kubectl get pods')).toBe('blocked');
+  });
+
+  it('should not refresh cache when version has not changed', () => {
+    const store: Record<string, any> = {};
+    const gs = createMockGlobalState(store);
+    const manager = new CommandApprovalManager(db, gs, 'linux');
+
+    // First check — no version change, should use cached values
+    const result1 = manager.checkCommand('ls -la');
+    expect(result1).toBe('allowed');
+
+    // Add a rule directly to DB WITHOUT bumping version (simulating stale state)
+    db.prepare(
+      "INSERT INTO command_rules (prefix, type, source, created_at) VALUES (?, ?, ?, ?)"
+    ).run('ls', 'blocked', 'user', Date.now());
+
+    // checkCommand should still use the cached (stale) version since version hasn't changed
+    const result2 = manager.checkCommand('ls -la');
+    expect(result2).toBe('allowed'); // Still allowed — cache not refreshed
+  });
+
+  it('should work without globalState (backward compatible)', () => {
+    // No globalState passed — should work exactly as before
+    const manager = new CommandApprovalManager(db, undefined, 'linux');
+    expect(manager.checkCommand('ls -la')).toBe('allowed');
+    expect(manager.checkCommand('rm -rf /')).toBe('blocked');
+
+    // Adding rules should work without errors
+    manager.addRule('docker run', 'allowed');
+    expect(manager.checkCommand('docker run ubuntu')).toBe('allowed');
   });
 });

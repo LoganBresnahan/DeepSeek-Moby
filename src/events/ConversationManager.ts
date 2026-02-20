@@ -69,6 +69,10 @@ export interface Session {
   tags: string[];
   firstUserMessage?: string;
   lastActivityPreview?: string;
+  /** Fork parent session ID (null/undefined = original session) */
+  parentSessionId?: string;
+  /** Sequence in parent where forked (null/undefined = original session) */
+  forkSequence?: number;
 }
 
 /**
@@ -91,6 +95,7 @@ export class ConversationManager {
   private snapshotManager: SnapshotManager;
 
   private currentSessionId: string | null = null;
+  private instanceId: string = uuidv4();
   private context: vscode.ExtensionContext;
   private options: ConversationManagerOptions;
 
@@ -108,6 +113,11 @@ export class ConversationManager {
   /** Expose the underlying Database for shared tables (e.g., command_rules). */
   getDatabase(): Database {
     return this.db;
+  }
+
+  /** Expose globalState for cross-instance coordination (e.g., command rules version counter). */
+  getGlobalState(): vscode.Memento {
+    return this.context.globalState;
   }
 
   constructor(context: vscode.ExtensionContext, options: ConversationManagerOptions) {
@@ -140,8 +150,8 @@ export class ConversationManager {
     );
     // Prepare session statements
     this.stmtInsertSession = this.db.prepare(`
-      INSERT INTO sessions (id, title, model, created_at, updated_at, event_count, tags)
-      VALUES (?, ?, ?, ?, ?, 0, '[]')
+      INSERT INTO sessions (id, title, model, created_at, updated_at, event_count, tags, parent_session_id, fork_sequence)
+      VALUES (?, ?, ?, ?, ?, 0, '[]', ?, ?)
     `);
     this.stmtGetSession = this.db.prepare(`
       SELECT * FROM sessions WHERE id = ?
@@ -168,6 +178,15 @@ export class ConversationManager {
   // ==========================================================================
 
   private loadCurrentSession(): void {
+    // Try instance-scoped key first (runtime isolation between parallel instances)
+    const instanceKey = `currentSessionId-${this.instanceId}`;
+    const instanceSavedId = this.context.globalState.get<string>(instanceKey);
+    if (instanceSavedId && this.getSessionSync(instanceSavedId)) {
+      this.currentSessionId = instanceSavedId;
+      return;
+    }
+
+    // Fall back to shared key (resume last session on cold start)
     const savedId = this.context.globalState.get<string>('currentSessionId');
     if (savedId && this.getSessionSync(savedId)) {
       this.currentSessionId = savedId;
@@ -176,6 +195,8 @@ export class ConversationManager {
 
   private async saveCurrentSession(): Promise<void> {
     if (this.currentSessionId) {
+      // Write to both: instance-scoped (runtime isolation) + shared (cold start resume)
+      await this.context.globalState.update(`currentSessionId-${this.instanceId}`, this.currentSessionId);
       await this.context.globalState.update('currentSessionId', this.currentSessionId);
     }
   }
@@ -191,7 +212,7 @@ export class ConversationManager {
     const id = uuidv4();
     const now = Date.now();
 
-    this.stmtInsertSession.run(id, title || 'New Chat', model, now, now);
+    this.stmtInsertSession.run(id, title || 'New Chat', model, now, now, null, null);
 
     // Record session created event
     this.eventStore.append({
@@ -258,9 +279,12 @@ export class ConversationManager {
    */
   async deleteSession(sessionId: string): Promise<void> {
     const deleteAll = this.db.transaction(() => {
-      this.eventStore.deleteSessionEvents(sessionId);
-      this.snapshotManager.deleteSessionSnapshots(sessionId);
+      // Delete session — CASCADE removes event_sessions rows + snapshots
       this.stmtDeleteSession.run(sessionId);
+      // Clean up orphaned events (no remaining session references)
+      this.db.prepare(
+        'DELETE FROM events WHERE id NOT IN (SELECT event_id FROM event_sessions)'
+      ).run();
     });
     deleteAll();
 
@@ -270,6 +294,101 @@ export class ConversationManager {
     }
 
     this.onSessionsChanged.fire();
+  }
+
+  /**
+   * Fork a session at a given sequence number, creating an independent branch.
+   *
+   * Links existing events (up to atSequence) to a new session via the join
+   * table — zero-copy, no event data duplication. Then records a fork_created
+   * event and switches to the forked session.
+   *
+   * @param parentSessionId - Session to fork from
+   * @param atSequence - Sequence number to fork at (must be a turn boundary)
+   * @returns The newly created fork session
+   */
+  async forkSession(parentSessionId: string, atSequence: number): Promise<Session> {
+    const parentSession = this.getSessionSync(parentSessionId);
+    if (!parentSession) {
+      throw new Error(`Cannot fork: parent session ${parentSessionId} not found`);
+    }
+
+    // Validate fork point is a clean turn boundary
+    const events = this.eventStore.getEvents(parentSessionId);
+    const forkEvent = events.find(e => e.sequence === atSequence);
+    if (!forkEvent) {
+      throw new Error(`Cannot fork: no event at sequence ${atSequence}`);
+    }
+    if (forkEvent.type !== 'user_message' && forkEvent.type !== 'assistant_message') {
+      throw new Error(
+        `Cannot fork: event at sequence ${atSequence} is '${forkEvent.type}', ` +
+        `must be 'user_message' or 'assistant_message' (turn boundary)`
+      );
+    }
+
+    // Create the fork session
+    const forkId = uuidv4();
+    const now = Date.now();
+    const forkTitle = `${parentSession.title} (fork)`;
+
+    this.stmtInsertSession.run(
+      forkId, forkTitle, parentSession.model, now, now,
+      parentSessionId, atSequence
+    );
+
+    // Link events from parent to fork via join table (zero-copy)
+    const linkedCount = this.eventStore.linkEventsToSession(
+      parentSessionId, forkId, atSequence
+    );
+
+    // Record fork_created event in the new session
+    this.eventStore.append({
+      sessionId: forkId,
+      timestamp: now,
+      type: 'fork_created',
+      parentSessionId,
+      forkPointSequence: atSequence
+    });
+
+    // Update session metadata
+    const forkSession = this.getSessionSync(forkId)!;
+    const eventCount = this.eventStore.getEventCount(forkId);
+    const firstUserMsg = events.find(e => e.type === 'user_message');
+
+    this.stmtUpdateSession.run(
+      forkTitle,
+      now,
+      eventCount,
+      firstUserMsg ? (firstUserMsg as any).content.substring(0, 100) : null,
+      'Forked from session',
+      forkId
+    );
+
+    // Switch to the forked session
+    this.currentSessionId = forkId;
+    await this.saveCurrentSession();
+    this.onSessionsChanged.fire();
+
+    logger.info(
+      `[Fork] Created fork session=${forkId.substring(0, 8)}` +
+      ` from parent=${parentSessionId.substring(0, 8)}` +
+      ` at sequence=${atSequence} (${linkedCount} events linked)`
+    );
+
+    return (await this.getSession(forkId))!;
+  }
+
+  /**
+   * Get all fork children of a session.
+   *
+   * @param sessionId - Parent session to get forks for
+   * @returns Array of fork sessions, ordered by creation date (newest first)
+   */
+  async getSessionForks(sessionId: string): Promise<Session[]> {
+    const rows = this.db.prepare(
+      'SELECT * FROM sessions WHERE parent_session_id = ? ORDER BY created_at DESC'
+    ).all(sessionId) as any[];
+    return rows.map(row => this.rowToSession(row));
   }
 
   /**
@@ -302,6 +421,7 @@ export class ConversationManager {
    */
   async clearAllSessions(): Promise<void> {
     const clearAll = this.db.transaction(() => {
+      this.db.exec('DELETE FROM event_sessions');
       this.db.exec('DELETE FROM events');
       this.db.exec('DELETE FROM snapshots');
       this.db.exec('DELETE FROM sessions');
@@ -1000,7 +1120,7 @@ export class ConversationManager {
       const id = uuidv4();
       const now = Date.now();
 
-      this.stmtInsertSession.run(id, 'New Chat', 'deepseek-chat', now, now);
+      this.stmtInsertSession.run(id, 'New Chat', 'deepseek-chat', now, now, null, null);
       this.currentSessionId = id;
 
       // Don't await - just fire and forget
@@ -1050,7 +1170,9 @@ export class ConversationManager {
       eventCount: row.event_count,
       tags: JSON.parse(row.tags),
       firstUserMessage: row.first_user_message,
-      lastActivityPreview: row.last_activity_preview
+      lastActivityPreview: row.last_activity_preview,
+      parentSessionId: row.parent_session_id ?? undefined,
+      forkSequence: row.fork_sequence ?? undefined
     };
   }
 

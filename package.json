@@ -514,7 +514,6 @@
     "@signalapp/sqlcipher": "^3.1.0",
     "deepseek-moby-wasm": "file:packages/moby-wasm/pkg",
     "diff": "^8.0.3",
-    "highlight.js": "^11.11.1",
     "uuid": "^11.0.5"
   },
   "repository": {

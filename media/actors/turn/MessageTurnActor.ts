@@ -26,6 +26,7 @@ import { EventStateManager } from '../../state/EventStateManager';
 import { turnActorStyles } from './styles';
 import { createLogger } from '../../logging';
 import { extractCodeBlocks, hasIncompleteFence } from '../../utils/codeBlocks';
+import { highlightCode } from '../../utils/syntaxHighlight';
 import type {
   TurnRole,
   TurnData,
@@ -1219,7 +1220,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
     this.delegateInContainer(containerId, 'click', '.apply-btn', (e, btn) => {
       e.stopPropagation();
       const codeBlock = btn.closest('.code-block');
-      if (!codeBlock?.classList.contains('diffed')) return;
+      if (!codeBlock?.classList.contains('diffed') || codeBlock?.classList.contains('applied')) return;
 
       const code = codeBlock?.querySelector('code')?.textContent;
       const lang = codeBlock?.getAttribute('data-lang') || 'text';
@@ -1227,13 +1228,14 @@ export class MessageTurnActor extends InterleavedShadowActor {
       if (code && this._postMessage) {
         this._postMessage({ type: 'applyCode', code, language: lang });
 
-        btn.textContent = 'Applied!';
-        setTimeout(() => {
-          btn.textContent = 'Apply';
-          codeBlock?.classList.remove('diffed');
-          const diffBtn = codeBlock?.querySelector('.diff-btn');
-          diffBtn?.classList.remove('active');
-        }, 1500);
+        // Permanent applied state
+        codeBlock?.classList.add('applied');
+        codeBlock?.classList.remove('diffed');
+        btn.textContent = '\u2713 Applied';
+        const diffBtn = codeBlock?.querySelector('.diff-btn') as HTMLElement | null;
+        if (diffBtn) {
+          diffBtn.classList.remove('active');
+        }
       }
     });
   }
@@ -1561,14 +1563,14 @@ export class MessageTurnActor extends InterleavedShadowActor {
       const block = blocks[bi];
       const language = block.language || 'text';
       const code = block.content;
-      const escapedCode = this.escapeHtml(code.trimEnd()).replace(/\n/g, '&#10;');
+      const highlightedCode = highlightCode(code.trimEnd(), language);
       const expandedClass = startExpanded ? ' expanded' : '';
 
       const firstLine = code.trim().split('\n')[0] || '';
       const preview = firstLine.length > 60 ? firstLine.substring(0, 60) + '...' : firstLine;
       const escapedPreview = this.escapeHtml(preview);
 
-      const html = `<div class="code-block entering${expandedClass}" data-lang="${language}" data-edit-mode="${this._editMode}"><div class="code-header"><span class="code-toggle">▶</span><span class="code-lang">${language}</span><span class="code-preview">${escapedPreview}</span><div class="code-actions"><button class="code-action-btn diff-btn">Diff</button><button class="code-action-btn apply-btn">Apply</button><button class="code-action-btn copy-btn">Copy</button></div></div><div class="code-body"><pre><code class="language-${language}">${escapedCode}</code></pre></div></div>`;
+      const html = `<div class="code-block entering${expandedClass}" data-lang="${language}" data-edit-mode="${this._editMode}"><div class="code-header"><span class="code-toggle">▶</span><span class="code-lang">${language}</span><span class="code-preview">${escapedPreview}</span><div class="code-actions"><button class="code-action-btn diff-btn">Diff</button><button class="code-action-btn apply-btn">Apply</button><button class="code-action-btn copy-btn">Copy</button></div></div><div class="code-body"><pre><code class="language-${language}">${highlightedCode}</code></pre></div></div>`;
       result = result.substring(0, block.startIndex) + html + result.substring(block.endIndex);
     }
 

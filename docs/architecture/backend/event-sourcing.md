@@ -233,7 +233,7 @@ conversationManager = new ConversationManager(context, dbKey);  // fully sync
 ```
 
 The constructor performs the following sequence:
-1. Creates `Database` (sets `PRAGMA foreign_keys = ON`)
+1. Creates `Database` (sets `PRAGMA foreign_keys = ON`, `journal_mode = WAL`, `busy_timeout = 5000`)
 2. Runs `runMigrations(db)` — single source of truth for all schema (v1: tables, v2: FK constraints)
 3. Creates `EventStore` and `SnapshotManager` (prepared statements only)
 4. Prepares session statements and loads the last active session

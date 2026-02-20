@@ -61,8 +61,11 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     const editMode = (config.get<string>('editMode') || 'manual') as 'manual' | 'ask' | 'auto';
     this.diffManager = new DiffManager(new DiffEngine(), this.fileContextManager, editMode);
     this.settingsManager = new SettingsManager(this.deepSeekClient);
-    // Create command approval manager (uses the same encrypted DB)
-    this.commandApprovalManager = new CommandApprovalManager(this.conversationManager.getDatabase());
+    // Create command approval manager (uses the same encrypted DB + globalState for cross-instance version counter)
+    this.commandApprovalManager = new CommandApprovalManager(
+      this.conversationManager.getDatabase(),
+      this.conversationManager.getGlobalState()
+    );
     this.requestOrchestrator = new RequestOrchestrator(
       this.deepSeekClient, this.conversationManager, this.statusBar,
       this.diffManager, this.webSearchManager, this.fileContextManager,

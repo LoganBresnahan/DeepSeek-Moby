@@ -46,6 +46,7 @@ const COLORS = {
 
 class Logger {
   private static instance: Logger;
+  private static _instanceNumber: number = 1;
   private outputChannel: vscode.LogOutputChannel;
   private _minLevel: LogLevel = 'INFO';
   // Note: VS Code Output channels do NOT support ANSI colors
@@ -55,8 +56,34 @@ class Logger {
   private _logBufferStart: number = 0;
   private _logBufferCount: number = 0;
 
+  /**
+   * Set the instance number for multi-instance output channel separation.
+   * Call from activate() before any logging occurs.
+   * Instance 1 → "DeepSeek Moby", Instance 2+ → "DeepSeek Moby (2)", etc.
+   * If called after the Logger is already created, replaces the output channel.
+   */
+  static setInstanceNumber(n: number): void {
+    Logger._instanceNumber = n;
+    if (Logger.instance) {
+      const channelName = n > 1 ? `DeepSeek Moby (${n})` : 'DeepSeek Moby';
+      Logger.instance.outputChannel.dispose();
+      Logger.instance.outputChannel = vscode.window.createOutputChannel(channelName, { log: true });
+    }
+  }
+
+  /** Get the current instance number. */
+  static getInstanceNumber(): number {
+    return Logger._instanceNumber;
+  }
+
+  private static get channelName(): string {
+    return Logger._instanceNumber > 1
+      ? `DeepSeek Moby (${Logger._instanceNumber})`
+      : 'DeepSeek Moby';
+  }
+
   private constructor() {
-    this.outputChannel = vscode.window.createOutputChannel('DeepSeek Moby', { log: true });
+    this.outputChannel = vscode.window.createOutputChannel(Logger.channelName, { log: true });
     this.loadSettings();
 
     // Listen for config changes
@@ -552,4 +579,5 @@ class Logger {
   }
 }
 
+export { Logger };
 export const logger = Logger.getInstance();

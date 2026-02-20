@@ -32,19 +32,21 @@ When you start the drawing server in WSL2, it detects this automatically and off
 **Open an admin PowerShell on Windows** and run:
 
 ```powershell
-# Port forwarding: route Windows port 8839 to WSL2
-netsh interface portproxy add v4tov4 listenport=8839 listenaddress=0.0.0.0 connectport=8839 connectaddress=<WSL2_IP>
+# Port forwarding: route Windows port <PORT> to WSL2
+netsh interface portproxy add v4tov4 listenport=<PORT> listenaddress=0.0.0.0 connectport=<PORT> connectaddress=<WSL2_IP>
 
-# Firewall: allow incoming connections on port 8839
-netsh advfirewall firewall add rule name="Moby Drawing Pad" dir=in action=allow protocol=TCP localport=8839
+# Firewall: allow incoming connections on the port
+netsh advfirewall firewall add rule name="Moby Drawing Pad" dir=in action=allow protocol=TCP localport=<PORT>
 ```
 
-Replace `<WSL2_IP>` with your WSL2 IP address. To find it, run in WSL2:
+Replace `<PORT>` with the port shown in the drawing server popup (it's assigned dynamically on each start). Replace `<WSL2_IP>` with your WSL2 IP address. To find it, run in WSL2:
 ```bash
 hostname -I | awk '{print $1}'
 ```
 
-Then open `http://<your-windows-ip>:8839` on your phone. Your Windows IP is typically found via `ipconfig` in a Windows terminal (look for the WiFi adapter's IPv4 address).
+Then open `http://<your-windows-ip>:<PORT>` on your phone. Your Windows IP is typically found via `ipconfig` in a Windows terminal (look for the WiFi adapter's IPv4 address).
+
+> **Tip:** The extension copies the exact netsh commands with the correct port and IP when you click "Copy Setup Commands" in the WSL2 start dialog. You don't need to fill in the placeholders manually.
 
 ### WSL2 IP Changes on Reboot
 
@@ -52,10 +54,10 @@ WSL2's internal IP changes every time Windows or WSL restarts. When that happens
 
 ```powershell
 # Remove the old rule
-netsh interface portproxy delete v4tov4 listenport=8839 listenaddress=0.0.0.0
+netsh interface portproxy delete v4tov4 listenport=<PORT> listenaddress=0.0.0.0
 
 # Add with the new WSL2 IP
-netsh interface portproxy add v4tov4 listenport=8839 listenaddress=0.0.0.0 connectport=8839 connectaddress=<NEW_WSL2_IP>
+netsh interface portproxy add v4tov4 listenport=<PORT> listenaddress=0.0.0.0 connectport=<PORT> connectaddress=<NEW_WSL2_IP>
 ```
 
 Or just restart the drawing server in the extension — it will give you the updated command with the current IP.
@@ -78,7 +80,7 @@ Then restart WSL (`wsl --shutdown` in PowerShell, then reopen your terminal). Wi
 To remove the port forwarding and firewall rules:
 
 ```powershell
-netsh interface portproxy delete v4tov4 listenport=8839 listenaddress=0.0.0.0
+netsh interface portproxy delete v4tov4 listenport=<PORT> listenaddress=0.0.0.0
 netsh advfirewall firewall delete rule name="Moby Drawing Pad"
 ```
 
@@ -212,7 +214,7 @@ On WSL2, the popup automatically detects and displays the real Windows LAN IP (v
 ## Technical Details
 
 - **Server**: Built-in Node.js `http` module (zero dependencies)
-- **Port**: 8839 (default)
+- **Port**: OS-assigned (dynamic — a free port is chosen automatically on each start)
 - **Protocol**: HTTP (no HTTPS needed on LAN — WiFi encryption handles security)
 - **Routes**: `GET /` (ASCII editor), `GET /draw` (color drawing), `POST /upload` (receive content), `GET /health` (health check)
 - **Upload formats**: Image (`{ image: 'data:image/png;base64,...' }`) or ASCII (`{ type: 'ascii', text: '...' }`)
@@ -272,7 +274,7 @@ VirtualMessageGatewayActor
 | Problem | Solution |
 |---------|----------|
 | Phone can't reach the URL | Check WiFi (same network?), check firewall, check port forwarding (WSL2) |
-| "Port 8839 is already in use" | Another process is using the port. Stop it or change the port in code |
+| "Port is already in use" | Only possible if a specific port was passed to the constructor. Default behavior uses a free OS-assigned port. |
 | Drawing doesn't send | Check phone browser console for errors. Ensure the server is still running |
 | QR code shows WSL2 internal IP | PowerShell IP detection failed. Check that `powershell.exe` is in PATH |
 | WSL2 port forwarding stopped working | WSL2 IP changed after reboot. Re-run the setup commands |

@@ -952,3 +952,118 @@ describe('ConversationManager.getLatestSnapshotSummary', () => {
     expect(resultA).toBeDefined();
   });
 });
+
+// ==========================================================================
+// Instance-scoped session key (hybrid approach)
+// ==========================================================================
+
+const loadCurrentSession = (ConversationManager.prototype as any).loadCurrentSession;
+const saveCurrentSession = (ConversationManager.prototype as any).saveCurrentSession;
+
+describe('ConversationManager instance-scoped session key', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    runMigrations(db);
+    db.prepare('INSERT INTO sessions (id, title, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
+      .run('session-1', 'Test', 'test', 1000, 1000);
+    db.prepare('INSERT INTO sessions (id, title, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
+      .run('session-2', 'Test 2', 'test', 2000, 2000);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  function createMockCm(globalStateStore: Record<string, any>) {
+    const stmtGetSession = db.prepare('SELECT * FROM sessions WHERE id = ?');
+    return {
+      instanceId: 'test-instance-abc',
+      currentSessionId: null as string | null,
+      context: {
+        globalState: {
+          get: (key: string) => globalStateStore[key],
+          update: async (key: string, value: any) => { globalStateStore[key] = value; },
+        },
+      },
+      getSessionSync: (id: string) => stmtGetSession.get(id),
+    };
+  }
+
+  it('loadCurrentSession falls back to shared key on cold start', () => {
+    const store: Record<string, any> = { currentSessionId: 'session-1' };
+    const mockCm = createMockCm(store);
+
+    loadCurrentSession.call(mockCm);
+
+    expect(mockCm.currentSessionId).toBe('session-1');
+  });
+
+  it('loadCurrentSession prefers instance-scoped key over shared key', () => {
+    const store: Record<string, any> = {
+      'currentSessionId': 'session-1',
+      'currentSessionId-test-instance-abc': 'session-2',
+    };
+    const mockCm = createMockCm(store);
+
+    loadCurrentSession.call(mockCm);
+
+    expect(mockCm.currentSessionId).toBe('session-2');
+  });
+
+  it('loadCurrentSession ignores instance-scoped key if session does not exist', () => {
+    const store: Record<string, any> = {
+      'currentSessionId': 'session-1',
+      'currentSessionId-test-instance-abc': 'nonexistent-session',
+    };
+    const mockCm = createMockCm(store);
+
+    loadCurrentSession.call(mockCm);
+
+    // Falls back to shared key since instance-scoped session doesn't exist
+    expect(mockCm.currentSessionId).toBe('session-1');
+  });
+
+  it('saveCurrentSession writes to both instance-scoped and shared keys', async () => {
+    const store: Record<string, any> = {};
+    const mockCm = createMockCm(store);
+    mockCm.currentSessionId = 'session-2';
+
+    await saveCurrentSession.call(mockCm);
+
+    expect(store['currentSessionId-test-instance-abc']).toBe('session-2');
+    expect(store['currentSessionId']).toBe('session-2');
+  });
+
+  it('two instances do not overwrite each other during runtime', async () => {
+    const store: Record<string, any> = { currentSessionId: 'session-1' };
+
+    // Instance A loads
+    const instanceA = createMockCm(store);
+    instanceA.instanceId = 'instance-A';
+    loadCurrentSession.call(instanceA);
+    expect(instanceA.currentSessionId).toBe('session-1');
+
+    // Instance A switches to session-2
+    instanceA.currentSessionId = 'session-2';
+    await saveCurrentSession.call(instanceA);
+
+    // Instance B starts, loads from shared key (last written by A)
+    const instanceB = createMockCm(store);
+    instanceB.instanceId = 'instance-B';
+    loadCurrentSession.call(instanceB);
+    expect(instanceB.currentSessionId).toBe('session-2');
+
+    // Instance B switches to session-1
+    instanceB.currentSessionId = 'session-1';
+    await saveCurrentSession.call(instanceB);
+
+    // Instance A's scoped key is untouched
+    expect(store['currentSessionId-instance-A']).toBe('session-2');
+    // Instance B's scoped key has its own value
+    expect(store['currentSessionId-instance-B']).toBe('session-1');
+    // Shared key reflects last writer (B)
+    expect(store['currentSessionId']).toBe('session-1');
+  });
+});

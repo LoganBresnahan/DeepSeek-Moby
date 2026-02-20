@@ -6,7 +6,7 @@ The persistence layer uses **SQLite** via **@signalapp/sqlcipher** (a native N-A
 
 - **Encryption at rest** — AES-256-CBC encryption via SQLCipher
 - **Native performance** — Direct disk I/O, no WASM memory overhead
-- **Crash safety** — WAL journal mode for crash recovery
+- **Crash safety** — WAL journal mode for crash recovery and concurrent reads
 - **Synchronous API** — No async initialization needed
 - **Battle-tested** — Used by Signal Desktop (also an Electron app)
 
@@ -78,6 +78,8 @@ All schema is managed by `src/events/migrations.ts` — the **single source of t
 ```
 ConversationManager constructor:
   1. new Database(dbPath, encryptionKey)    → PRAGMA foreign_keys = ON
+                                             → PRAGMA journal_mode = WAL
+                                             → PRAGMA busy_timeout = 5000
   2. runMigrations(this.db)                 → v1: create tables, v2: add FK constraints
   3. new EventStore(this.db)               → prepareStatements() only
   4. new SnapshotManager(this.db, ...)     → prepareStatements() only
@@ -201,7 +203,10 @@ CREATE INDEX idx_snapshots_session
 │  │     token_count         │                                                │
 │  └─────────────────────────┘                                                │
 │                                                                              │
-│  PRAGMA foreign_keys = ON (set per-connection in Database constructor)       │
+│  Per-connection pragmas (set in Database constructor):                      │
+│  • PRAGMA foreign_keys = ON                                                 │
+│  • PRAGMA journal_mode = WAL (concurrent reads, crash safety)              │
+│  • PRAGMA busy_timeout = 5000 (retry 5s on lock instead of failing)        │
 │  ON DELETE CASCADE: deleting a session auto-deletes its events + snapshots  │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -215,7 +220,7 @@ The wrapper provides a synchronous API that adapts @signalapp/sqlcipher's array-
 // Database class
 class Database {
   constructor(filePath?: string, encryptionKey?: string);
-  // Constructor enables: PRAGMA foreign_keys = ON
+  // Constructor enables: foreign_keys=ON, journal_mode=WAL, busy_timeout=5000
 
   exec(sql: string): void;                // Execute multiple statements
   prepare(sql: string): Statement;        // Prepare for repeated use
@@ -423,7 +428,8 @@ Minimal key-value store for cross-restart state:
 
 | Key | Purpose |
 |-----|---------|
-| `currentSessionId` | Active session UUID pointer |
+| `currentSessionId` | Shared session pointer (cold-start resume — last active session) |
+| `currentSessionId-{instanceId}` | Instance-scoped session pointer (runtime isolation between parallel instances) |
 
 ### Storage Decision Guide
 

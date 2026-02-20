@@ -3,10 +3,10 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from 'vitest';
-import { mockOutputChannel, mockConfiguration, resetAllMocks } from '../../__mocks__/vscode';
+import { mockOutputChannel, mockConfiguration, resetAllMocks, window } from '../../__mocks__/vscode';
 
 // Import logger - vscode is aliased to our mock in vitest.config.ts
-import { logger, type LogLevel } from '../../../src/utils/logger';
+import { logger, Logger, type LogLevel } from '../../../src/utils/logger';
 
 describe('Logger', () => {
   beforeEach(() => {
@@ -369,6 +369,46 @@ describe('Logger', () => {
 
       logger.error('should appear');
       expect(mockOutputChannel.error).toHaveBeenCalled();
+    });
+  });
+
+  describe('multi-instance channel naming', () => {
+    afterEach(() => {
+      // Reset to default
+      Logger.setInstanceNumber(1);
+    });
+
+    it('getInstanceNumber returns 1 by default', () => {
+      expect(Logger.getInstanceNumber()).toBe(1);
+    });
+
+    it('setInstanceNumber updates the instance number', () => {
+      Logger.setInstanceNumber(3);
+      expect(Logger.getInstanceNumber()).toBe(3);
+    });
+
+    it('setInstanceNumber disposes old channel and creates new one', () => {
+      resetAllMocks();
+      Logger.setInstanceNumber(2);
+
+      // Should dispose the old channel
+      expect(mockOutputChannel.dispose).toHaveBeenCalled();
+      // Should create a new channel with instance suffix
+      expect(window.createOutputChannel).toHaveBeenCalledWith(
+        'DeepSeek Moby (2)',
+        { log: true }
+      );
+    });
+
+    it('setInstanceNumber(1) uses plain name without suffix', () => {
+      Logger.setInstanceNumber(2); // first set to 2
+      resetAllMocks();
+      Logger.setInstanceNumber(1); // then back to 1
+
+      expect(window.createOutputChannel).toHaveBeenCalledWith(
+        'DeepSeek Moby',
+        { log: true }
+      );
     });
   });
 
