@@ -663,6 +663,36 @@ describe('ConversationManager.getSessionRichHistory', () => {
     expect(assistant.shellResults).toBeUndefined();
     expect(assistant.contentIterations).toBeUndefined();
   });
+
+  it('includes event sequence numbers in turns', async () => {
+    eventStore.append({
+      sessionId: SESSION_ID,
+      timestamp: 1000,
+      type: 'user_message',
+      content: 'Hello'
+    });
+    eventStore.append({
+      sessionId: SESSION_ID,
+      timestamp: 2000,
+      type: 'assistant_message',
+      content: 'Hi there',
+      model: 'deepseek-chat',
+      finishReason: 'stop'
+    });
+
+    const turns = await callRichHistory(SESSION_ID);
+    expect(turns).toHaveLength(2);
+
+    // User turn should have the user_message sequence
+    expect(turns[0].sequence).toBeDefined();
+    expect(typeof turns[0].sequence).toBe('number');
+    expect(turns[0].sequence).toBe(1);
+
+    // Assistant turn should have the assistant_message sequence
+    expect(turns[1].sequence).toBeDefined();
+    expect(typeof turns[1].sequence).toBe('number');
+    expect(turns[1].sequence).toBe(2);
+  });
 });
 
 // Bind hasFreshSummary / createSnapshot to lightweight mocks
@@ -853,20 +883,15 @@ describe('ConversationManager.recordAssistantMessage — no auto-snapshot', () =
   it('should NOT auto-create snapshots after recording assistant messages', async () => {
     // Create a mock that has the fields recordAssistantMessage needs
     const mockCm = {
-      currentSessionId: SESSION_ID,
       eventStore,
       snapshotManager,
       onSessionsChanged: { fire: () => {} },
-      ensureCurrentSession: () => ({
-        id: SESSION_ID, title: 'Test', model: 'deepseek-chat',
-        createdAt: new Date(), updatedAt: new Date(), eventCount: 0, tags: []
-      }),
       updateSessionMetadata: () => {},
     };
 
     // Add more than snapshotInterval events (3) via recordAssistantMessage
     for (let i = 0; i < 10; i++) {
-      await recordAssistantMessage.call(mockCm, `Response ${i}`, 'deepseek-chat', 'stop');
+      await recordAssistantMessage.call(mockCm, SESSION_ID, `Response ${i}`, 'deepseek-chat', 'stop');
     }
 
     // No snapshot should have been auto-created
@@ -954,116 +979,398 @@ describe('ConversationManager.getLatestSnapshotSummary', () => {
 });
 
 // ==========================================================================
-// Instance-scoped session key (hybrid approach)
+// Fork Session
 // ==========================================================================
 
-const loadCurrentSession = (ConversationManager.prototype as any).loadCurrentSession;
-const saveCurrentSession = (ConversationManager.prototype as any).saveCurrentSession;
+const callForkSession = ConversationManager.prototype.forkSession;
+const callGetSessionForks = ConversationManager.prototype.getSessionForks;
+const rowToSession = (ConversationManager.prototype as any).rowToSession;
 
-describe('ConversationManager instance-scoped session key', () => {
+/**
+ * Create a mock ConversationManager with real DB + EventStore for fork testing.
+ * Uses the same lightweight-mock pattern as other tests but includes the
+ * prepared statements and helper methods that forkSession() needs.
+ */
+function createForkMockCm(db: Database, eventStore: EventStore) {
+  const stmtInsertSession = db.prepare(`
+    INSERT INTO sessions (id, title, model, created_at, updated_at, event_count, tags, parent_session_id, fork_sequence)
+    VALUES (?, ?, ?, ?, ?, 0, '[]', ?, ?)
+  `);
+  const stmtGetSession = db.prepare('SELECT * FROM sessions WHERE id = ?');
+  const stmtUpdateSession = db.prepare(`
+    UPDATE sessions
+    SET title = ?, updated_at = ?, event_count = ?,
+        first_user_message = ?, last_activity_preview = ?
+    WHERE id = ?
+  `);
+
+  return {
+    db,
+    eventStore,
+    stmtInsertSession,
+    stmtGetSession,
+    stmtUpdateSession,
+    onSessionsChanged: { fire: () => {} },
+    getSessionSync(id: string) {
+      const row = stmtGetSession.get(id) as any;
+      return row ? rowToSession.call(this, row) : null;
+    },
+    async getSession(id: string) {
+      const row = stmtGetSession.get(id) as any;
+      return row ? rowToSession.call(this, row) : null;
+    },
+    rowToSession,
+  };
+}
+
+describe('ConversationManager.forkSession', () => {
   let db: Database;
+  let eventStore: EventStore;
+  let mockCm: ReturnType<typeof createForkMockCm>;
+  const PARENT_ID = 'parent-session-fork';
 
   beforeEach(() => {
     db = new Database(':memory:');
     runMigrations(db);
-    db.prepare('INSERT INTO sessions (id, title, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
-      .run('session-1', 'Test', 'test', 1000, 1000);
-    db.prepare('INSERT INTO sessions (id, title, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
-      .run('session-2', 'Test 2', 'test', 2000, 2000);
+    eventStore = new EventStore(db);
+    mockCm = createForkMockCm(db, eventStore);
+
+    // Create the parent session
+    mockCm.stmtInsertSession.run(PARENT_ID, 'Parent Chat', 'deepseek-chat', 1000, 1000, null, null);
   });
 
   afterEach(() => {
     db.close();
   });
 
-  function createMockCm(globalStateStore: Record<string, any>) {
-    const stmtGetSession = db.prepare('SELECT * FROM sessions WHERE id = ?');
-    return {
-      instanceId: 'test-instance-abc',
-      currentSessionId: null as string | null,
-      context: {
-        globalState: {
-          get: (key: string) => globalStateStore[key],
-          update: async (key: string, value: any) => { globalStateStore[key] = value; },
-        },
-      },
-      getSessionSync: (id: string) => stmtGetSession.get(id),
-    };
+  /** Seed parent with a basic user → assistant turn (sequences 1, 2). */
+  function seedTurn() {
+    eventStore.append({
+      sessionId: PARENT_ID, timestamp: 1000,
+      type: 'user_message', content: 'Hello'
+    });
+    eventStore.append({
+      sessionId: PARENT_ID, timestamp: 2000,
+      type: 'assistant_message', content: 'Hi there!',
+      model: 'deepseek-chat', finishReason: 'stop'
+    });
   }
 
-  it('loadCurrentSession falls back to shared key on cold start', () => {
-    const store: Record<string, any> = { currentSessionId: 'session-1' };
-    const mockCm = createMockCm(store);
+  it('creates a fork session with correct parent reference', async () => {
+    seedTurn();
+    const fork = await callForkSession.call(mockCm, PARENT_ID, 2);
 
-    loadCurrentSession.call(mockCm);
-
-    expect(mockCm.currentSessionId).toBe('session-1');
+    expect(fork).toBeDefined();
+    expect(fork.parentSessionId).toBe(PARENT_ID);
+    expect(fork.forkSequence).toBe(2);
+    expect(fork.title).toBe('Parent Chat (fork)');
+    expect(fork.model).toBe('deepseek-chat');
   });
 
-  it('loadCurrentSession prefers instance-scoped key over shared key', () => {
-    const store: Record<string, any> = {
-      'currentSessionId': 'session-1',
-      'currentSessionId-test-instance-abc': 'session-2',
-    };
-    const mockCm = createMockCm(store);
+  it('links parent events to fork via join table (zero-copy)', async () => {
+    seedTurn();
+    const fork = await callForkSession.call(mockCm, PARENT_ID, 2);
 
-    loadCurrentSession.call(mockCm);
+    const parentEvents = eventStore.getEvents(PARENT_ID);
+    const forkEvents = eventStore.getEvents(fork.id);
 
-    expect(mockCm.currentSessionId).toBe('session-2');
+    // Parent has 2 events; fork has 2 linked + 1 fork_created = 3
+    expect(parentEvents).toHaveLength(2);
+    expect(forkEvents).toHaveLength(3);
+
+    // Shared events have the SAME event IDs (zero-copy)
+    expect(forkEvents[0].id).toBe(parentEvents[0].id);
+    expect(forkEvents[1].id).toBe(parentEvents[1].id);
+
+    // Sequences preserved from parent
+    expect(forkEvents[0].sequence).toBe(1);
+    expect(forkEvents[1].sequence).toBe(2);
+
+    // fork_created is sequence 3
+    expect(forkEvents[2].type).toBe('fork_created');
+    expect(forkEvents[2].sequence).toBe(3);
   });
 
-  it('loadCurrentSession ignores instance-scoped key if session does not exist', () => {
-    const store: Record<string, any> = {
-      'currentSessionId': 'session-1',
-      'currentSessionId-test-instance-abc': 'nonexistent-session',
-    };
-    const mockCm = createMockCm(store);
+  it('records fork_created event with correct metadata', async () => {
+    seedTurn();
+    const fork = await callForkSession.call(mockCm, PARENT_ID, 2);
 
-    loadCurrentSession.call(mockCm);
+    const forkEvents = eventStore.getEvents(fork.id);
+    const forkCreated = forkEvents.find(e => e.type === 'fork_created')!;
 
-    // Falls back to shared key since instance-scoped session doesn't exist
-    expect(mockCm.currentSessionId).toBe('session-1');
+    expect(forkCreated).toBeDefined();
+    expect((forkCreated as any).parentSessionId).toBe(PARENT_ID);
+    expect((forkCreated as any).forkPointSequence).toBe(2);
   });
 
-  it('saveCurrentSession writes to both instance-scoped and shared keys', async () => {
-    const store: Record<string, any> = {};
-    const mockCm = createMockCm(store);
-    mockCm.currentSessionId = 'session-2';
+  it('forks at user_message boundary (sequence 1)', async () => {
+    seedTurn();
+    const fork = await callForkSession.call(mockCm, PARENT_ID, 1);
 
-    await saveCurrentSession.call(mockCm);
-
-    expect(store['currentSessionId-test-instance-abc']).toBe('session-2');
-    expect(store['currentSessionId']).toBe('session-2');
+    expect(fork).toBeDefined();
+    const forkEvents = eventStore.getEvents(fork.id);
+    // 1 linked + 1 fork_created = 2
+    expect(forkEvents).toHaveLength(2);
+    expect(forkEvents[0].type).toBe('user_message');
+    expect(forkEvents[1].type).toBe('fork_created');
   });
 
-  it('two instances do not overwrite each other during runtime', async () => {
-    const store: Record<string, any> = { currentSessionId: 'session-1' };
+  it('rejects fork at non-turn-boundary (tool_call)', async () => {
+    eventStore.append({ sessionId: PARENT_ID, timestamp: 1000, type: 'user_message', content: 'Do something' });
+    eventStore.append({ sessionId: PARENT_ID, timestamp: 2000, type: 'tool_call', toolCallId: 'tc-1', toolName: 'shell', arguments: { command: 'ls' } });
+    eventStore.append({ sessionId: PARENT_ID, timestamp: 3000, type: 'tool_result', toolCallId: 'tc-1', result: 'files', success: true });
+    eventStore.append({ sessionId: PARENT_ID, timestamp: 4000, type: 'assistant_message', content: 'Done.', model: 'deepseek-chat', finishReason: 'stop' });
 
-    // Instance A loads
-    const instanceA = createMockCm(store);
-    instanceA.instanceId = 'instance-A';
-    loadCurrentSession.call(instanceA);
-    expect(instanceA.currentSessionId).toBe('session-1');
+    await expect(
+      callForkSession.call(mockCm, PARENT_ID, 2)
+    ).rejects.toThrow(/must be 'user_message' or 'assistant_message'/);
+  });
 
-    // Instance A switches to session-2
-    instanceA.currentSessionId = 'session-2';
-    await saveCurrentSession.call(instanceA);
+  it('rejects fork at non-turn-boundary (assistant_reasoning)', async () => {
+    eventStore.append({ sessionId: PARENT_ID, timestamp: 1000, type: 'user_message', content: 'Think' });
+    eventStore.append({ sessionId: PARENT_ID, timestamp: 2000, type: 'assistant_reasoning', content: 'Thinking...', iteration: 0 });
+    eventStore.append({ sessionId: PARENT_ID, timestamp: 3000, type: 'assistant_message', content: 'Done.', model: 'deepseek-reasoner', finishReason: 'stop' });
 
-    // Instance B starts, loads from shared key (last written by A)
-    const instanceB = createMockCm(store);
-    instanceB.instanceId = 'instance-B';
-    loadCurrentSession.call(instanceB);
-    expect(instanceB.currentSessionId).toBe('session-2');
+    await expect(
+      callForkSession.call(mockCm, PARENT_ID, 2)
+    ).rejects.toThrow(/must be 'user_message' or 'assistant_message'/);
+  });
 
-    // Instance B switches to session-1
-    instanceB.currentSessionId = 'session-1';
-    await saveCurrentSession.call(instanceB);
+  it('rejects fork at non-turn-boundary (tool_result)', async () => {
+    eventStore.append({ sessionId: PARENT_ID, timestamp: 1000, type: 'user_message', content: 'Run it' });
+    eventStore.append({ sessionId: PARENT_ID, timestamp: 2000, type: 'tool_call', toolCallId: 'tc-1', toolName: 'shell', arguments: { command: 'ls' } });
+    eventStore.append({ sessionId: PARENT_ID, timestamp: 3000, type: 'tool_result', toolCallId: 'tc-1', result: 'output', success: true });
+    eventStore.append({ sessionId: PARENT_ID, timestamp: 4000, type: 'assistant_message', content: 'Done.', model: 'deepseek-chat', finishReason: 'stop' });
 
-    // Instance A's scoped key is untouched
-    expect(store['currentSessionId-instance-A']).toBe('session-2');
-    // Instance B's scoped key has its own value
-    expect(store['currentSessionId-instance-B']).toBe('session-1');
-    // Shared key reflects last writer (B)
-    expect(store['currentSessionId']).toBe('session-1');
+    await expect(
+      callForkSession.call(mockCm, PARENT_ID, 3)
+    ).rejects.toThrow(/must be 'user_message' or 'assistant_message'/);
+  });
+
+  it('rejects fork at non-existent sequence', async () => {
+    seedTurn();
+
+    await expect(
+      callForkSession.call(mockCm, PARENT_ID, 99)
+    ).rejects.toThrow(/no event at sequence 99/);
+  });
+
+  it('rejects fork of non-existent session', async () => {
+    await expect(
+      callForkSession.call(mockCm, 'nonexistent', 1)
+    ).rejects.toThrow(/parent session nonexistent not found/);
+  });
+
+  it('updates fork session metadata (event_count, first_user_message, preview)', async () => {
+    seedTurn();
+    const fork = await callForkSession.call(mockCm, PARENT_ID, 2);
+
+    expect(fork.eventCount).toBe(3); // 2 linked + fork_created
+    expect(fork.firstUserMessage).toBe('Hello');
+    expect(fork.lastActivityPreview).toBe('Forked from session');
+  });
+
+  it('fork-of-fork works (nested forking)', async () => {
+    seedTurn();
+
+    // First fork at assistant_message
+    const fork1 = await callForkSession.call(mockCm, PARENT_ID, 2);
+
+    // Add new conversation in the fork
+    eventStore.append({ sessionId: fork1.id, timestamp: 5000, type: 'user_message', content: 'Follow-up in fork' });
+    eventStore.append({ sessionId: fork1.id, timestamp: 6000, type: 'assistant_message', content: 'Fork reply', model: 'deepseek-chat', finishReason: 'stop' });
+
+    // Get the latest sequence in fork1
+    const fork1Events = eventStore.getEvents(fork1.id);
+    const lastSeq = fork1Events[fork1Events.length - 1].sequence;
+
+    // Fork the fork
+    const fork2 = await callForkSession.call(mockCm, fork1.id, lastSeq);
+
+    expect(fork2).toBeDefined();
+    expect(fork2.parentSessionId).toBe(fork1.id);
+    expect(fork2.title).toBe('Parent Chat (fork) (fork)');
+  });
+
+  it('parent deletion does not affect fork (shared events survive)', async () => {
+    seedTurn();
+    const fork = await callForkSession.call(mockCm, PARENT_ID, 2);
+    const forkId = fork.id;
+
+    // Delete parent (CASCADE removes parent's event_sessions + snapshots)
+    const deleteParent = db.transaction(() => {
+      db.prepare('DELETE FROM sessions WHERE id = ?').run(PARENT_ID);
+      db.prepare('DELETE FROM events WHERE id NOT IN (SELECT event_id FROM event_sessions)').run();
+    });
+    deleteParent();
+
+    // Parent is gone
+    expect(mockCm.getSessionSync(PARENT_ID)).toBeNull();
+
+    // Fork still exists
+    const forkAfter = mockCm.getSessionSync(forkId);
+    expect(forkAfter).not.toBeNull();
+    expect(forkAfter!.id).toBe(forkId);
+
+    // Fork events still accessible (shared events preserved since fork references them)
+    const forkEvents = eventStore.getEvents(forkId);
+    expect(forkEvents.length).toBeGreaterThanOrEqual(3);
+    expect(forkEvents[0].type).toBe('user_message');
+    expect(forkEvents[1].type).toBe('assistant_message');
+  });
+
+  it('forks with single user_message (minimal case)', async () => {
+    eventStore.append({ sessionId: PARENT_ID, timestamp: 1000, type: 'user_message', content: 'Just one message' });
+
+    const fork = await callForkSession.call(mockCm, PARENT_ID, 1);
+
+    const forkEvents = eventStore.getEvents(fork.id);
+    expect(forkEvents).toHaveLength(2); // 1 linked + fork_created
+    expect(forkEvents[0].type).toBe('user_message');
+    expect((forkEvents[0] as any).content).toBe('Just one message');
+  });
+
+  it('parent events remain unchanged after fork', async () => {
+    seedTurn();
+    const parentEventsBefore = eventStore.getEvents(PARENT_ID);
+
+    await callForkSession.call(mockCm, PARENT_ID, 2);
+
+    const parentEventsAfter = eventStore.getEvents(PARENT_ID);
+    expect(parentEventsAfter).toHaveLength(parentEventsBefore.length);
+    expect(parentEventsAfter.map(e => e.id)).toEqual(parentEventsBefore.map(e => e.id));
+  });
+
+  it('multiple forks from same parent are independent', async () => {
+    seedTurn();
+
+    const fork1 = await callForkSession.call(mockCm, PARENT_ID, 2);
+    const fork2 = await callForkSession.call(mockCm, PARENT_ID, 2);
+
+    expect(fork1.id).not.toBe(fork2.id);
+
+    // Add events to fork1 only
+    eventStore.append({ sessionId: fork1.id, timestamp: 7000, type: 'user_message', content: 'Only in fork1' });
+
+    const fork1Events = eventStore.getEvents(fork1.id);
+    const fork2Events = eventStore.getEvents(fork2.id);
+
+    // fork1 has extra event, fork2 does not
+    expect(fork1Events.length).toBe(fork2Events.length + 1);
+  });
+});
+
+describe('ConversationManager.getSessionForks', () => {
+  let db: Database;
+  let eventStore: EventStore;
+  let mockCm: ReturnType<typeof createForkMockCm>;
+  const PARENT_ID = 'parent-session-get-forks';
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    runMigrations(db);
+    eventStore = new EventStore(db);
+    mockCm = createForkMockCm(db, eventStore);
+
+    mockCm.stmtInsertSession.run(PARENT_ID, 'Parent Chat', 'deepseek-chat', 1000, 1000, null, null);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('returns empty array for session with no forks', async () => {
+    const forks = await callGetSessionForks.call(mockCm, PARENT_ID);
+    expect(forks).toEqual([]);
+  });
+
+  it('returns all fork children of a parent', async () => {
+    eventStore.append({ sessionId: PARENT_ID, timestamp: 1000, type: 'user_message', content: 'Hello' });
+    eventStore.append({ sessionId: PARENT_ID, timestamp: 2000, type: 'assistant_message', content: 'Hi!', model: 'deepseek-chat', finishReason: 'stop' });
+
+    const fork1 = await callForkSession.call(mockCm, PARENT_ID, 2);
+    const fork2 = await callForkSession.call(mockCm, PARENT_ID, 2);
+
+    const forks = await callGetSessionForks.call(mockCm, PARENT_ID);
+    expect(forks).toHaveLength(2);
+    const forkIds = forks.map(f => f.id);
+    expect(forkIds).toContain(fork1.id);
+    expect(forkIds).toContain(fork2.id);
+  });
+
+  it('does not return forks of other sessions', async () => {
+    // Create another session
+    const otherId = 'other-session-1';
+    mockCm.stmtInsertSession.run(otherId, 'Other Chat', 'deepseek-chat', 1000, 1000, null, null);
+    eventStore.append({ sessionId: otherId, timestamp: 1000, type: 'user_message', content: 'Other' });
+    eventStore.append({ sessionId: otherId, timestamp: 2000, type: 'assistant_message', content: 'Reply', model: 'deepseek-chat', finishReason: 'stop' });
+
+    // Fork the other session, not the parent
+    await callForkSession.call(mockCm, otherId, 2);
+
+    const forks = await callGetSessionForks.call(mockCm, PARENT_ID);
+    expect(forks).toEqual([]);
+  });
+});
+
+// ====================================================
+// getRecentTurnSequences
+// ====================================================
+
+const getRecentTurnSequences = ConversationManager.prototype.getRecentTurnSequences;
+
+describe('ConversationManager.getRecentTurnSequences', () => {
+  let db: Database;
+  let eventStore: EventStore;
+  const SESSION_ID = 'recent-seq-session';
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    runMigrations(db);
+    eventStore = new EventStore(db);
+    db.prepare('INSERT INTO sessions (id, title, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
+      .run(SESSION_ID, 'Test', 'deepseek-chat', 1000, 1000);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('returns undefined for both when session has no events', () => {
+    const mockCm = { eventStore } as any;
+    const result = getRecentTurnSequences.call(mockCm, SESSION_ID);
+    expect(result.userSequence).toBeUndefined();
+    expect(result.assistantSequence).toBeUndefined();
+  });
+
+  it('returns user sequence when only user message exists', () => {
+    eventStore.append({ sessionId: SESSION_ID, timestamp: 1000, type: 'user_message', content: 'Hello' });
+
+    const mockCm = { eventStore } as any;
+    const result = getRecentTurnSequences.call(mockCm, SESSION_ID);
+    expect(result.userSequence).toBe(1);
+    expect(result.assistantSequence).toBeUndefined();
+  });
+
+  it('returns both sequences for a complete turn', () => {
+    eventStore.append({ sessionId: SESSION_ID, timestamp: 1000, type: 'user_message', content: 'Hello' });
+    eventStore.append({ sessionId: SESSION_ID, timestamp: 2000, type: 'assistant_message', content: 'Hi', model: 'deepseek-chat', finishReason: 'stop' });
+
+    const mockCm = { eventStore } as any;
+    const result = getRecentTurnSequences.call(mockCm, SESSION_ID);
+    expect(result.userSequence).toBe(1);
+    expect(result.assistantSequence).toBe(2);
+  });
+
+  it('returns most recent sequences when multiple turns exist', () => {
+    eventStore.append({ sessionId: SESSION_ID, timestamp: 1000, type: 'user_message', content: 'First' });
+    eventStore.append({ sessionId: SESSION_ID, timestamp: 2000, type: 'assistant_message', content: 'Reply 1', model: 'deepseek-chat', finishReason: 'stop' });
+    eventStore.append({ sessionId: SESSION_ID, timestamp: 3000, type: 'user_message', content: 'Second' });
+    eventStore.append({ sessionId: SESSION_ID, timestamp: 4000, type: 'assistant_message', content: 'Reply 2', model: 'deepseek-chat', finishReason: 'stop' });
+
+    const mockCm = { eventStore } as any;
+    const result = getRecentTurnSequences.call(mockCm, SESSION_ID);
+    expect(result.userSequence).toBe(3);
+    expect(result.assistantSequence).toBe(4);
   });
 });

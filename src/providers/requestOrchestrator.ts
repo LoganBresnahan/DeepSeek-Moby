@@ -62,6 +62,9 @@ export class RequestOrchestrator {
   private readonly _onSummarizationStarted = new vscode.EventEmitter<void>();
   private readonly _onSummarizationCompleted = new vscode.EventEmitter<void>();
 
+  // ── Events (fork support) ──
+  private readonly _onTurnSequenceUpdate = new vscode.EventEmitter<{ userSequence?: number; assistantSequence?: number }>();
+
   // ── Events (errors) ──
   private readonly _onError = new vscode.EventEmitter<{ error: string }>();
   private readonly _onWarning = new vscode.EventEmitter<{ message: string }>();
@@ -83,6 +86,7 @@ export class RequestOrchestrator {
   readonly onSessionCreated = this._onSessionCreated.event;
   readonly onSummarizationStarted = this._onSummarizationStarted.event;
   readonly onSummarizationCompleted = this._onSummarizationCompleted.event;
+  readonly onTurnSequenceUpdate = this._onTurnSequenceUpdate.event;
   readonly onError = this._onError.event;
   readonly onWarning = this._onWarning.event;
 
@@ -128,12 +132,9 @@ export class RequestOrchestrator {
     // Get or create current session
     let sessionId = currentSessionId;
     if (!sessionId) {
-      const editor = vscode.window.activeTextEditor;
-      const language = editor?.document.languageId;
-      const session = await this.conversationManager.startNewSession(
+      const session = await this.conversationManager.createSession(
         message,
-        this.deepSeekClient.getModel(),
-        language
+        this.deepSeekClient.getModel()
       );
       sessionId = session.id;
 
@@ -145,10 +146,7 @@ export class RequestOrchestrator {
 
     // Save user message to history (UI already shows it from frontend)
     if (sessionId) {
-      await this.conversationManager.addMessageToCurrentSession({
-        role: 'user',
-        content: message
-      });
+      await this.conversationManager.recordUserMessage(sessionId, message);
     }
 
     // Build system prompt
@@ -218,9 +216,8 @@ export class RequestOrchestrator {
 
     try {
       // Get current session messages for context (user message already saved above)
-      const currentSession = await this.conversationManager.getCurrentSession();
-      const sessionMessages = currentSession
-        ? await this.conversationManager.getSessionMessagesCompat(currentSession.id)
+      const sessionMessages = sessionId
+        ? await this.conversationManager.getSessionMessagesCompat(sessionId)
         : [];
       const messageCount = sessionMessages.length || 1;
       logger.apiRequest(model, messageCount, hasAttachments);
@@ -265,8 +262,8 @@ export class RequestOrchestrator {
       }
 
       // --- Context Window Management ---
-      const snapshotSummary = currentSession
-        ? this.conversationManager.getLatestSnapshotSummary(currentSession.id)
+      const snapshotSummary = sessionId
+        ? this.conversationManager.getLatestSnapshotSummary(sessionId)
         : undefined;
 
       const contextResult = await this.deepSeekClient.buildContext(
@@ -393,14 +390,14 @@ export class RequestOrchestrator {
 
           // Record reasoning iterations that completed
           for (let i = 0; i < streamState.reasoningIterations.length; i++) {
-            this.conversationManager.recordAssistantReasoning(streamState.reasoningIterations[i], i);
+            this.conversationManager.recordAssistantReasoning(sessionId!, streamState.reasoningIterations[i], i);
           }
 
           // Record the partial assistant message
           const partialText = cleanPartialResponse
             ? `${cleanPartialResponse}\n\n*[Generation stopped]*`
             : '*[Generation stopped]*';
-          await this.conversationManager.recordAssistantMessage(partialText, model, 'length');
+          await this.conversationManager.recordAssistantMessage(sessionId!, partialText, model, 'length');
           logger.info(`[RequestOrchestrator] Saved partial response to history`);
         }
         // Don't show error for user-initiated stops
@@ -990,24 +987,24 @@ export class RequestOrchestrator {
       try {
         // 1. Record reasoning iterations
         for (let i = 0; i < reasoningIterations.length; i++) {
-          this.conversationManager.recordAssistantReasoning(reasoningIterations[i], i);
-          logger.info(`[HistorySave] Recorded reasoning iteration ${i} (${reasoningIterations[i].length} chars)`);
+          this.conversationManager.recordAssistantReasoning(sessionId, reasoningIterations[i], i);
+          logger.info(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} Recorded reasoning iteration ${i} (${reasoningIterations[i].length} chars)`);
         }
 
         // 2. Record non-shell tool calls
         for (const tc of toolCallsForHistory) {
           const toolCallId = `tc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-          this.conversationManager.recordToolCall(toolCallId, tc.name, { detail: tc.detail });
-          this.conversationManager.recordToolResult(toolCallId, tc.detail, tc.status === 'done');
-          logger.info(`[HistorySave] Recorded tool call: ${tc.name}`);
+          this.conversationManager.recordToolCall(sessionId, toolCallId, tc.name, { detail: tc.detail });
+          this.conversationManager.recordToolResult(sessionId, toolCallId, tc.detail, tc.status === 'done');
+          logger.info(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} Recorded tool call: ${tc.name}`);
         }
 
         // 3. Record shell results with richer data
         for (const sr of shellResultsForHistory) {
           const shellCallId = `sh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-          this.conversationManager.recordToolCall(shellCallId, 'shell', { command: sr.command });
-          this.conversationManager.recordToolResult(shellCallId, sr.output, sr.success, sr.executionTimeMs);
-          logger.info(`[HistorySave] Recorded shell: ${sr.command.substring(0, 50)}`);
+          this.conversationManager.recordToolCall(sessionId, shellCallId, 'shell', { command: sr.command });
+          this.conversationManager.recordToolResult(sessionId, shellCallId, sr.output, sr.success, sr.executionTimeMs);
+          logger.info(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} Recorded shell: ${sr.command.substring(0, 50)}`);
         }
 
         // 4. Record file modifications (for restore of "Modified Files" dropdown)
@@ -1018,17 +1015,21 @@ export class RequestOrchestrator {
         )];
         for (const filePath of modifiedFiles) {
           const fileCallId = `fm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-          this.conversationManager.recordToolCall(fileCallId, '_file_modified', { filePath });
-          this.conversationManager.recordToolResult(fileCallId, filePath, true);
-          logger.info(`[HistorySave] Recorded file modification: ${filePath}`);
+          this.conversationManager.recordToolCall(sessionId, fileCallId, '_file_modified', { filePath });
+          this.conversationManager.recordToolResult(sessionId, fileCallId, filePath, true);
+          logger.info(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} Recorded file modification: ${filePath}`);
         }
 
         // 5. Record the assistant message with real model + finishReason
         const cleanedContentIterations = contentIterations.length > 0
           ? contentIterations.map(c => stripShellTags(stripDSML(c)).trim()).filter(c => c.length > 0)
           : undefined;
-        await this.conversationManager.recordAssistantMessage(cleanResponse, model, 'stop', undefined, cleanedContentIterations);
-        logger.info(`[HistorySave] Recorded assistant message (${cleanResponse.length} chars, model=${model}, contentIts=${cleanedContentIterations?.length || 0})`);
+        await this.conversationManager.recordAssistantMessage(sessionId, cleanResponse, model, 'stop', undefined, cleanedContentIterations);
+        logger.info(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} Recorded assistant message (${cleanResponse.length} chars, model=${model}, contentIts=${cleanedContentIterations?.length || 0})`);
+
+        // Fire turn sequence update so webview can show fork buttons on live turns
+        const seqs = this.conversationManager.getRecentTurnSequences(sessionId);
+        this._onTurnSequenceUpdate.fire(seqs);
       } catch (saveError: any) {
         logger.error(`[HistorySave] FAILED to save history: ${saveError.message}`, saveError.stack);
       }

@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { v4 as uuidv4 } from 'uuid';
 import { DeepSeekClient } from '../deepseekClient';
 import { StatusBar } from '../views/statusBar';
 import { ConversationManager } from '../events';
@@ -23,6 +24,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
   private statusBar: StatusBar;
   private conversationManager: ConversationManager;
   private currentSessionId: string | null = null;
+  private readonly instanceId: string = uuidv4();
   private disposables: vscode.Disposable[] = [];
   private tavilyClient: TavilyClient;
 
@@ -74,6 +76,13 @@ export class ChatProvider implements vscode.WebviewViewProvider {
 
     // Wire manager events → webview
     this.wireEvents();
+
+    // Subscribe to session changes (cross-panel sync)
+    this.disposables.push(
+      this.conversationManager.onSessionsChangedEvent(() => {
+        this.sendHistorySessions();
+      })
+    );
 
     // Load current session
     this.loadCurrentSession();
@@ -270,6 +279,9 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       this._summarizing = false;
       logger.info('[ChatProvider] Summarization completed — queuing disabled');
     });
+    this.requestOrchestrator.onTurnSequenceUpdate(d => {
+      this._view?.webview.postMessage({ type: 'turnSequenceUpdate', ...d });
+    });
 
     // CommandApprovalManager → webview
     this.commandApprovalManager.onApprovalRequired(data => {
@@ -301,10 +313,42 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     this.disposables.forEach(d => d.dispose());
   }
 
+  /** Public getter for CommandProvider and extension.ts to access the current session ID. */
+  public getCurrentSessionId(): string | null {
+    return this.currentSessionId;
+  }
+
   private async loadCurrentSession() {
-    const currentSession = await this.conversationManager.getCurrentSession();
-    if (currentSession) {
-      this.currentSessionId = currentSession.id;
+    const gs = this.conversationManager.getGlobalState();
+
+    // Try instance-scoped key first (runtime isolation between parallel instances)
+    const instanceKey = `currentSessionId-${this.instanceId}`;
+    const instanceSavedId = gs.get<string>(instanceKey);
+    if (instanceSavedId) {
+      const session = await this.conversationManager.getSession(instanceSavedId);
+      if (session) {
+        this.currentSessionId = instanceSavedId;
+        logger.info(`[ChatProvider] loadCurrentSession: restored ${instanceSavedId.substring(0, 8)} from instance-key`);
+        return;
+      }
+    }
+
+    // Fall back to shared key (resume last session on cold start)
+    const savedId = gs.get<string>('currentSessionId');
+    if (savedId) {
+      const session = await this.conversationManager.getSession(savedId);
+      if (session) {
+        this.currentSessionId = savedId;
+        logger.info(`[ChatProvider] loadCurrentSession: restored ${savedId.substring(0, 8)} from shared-key`);
+      }
+    }
+  }
+
+  private async saveCurrentSession(): Promise<void> {
+    if (this.currentSessionId) {
+      const gs = this.conversationManager.getGlobalState();
+      await gs.update(`currentSessionId-${this.instanceId}`, this.currentSessionId);
+      await gs.update('currentSessionId', this.currentSessionId);
     }
   }
 
@@ -520,6 +564,9 @@ export class ChatProvider implements vscode.WebviewViewProvider {
           break;
         case 'exportAllHistory':
           await this.exportAllHistoryToFile(data.format);
+          break;
+        case 'forkSession':
+          await this.handleForkSession(data.atSequence as number);
           break;
         // Command approval response from webview
         case 'commandApprovalResponse': {
@@ -758,14 +805,12 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     this.commandApprovalManager.cancelPendingApproval();
 
     // Create a new session for fresh conversation
-    const editor = vscode.window.activeTextEditor;
-    const language = editor?.document.languageId;
-    const session = await this.conversationManager.startNewSession(
+    const session = await this.conversationManager.createSession(
       undefined,
-      this.deepSeekClient.getModel(),
-      language
+      this.deepSeekClient.getModel()
     );
     this.currentSessionId = session.id;
+    await this.saveCurrentSession();
     logger.sessionStart(session.id, session.title);
 
     // Notify webview of new session (for SessionActor)
@@ -828,6 +873,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       this.currentSessionId = null;
 
       logger.info('[ChatProvider] All chat history cleared');
+      logger.sessionClear();
 
       // Notify webview
       this._view?.webview.postMessage({ type: 'historyCleared' });
@@ -849,11 +895,10 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       });
 
       // Also send current session ID
-      const currentSession = await this.conversationManager.getCurrentSession();
-      if (currentSession) {
+      if (this.currentSessionId) {
         this._view?.webview.postMessage({
           type: 'currentSessionId',
-          sessionId: currentSession.id
+          sessionId: this.currentSessionId
         });
       }
     } catch (error) {
@@ -989,8 +1034,9 @@ export class ChatProvider implements vscode.WebviewViewProvider {
   }
 
   private async loadCurrentSessionHistory() {
-    const currentSession = await this.conversationManager.getCurrentSession();
-    if (!currentSession || !this._view) return;
+    if (!this.currentSessionId || !this._view) return;
+    const currentSession = await this.conversationManager.getSession(this.currentSessionId);
+    if (!currentSession) return;
 
     const history = await this.conversationManager.getSessionRichHistory(currentSession.id);
     if (history.length > 0) {
@@ -1018,9 +1064,12 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     const session = await this.conversationManager.getSession(sessionId);
     logger.info(`[loadSession] session=${sessionId}, found=${!!session}, view=${!!this._view}`);
     if (session && this._view) {
+      const oldSessionId = this.currentSessionId;
       this.currentSessionId = session.id;
-      await this.conversationManager.switchToSession(sessionId);
-      logger.sessionSwitch(sessionId);
+      await this.saveCurrentSession();
+      this.conversationManager.notifySessionsChanged();
+      logger.info(`[ChatProvider] switchSession: ${oldSessionId?.substring(0, 8) ?? 'null'} → ${session.id.substring(0, 8)}`);
+      logger.sessionSwitch(session.id);
 
       // Don't switch to session's model - keep user's current model selection
       // The model dropdown reflects user preference, not per-session setting
@@ -1045,6 +1094,32 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         type: 'loadHistory',
         history
       });
+    }
+  }
+
+  private async handleForkSession(atSequence: number): Promise<void> {
+    if (!this.currentSessionId) return;
+    try {
+      const parentSession = await this.conversationManager.getSession(this.currentSessionId);
+      const parentTitle = parentSession?.title || 'Unknown';
+      const parentId = this.currentSessionId;
+
+      const fork = await this.conversationManager.forkSession(this.currentSessionId, atSequence);
+      logger.info(`[ChatProvider] forkSession: ${parentId.substring(0, 8)} → ${fork.id.substring(0, 8)} at seq=${atSequence}`);
+      logger.sessionFork(parentId, fork.id, atSequence);
+
+      await this.loadSession(fork.id);
+
+      // Toast notification
+      this._view?.webview.postMessage({
+        type: 'sessionForked',
+        forkId: fork.id,
+        parentId,
+        parentTitle
+      });
+    } catch (error: any) {
+      logger.error(`[ChatProvider] Fork failed: ${error.message}`);
+      this._view?.webview.postMessage({ type: 'error', error: `Fork failed: ${error.message}` });
     }
   }
 

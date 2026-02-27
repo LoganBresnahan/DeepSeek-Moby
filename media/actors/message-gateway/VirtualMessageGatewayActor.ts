@@ -399,6 +399,15 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         this.handleAsciiDrawingReceived(msg);
         break;
 
+      // ---- Fork Messages ----
+      case 'turnSequenceUpdate':
+        this.handleTurnSequenceUpdate(msg);
+        break;
+
+      case 'sessionForked':
+        this.showForkToast(msg.parentTitle as string);
+        break;
+
       // ---- Trace Messages ----
       case 'traceCalibration':
         // Receive calibration data from extension for timeline alignment
@@ -970,6 +979,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       filesModified?: string[];
       model?: string;
       timestamp?: number;
+      sequence?: number;
     }>;
 
     log.debug(`[VirtualGateway] handleLoadHistory: ${history?.length ?? 0} turns`);
@@ -986,13 +996,15 @@ export class VirtualMessageGatewayActor extends EventStateActor {
           if (m.role === 'user') {
             virtualList.addTurn(turnId, 'user', {
               files: m.files,
-              timestamp: m.timestamp || Date.now()
+              timestamp: m.timestamp || Date.now(),
+              sequence: m.sequence
             });
             virtualList.addTextSegment(turnId, m.content);
           } else if (m.role === 'assistant') {
             virtualList.addTurn(turnId, 'assistant', {
               model: m.model,
-              timestamp: m.timestamp || Date.now()
+              timestamp: m.timestamp || Date.now(),
+              sequence: m.sequence
             });
 
             const reasoning = m.reasoning_iterations || [];
@@ -1091,6 +1103,50 @@ export class VirtualMessageGatewayActor extends EventStateActor {
     this._currentTurnId = null;
 
     this.publishCoordinationState();
+  }
+
+  // ============================================
+  // Fork Message Handlers
+  // ============================================
+
+  private handleTurnSequenceUpdate(msg: { type: string; [key: string]: unknown }): void {
+    const { virtualList } = this._actors;
+    const userSequence = msg.userSequence as number | undefined;
+    const assistantSequence = msg.assistantSequence as number | undefined;
+
+    // Walk last 2 turns (most recent user + assistant) and assign sequences
+    const lastTurnIds = virtualList.getLastNTurnIds(2);
+    for (const turnId of lastTurnIds) {
+      const turn = virtualList.getTurn(turnId);
+      if (!turn || turn.sequence) continue; // Skip if already has sequence
+
+      if (turn.role === 'user' && userSequence) {
+        virtualList.updateTurnSequence(turnId, userSequence);
+      } else if (turn.role === 'assistant' && assistantSequence) {
+        virtualList.updateTurnSequence(turnId, assistantSequence);
+      }
+    }
+  }
+
+  private showForkToast(parentTitle: string): void {
+    const container = document.getElementById('toastContainer');
+    if (!container) return;
+
+    const escapedTitle = parentTitle.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const toast = document.createElement('div');
+    toast.className = 'toast fork-toast';
+    toast.innerHTML = `
+      <div class="toast-content">
+        <span class="toast-message">Forked from "${escapedTitle}"</span>
+      </div>
+      <button class="toast-close">&times;</button>
+    `;
+
+    container.innerHTML = '';
+    container.appendChild(toast);
+
+    toast.querySelector('.toast-close')?.addEventListener('click', () => { container.innerHTML = ''; });
+    setTimeout(() => { toast.classList.add('fading'); setTimeout(() => container.innerHTML = '', 300); }, 5000);
   }
 
   // ============================================

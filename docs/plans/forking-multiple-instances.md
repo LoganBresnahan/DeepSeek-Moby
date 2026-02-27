@@ -1,6 +1,6 @@
 # Forking Conversations from Events
 
-**Status:** Implementation — Part 1 (multi-instance blockers) complete, Part 2 (schema design) decided, Parts 3-4 ready to implement
+**Status:** Implementation — Parts 1-4.6 complete (multi-instance blockers, schema, forking logic, tests, Option B refactor, fork UI). Part 5 (parallel subagents) not started.
 
 ---
 
@@ -344,6 +344,213 @@ The forked session loads normally — `getSessionRichHistory()` reads events via
 
 ---
 
+## Part 4.5: Option B — ConversationManager → Pure Data Service
+
+### Problem
+
+ConversationManager has dual responsibility: data access layer (CRUD for sessions/events) **and** UI state tracking (`currentSessionId`, `instanceId`, `saveCurrentSession()`). This coupling blocks multi-panel support — a second panel sharing the same ConversationManager would fight over `currentSessionId`.
+
+### Decision
+
+**Option B** was chosen over Option A (two ConversationManager instances with separate DB connections):
+
+| | Option A: Two Instances | Option B: Shared Instance |
+|---|---|---|
+| DB connections | 2 (one per panel) | 1 (shared) |
+| `onSessionsChangedEvent` | Separate — panels don't see each other's changes | Shared — all panels notified automatically |
+| `currentSessionId` | Natural isolation (each instance has own) | Removed from CM — each ChatProvider owns its own |
+| Code changes | Zero | Mechanical refactor of ~10 record methods |
+| Long-term | Technical debt (duplicate state in data layer) | Clean separation (data layer is stateless) |
+
+Option B makes ConversationManager a pure data service. Every write method takes an explicit `sessionId`. ChatProvider owns which session is "current".
+
+### Changes
+
+#### ConversationManager (`src/events/ConversationManager.ts`)
+
+**Remove stateful fields and methods:**
+- `currentSessionId`, `instanceId` fields
+- `loadCurrentSession()`, `saveCurrentSession()`, `ensureCurrentSession()`, `getCurrentSession()`
+
+**Session-mutating methods stop managing currentSessionId:**
+- `createSession()` — remove `this.currentSessionId = id` + save. Just create and return.
+- `switchToSession()` — remove entirely. Caller validates and manages its own state.
+- `deleteSession()` — remove currentSessionId check. Just delete from DB and fire event.
+- `forkSession()` — remove `this.currentSessionId = forkId` + save. Just return the fork.
+- `clearAllSessions()` — remove `this.currentSessionId = null` + save.
+
+**Add explicit `sessionId` to all 10 record methods:**
+
+| Method | Change |
+|---|---|
+| `recordUserMessage(content, ...)` | → `recordUserMessage(sessionId, content, ...)` |
+| `recordAssistantMessage(content, ...)` | → `recordAssistantMessage(sessionId, content, ...)` |
+| `recordAssistantReasoning(content, iter)` | → `recordAssistantReasoning(sessionId, content, iter)` |
+| `recordToolCall(id, name, args)` | → `recordToolCall(sessionId, id, name, args)` |
+| `recordToolResult(id, result, ...)` | → `recordToolResult(sessionId, id, result, ...)` |
+| `recordDiffCreated(...)` | → `recordDiffCreated(sessionId, ...)` |
+| `recordDiffAccepted(id)` | → `recordDiffAccepted(sessionId, id)` |
+| `recordDiffRejected(id)` | → `recordDiffRejected(sessionId, id)` |
+| `recordWebSearch(query, ...)` | → `recordWebSearch(sessionId, query, ...)` |
+| `recordError(type, msg, ...)` | → `recordError(sessionId, type, msg, ...)` |
+
+Each removes `ensureCurrentSession()` call, uses the explicit `sessionId` directly.
+
+**Remove compatibility wrappers:**
+- `addMessageToCurrentSession()` — callers use record methods directly
+- `startNewSession()` kept as alias for `createSession()`
+
+**Add:**
+- `notifySessionsChanged()` — public method so ChatProvider can fire the shared event
+
+#### ChatProvider (`src/providers/chatProvider.ts`)
+
+Already has `private currentSessionId: string | null`. Takes ownership of persistence:
+
+```
+private readonly instanceId: string = uuidv4();
+
+private loadCurrentSession(): void {
+  // 1. Try instance-scoped key `currentSessionId-${instanceId}` from globalState
+  // 2. Fall back to shared key `currentSessionId`
+  // 3. Validate with conversationManager.getSession()
+}
+
+private async saveCurrentSession(): Promise<void> {
+  // Write to both instance-scoped + shared globalState keys
+}
+```
+
+**Updated methods:**
+- `loadCurrentSession()` — read from globalState, validate with `getSession()`
+- `clearConversation()` — call `createSession()` + `saveCurrentSession()`
+- `loadSession()` — remove `switchToSession()` call, use own state + `saveCurrentSession()` + `notifySessionsChanged()`
+- `sendHistorySessions()` — use `this.currentSessionId` instead of `getCurrentSession()`
+- `loadCurrentSessionHistory()` — use `this.currentSessionId` → `getSession(id)`
+
+**New:** Subscribe to `onSessionsChangedEvent` — when any panel mutates sessions, all panels auto-refresh.
+
+#### CommandProvider (`src/providers/commandProvider.ts`)
+
+Takes a `getCurrentSessionId: () => string | null` callback in constructor. ChatProvider provides it.
+
+**Updated methods:**
+- `exportCurrentSession()` — use callback + `getSession(id)`
+- `executeCodeAction()` — use `recordUserMessage(sessionId, ...)` and `recordAssistantMessage(sessionId, ...)`
+
+#### RequestOrchestrator (`src/providers/requestOrchestrator.ts`)
+
+Already receives `currentSessionId` as parameter to `handleMessage()`. Thread it through:
+- `addMessageToCurrentSession(...)` → `recordUserMessage(sessionId, ...)`
+- `getCurrentSession()` → `getSession(sessionId)`
+- All `record*()` calls in `saveToHistory()` get explicit `sessionId` (method already has it as param)
+
+### Logging & Tracing
+
+**Logger (Tier 1):**
+- CM: `[CM] createSession id=${id}`, `[CM] deleteSession id=${id}`, `[CM] record${type} sessionId=${id}`
+- ChatProvider: `[ChatProvider] loadCurrentSession: restored ${id} from ${source}`, `[ChatProvider] saveCurrentSession: ${id}`, `[ChatProvider] switchSession: ${old} → ${new}`
+
+**TraceCollector (Tier 2):**
+- `{ category: 'session', action: 'fork', detail: { parentId, forkId, atSequence } }`
+- `{ category: 'session', action: 'switch', detail: { from, to, trigger } }`
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `src/events/ConversationManager.ts` | Remove session state. Add `sessionId` to 10 record methods. Add `notifySessionsChanged()`. |
+| `src/providers/chatProvider.ts` | Own session lifecycle. Add persistence. Subscribe to events. |
+| `src/providers/requestOrchestrator.ts` | Thread `sessionId` to all record calls. |
+| `src/providers/commandProvider.ts` | Add `getCurrentSessionId` callback. |
+| `src/extension.ts` | Update `CommandProvider` constructor. |
+| `tests/unit/events/ConversationManager.test.ts` | Update record calls, fork tests, session management tests. |
+| `tests/unit/providers/requestOrchestrator.test.ts` | Update record mock signatures. |
+| `docs/architecture/backend/backend-architecture.md` | Update ChatProvider/CM role descriptions. |
+| `docs/architecture/backend/event-sourcing.md` | Add session ownership section. |
+| `docs/architecture/backend/database-layer.md` | Update CM layer description. |
+| `docs/guides/history-persistence.md` | Document new persistence flow. |
+| `docs/architecture/reference/state-keys.md` | Add `currentSessionId-{instanceId}` key docs. |
+
+### Verification
+
+1. `npx vitest run` — all tests pass
+2. Grep for removed methods (`ensureCurrentSession`, `getCurrentSession`, `switchToSession`, `addMessageToCurrentSession`) — zero hits outside CM
+3. Manual: open extension → new chat → send message → check history → switch sessions → fork → verify everything works
+
+---
+
+## Part 4.6: Fork UI — Icon, Popup, Toast, History Indicators
+
+With the fork backend complete (Part 4 + 4.5), this part adds the user-facing fork UI.
+
+### Sequence Number Bridge
+
+The fork API requires `atSequence` but webview turns had no sequence info. Solution: flow event sequence numbers from EventStore through the full pipeline.
+
+```
+EventStore (has .sequence)
+  → RichHistoryTurn.sequence  (ConversationManager.getSessionRichHistory)
+  → gateway handleLoadHistory → addTurn(sequence)
+  → VirtualListActor.TurnData.sequence
+  → MessageTurnActor.bind(sequence) → _sequence field
+```
+
+For **live turns** (not yet saved to history), `RequestOrchestrator` fires `onTurnSequenceUpdate` after `saveToHistory()`. ChatProvider forwards this to the webview, and the gateway walks the last 2 turns to assign sequences via `VirtualListActor.updateTurnSequence()`.
+
+### Fork Button
+
+A `⑂` button appears on message dividers when hovering. It's hidden by default (`opacity: 0`) and fades in via `:host(:hover) .fork-btn` — following the shadow DOM pattern used by thinking/tools/shell containers. Present only on turns that have a sequence number.
+
+### Fork Popup
+
+Clicking the fork button opens a fixed-position popup menu with one entry: "Fork here". The popup follows the same pattern as `showDrawingContextMenu()` — positioned below the anchor, closed on outside click or Escape.
+
+On click, sends `{ type: 'forkSession', atSequence }` to the extension.
+
+### Extension Handler
+
+`ChatProvider.handleForkSession(atSequence)`:
+1. Calls `conversationManager.forkSession(currentSessionId, atSequence)` — zero-copy event linking
+2. Calls `loadSession(fork.id)` — switches the current panel to the fork
+3. Sends `sessionForked` message with parent title for toast
+
+### Toast Notification
+
+On `sessionForked`, the gateway renders a green-bordered toast in `#toastContainer`: "Forked from [parent title]". Auto-dismisses after 5s with fade animation.
+
+### History Panel
+
+- `HistorySession` interface extended with `parentSessionId` and `forkSequence` (data already flows from `Session` via `sendHistorySessions`)
+- Fork-of badge: "⑂ Fork of [parent title]" with clickable parent link below the title
+- Fork count badge: "⑂ N" in the meta row when N > 0
+- Parent link click navigates to the parent session via `openSession(parentId)`
+
+### Files Changed
+
+| File | Changes |
+|------|---------|
+| `src/events/ConversationManager.ts` | `sequence` on `RichHistoryTurn`, capture in `getSessionRichHistory()`, `getRecentTurnSequences()` |
+| `src/providers/requestOrchestrator.ts` | `_onTurnSequenceUpdate` emitter, fire after `saveToHistory()` |
+| `src/providers/chatProvider.ts` | Wire `onTurnSequenceUpdate`, `forkSession` handler, `handleForkSession()` |
+| `media/actors/turn/types.ts` | `sequence` on `TurnData` |
+| `media/actors/virtual-list/types.ts` | `sequence` on `TurnData` |
+| `media/actors/virtual-list/VirtualListActor.ts` | `sequence` in `addTurn()` + `bindActorToTurn()`, `getLastNTurnIds()`, `updateTurnSequence()` |
+| `media/actors/message-gateway/VirtualMessageGatewayActor.ts` | Pass `sequence` in `handleLoadHistory()`, `handleTurnSequenceUpdate()`, `showForkToast()` |
+| `media/actors/turn/MessageTurnActor.ts` | `_sequence` field, fork button in headers, `showForkPopup()`, `updateSequence()`, `setupForkHandlers()` |
+| `media/actors/turn/styles/index.ts` | Fork button CSS |
+| `media/chat.css` | Fork popup + fork toast CSS |
+| `media/actors/history/HistoryShadowActor.ts` | Fork fields on `HistorySession`, fork badges, parent link handler |
+| `media/actors/history/shadowStyles.ts` | Fork badge CSS |
+
+### Tests Added
+
+- `getSessionRichHistory` includes event sequence numbers in turns
+- `getRecentTurnSequences` returns correct user/assistant sequences (4 tests)
+- `onTurnSequenceUpdate` fires after `saveToHistory()`
+
+---
+
 ## Part 5: Parallel Subagents
 
 Claude Code's "Task" tool spawns parallel agents that work independently and report back. This is an application-level orchestration pattern — not a model capability. It's buildable with any LLM API.
@@ -526,14 +733,16 @@ This maps naturally to the existing `tools-container` UI pattern — a collapsib
 | **Orphan event cleanup?** | **Application-level** — `DELETE FROM events WHERE id NOT IN (SELECT event_id FROM event_sessions)` in same transaction as session delete. No triggers. |
 | **Parent deletion cascade to forks?** | **No** — `parent_session_id` is informational only (no FK). Forks are fully independent. |
 | **Can you fork a fork?** | **Yes** — the join table makes this trivial. Link events from any session to a new session. |
+| **Shared CM or separate instances?** | **Shared (Option B)** — one ConversationManager, pure data service. ChatProvider owns session lifecycle. Enables single `onSessionsChangedEvent` for cross-panel sync. |
 | **Fork while streaming?** | **No** — only fork completed turns. |
+| **Fork in same panel or new tab?** | **Same panel (in-place)** — sidebar to editor tab is jarring, fork is lightweight/exploratory, history panel is the navigation. New tab can come later with multi-panel architecture. |
 | **JSON blob contents?** | **No sessionId/sequence in blob** — hydrated from join table during reads. |
 
 ## Open Questions
 
 | Question | Options |
 |----------|---------|
-| **Show fork tree in history?** | Flat list with "(fork of X)" label vs. visual tree. |
+| ~~**Show fork tree in history?**~~ | **Flat list with "⑂ Fork of [parent]" badge** — clickable parent link + fork count badge on parents. Visual tree deferred. |
 | **Subagent model?** | Same model as main conversation, or cheaper/faster model for focused tasks? |
 | **Subagent tool access?** | Read-only safe, write tools risk conflicts. Start read-only. |
 | **Who decides to parallelize?** | Application-driven (Phase 1) is safer. LLM-driven (Phase 2) is more flexible. |

@@ -276,6 +276,7 @@ export class VirtualListActor extends EventStateActor {
     model?: string;
     files?: string[];
     timestamp?: number;
+    sequence?: number;
   }): TurnData {
     const turn: TurnData = {
       turnId,
@@ -283,6 +284,7 @@ export class VirtualListActor extends EventStateActor {
       timestamp: options?.timestamp ?? Date.now(),
       model: options?.model,
       files: options?.files,
+      sequence: options?.sequence,
       height: this.config.defaultTurnHeight,
       heightMeasured: false,
       offsetTop: this._totalHeight,
@@ -335,6 +337,29 @@ export class VirtualListActor extends EventStateActor {
    */
   getBoundActor(turnId: string): MessageTurnActor | undefined {
     return this._boundActors.get(turnId)?.actor;
+  }
+
+  /**
+   * Get the last N turn IDs (most recent first).
+   */
+  getLastNTurnIds(n: number): string[] {
+    const start = Math.max(0, this._turns.length - n);
+    return this._turns.slice(start).map(t => t.turnId);
+  }
+
+  /**
+   * Update the event sequence number for a turn (used for fork API).
+   * If the turn has a bound actor, also updates it so the fork button appears.
+   */
+  updateTurnSequence(turnId: string, sequence: number): void {
+    const turn = this._turnMap.get(turnId);
+    if (!turn) return;
+    turn.sequence = sequence;
+    // Update bound actor if visible
+    const bound = this._boundActors.get(turnId);
+    if (bound) {
+      bound.actor.updateSequence(sequence);
+    }
   }
 
   /**
@@ -1057,7 +1082,8 @@ export class VirtualListActor extends EventStateActor {
       role: turn.role,
       timestamp: turn.timestamp,
       model: turn.model,
-      files: turn.files
+      files: turn.files,
+      sequence: turn.sequence
     });
 
     // Set edit mode

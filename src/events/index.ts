@@ -13,10 +13,10 @@
  * const manager = new ConversationManager(context);
  *
  * // Create a session
- * manager.startNewSession('My Chat', 'deepseek-chat');
+ * const session = await manager.createSession('My Chat', 'deepseek-chat');
  *
- * // Record events
- * manager.addMessageToCurrentSession('user', 'Hello');
+ * // Record events (explicit sessionId)
+ * manager.recordUserMessage(session.id, 'Hello');
  * ```
  */
 

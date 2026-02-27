@@ -95,6 +95,25 @@ const textStyles = `
   color: var(--vscode-descriptionForeground, #8b8b8b);
 }
 
+/* Fork button — hidden by default, visible on host hover */
+.fork-btn {
+  background: transparent;
+  border: none;
+  color: var(--vscode-descriptionForeground, #8b8b8b);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 4px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+:host(:hover) .fork-btn {
+  opacity: 0.6;
+}
+.fork-btn:hover {
+  opacity: 1 !important;
+  color: var(--vscode-foreground);
+}
+
 /* Hide divider for continuation segments */
 .text-container.continuation .message-divider {
   display: none;

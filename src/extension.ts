@@ -95,7 +95,10 @@ export async function activate(context: vscode.ExtensionContext) {
   completionProvider = new CompletionProvider(deepSeekClient);
   
   // Initialize command provider (code actions)
-  commandProvider = new CommandProvider(deepSeekClient, statusBar, conversationManager);
+  commandProvider = new CommandProvider(
+    deepSeekClient, statusBar, conversationManager,
+    () => chatProvider.getCurrentSessionId()
+  );
 
   // Register providers
   context.subscriptions.push(

@@ -36,6 +36,8 @@ export interface HistorySession {
   createdAt: Date | string;
   updatedAt: Date | string;
   model: string;
+  parentSessionId?: string;
+  forkSequence?: number;
 }
 
 interface VSCodeAPI {
@@ -174,16 +176,29 @@ export class HistoryShadowActor extends ShadowActor {
     const modelLabel = session.model === 'deepseek-reasoner' ? 'R1' : 'Chat';
     const messageCount = session.messages?.length || 0;
 
+    // Fork badge: show "Fork of [parent]" if this session has a parent
+    const forkBadge = session.parentSessionId
+      ? this.renderForkBadge(session.parentSessionId)
+      : '';
+
+    // Fork count: number of sessions forked from this one
+    const forkCount = this._sessions.filter(s => s.parentSessionId === session.id).length;
+    const forkCountBadge = forkCount > 0
+      ? `<span class="history-entry-forks">\u2442 ${forkCount}</span>`
+      : '';
+
     return `
       <div class="history-entry${isActive ? ' active' : ''}" data-session-id="${session.id}">
         <div class="history-entry-active-indicator"></div>
         <div class="history-entry-content">
           <div class="history-entry-title">${this.escapeHtml(session.title || 'Untitled')}</div>
+          ${forkBadge}
           <div class="history-entry-preview">${this.escapeHtml(preview)}</div>
           <div class="history-entry-meta">
             <span class="history-entry-timestamp">${timestamp}</span>
             <span class="history-entry-model">${modelIcon} ${modelLabel}</span>
             <span class="history-entry-messages">💬 ${messageCount}</span>
+            ${forkCountBadge}
           </div>
         </div>
         <button class="history-entry-menu" data-entry-menu="${session.id}" title="Actions">⋮</button>
@@ -293,6 +308,14 @@ export class HistoryShadowActor extends ShadowActor {
     return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
   }
 
+  private renderForkBadge(parentSessionId: string): string {
+    const parentSession = this._sessions.find(s => s.id === parentSessionId);
+    const parentTitle = parentSession
+      ? this.escapeHtml(parentSession.title || 'Untitled')
+      : parentSessionId.substring(0, 8);
+    return `<div class="history-entry-fork-badge">\u2442 Fork of <span class="fork-badge-parent" data-fork-parent="${parentSessionId}">${parentTitle}</span></div>`;
+  }
+
   private getSessionPreview(session: HistorySession): string {
     if (!session.messages || session.messages.length === 0) {
       return 'No messages';
@@ -340,11 +363,20 @@ export class HistoryShadowActor extends ShadowActor {
       this.filterSessions();
     });
 
+    // Fork badge parent click (navigate to parent session)
+    this.delegate('click', '.fork-badge-parent', (e) => {
+      e.stopPropagation();
+      const parentId = (e.target as HTMLElement).getAttribute('data-fork-parent');
+      if (parentId) {
+        this.openSession(parentId);
+      }
+    });
+
     // Session entry click (open)
     this.delegate('click', '.history-entry', (e, entry) => {
       const target = e.target as HTMLElement;
-      // Don't open if clicking menu button or dropdown
-      if (target.closest('[data-entry-menu]') || target.closest('[data-entry-dropdown]')) {
+      // Don't open if clicking menu button, dropdown, or fork badge parent
+      if (target.closest('[data-entry-menu]') || target.closest('[data-entry-dropdown]') || target.closest('.fork-badge-parent')) {
         return;
       }
       const sessionId = entry.getAttribute('data-session-id');

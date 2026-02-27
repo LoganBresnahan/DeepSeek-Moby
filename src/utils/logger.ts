@@ -219,6 +219,13 @@ class Logger {
     });
   }
 
+  public sessionFork(parentId: string, forkId: string, atSequence: number) {
+    this.log('INFO', `Session forked: ${parentId} → ${forkId} at seq ${atSequence}`, undefined, 'session');
+    tracer.trace('session.fork', 'fork', {
+      data: { parentId, forkId, atSequence }
+    });
+  }
+
   public sessionClear() {
     this.log('INFO', 'Session cleared', undefined, 'session');
     tracer.trace('session.switch', 'clear');

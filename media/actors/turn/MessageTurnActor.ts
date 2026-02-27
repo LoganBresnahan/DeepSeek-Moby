@@ -146,6 +146,9 @@ export class MessageTurnActor extends InterleavedShadowActor {
   /** Whether the role header ("DEEPSEEK MOBY" / "YOU") has been rendered */
   private _headerRendered = false;
 
+  /** Event sequence number from backend (for fork API) */
+  private _sequence: number | null = null;
+
   // ============================================
   // Configuration
   // ============================================
@@ -259,6 +262,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
     this._timestamp = data.timestamp;
     this._model = data.model ?? null;
     this._files = data.files ?? [];
+    this._sequence = data.sequence ?? null;
 
     this.element.setAttribute('data-turn-id', data.turnId);
     this.element.setAttribute('data-role', data.role);
@@ -511,13 +515,19 @@ export class MessageTurnActor extends InterleavedShadowActor {
       skipAnimation: true
     });
 
+    const forkBtn = this._sequence ? `<button class="fork-btn" data-sequence="${this._sequence}" title="Fork from here">\u2442</button>` : '';
     container.content.innerHTML = `
       <div class="message ${this._role}">
         <div class="message-divider">
           <span class="message-divider-label">${roleLabel}</span>
+          ${forkBtn}
         </div>
       </div>
     `;
+
+    if (this._sequence) {
+      this.setupForkHandlers(container.id);
+    }
 
     this._headerRendered = true;
   }
@@ -908,8 +918,10 @@ export class MessageTurnActor extends InterleavedShadowActor {
 
     // Divider (not for continuations, not if header already rendered)
     if (showDivider) {
+      const forkBtn = this._sequence ? `<button class="fork-btn" data-sequence="${this._sequence}" title="Fork from here">\u2442</button>` : '';
       html += `<div class="message-divider">`;
       html += `<span class="message-divider-label">${roleLabel}</span>`;
+      html += forkBtn;
       html += `</div>`;
       this._headerRendered = true;
     }
@@ -1173,6 +1185,11 @@ export class MessageTurnActor extends InterleavedShadowActor {
   // ============================================
 
   private setupTextSegmentHandlers(containerId: string): void {
+    // Fork button (may be present in divider)
+    if (this._sequence) {
+      this.setupForkHandlers(containerId);
+    }
+
     // Code block toggle
     this.delegateInContainer(containerId, 'click', '.code-header', (e, header) => {
       const target = e.target as HTMLElement;
@@ -1595,6 +1612,79 @@ export class MessageTurnActor extends InterleavedShadowActor {
   }
 
   /** Pre-built HTML for the code-generating placeholder (static, cached once) */
+  // ============================================
+  // Fork Methods
+  // ============================================
+
+  /**
+   * Update the event sequence number (called after live turn save).
+   * Injects fork button into the rendered divider if not already present.
+   */
+  updateSequence(sequence: number): void {
+    this._sequence = sequence;
+    // Find the rendered divider, inject button if missing
+    // containers is a Map<string, ShadowContainer> — iterate values
+    for (const [containerId, container] of this.containers) {
+      const divider = container.content.querySelector('.message-divider');
+      if (divider && !divider.querySelector('.fork-btn')) {
+        const btn = document.createElement('button');
+        btn.className = 'fork-btn';
+        btn.dataset.sequence = String(sequence);
+        btn.title = 'Fork from here';
+        btn.textContent = '\u2442';
+        divider.appendChild(btn);
+        this.setupForkHandlers(containerId);
+        break;
+      }
+    }
+  }
+
+  private setupForkHandlers(containerId: string): void {
+    this.delegateInContainer(containerId, 'click', '.fork-btn', (e, btn) => {
+      e.stopPropagation();
+      const seq = parseInt(btn.getAttribute('data-sequence') || '0', 10);
+      if (seq > 0) this.showForkPopup(btn as HTMLElement, seq);
+    });
+  }
+
+  private showForkPopup(anchor: HTMLElement, sequence: number): void {
+    // Remove existing popup
+    document.querySelector('.fork-popup')?.remove();
+
+    const popup = document.createElement('div');
+    popup.className = 'fork-popup';
+    popup.innerHTML = `<div class="fork-popup-item"><span class="fork-popup-icon">\u2442</span> Fork here</div>`;
+
+    // Position below the button
+    const rect = anchor.getBoundingClientRect();
+    popup.style.position = 'fixed';
+    popup.style.top = `${rect.bottom + 4}px`;
+    popup.style.left = `${rect.left}px`;
+    document.body.appendChild(popup);
+
+    // "Fork here" click
+    popup.querySelector('.fork-popup-item')!.addEventListener('click', () => {
+      popup.remove();
+      if (this._postMessage) {
+        this._postMessage({ type: 'forkSession', atSequence: sequence });
+      }
+    });
+
+    // Close on outside click / Escape
+    const close = () => {
+      popup.remove();
+      document.removeEventListener('click', close, true);
+      document.removeEventListener('keydown', onKey);
+    };
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') close();
+    };
+    setTimeout(() => {
+      document.addEventListener('click', close, true);
+      document.addEventListener('keydown', onKey);
+    }, 0);
+  }
+
   private readonly _codeGeneratingHtml = (() => {
     const mobyIconUrl = document.body.dataset.mobyIcon || '';
     const mobyHtml = mobyIconUrl

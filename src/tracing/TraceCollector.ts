@@ -721,7 +721,7 @@ export class TraceCollector {
     // Key events (API requests, tool calls, session events)
     const keyCategories: TraceCategory[] = [
       'api.request', 'api.response', 'tool.call',
-      'shell.execute', 'session.create', 'session.switch',
+      'shell.execute', 'session.create', 'session.switch', 'session.fork',
       'command.check', 'command.approval'
     ];
     const keyEvents = events.filter(e =>
@@ -901,7 +901,7 @@ export class TraceCollector {
       if (hasShell) return 'API Request with Shell';
       return 'API Request';
     }
-    if (categories.has('session.create') || categories.has('session.switch')) {
+    if (categories.has('session.create') || categories.has('session.switch') || categories.has('session.fork')) {
       return 'Session';
     }
     if (categories.has('tool.call')) {

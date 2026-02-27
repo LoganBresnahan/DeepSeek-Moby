@@ -14,7 +14,7 @@ The backend (VS Code extension) follows an **Event-Driven Coordinator pattern** 
 │  │                                                                         │ │
 │  │  • Receive webview messages (onDidReceiveMessage) → delegate            │ │
 │  │  • Subscribe to manager events → forward to webview (postMessage)       │ │
-│  │  • Session lifecycle (currentSessionId, loadSession)                    │ │
+│  │  • Session lifecycle owner (currentSessionId, instanceId, persistence) │ │
 │  │  • VS Code context gathering (getEditorContext, findRelatedFiles)       │ │
 │  └───────────┬───────────────────────────────────────────────────────────┘ │
 │              │ delegates to                                                  │
@@ -47,13 +47,13 @@ The backend (VS Code extension) follows an **Event-Driven Coordinator pattern** 
 │  │  │  DeepSeekClient │  │  TavilyClient   │  │  ConversationManager  │   │ │
 │  │  │  • HTTP/SSE     │  │  • Search API   │  │  • Event Sourcing     │   │ │
 │  │  │  • Streaming    │  │                 │  │  • Session CRUD       │   │ │
-│  │  │  • Tool calls   │  │                 │  │  • Context building   │   │ │
+│  │  │  • Tool calls   │  │                 │  │  • Pure data service  │   │ │
 │  │  └─────────────────┘  └─────────────────┘  └───────────┬───────────┘   │ │
 │  └────────────────────────────────────────────────────────┼───────────────┘ │
 │                                                            │                 │
 │  ┌─────────────────────────────────────────────────────────▼───────────────┐ │
 │  │                       SQLite Database (via SQLCipher)                     │ │
-│  │  • events table  • sessions table  • snapshots table                    │ │
+│  │  • sessions  • events  • event_sessions (M:N)  • snapshots  • command_rules │ │
 │  └─────────────────────────────────────────────────────────────────────────┘ │
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────────┐ │
@@ -373,11 +373,11 @@ The conversation state uses **Event Sourcing** - all changes are stored as an ap
 │                         State Management                                     │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
-│  ConversationManager                                                         │
+│  ConversationManager (pure data service — no session-tracking state)          │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │                                                                      │    │
-│  │  currentSessionId: string | null                                     │    │
-│  │  // Active conversation                                              │    │
+│  │  // No currentSessionId — ChatProvider owns session lifecycle        │    │
+│  │  // All record*() methods take explicit sessionId parameter          │    │
 │  │                                                                      │    │
 │  │  EventStore (SQLite)                                                 │    │
 │  │  ┌─────┐ ┌─────┐ ┌─────┐ ┌─────┐ ┌─────┐                            │    │
@@ -415,9 +415,11 @@ The conversation state uses **Event Sourcing** - all changes are stored as an ap
 │  │  ~/.vscode/extensions/.../globalStorage/moby.db             │    │
 │  │                                                                      │    │
 │  │  Tables:                                                             │    │
-│  │  • sessions  - Session metadata                                      │    │
-│  │  • events    - All conversation events                               │    │
-│  │  • snapshots - Periodic summaries                                    │    │
+│  │  • sessions        - Session metadata (incl. fork info)              │    │
+│  │  • events          - Session-agnostic event data                     │    │
+│  │  • event_sessions  - M:N join (events ↔ sessions + sequence)         │    │
+│  │  • snapshots       - Periodic summaries                              │    │
+│  │  • command_rules   - Shell command approval rules                    │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘

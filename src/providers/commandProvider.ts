@@ -10,12 +10,19 @@ export class CommandProvider {
   private statusBar: StatusBar;
   private config: ConfigManager;
   private conversationManager: ConversationManager;
+  private getCurrentSessionId: () => string | null;
 
-  constructor(deepSeekClient: DeepSeekClient, statusBar: StatusBar, conversationManager: ConversationManager) {
+  constructor(
+    deepSeekClient: DeepSeekClient,
+    statusBar: StatusBar,
+    conversationManager: ConversationManager,
+    getCurrentSessionId: () => string | null
+  ) {
     this.deepSeekClient = deepSeekClient;
     this.statusBar = statusBar;
     this.config = ConfigManager.getInstance();
     this.conversationManager = conversationManager;
+    this.getCurrentSessionId = getCurrentSessionId;
   }
 
   async explainCode() {
@@ -553,7 +560,12 @@ export class CommandProvider {
   }
 
   async exportCurrentSession() {
-    const currentSession = await this.conversationManager.getCurrentSession();
+    const sessionId = this.getCurrentSessionId();
+    if (!sessionId) {
+      vscode.window.showWarningMessage('No active chat session');
+      return;
+    }
+    const currentSession = await this.conversationManager.getSession(sessionId);
     if (!currentSession) {
       vscode.window.showWarningMessage('No active chat session');
       return;
@@ -601,15 +613,13 @@ export class CommandProvider {
         );
 
         // Save to chat history
-        await this.conversationManager.addMessageToCurrentSession({
-          role: 'user',
-          content: prompt
-        });
-
-        await this.conversationManager.addMessageToCurrentSession({
-          role: 'assistant',
-          content: formattedResponse
-        });
+        const sessionId = this.getCurrentSessionId();
+        if (sessionId) {
+          await this.conversationManager.recordUserMessage(sessionId, prompt);
+          await this.conversationManager.recordAssistantMessage(
+            sessionId, formattedResponse, this.deepSeekClient.getModel(), 'stop'
+          );
+        }
 
         // Show in new document
         const document = await vscode.workspace.openTextDocument({

@@ -10,18 +10,18 @@ History persistence captures every segment of a conversation — reasoning bubbl
 
 ```
 ┌──────────────────────────────┐
-│  Save (chatProvider.ts)      │  Extension process (Node.js)
-│  Records granular events     │
-│  during/after streaming      │
+│  Save (requestOrchestrator)  │  Extension process (Node.js)
+│  Records granular events     │  All record*() take explicit
+│  during/after streaming      │  sessionId parameter
 └──────────┬───────────────────┘
-           │ recordAssistantReasoning()
-           │ recordToolCall() / recordToolResult()
-           │ recordAssistantMessage()
+           │ recordAssistantReasoning(sessionId, ...)
+           │ recordToolCall(sessionId, ...) / recordToolResult(sessionId, ...)
+           │ recordAssistantMessage(sessionId, ...)
            ▼
 ┌──────────────────────────────┐
 │  EventStore (SQLCipher)       │  Native SQLite (encrypted)
-│  Append-only events table    │  Direct disk I/O
-│  Indexed by session + type   │
+│  events + event_sessions     │  M:N join table for
+│  (session-agnostic storage)  │  per-session sequencing
 └──────────┬───────────────────┘
            │ getEventsByType()
            ▼
@@ -58,16 +58,16 @@ Each action during a conversation produces one or more events:
 
 ## Save Pipeline
 
-Located in [`chatProvider.ts`](../../src/providers/chatProvider.ts) around line 2125.
+Located in [`requestOrchestrator.ts`](../../src/providers/requestOrchestrator.ts) `saveToHistory()`.
 
-The save happens at the end of streaming (both normal completion and partial/abort). Events are recorded in this order:
+The save happens at the end of streaming (both normal completion and partial/abort). All `record*()` calls take an explicit `sessionId` — ConversationManager is a pure data service with no implicit "current session". Events are recorded in this order:
 
 ```
-1. recordAssistantReasoning()  × N reasoning iterations
-2. recordToolCall() + recordToolResult()  × non-shell tool calls
-3. recordToolCall('shell') + recordToolResult()  × shell results
-4. recordToolCall('_file_modified') + recordToolResult()  × file modifications
-5. recordAssistantMessage()  ← seals the turn
+1. recordAssistantReasoning(sessionId, ...)  × N reasoning iterations
+2. recordToolCall(sessionId, ...) + recordToolResult(sessionId, ...)  × non-shell tool calls
+3. recordToolCall(sessionId, 'shell', ...) + recordToolResult(sessionId, ...)  × shell results
+4. recordToolCall(sessionId, '_file_modified', ...) + recordToolResult(sessionId, ...)  × file modifications
+5. recordAssistantMessage(sessionId, ...)  ← seals the turn
 ```
 
 ### Content Iterations

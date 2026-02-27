@@ -21,6 +21,8 @@ export interface TurnData {
   timestamp: number;
   model?: string;
   files?: string[];
+  /** Event sequence number from backend (for fork API) */
+  sequence?: number;
 
   /** Estimated or measured height in pixels */
   height: number;

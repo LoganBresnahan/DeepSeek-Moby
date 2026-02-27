@@ -37,10 +37,10 @@ Instead of storing mutable state (like a list of messages), we store an append-o
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │                                                                      │    │
-│  │   recordUserMessage()    recordAssistantMessage()   createSession()  │    │
-│  │   recordToolCall()       recordToolResult()         deleteSession()  │    │
-│  │   recordDiffCreated()    recordDiffAccepted()       switchSession()  │    │
-│  │   addMessageToCurrentSession()   getAllSessions()   getSession()     │    │
+│  │   recordUserMessage(sessionId, ...)   createSession()   getSession()  │    │
+│  │   recordAssistantMessage(sessionId, ...)              deleteSession()│    │
+│  │   recordToolCall(sessionId, ...)    recordToolResult(sessionId, ...) │    │
+│  │   recordDiffCreated(sessionId, ...) forkSession(parentId, atSeq)    │    │
 │  │                                                                      │    │
 │  └──────────────────────────────────┬──────────────────────────────────┘    │
 │                                     │                                        │
@@ -58,14 +58,16 @@ Instead of storing mutable state (like a list of messages), we store an append-o
 │           └────────────────────────┘                                         │
 │                                    │                                         │
 │                                    ▼                                         │
-│                         ┌─────────────────────┐                              │
-│                         │  SQLite Database    │                              │
-│                         │  (@signalapp/       │                              │
-│                         │   sqlcipher)        │                              │
-│                         │  • events table     │                              │
-│                         │  • sessions table   │                              │
-│                         │  • snapshots table  │                              │
-│                         └─────────────────────┘                              │
+│                         ┌─────────────────────────┐                          │
+│                         │  SQLite Database        │                          │
+│                         │  (@signalapp/sqlcipher)  │                          │
+│                         │                         │                          │
+│                         │  • sessions table       │                          │
+│                         │  • events table         │                          │
+│                         │  • event_sessions (M:N) │                          │
+│                         │  • snapshots table      │                          │
+│                         │  • command_rules table  │                          │
+│                         └─────────────────────────┘                          │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -80,13 +82,15 @@ Events are strongly typed and capture all conversation interactions:
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
 │  Base Event (all events have)                                                │
-│  ┌────────────────────────────────────────┐                                 │
-│  │  id: string          // UUID           │                                 │
-│  │  sessionId: string   // Session UUID   │                                 │
-│  │  sequence: number    // Auto-increment │                                 │
-│  │  timestamp: number   // Unix ms        │                                 │
-│  │  type: EventType     // Discriminator  │                                 │
-│  └────────────────────────────────────────┘                                 │
+│  ┌─────────────────────────────────────────────────────────┐                │
+│  │  id: string          // UUID (stored in JSON blob)      │                │
+│  │  sessionId: string   // Hydrated from join table*       │                │
+│  │  sequence: number    // Hydrated from join table*       │                │
+│  │  timestamp: number   // Unix ms                         │                │
+│  │  type: EventType     // Discriminator                   │                │
+│  └─────────────────────────────────────────────────────────┘                │
+│  * sessionId and sequence are NOT stored in the JSON blob.                  │
+│    They're injected from the event_sessions join table during reads.        │
 │                                                                              │
 │  Message Events                                                              │
 │  ├── user_message        { content, attachments? }                          │
@@ -107,8 +111,12 @@ Events are strongly typed and capture all conversation interactions:
 │  ├── session_created     { title, model }                                    │
 │  └── session_renamed     { oldTitle, newTitle }                              │
 │                                                                              │
+│  Fork Events                                                                 │
+│  └── fork_created        { parentSessionId, forkPointSequence }             │
+│                                                                              │
 │  Other                                                                       │
 │  ├── web_search          { query, resultCount, resultsPreview }             │
+│  ├── context_imported    { previousSessionId }                               │
 │  └── error               { errorType, message, recoverable }                 │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -234,11 +242,11 @@ conversationManager = new ConversationManager(context, dbKey);  // fully sync
 
 The constructor performs the following sequence:
 1. Creates `Database` (sets `PRAGMA foreign_keys = ON`, `journal_mode = WAL`, `busy_timeout = 5000`)
-2. Runs `runMigrations(db)` — single source of truth for all schema (v1: tables, v2: FK constraints)
+2. Runs `runMigrations(db)` — single source of truth for all schema (fresh v1: all tables + indexes)
 3. Creates `EventStore` and `SnapshotManager` (prepared statements only)
-4. Prepares session statements and loads the last active session
+4. Prepares session statements (no session state loaded — ChatProvider owns session lifecycle)
 
-FK constraints with `ON DELETE CASCADE` mean deleting a session automatically removes its events and snapshots. Delete operations (`deleteSession`, `clearAllSessions`) are wrapped in transactions for atomicity.
+FK constraints with `ON DELETE CASCADE` mean deleting a session automatically removes its `event_sessions` join rows and snapshots. Application-level orphan cleanup then removes unreferenced events. Delete operations are wrapped in transactions for atomicity.
 
 ## File Locations
 
@@ -254,15 +262,18 @@ FK constraints with `ON DELETE CASCADE` mean deleting a session automatically re
 
 ## Usage Examples
 
+### Session Ownership
+
+ConversationManager is a **pure data service** — it has no concept of a "current" session. Every write method takes an explicit `sessionId` parameter. ChatProvider (and eventually each panel's ChatProvider) owns which session is "active" via its `currentSessionId` field and persists it to `globalState`.
+
+This separation enables multi-panel support: multiple ChatProvider instances can share one ConversationManager (single DB connection) while each tracking their own active session independently. The shared `onSessionsChangedEvent` notifies all subscribers when any panel mutates sessions.
+
 ### Recording Messages
 
 ```typescript
-// Record events via addMessageToCurrentSession
-conversationManager.addMessageToCurrentSession('user', 'Fix the authentication bug');
-conversationManager.addMessageToCurrentSession('assistant', 'I\'ll help you fix that.', {
-  model: 'deepseek-chat',
-  finishReason: 'stop'
-});
+// All record methods take explicit sessionId — no implicit "current session"
+await conversationManager.recordUserMessage(sessionId, 'Fix the authentication bug');
+await conversationManager.recordAssistantMessage(sessionId, 'I\'ll help you fix that.', 'deepseek-chat', 'stop');
 ```
 
 ## Benefits of This Architecture
@@ -272,9 +283,9 @@ conversationManager.addMessageToCurrentSession('assistant', 'I\'ll help you fix 
 | **Auditability** | Complete history of every interaction |
 | **Debugging** | Replay events to reproduce issues |
 | **Context Management** | Snapshots prevent context window overflow |
-| **Flexibility** | Fork, branch, and import conversations |
+| **Zero-Copy Forking** | M:N join table enables forking via INSERT...SELECT on IDs |
 | **Durability** | SQLite provides ACID guarantees |
-| **Performance** | Prepared statements for fast queries |
+| **Performance** | Prepared statements + join table for flat per-session lookups |
 
 ## History Restore
 

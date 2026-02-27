@@ -223,6 +223,32 @@ export const historyShadowStyles = `
     gap: 2px;
   }
 
+  .history-entry-forks {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    color: var(--vscode-descriptionForeground);
+  }
+
+  /* Fork badge */
+  .history-entry-fork-badge {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: var(--vscode-descriptionForeground);
+    margin-top: 2px;
+  }
+
+  .fork-badge-parent {
+    color: var(--vscode-textLink-foreground);
+    cursor: pointer;
+  }
+
+  .fork-badge-parent:hover {
+    text-decoration: underline;
+  }
+
   /* Active Indicator */
   .history-entry-active-indicator {
     display: none;

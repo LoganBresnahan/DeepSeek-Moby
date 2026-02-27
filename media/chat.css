@@ -137,6 +137,51 @@ body {
   }
 }
 
+/* Fork toast */
+.toast.fork-toast {
+  background: var(--vscode-editorWidget-background, #252526);
+  border: 1px solid var(--vscode-terminal-ansiGreen, #89d185);
+  color: var(--vscode-foreground);
+}
+.toast.fading {
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+/* Fork popup (rendered on body, outside shadow DOM) */
+.fork-popup {
+  background: var(--vscode-menu-background, var(--vscode-dropdown-background));
+  border: 1px solid var(--vscode-menu-border, var(--vscode-widget-border, #454545));
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  padding: 4px 0;
+  z-index: 10000;
+  min-width: 140px;
+  animation: forkPopupIn 0.1s ease-out;
+}
+@keyframes forkPopupIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; }
+}
+.fork-popup-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  font-size: 13px;
+  color: var(--vscode-menu-foreground, var(--vscode-foreground));
+  cursor: pointer;
+  white-space: nowrap;
+}
+.fork-popup-item:hover {
+  background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground));
+}
+.fork-popup-icon {
+  font-size: 14px;
+  width: 16px;
+  text-align: center;
+}
+
 /* Model Selector */
 .model-selector {
   position: relative;

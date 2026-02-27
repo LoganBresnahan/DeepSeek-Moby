@@ -28,6 +28,7 @@ export type TraceCategory =
   // Session
   | 'session.create'
   | 'session.switch'
+  | 'session.fork'
 
   // Webview Lifecycle
   | 'webview.resolve'  // Webview view resolved (created/recreated)

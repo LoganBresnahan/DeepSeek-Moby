@@ -17,7 +17,7 @@ The persistence layer uses **SQLite** via **@signalapp/sqlcipher** (a native N-A
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────┐        │
 │  │                    ConversationManager                           │        │
-│  │                    (Application Layer)                           │        │
+│  │              (Pure Data Service — no session state)              │        │
 │  └────────────────────────────────┬────────────────────────────────┘        │
 │                                   │                                          │
 │                                   ▼                                          │
@@ -80,21 +80,15 @@ ConversationManager constructor:
   1. new Database(dbPath, encryptionKey)    → PRAGMA foreign_keys = ON
                                              → PRAGMA journal_mode = WAL
                                              → PRAGMA busy_timeout = 5000
-  2. runMigrations(this.db)                 → v1: create tables, v2: add FK constraints
+  2. runMigrations(this.db)                 → v1: clean schema (all tables + indexes)
   3. new EventStore(this.db)               → prepareStatements() only
   4. new SnapshotManager(this.db, ...)     → prepareStatements() only
-  5. prepare session statements
-  6. loadCurrentSession()
+  5. prepare session statements (no session state — ChatProvider owns lifecycle)
 ```
 
-| Version | Migration | Description |
-|---------|-----------|-------------|
-| 1 | Baseline schema | Creates all 3 tables + 5 indexes using `CREATE TABLE IF NOT EXISTS` |
-| 2 | FK constraints | Recreates `events` and `snapshots` with `REFERENCES sessions(id) ON DELETE CASCADE` |
+The schema uses a **fresh single-version approach** — no migration history, no version-gated upgrades. Version 1 creates all tables from scratch with the final schema (including M:N join table and FK constraints).
 
-- **Fresh installs:** all migrations run in sequence from version 0
-- **Updates:** only new migrations run (skips already-applied ones)
-- **Adding schema changes:** add a new `if (version < N)` block in `migrations.ts`
+- **Adding schema changes:** add a new `if (version < N)` block in `migrations.ts`, bump `LATEST_VERSION`
 
 ### Schema Ownership
 
@@ -105,7 +99,7 @@ ConversationManager constructor:
 
 ## Database Schema
 
-### Sessions Table (parent)
+### Sessions Table
 
 ```sql
 CREATE TABLE sessions (
@@ -118,34 +112,48 @@ CREATE TABLE sessions (
   last_snapshot_sequence INTEGER DEFAULT 0,
   tags TEXT DEFAULT '[]',           -- JSON array
   first_user_message TEXT,          -- For display
-  last_activity_preview TEXT        -- For display
+  last_activity_preview TEXT,       -- For display
+  parent_session_id TEXT,           -- Fork parent (NULL = original)
+  fork_sequence INTEGER             -- Sequence in parent where forked
 );
 
 CREATE INDEX idx_sessions_updated
   ON sessions(updated_at DESC);
 ```
 
-### Events Table (child, FK → sessions)
+### Events Table (session-agnostic)
+
+Events are **session-agnostic** — they store immutable facts without `session_id` or `sequence`. The `event_sessions` join table maps events to sessions with per-session sequencing.
 
 ```sql
 CREATE TABLE events (
   id TEXT PRIMARY KEY,              -- UUID
-  session_id TEXT NOT NULL          -- FK to sessions
-    REFERENCES sessions(id) ON DELETE CASCADE,
-  sequence INTEGER NOT NULL,        -- Per-session auto-increment
   timestamp INTEGER NOT NULL,       -- Unix timestamp (ms)
   type TEXT NOT NULL,               -- Event type discriminator
-  data TEXT NOT NULL,               -- JSON payload
-
-  UNIQUE(session_id, sequence)
+  data TEXT NOT NULL                -- JSON payload (no sessionId/sequence inside)
 );
-
-CREATE INDEX idx_events_session ON events(session_id, sequence);
-CREATE INDEX idx_events_type ON events(session_id, type);
-CREATE INDEX idx_events_timestamp ON events(session_id, timestamp);
 ```
 
-### Snapshots Table (child, FK → sessions)
+### Event Sessions Join Table (M:N)
+
+The join table provides the M:N relationship between events and sessions. Each session curates its events with per-session sequence numbering. This enables **zero-copy forking**: link existing events to a new session via `INSERT...SELECT` without duplicating event data.
+
+```sql
+CREATE TABLE event_sessions (
+  event_id TEXT NOT NULL            -- FK to events
+    REFERENCES events(id) ON DELETE CASCADE,
+  session_id TEXT NOT NULL          -- FK to sessions
+    REFERENCES sessions(id) ON DELETE CASCADE,
+  sequence INTEGER NOT NULL,        -- Per-session ordering
+  UNIQUE(session_id, sequence),     -- One event per sequence per session
+  UNIQUE(event_id, session_id)      -- An event appears at most once per session
+);
+
+CREATE INDEX idx_event_sessions_session
+  ON event_sessions(session_id, sequence);
+```
+
+### Snapshots Table (FK → sessions)
 
 ```sql
 CREATE TABLE snapshots (
@@ -166,27 +174,46 @@ CREATE INDEX idx_snapshots_session
   ON snapshots(session_id, up_to_sequence DESC);
 ```
 
+### Command Rules Table
+
+```sql
+CREATE TABLE command_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  prefix TEXT NOT NULL,
+  type TEXT NOT NULL CHECK(type IN ('allowed', 'blocked')),
+  source TEXT NOT NULL DEFAULT 'user' CHECK(source IN ('default', 'user')),
+  created_at INTEGER NOT NULL
+);
+
+CREATE UNIQUE INDEX idx_command_rules_prefix_type
+  ON command_rules(prefix, type);
+```
+
 ## Entity Relationship Diagram
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                   Database Schema (FK CASCADE)                                │
+│                   Database Schema (M:N Join Table)                            │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
 │  ┌─────────────────────────┐         ┌─────────────────────────┐            │
 │  │       sessions          │         │        events           │            │
-│  ├─────────────────────────┤  1:N    ├─────────────────────────┤            │
-│  │ PK  id                  │◄────────│ FK  session_id CASCADE  │            │
-│  │     title               │         │ PK  id                  │            │
-│  │     model               │         │     sequence            │            │
-│  │     created_at          │         │     timestamp           │            │
-│  │     updated_at          │         │     type                │            │
-│  │     event_count         │         │     data (JSON)         │            │
-│  │     tags (JSON)         │         └─────────────────────────┘            │
-│  │     first_user_message  │                                                │
-│  │     last_activity_preview│                                               │
-│  └──────────┬──────────────┘                                                │
-│             │                                                                │
+│  ├─────────────────────────┤         ├─────────────────────────┤            │
+│  │ PK  id                  │         │ PK  id                  │            │
+│  │     title               │         │     timestamp           │            │
+│  │     model               │         │     type                │            │
+│  │     created_at          │         │     data (JSON)         │            │
+│  │     updated_at          │         └──────────┬──────────────┘            │
+│  │     event_count         │                    │                            │
+│  │     tags (JSON)         │                    │ M:N via join table         │
+│  │     first_user_message  │                    │                            │
+│  │     last_activity_preview│    ┌──────────────┴──────────────┐            │
+│  │     parent_session_id   │    │      event_sessions          │            │
+│  │     fork_sequence       │    ├─────────────────────────────┤            │
+│  └──────────┬──────────────┘    │ FK  event_id CASCADE        │            │
+│             │                    │ FK  session_id CASCADE      │            │
+│             ├────────────────────│     sequence                │            │
+│             │                    └─────────────────────────────┘            │
 │             │ 1:N                                                            │
 │             │                                                                │
 │             ▼                                                                │
@@ -207,7 +234,10 @@ CREATE INDEX idx_snapshots_session
 │  • PRAGMA foreign_keys = ON                                                 │
 │  • PRAGMA journal_mode = WAL (concurrent reads, crash safety)              │
 │  • PRAGMA busy_timeout = 5000 (retry 5s on lock instead of failing)        │
-│  ON DELETE CASCADE: deleting a session auto-deletes its events + snapshots  │
+│                                                                              │
+│  Deletion behavior:                                                         │
+│  • ON DELETE CASCADE: session delete removes event_sessions + snapshots     │
+│  • Orphan cleanup: application-level DELETE of unreferenced events          │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -250,20 +280,25 @@ runMigrations(db);
 
 // Prepared statements for performance
 const insertStmt = db.prepare(
-  'INSERT INTO events (id, session_id, data) VALUES (?, ?, ?)'
+  'INSERT INTO events (id, timestamp, type, data) VALUES (?, ?, ?, ?)'
 );
-insertStmt.run('uuid-1', 'session-1', '{"type":"user_message"}');
+insertStmt.run('uuid-1', Date.now(), 'user_message', '{"content":"hello"}');
 
-// Query
-const selectStmt = db.prepare(
-  'SELECT * FROM events WHERE session_id = ?'
-);
-const events = selectStmt.all('session-1');
+// Query events for a session via join table
+const selectStmt = db.prepare(`
+  SELECT e.data, es.sequence, es.session_id
+  FROM events e
+  JOIN event_sessions es ON e.id = es.event_id
+  WHERE es.session_id = ? AND es.sequence > ?
+  ORDER BY es.sequence ASC
+`);
+const events = selectStmt.all('session-1', 0);
 
 // Transactions (atomic — all or nothing)
 const deleteAll = db.transaction(() => {
-  db.prepare('DELETE FROM events WHERE session_id = ?').run('session-1');
   db.prepare('DELETE FROM sessions WHERE id = ?').run('session-1');
+  // CASCADE removes event_sessions rows; clean up orphaned events
+  db.prepare('DELETE FROM events WHERE id NOT IN (SELECT event_id FROM event_sessions)').run();
 });
 deleteAll();
 
@@ -295,14 +330,19 @@ module.exports = {
 All frequently-used queries use prepared statements:
 
 ```typescript
-// Prepared once
+// Prepared once — events table (session-agnostic)
 this.stmtInsertEvent = this.db.prepare(`
-  INSERT INTO events (id, session_id, sequence, timestamp, type, data)
-  VALUES (?, ?, ?, ?, ?, ?)
+  INSERT INTO events (id, timestamp, type, data) VALUES (?, ?, ?, ?)
+`);
+
+// Prepared once — join table (links event to session with sequence)
+this.stmtInsertEventSession = this.db.prepare(`
+  INSERT INTO event_sessions (event_id, session_id, sequence) VALUES (?, ?, ?)
 `);
 
 // Reused many times
-this.stmtInsertEvent.run(id, sessionId, sequence, timestamp, type, data);
+this.stmtInsertEvent.run(id, timestamp, type, data);
+this.stmtInsertEventSession.run(id, sessionId, nextSequence);
 ```
 
 ### Indexes
@@ -310,11 +350,8 @@ this.stmtInsertEvent.run(id, sessionId, sequence, timestamp, type, data);
 Strategic indexes for common queries:
 
 ```sql
--- Fast session event retrieval
-CREATE INDEX idx_events_session_sequence ON events(session_id, sequence);
-
--- Fast event type filtering
-CREATE INDEX idx_events_session_type ON events(session_id, type);
+-- Fast per-session event retrieval via join table
+CREATE INDEX idx_event_sessions_session ON event_sessions(session_id, sequence);
 
 -- Fast session listing
 CREATE INDEX idx_sessions_updated ON sessions(updated_at DESC);
@@ -341,7 +378,7 @@ describe('EventStore', () => {
 
   beforeEach(() => {
     db = new Database(':memory:');  // Fresh DB each test
-    runMigrations(db);             // Creates all tables + FK constraints
+    runMigrations(db);             // Creates all tables (sessions, events, event_sessions, etc.)
     // FK constraints require parent sessions before inserting events
     db.prepare('INSERT INTO sessions (id, title, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
       .run('session-1', 'Test', 'test', 1000, 1000);
@@ -351,8 +388,9 @@ describe('EventStore', () => {
     db.close();
   });
 
-  it('should store events', () => {
-    // Tests run in-memory, no file I/O
+  it('should store events via join table', () => {
+    // EventStore.append() inserts into both events + event_sessions
+    // Reads hydrate sessionId/sequence from the join table
   });
 });
 ```
@@ -382,9 +420,11 @@ All conversation data lives here:
 
 | Table | Contents |
 |-------|----------|
-| `sessions` | Session metadata (title, model, timestamps, event count) |
-| `events` | Append-only event log (messages, tool calls, diffs, searches) |
+| `sessions` | Session metadata (title, model, timestamps, fork info) |
+| `events` | Session-agnostic append-only event log (messages, tool calls, diffs) |
+| `event_sessions` | M:N join table linking events to sessions with per-session sequence |
 | `snapshots` | Periodic conversation summaries for context compression |
+| `command_rules` | Allowed/blocked command prefixes for shell approval |
 
 ### 2. VS Code SecretStorage (`context.secrets`)
 
@@ -428,8 +468,8 @@ Minimal key-value store for cross-restart state:
 
 | Key | Purpose |
 |-----|---------|
-| `currentSessionId` | Shared session pointer (cold-start resume — last active session) |
-| `currentSessionId-{instanceId}` | Instance-scoped session pointer (runtime isolation between parallel instances) |
+| `currentSessionId` | Shared session pointer (cold-start fallback — last active session). Owned by ChatProvider. |
+| `currentSessionId-{instanceId}` | Instance-scoped session pointer (runtime isolation between parallel panels). Owned by ChatProvider. |
 
 ### Storage Decision Guide
 

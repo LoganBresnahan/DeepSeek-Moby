@@ -133,18 +133,14 @@ function createMockDeepSeekClient() {
 
 function createMockConversationManager() {
   return {
-    startNewSession: vi.fn(async (title?: string, model?: string) => ({
+    createSession: vi.fn(async (title?: string, model?: string) => ({
       id: 'test-session-123',
       title: title || 'Test Session',
       model: model || 'deepseek-chat',
       createdAt: new Date().toISOString()
     })),
-    getCurrentSession: vi.fn(async () => ({
-      id: 'test-session-123',
-      title: 'Test Session'
-    })),
     getSession: vi.fn(async () => null),
-    addMessageToCurrentSession: vi.fn(async () => {}),
+    recordUserMessage: vi.fn().mockResolvedValue({}),
     getSessionMessagesCompat: vi.fn(async () => [
       { role: 'user', content: 'Hello' }
     ]),
@@ -153,11 +149,11 @@ function createMockConversationManager() {
     recordToolCall: vi.fn(),
     recordToolResult: vi.fn(),
     recordAssistantMessage: vi.fn(async () => {}),
-    switchToSession: vi.fn(),
     getSessionRichHistory: vi.fn(async () => []),
     getAllSessions: vi.fn(async () => []),
     hasFreshSummary: vi.fn(() => false),
     createSnapshot: vi.fn(async () => {}),
+    getRecentTurnSequences: vi.fn(() => ({ userSequence: 1, assistantSequence: 2 })),
   };
 }
 
@@ -259,7 +255,7 @@ describe('RequestOrchestrator', () => {
         'Hello', null, async () => '', undefined
       );
 
-      expect(mockConversation.startNewSession).toHaveBeenCalledWith('Hello', 'deepseek-chat', undefined);
+      expect(mockConversation.createSession).toHaveBeenCalledWith('Hello', 'deepseek-chat');
       expect(result.sessionId).toBe('test-session-123');
       expect(sessionEvents).toEqual([{ sessionId: 'test-session-123', model: 'deepseek-chat' }]);
     });
@@ -272,7 +268,7 @@ describe('RequestOrchestrator', () => {
         'Hello', 'existing-session', async () => '', undefined
       );
 
-      expect(mockConversation.startNewSession).not.toHaveBeenCalled();
+      expect(mockConversation.createSession).not.toHaveBeenCalled();
       expect(result.sessionId).toBe('existing-session');
       expect(sessionEvents).toHaveLength(0);
     });
@@ -280,10 +276,7 @@ describe('RequestOrchestrator', () => {
     it('should save user message to history', async () => {
       await orchestrator.handleMessage('Hello world', null, async () => '', undefined);
 
-      expect(mockConversation.addMessageToCurrentSession).toHaveBeenCalledWith({
-        role: 'user',
-        content: 'Hello world'
-      });
+      expect(mockConversation.recordUserMessage).toHaveBeenCalledWith('test-session-123', 'Hello world');
     });
   });
 
@@ -518,9 +511,10 @@ describe('RequestOrchestrator', () => {
 
       expect(mockConversation.recordAssistantMessage).toHaveBeenCalled();
       const callArgs = mockConversation.recordAssistantMessage.mock.calls[0];
-      expect(callArgs[0]).toContain('Hello world');
-      expect(callArgs[1]).toBe('deepseek-chat');
-      expect(callArgs[2]).toBe('stop');
+      expect(callArgs[0]).toBe('session-1');
+      expect(callArgs[1]).toContain('Hello world');
+      expect(callArgs[2]).toBe('deepseek-chat');
+      expect(callArgs[3]).toBe('stop');
     });
 
     it('should record file modifications in history', async () => {
@@ -533,7 +527,7 @@ describe('RequestOrchestrator', () => {
 
       // Should record _file_modified tool calls
       const toolCallCalls = mockConversation.recordToolCall.mock.calls;
-      const fileModCalls = toolCallCalls.filter((c: any) => c[1] === '_file_modified');
+      const fileModCalls = toolCallCalls.filter((c: any) => c[2] === '_file_modified');
       expect(fileModCalls).toHaveLength(2);
     });
 
@@ -541,6 +535,18 @@ describe('RequestOrchestrator', () => {
       await orchestrator.handleMessage('Hello', null, async () => '', undefined);
 
       expect(mockStatusBar.updateLastResponse).toHaveBeenCalled();
+    });
+
+    it('should fire onTurnSequenceUpdate after saving to history', async () => {
+      const seqEvents: Array<{ userSequence?: number; assistantSequence?: number }> = [];
+      orchestrator.onTurnSequenceUpdate(e => seqEvents.push(e));
+
+      await orchestrator.handleMessage('Hello', 'session-1', async () => '', undefined);
+
+      expect(mockConversation.getRecentTurnSequences).toHaveBeenCalledWith('session-1');
+      expect(seqEvents).toHaveLength(1);
+      expect(seqEvents[0].userSequence).toBe(1);
+      expect(seqEvents[0].assistantSequence).toBe(2);
     });
   });
 
@@ -579,6 +585,7 @@ describe('RequestOrchestrator', () => {
 
       // Should record partial message with [Generation stopped]
       expect(mockConversation.recordAssistantMessage).toHaveBeenCalledWith(
+        'session-1',
         expect.stringContaining('[Generation stopped]'),
         'deepseek-chat',
         'length'

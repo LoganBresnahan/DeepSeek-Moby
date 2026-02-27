@@ -1,11 +1,13 @@
 /**
- * ConversationManager - Main interface for conversation state management
+ * ConversationManager - Pure data service for conversation persistence
  *
- * This is the primary class that ChatProvider and other components interact with.
- * It orchestrates EventStore, SnapshotManager, and ContextBuilder to provide
- * a clean API for:
- * - Session management (create, switch, delete)
- * - Event recording (messages, tools, diffs)
+ * Stateless w.r.t. which session is "current" — callers (ChatProvider) own
+ * session lifecycle and pass explicit sessionId to all write operations.
+ *
+ * Orchestrates EventStore, SnapshotManager to provide a clean API for:
+ * - Session CRUD (create, delete, rename, fork)
+ * - Event recording (messages, tools, diffs) — all take explicit sessionId
+ * - History queries (rich history, messages, search)
  */
 
 import * as vscode from 'vscode';
@@ -47,6 +49,8 @@ export interface RichHistoryTurn {
   // User-only fields:
   files?: string[];
   timestamp: number;
+  /** Event sequence number for this turn boundary (used by fork API) */
+  sequence?: number;
 }
 
 // Statement interface for our wrapper
@@ -94,8 +98,6 @@ export class ConversationManager {
   private eventStore: EventStore;
   private snapshotManager: SnapshotManager;
 
-  private currentSessionId: string | null = null;
-  private instanceId: string = uuidv4();
   private context: vscode.ExtensionContext;
   private options: ConversationManagerOptions;
 
@@ -169,36 +171,6 @@ export class ConversationManager {
       DELETE FROM sessions WHERE id = ?
     `);
 
-    // Load last active session
-    this.loadCurrentSession();
-  }
-
-  // ==========================================================================
-  // Initialization
-  // ==========================================================================
-
-  private loadCurrentSession(): void {
-    // Try instance-scoped key first (runtime isolation between parallel instances)
-    const instanceKey = `currentSessionId-${this.instanceId}`;
-    const instanceSavedId = this.context.globalState.get<string>(instanceKey);
-    if (instanceSavedId && this.getSessionSync(instanceSavedId)) {
-      this.currentSessionId = instanceSavedId;
-      return;
-    }
-
-    // Fall back to shared key (resume last session on cold start)
-    const savedId = this.context.globalState.get<string>('currentSessionId');
-    if (savedId && this.getSessionSync(savedId)) {
-      this.currentSessionId = savedId;
-    }
-  }
-
-  private async saveCurrentSession(): Promise<void> {
-    if (this.currentSessionId) {
-      // Write to both: instance-scoped (runtime isolation) + shared (cold start resume)
-      await this.context.globalState.update(`currentSessionId-${this.instanceId}`, this.currentSessionId);
-      await this.context.globalState.update('currentSessionId', this.currentSessionId);
-    }
   }
 
   // ==========================================================================
@@ -223,9 +195,8 @@ export class ConversationManager {
       model
     });
 
-    this.currentSessionId = id;
-    await this.saveCurrentSession();
     this.onSessionsChanged.fire();
+    logger.info(`[CM] createSession id=${id.substring(0, 8)} title="${title || 'New Chat'}" model=${model}`);
 
     return (await this.getSession(id))!;
   }
@@ -247,31 +218,11 @@ export class ConversationManager {
   }
 
   /**
-   * Get the current active session.
-   */
-  async getCurrentSession(): Promise<Session | null> {
-    if (!this.currentSessionId) return null;
-    return this.getSession(this.currentSessionId);
-  }
-
-  /**
    * Get all sessions, sorted by most recently updated.
    */
   async getAllSessions(): Promise<Session[]> {
     const rows = this.stmtGetAllSessions.all() as any[];
     return rows.map(row => this.rowToSession(row));
-  }
-
-  /**
-   * Switch to a different session.
-   */
-  async switchToSession(sessionId: string): Promise<void> {
-    const session = await this.getSession(sessionId);
-    if (session) {
-      this.currentSessionId = sessionId;
-      await this.saveCurrentSession();
-      this.onSessionsChanged.fire();
-    }
   }
 
   /**
@@ -288,12 +239,8 @@ export class ConversationManager {
     });
     deleteAll();
 
-    if (this.currentSessionId === sessionId) {
-      this.currentSessionId = null;
-      await this.saveCurrentSession();
-    }
-
     this.onSessionsChanged.fire();
+    logger.info(`[CM] deleteSession id=${sessionId.substring(0, 8)}`);
   }
 
   /**
@@ -301,7 +248,7 @@ export class ConversationManager {
    *
    * Links existing events (up to atSequence) to a new session via the join
    * table — zero-copy, no event data duplication. Then records a fork_created
-   * event and switches to the forked session.
+   * event. Does NOT switch to the fork — caller decides.
    *
    * @param parentSessionId - Session to fork from
    * @param atSequence - Sequence number to fork at (must be a turn boundary)
@@ -364,9 +311,6 @@ export class ConversationManager {
       forkId
     );
 
-    // Switch to the forked session
-    this.currentSessionId = forkId;
-    await this.saveCurrentSession();
     this.onSessionsChanged.fire();
 
     logger.info(
@@ -374,6 +318,7 @@ export class ConversationManager {
       ` from parent=${parentSessionId.substring(0, 8)}` +
       ` at sequence=${atSequence} (${linkedCount} events linked)`
     );
+    logger.sessionFork(parentSessionId, forkId, atSequence);
 
     return (await this.getSession(forkId))!;
   }
@@ -428,9 +373,8 @@ export class ConversationManager {
     });
     clearAll();
 
-    this.currentSessionId = null;
-    await this.saveCurrentSession();
     this.onSessionsChanged.fire();
+    logger.info('[CM] clearAllSessions complete');
   }
 
   // ==========================================================================
@@ -440,11 +384,9 @@ export class ConversationManager {
   /**
    * Record a user message.
    */
-  async recordUserMessage(content: string, attachments?: Attachment[]): Promise<ConversationEvent> {
-    const session = this.ensureCurrentSession();
-
+  async recordUserMessage(sessionId: string, content: string, attachments?: Attachment[]): Promise<ConversationEvent> {
     const event = this.eventStore.append({
-      sessionId: session.id,
+      sessionId,
       timestamp: Date.now(),
       type: 'user_message',
       content,
@@ -452,7 +394,7 @@ export class ConversationManager {
     });
 
     // Update session metadata
-    this.updateSessionMetadata(session.id, event);
+    this.updateSessionMetadata(sessionId, event);
 
     this.onSessionsChanged.fire();
     return event;
@@ -474,16 +416,15 @@ export class ConversationManager {
    *   during restore (thinking[i] → content[i] → shell[i]). Omit for Chat model.
    */
   async recordAssistantMessage(
+    sessionId: string,
     content: string,
     model: string,
     finishReason: 'stop' | 'tool_calls' | 'length' | 'error',
     usage?: { promptTokens: number; completionTokens: number },
     contentIterations?: string[]
   ): Promise<ConversationEvent> {
-    const session = this.ensureCurrentSession();
-
     const event = this.eventStore.append({
-      sessionId: session.id,
+      sessionId,
       timestamp: Date.now(),
       type: 'assistant_message',
       content,
@@ -494,7 +435,7 @@ export class ConversationManager {
     });
 
     // Update session metadata
-    this.updateSessionMetadata(session.id, event);
+    this.updateSessionMetadata(sessionId, event);
 
     this.onSessionsChanged.fire();
     return event;
@@ -503,11 +444,9 @@ export class ConversationManager {
   /**
    * Record reasoning content from R1 model.
    */
-  recordAssistantReasoning(content: string, iteration: number): ConversationEvent {
-    const session = this.ensureCurrentSession();
-
+  recordAssistantReasoning(sessionId: string, content: string, iteration: number): ConversationEvent {
     return this.eventStore.append({
-      sessionId: session.id,
+      sessionId,
       timestamp: Date.now(),
       type: 'assistant_reasoning',
       content,
@@ -519,14 +458,13 @@ export class ConversationManager {
    * Record a tool call request.
    */
   recordToolCall(
+    sessionId: string,
     toolCallId: string,
     toolName: string,
     args: Record<string, unknown>
   ): ConversationEvent {
-    const session = this.ensureCurrentSession();
-
     return this.eventStore.append({
-      sessionId: session.id,
+      sessionId,
       timestamp: Date.now(),
       type: 'tool_call',
       toolCallId,
@@ -539,15 +477,14 @@ export class ConversationManager {
    * Record a tool execution result.
    */
   recordToolResult(
+    sessionId: string,
     toolCallId: string,
     result: string,
     success: boolean,
     duration?: number
   ): ConversationEvent {
-    const session = this.ensureCurrentSession();
-
     return this.eventStore.append({
-      sessionId: session.id,
+      sessionId,
       timestamp: Date.now(),
       type: 'tool_result',
       toolCallId,
@@ -561,15 +498,14 @@ export class ConversationManager {
    * Record a diff being created (pending).
    */
   recordDiffCreated(
+    sessionId: string,
     diffId: string,
     filePath: string,
     originalContent: string,
     newContent: string
   ): ConversationEvent {
-    const session = this.ensureCurrentSession();
-
     return this.eventStore.append({
-      sessionId: session.id,
+      sessionId,
       timestamp: Date.now(),
       type: 'diff_created',
       diffId,
@@ -582,11 +518,9 @@ export class ConversationManager {
   /**
    * Record a diff being accepted.
    */
-  recordDiffAccepted(diffId: string): ConversationEvent {
-    const session = this.ensureCurrentSession();
-
+  recordDiffAccepted(sessionId: string, diffId: string): ConversationEvent {
     return this.eventStore.append({
-      sessionId: session.id,
+      sessionId,
       timestamp: Date.now(),
       type: 'diff_accepted',
       diffId
@@ -596,11 +530,9 @@ export class ConversationManager {
   /**
    * Record a diff being rejected.
    */
-  recordDiffRejected(diffId: string): ConversationEvent {
-    const session = this.ensureCurrentSession();
-
+  recordDiffRejected(sessionId: string, diffId: string): ConversationEvent {
     return this.eventStore.append({
-      sessionId: session.id,
+      sessionId,
       timestamp: Date.now(),
       type: 'diff_rejected',
       diffId
@@ -610,11 +542,9 @@ export class ConversationManager {
   /**
    * Record a web search.
    */
-  recordWebSearch(query: string, resultCount: number, resultsPreview: string[]): ConversationEvent {
-    const session = this.ensureCurrentSession();
-
+  recordWebSearch(sessionId: string, query: string, resultCount: number, resultsPreview: string[]): ConversationEvent {
     return this.eventStore.append({
-      sessionId: session.id,
+      sessionId,
       timestamp: Date.now(),
       type: 'web_search',
       query,
@@ -627,14 +557,13 @@ export class ConversationManager {
    * Record an error.
    */
   recordError(
+    sessionId: string,
     errorType: 'api' | 'tool' | 'parse' | 'network',
     message: string,
     recoverable: boolean
   ): ConversationEvent {
-    const session = this.ensureCurrentSession();
-
     return this.eventStore.append({
-      sessionId: session.id,
+      sessionId,
       timestamp: Date.now(),
       type: 'error',
       errorType,
@@ -718,7 +647,8 @@ export class ConversationManager {
             role: 'user',
             content: userEvent.content,
             files: userEvent.attachments?.map(a => a.name),
-            timestamp: userEvent.timestamp
+            timestamp: userEvent.timestamp,
+            sequence: event.sequence
           });
           break;
         }
@@ -816,6 +746,7 @@ export class ConversationManager {
           const assistantEvent = event as AssistantMessageEvent;
           currentAssistantTurn.content = assistantEvent.content;
           currentAssistantTurn.model = assistantEvent.model;
+          currentAssistantTurn.sequence = event.sequence;
           // Extract per-iteration content text (for correct interleaving during restore)
           if (assistantEvent.contentIterations && assistantEvent.contentIterations.length > 0) {
             currentAssistantTurn.contentIterations = assistantEvent.contentIterations;
@@ -852,17 +783,6 @@ export class ConversationManager {
     console.log(`[RichHistory] Returning ${turns.length} turns:`, turnSummary);
 
     return turns;
-  }
-
-  /**
-   * Add a message to the current session (compatibility method).
-   */
-  async addMessageToCurrentSession(message: { role: 'user' | 'assistant'; content: string }): Promise<void> {
-    if (message.role === 'user') {
-      await this.recordUserMessage(message.content);
-    } else {
-      await this.recordAssistantMessage(message.content, 'deepseek-chat', 'stop');
-    }
   }
 
   /**
@@ -1013,9 +933,9 @@ export class ConversationManager {
       // Replay messages as events
       for (const msg of (importData.messages || [])) {
         if (msg.role === 'user') {
-          this.recordUserMessage(msg.content);
+          this.recordUserMessage(session.id, msg.content);
         } else {
-          this.recordAssistantMessage(msg.content, session.model, 'stop');
+          this.recordAssistantMessage(session.id, msg.content, session.model, 'stop');
         }
       }
 
@@ -1068,6 +988,20 @@ export class ConversationManager {
    * Used by ContextBuilder to inject context when old messages are dropped.
    * Returns summary text, pre-computed token count, and snapshot ID for caching.
    */
+  /**
+   * Get the most recent user_message and assistant_message sequence numbers.
+   * Used to send sequence updates to the webview after saveToHistory().
+   */
+  getRecentTurnSequences(sessionId: string): { userSequence?: number; assistantSequence?: number } {
+    const events = this.eventStore.getEventsByType(sessionId, ['user_message', 'assistant_message']);
+    const user = events.filter(e => e.type === 'user_message');
+    const asst = events.filter(e => e.type === 'assistant_message');
+    return {
+      userSequence: user.length > 0 ? user[user.length - 1].sequence : undefined,
+      assistantSequence: asst.length > 0 ? asst[asst.length - 1].sequence : undefined,
+    };
+  }
+
   getLatestSnapshotSummary(sessionId: string): { summary: string; tokenCount: number; snapshotId: string } | undefined {
     const snapshot = this.snapshotManager.getLatestSnapshot(sessionId);
     if (!snapshot) return undefined;
@@ -1114,20 +1048,12 @@ export class ConversationManager {
   // Private Helpers
   // ==========================================================================
 
-  private ensureCurrentSession(): Session {
-    if (!this.currentSessionId) {
-      // Synchronously create a session
-      const id = uuidv4();
-      const now = Date.now();
-
-      this.stmtInsertSession.run(id, 'New Chat', 'deepseek-chat', now, now, null, null);
-      this.currentSessionId = id;
-
-      // Don't await - just fire and forget
-      this.saveCurrentSession();
-    }
-
-    return this.getSessionSync(this.currentSessionId)!;
+  /**
+   * Notify all subscribers that sessions have changed.
+   * Called by ChatProvider after session switches or other lifecycle events.
+   */
+  public notifySessionsChanged(): void {
+    this.onSessionsChanged.fire();
   }
 
   private updateSessionMetadata(sessionId: string, event: ConversationEvent): void {
