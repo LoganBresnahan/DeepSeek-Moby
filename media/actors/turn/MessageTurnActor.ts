@@ -143,7 +143,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
   // Header State
   // ============================================
 
-  /** Whether the role header ("DEEPSEEK MOBY" / "YOU") has been rendered */
+  /** Whether the role header ("MOBY" / "YOU") has been rendered */
   private _headerRendered = false;
 
   /** Event sequence number from backend (for fork API) */
@@ -501,21 +501,21 @@ export class MessageTurnActor extends InterleavedShadowActor {
   // ============================================
 
   /**
-   * Ensure the role header divider ("DEEPSEEK MOBY" / "YOU") is rendered.
+   * Ensure the role header divider ("MOBY" / "YOU") is rendered.
    * Called before thinking/tool containers so the header always appears first.
    * If a text segment is created first, it renders the header itself.
    */
   private ensureRoleHeader(): void {
     if (this._headerRendered) return;
 
-    const roleLabel = this._role === 'user' ? 'YOU' : 'DEEPSEEK MOBY';
+    const roleLabel = this._role === 'user' ? 'YOU' : 'MOBY';
 
     const container = this.createContainer('header', {
       hostClasses: ['header-container', this._role === 'user' ? 'user' : 'assistant'],
       skipAnimation: true
     });
 
-    const forkBtn = this._sequence ? `<button class="fork-btn" data-sequence="${this._sequence}" title="Fork from here">\u2442</button>` : '';
+    const forkBtn = this._sequence ? `<button class="fork-btn" data-sequence="${this._sequence}" title="Fork from here">\u{1F374}</button>` : '';
     container.content.innerHTML = `
       <div class="message ${this._role}">
         <div class="message-divider">
@@ -809,7 +809,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
   /**
    * Add a pending file.
    */
-  addPendingFile(file: { filePath: string; diffId?: string; status?: PendingFileStatus }): string {
+  addPendingFile(file: { filePath: string; diffId?: string; status?: PendingFileStatus; editMode?: EditMode }): string {
     const fileName = file.filePath.split('/').pop() ?? file.filePath;
     const fileId = `pending-${Date.now()}-${this._pendingIteration}`;
 
@@ -824,13 +824,17 @@ export class MessageTurnActor extends InterleavedShadowActor {
       iteration: this._pendingIteration
     };
 
+    // Use explicit editMode if provided (e.g., from VirtualListActor restore),
+    // otherwise fall back to current global mode
+    const groupEditMode = file.editMode ?? this._editMode;
+
     // Create new group if needed (no current group = after non-pending content)
     if (!this._currentPendingGroup) {
       const container = this.createContainer('message', {
         hostClasses: ['pending-container', 'expanded'],
         dataAttributes: { 'turn-id': this._turnId ?? '' }
       });
-      this._currentPendingGroup = { containerId: container.id, files: new Map() };
+      this._currentPendingGroup = { containerId: container.id, files: new Map(), editMode: groupEditMode };
       this._pendingGroups.push(this._currentPendingGroup);
       this.setupPendingHandlers(container.id);
     }
@@ -889,7 +893,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
   setEditMode(mode: EditMode): void {
     this._editMode = mode;
 
-    // Update existing code blocks
+    // Update existing code blocks (these reflect current mode for new actions)
     this.containers.forEach(container => {
       const codeBlocks = container.content.querySelectorAll('.code-block');
       codeBlocks.forEach(block => {
@@ -897,10 +901,9 @@ export class MessageTurnActor extends InterleavedShadowActor {
       });
     });
 
-    // Update pending files display (all groups)
-    for (const group of this._pendingGroups) {
-      this.renderPendingGroup(group);
-    }
+    // NOTE: Pending groups are NOT re-rendered here. Each group retains its
+    // original editMode (set at creation time) so switching modes doesn't
+    // retroactively change how existing file changes are displayed.
   }
 
   // ============================================
@@ -909,7 +912,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
 
   private renderTextSegment(segment: TextSegment, container: ShadowContainer): void {
     const isUser = this._role === 'user';
-    const roleLabel = isUser ? 'YOU' : 'DEEPSEEK MOBY';
+    const roleLabel = isUser ? 'YOU' : 'MOBY';
     // Show divider unless it's a continuation or the header was already rendered
     // (e.g., by ensureRoleHeader() before a thinking iteration)
     const showDivider = !segment.isContinuation && !this._headerRendered;
@@ -918,7 +921,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
 
     // Divider (not for continuations, not if header already rendered)
     if (showDivider) {
-      const forkBtn = this._sequence ? `<button class="fork-btn" data-sequence="${this._sequence}" title="Fork from here">\u2442</button>` : '';
+      const forkBtn = this._sequence ? `<button class="fork-btn" data-sequence="${this._sequence}" title="Fork from here">\u{1F374}</button>` : '';
       html += `<div class="message-divider">`;
       html += `<span class="message-divider-label">${roleLabel}</span>`;
       html += forkBtn;
@@ -1101,16 +1104,20 @@ export class MessageTurnActor extends InterleavedShadowActor {
       return;
     }
 
+    // Use the group's edit mode (set at creation time), not the current global mode.
+    // This ensures groups retain their original display style when the user switches modes.
+    const groupMode = group.editMode;
+
     // In manual mode, only show if there are resolved files (applied/rejected from history
     // or completed actions). Hide if all files are still pending (user manages via diff view).
     const hasResolvedFiles = files.some(f => f.status === 'applied' || f.status === 'rejected');
-    if (this._editMode === 'manual' && !hasResolvedFiles) {
+    if (groupMode === 'manual' && !hasResolvedFiles) {
       container.host.setAttribute('hidden', '');
       return;
     }
     container.host.removeAttribute('hidden');
 
-    const isAuto = this._editMode === 'auto' || (this._editMode === 'manual' && hasResolvedFiles);
+    const isAuto = groupMode === 'auto' || (groupMode === 'manual' && hasResolvedFiles);
     const title = isAuto ? 'Modified Files' : 'Pending Changes';
     const icon = isAuto ? '✓' : '📝';
     const isExpanded = container.host.classList.contains('expanded');
@@ -1289,7 +1296,8 @@ export class MessageTurnActor extends InterleavedShadowActor {
       const container = this.getContainer(containerId);
       if (container) {
         container.host.classList.toggle('expanded');
-        this.renderPendingFiles();
+        const group = this._pendingGroups.find(g => g.containerId === containerId);
+        if (group) this.renderPendingGroup(group);
       }
     });
 
@@ -1631,7 +1639,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
         btn.className = 'fork-btn';
         btn.dataset.sequence = String(sequence);
         btn.title = 'Fork from here';
-        btn.textContent = '\u2442';
+        btn.textContent = '\u{1F374}';
         divider.appendChild(btn);
         this.setupForkHandlers(containerId);
         break;
@@ -1653,7 +1661,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
 
     const popup = document.createElement('div');
     popup.className = 'fork-popup';
-    popup.innerHTML = `<div class="fork-popup-item"><span class="fork-popup-icon">\u2442</span> Fork here</div>`;
+    popup.innerHTML = `<div class="fork-popup-item"><span class="fork-popup-icon">\u{1F374}</span> Fork here</div>`;
 
     // Position below the button
     const rect = anchor.getBoundingClientRect();

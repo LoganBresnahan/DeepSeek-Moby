@@ -41,23 +41,13 @@ export type CommandHandler = (commandId: string) => void;
 // ============================================
 
 const DEFAULT_COMMANDS: CommandItem[] = [
-  // Chat section
-  { id: 'deepseek.newChat', name: 'New Chat', description: 'Start a new conversation', icon: '✨', section: 'Chat' },
   // History section
-  { id: 'deepseek.showChatHistory', name: 'Show History', description: 'View chat history', icon: '📚', section: 'History' },
   { id: 'deepseek.exportChatHistory', name: 'Export History', description: 'Export all chats', icon: '📤', section: 'History' },
-  { id: 'deepseek.searchChatHistory', name: 'Search History', description: 'Search past chats', icon: '🔍', section: 'History' },
-  // Trace section
-  { id: 'deepseek.exportTrace', name: 'Export Trace', description: 'Save trace to file', icon: '💾', section: 'Trace' },
-  { id: 'deepseek.copyTrace', name: 'Copy Trace', description: 'Copy trace to clipboard', icon: '📋', section: 'Trace' },
-  { id: 'deepseek.viewTrace', name: 'View Trace', description: 'Show in output panel', icon: '👁️', section: 'Trace' },
-  { id: 'deepseek.traceStats', name: 'Trace Stats', description: 'View trace statistics', icon: '📊', section: 'Trace' },
-  { id: 'deepseek.clearTrace', name: 'Clear Trace', description: 'Clear trace buffer', icon: '🗑️', section: 'Trace' },
   // Logs section
-  { id: 'deepseek.exportLogsAI', name: 'Export Logs (AI)', description: 'LLM-optimized log export', icon: '🤖', section: 'Logs' },
-  { id: 'deepseek.exportLogsHuman', name: 'Export Logs (Full)', description: 'Full detail log export', icon: '📝', section: 'Logs' },
+  { id: 'deepseek.exportLogs', name: 'Export Logs', description: 'Export all logs and traces', icon: '📝', section: 'Logs' },
   // Settings section
-  { id: 'deepseek.openCommandRules', name: 'Command Rules', description: 'Manage command approval rules', icon: '🛡️', section: 'Settings' }
+  { id: 'deepseek.editSystemPrompt', name: 'System Prompt', description: 'Edit system prompt', icon: '✏️', section: 'Settings' },
+  { id: 'deepseek.openCommandRules', name: 'System Rules', description: 'Manage command approval rules', icon: '🛡️', section: 'Settings' }
 ];
 
 // ============================================
@@ -153,9 +143,16 @@ export class CommandsShadowActor extends PopupShadowActor {
     webviewTracer.trace('user.click', `command:${commandId}`, { level: 'info', data: { commandId } });
 
     // Special handling for history commands - open modal instead
-    if (commandId === 'deepseek.showChatHistory' || commandId === 'deepseek.searchChatHistory') {
+    if (commandId === 'deepseek.showChatHistory') {
       log.debug('routing to history modal');
       this.manager.publishDirect('history.modal.open', true, this.actorId);
+      return;
+    }
+
+    // Special handling for system prompt - open modal
+    if (commandId === 'deepseek.editSystemPrompt') {
+      log.debug('routing to system prompt modal');
+      this.manager.publishDirect('systemPrompt.modal.open', true, this.actorId);
       return;
     }
 

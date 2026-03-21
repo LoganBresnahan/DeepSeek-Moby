@@ -253,8 +253,9 @@ export class InputAreaShadowActor extends ShadowActor {
     if (!textarea) return;
 
     textarea.style.height = 'auto';
-    const newHeight = Math.min(textarea.scrollHeight, 200);
+    const newHeight = Math.min(textarea.scrollHeight, 300);
     textarea.style.height = `${newHeight}px`;
+    textarea.classList.toggle('expanded', newHeight > 68);
   }
 
   /** Called by Toolbar's attach button */

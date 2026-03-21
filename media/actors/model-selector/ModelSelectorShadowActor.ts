@@ -66,6 +66,7 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
   private _toolLimit = 100;
   private _shellIterations = 100;
   private _maxTokens = 8192;
+  private _streaming = false;
 
   private _onModelChange: ModelChangeHandler | null = null;
   private _onSettingsChange: SettingsChangeHandler | null = null;
@@ -86,7 +87,8 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
       },
       subscriptions: {
         'model.current': (value: unknown) => this.handleModelChange(value as string),
-        'model.settings': (value: unknown) => this.handleSettingsUpdate(value as ModelSettings)
+        'model.settings': (value: unknown) => this.handleSettingsUpdate(value as ModelSettings),
+        'streaming.active': (value: unknown) => this.handleStreamingChange(value as boolean)
       },
       additionalStyles: modelSelectorShadowStyles,
       openRequestKey: 'model.popup.open',
@@ -98,6 +100,29 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
     // Re-render now that instance properties are initialized
     // (base class renders during construction when properties are undefined)
     this.updateBodyContent(this.renderPopupContent());
+  }
+
+  // ============================================
+  // Streaming Guard
+  // ============================================
+
+  private handleStreamingChange(streaming: boolean): void {
+    this._streaming = streaming;
+    if (streaming && this._visible) {
+      this.close();
+    }
+    // Disable/enable the trigger button (sibling of our host element)
+    const modelBtn = this.element.parentElement?.querySelector<HTMLButtonElement>('#modelBtn');
+    if (modelBtn) {
+      modelBtn.disabled = streaming;
+      modelBtn.style.opacity = streaming ? '0.4' : '';
+      modelBtn.style.pointerEvents = streaming ? 'none' : '';
+    }
+  }
+
+  override open(): void {
+    if (this._streaming) return;
+    super.open();
   }
 
   // ============================================

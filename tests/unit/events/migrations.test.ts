@@ -57,11 +57,11 @@ describe('runMigrations', () => {
     expect(indexNames).toContain('idx_command_rules_prefix_type');
   });
 
-  it('stamps user_version to latest (1)', () => {
+  it('stamps user_version to latest (2)', () => {
     runMigrations(db);
 
     const version = db.pragmaGet('user_version');
-    expect(version).toBe(1);
+    expect(version).toBe(2);
   });
 
   it('starts from version 0 on fresh database', () => {
@@ -74,7 +74,7 @@ describe('runMigrations', () => {
     runMigrations(db);
 
     const version = db.pragmaGet('user_version');
-    expect(version).toBe(1);
+    expect(version).toBe(2);
 
     const tables = db.prepare(
       "SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'"

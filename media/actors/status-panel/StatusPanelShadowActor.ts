@@ -92,7 +92,18 @@ export class StatusPanelShadowActor extends ShadowActor {
         'status.hasWarning': () => !!this._warning,
         'status.hasError': () => !!this._error
       },
-      subscriptions: {}
+      subscriptions: {
+        'status.message': (value: unknown) => {
+          const msg = value as { type: string; message: string };
+          if (msg.type === 'error') {
+            this.showError(msg.message);
+          } else if (msg.type === 'warning') {
+            this.showWarning(msg.message);
+          } else {
+            this.showMessage(msg.message);
+          }
+        }
+      }
     });
 
     this._mobyImageUrl = mobyImageUrl;

@@ -21,12 +21,6 @@ export interface ModelChangedEvent {
   model: string;
 }
 
-/** Payload for default system prompt requests */
-export interface DefaultPromptEvent {
-  model: string;
-  prompt: string;
-}
-
 /** Input for updateSettings() */
 export interface SettingsUpdateInput {
   model?: string;
@@ -42,12 +36,10 @@ export class SettingsManager {
 
   private readonly _onSettingsChanged = new vscode.EventEmitter<SettingsSnapshot>();
   private readonly _onModelChanged = new vscode.EventEmitter<ModelChangedEvent>();
-  private readonly _onDefaultPromptRequested = new vscode.EventEmitter<DefaultPromptEvent>();
   private readonly _onSettingsReset = new vscode.EventEmitter<void>();
 
   readonly onSettingsChanged = this._onSettingsChanged.event;
   readonly onModelChanged = this._onModelChanged.event;
-  readonly onDefaultPromptRequested = this._onDefaultPromptRequested.event;
   readonly onSettingsReset = this._onSettingsReset.event;
 
   constructor(private deepSeekClient: DeepSeekClient) {}
@@ -157,33 +149,6 @@ export class SettingsManager {
   }
 
   /**
-   * Update the system prompt.
-   */
-  async updateSystemPrompt(prompt: string): Promise<void> {
-    const config = vscode.workspace.getConfiguration('deepseek');
-    await config.update('systemPrompt', prompt, vscode.ConfigurationTarget.Global);
-    logger.settingsChanged('systemPrompt', prompt ? `${prompt.substring(0, 50)}...` : '(default)');
-  }
-
-  /**
-   * Get the default system prompt for the current model and fire an event.
-   */
-  sendDefaultSystemPrompt(): void {
-    const config = vscode.workspace.getConfiguration('deepseek');
-    const model = config.get<string>('model') || 'deepseek-chat';
-    const isReasoner = model.includes('reasoner');
-
-    const prompt = isReasoner
-      ? this.getReasonerDefaultPrompt()
-      : this.getChatDefaultPrompt();
-
-    this._onDefaultPromptRequested.fire({
-      model: isReasoner ? 'DeepSeek Reasoner (R1)' : 'DeepSeek Chat',
-      prompt
-    });
-  }
-
-  /**
    * Read all current settings from VS Code config and return a snapshot.
    * Also syncs tracer.enabled to match config.
    */
@@ -204,7 +169,7 @@ export class SettingsManager {
       webviewLogLevel: config.get<string>('webviewLogLevel') || 'WARN',
       tracingEnabled,
       logColors: config.get<boolean>('logColors') ?? true,
-      systemPrompt: config.get<string>('systemPrompt') || '',
+      systemPrompt: '', // Now stored in DB, not VS Code settings
       autoSaveHistory: config.get<boolean>('autoSaveHistory') ?? true,
       allowAllCommands: config.get<boolean>('allowAllShellCommands') ?? false,
       webSearch: {
@@ -230,7 +195,6 @@ export class SettingsManager {
       await config.update('webviewLogLevel', undefined, vscode.ConfigurationTarget.Global);
       await config.update('tracing.enabled', undefined, vscode.ConfigurationTarget.Global);
       await config.update('logColors', undefined, vscode.ConfigurationTarget.Global);
-      await config.update('systemPrompt', undefined, vscode.ConfigurationTarget.Global);
       await config.update('maxTokens', undefined, vscode.ConfigurationTarget.Global);
       await config.update('maxToolCalls', undefined, vscode.ConfigurationTarget.Global);
       await config.update('maxShellIterations', undefined, vscode.ConfigurationTarget.Global);
@@ -253,59 +217,12 @@ export class SettingsManager {
     }
   }
 
-  // ── Private Methods ──
-
-  private getChatDefaultPrompt(): string {
-    return `You are a highly capable AI programming assistant integrated into VS Code. Your role is to help developers write, understand, and improve code.
-
-Key capabilities:
-- Analyze code and explain its functionality
-- Help debug issues and suggest fixes
-- Write new code following best practices
-- Refactor and optimize existing code
-- Answer programming questions
-
-When providing code changes, use the SEARCH/REPLACE format for precise edits.
-
-Always be concise, accurate, and helpful.`;
-  }
-
-  private getReasonerDefaultPrompt(): string {
-    return `You are a highly capable AI programming assistant with shell access for exploring and modifying codebases.
-
-You can run shell commands using <shell> tags:
-<shell>cat src/file.ts</shell>
-<shell>grep -rn "function" src/</shell>
-
-To create new files, use shell commands:
-<shell>cat > path/to/newfile.ts << 'EOF'
-// file contents
-EOF</shell>
-
-To edit existing files, use the SEARCH/REPLACE format:
-\`\`\`typescript
-# File: path/to/file.ts
-<<<<<<< SEARCH
-exact code to find
-======= AND
-replacement code
->>>>>>> REPLACE
-\`\`\`
-
-Always:
-1. Explore the codebase first using shell commands
-2. Create new files with shell commands (cat > file << 'EOF')
-3. Edit existing files with SEARCH/REPLACE
-4. Complete tasks in a single response`;
-  }
-
   /**
    * Dispose all event emitters.
    */
   dispose(): void {
     this._onSettingsChanged.dispose();
     this._onModelChanged.dispose();
-    this._onDefaultPromptRequested.dispose();
     this._onSettingsReset.dispose();
   }
 }

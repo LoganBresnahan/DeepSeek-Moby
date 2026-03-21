@@ -139,6 +139,8 @@ export interface PendingFileData {
   diffId?: string;
   status: 'pending' | 'applied' | 'rejected' | 'superseded' | 'error';
   iteration: number;
+  /** Edit mode at time of creation — preserved across virtual scroll re-binds */
+  editMode: EditMode;
 }
 
 export interface CommandApprovalData {

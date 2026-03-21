@@ -241,6 +241,8 @@ describe('RequestOrchestrator', () => {
       mockDiffManager as any,
       mockWebSearch as any,
       mockFileContext as any,
+      undefined, // commandApprovalManager
+      { getActiveContent: () => '' } as any, // savedPromptManager
     );
   });
 
@@ -437,9 +439,19 @@ describe('RequestOrchestrator', () => {
     });
 
     it('should include custom system prompt when configured', async () => {
-      configStore.set('systemPrompt', 'You are a helpful bot.');
+      // Create orchestrator with a mock saved prompt manager that returns content
+      const customOrch = new RequestOrchestrator(
+        mockClient as any,
+        mockConversation as any,
+        mockStatusBar as any,
+        mockDiffManager as any,
+        mockWebSearch as any,
+        mockFileContext as any,
+        undefined,
+        { getActiveContent: () => 'You are a helpful bot.' } as any,
+      );
 
-      await orchestrator.handleMessage('Hello', null, async () => '', undefined);
+      await customOrch.handleMessage('Hello', null, async () => '', undefined);
 
       const systemPromptArg = mockClient.streamChat.mock.calls[0][2];
       expect(systemPromptArg).toContain('You are a helpful bot.');

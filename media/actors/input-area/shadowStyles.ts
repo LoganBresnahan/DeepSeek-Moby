@@ -3,13 +3,16 @@
  * Styles for textarea and attachments (buttons are in Toolbar)
  */
 export const inputAreaShadowStyles = `
-/* Main container */
+/* Main container — anchored to bottom of host, grows upward */
 .input-area {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  flex: 1;
   min-width: 0;
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
 }
 
 /* Textarea */
@@ -24,9 +27,13 @@ textarea {
   font-size: 13px;
   resize: none;
   min-height: 68px;
-  max-height: 200px;
+  max-height: 300px;
   line-height: 1.4;
   box-sizing: border-box;
+}
+
+textarea.expanded {
+  box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.3);
 }
 
 textarea:focus {

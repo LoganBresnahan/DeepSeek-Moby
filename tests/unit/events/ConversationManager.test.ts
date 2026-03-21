@@ -1058,18 +1058,19 @@ describe('ConversationManager.forkSession', () => {
 
   it('creates a fork session with correct parent reference', async () => {
     seedTurn();
-    const fork = await callForkSession.call(mockCm, PARENT_ID, 2);
+    const { session: fork, forkEventType } = await callForkSession.call(mockCm, PARENT_ID, 2);
 
     expect(fork).toBeDefined();
     expect(fork.parentSessionId).toBe(PARENT_ID);
     expect(fork.forkSequence).toBe(2);
     expect(fork.title).toBe('Parent Chat (fork)');
     expect(fork.model).toBe('deepseek-chat');
+    expect(forkEventType).toBe('assistant_message');
   });
 
   it('links parent events to fork via join table (zero-copy)', async () => {
     seedTurn();
-    const fork = await callForkSession.call(mockCm, PARENT_ID, 2);
+    const { session: fork } = await callForkSession.call(mockCm, PARENT_ID, 2);
 
     const parentEvents = eventStore.getEvents(PARENT_ID);
     const forkEvents = eventStore.getEvents(fork.id);
@@ -1093,7 +1094,7 @@ describe('ConversationManager.forkSession', () => {
 
   it('records fork_created event with correct metadata', async () => {
     seedTurn();
-    const fork = await callForkSession.call(mockCm, PARENT_ID, 2);
+    const { session: fork } = await callForkSession.call(mockCm, PARENT_ID, 2);
 
     const forkEvents = eventStore.getEvents(fork.id);
     const forkCreated = forkEvents.find(e => e.type === 'fork_created')!;
@@ -1105,9 +1106,11 @@ describe('ConversationManager.forkSession', () => {
 
   it('forks at user_message boundary (sequence 1)', async () => {
     seedTurn();
-    const fork = await callForkSession.call(mockCm, PARENT_ID, 1);
+    const { session: fork, forkEventType, lastUserMessage } = await callForkSession.call(mockCm, PARENT_ID, 1);
 
     expect(fork).toBeDefined();
+    expect(forkEventType).toBe('user_message');
+    expect(lastUserMessage).toBe('Hello');
     const forkEvents = eventStore.getEvents(fork.id);
     // 1 linked + 1 fork_created = 2
     expect(forkEvents).toHaveLength(2);
@@ -1163,7 +1166,7 @@ describe('ConversationManager.forkSession', () => {
 
   it('updates fork session metadata (event_count, first_user_message, preview)', async () => {
     seedTurn();
-    const fork = await callForkSession.call(mockCm, PARENT_ID, 2);
+    const { session: fork } = await callForkSession.call(mockCm, PARENT_ID, 2);
 
     expect(fork.eventCount).toBe(3); // 2 linked + fork_created
     expect(fork.firstUserMessage).toBe('Hello');
@@ -1174,7 +1177,7 @@ describe('ConversationManager.forkSession', () => {
     seedTurn();
 
     // First fork at assistant_message
-    const fork1 = await callForkSession.call(mockCm, PARENT_ID, 2);
+    const { session: fork1 } = await callForkSession.call(mockCm, PARENT_ID, 2);
 
     // Add new conversation in the fork
     eventStore.append({ sessionId: fork1.id, timestamp: 5000, type: 'user_message', content: 'Follow-up in fork' });
@@ -1185,7 +1188,7 @@ describe('ConversationManager.forkSession', () => {
     const lastSeq = fork1Events[fork1Events.length - 1].sequence;
 
     // Fork the fork
-    const fork2 = await callForkSession.call(mockCm, fork1.id, lastSeq);
+    const { session: fork2 } = await callForkSession.call(mockCm, fork1.id, lastSeq);
 
     expect(fork2).toBeDefined();
     expect(fork2.parentSessionId).toBe(fork1.id);
@@ -1194,7 +1197,7 @@ describe('ConversationManager.forkSession', () => {
 
   it('parent deletion does not affect fork (shared events survive)', async () => {
     seedTurn();
-    const fork = await callForkSession.call(mockCm, PARENT_ID, 2);
+    const { session: fork } = await callForkSession.call(mockCm, PARENT_ID, 2);
     const forkId = fork.id;
 
     // Delete parent (CASCADE removes parent's event_sessions + snapshots)
@@ -1222,8 +1225,10 @@ describe('ConversationManager.forkSession', () => {
   it('forks with single user_message (minimal case)', async () => {
     eventStore.append({ sessionId: PARENT_ID, timestamp: 1000, type: 'user_message', content: 'Just one message' });
 
-    const fork = await callForkSession.call(mockCm, PARENT_ID, 1);
+    const { session: fork, forkEventType, lastUserMessage } = await callForkSession.call(mockCm, PARENT_ID, 1);
 
+    expect(forkEventType).toBe('user_message');
+    expect(lastUserMessage).toBe('Just one message');
     const forkEvents = eventStore.getEvents(fork.id);
     expect(forkEvents).toHaveLength(2); // 1 linked + fork_created
     expect(forkEvents[0].type).toBe('user_message');
@@ -1244,8 +1249,8 @@ describe('ConversationManager.forkSession', () => {
   it('multiple forks from same parent are independent', async () => {
     seedTurn();
 
-    const fork1 = await callForkSession.call(mockCm, PARENT_ID, 2);
-    const fork2 = await callForkSession.call(mockCm, PARENT_ID, 2);
+    const { session: fork1 } = await callForkSession.call(mockCm, PARENT_ID, 2);
+    const { session: fork2 } = await callForkSession.call(mockCm, PARENT_ID, 2);
 
     expect(fork1.id).not.toBe(fork2.id);
 
@@ -1288,8 +1293,8 @@ describe('ConversationManager.getSessionForks', () => {
     eventStore.append({ sessionId: PARENT_ID, timestamp: 1000, type: 'user_message', content: 'Hello' });
     eventStore.append({ sessionId: PARENT_ID, timestamp: 2000, type: 'assistant_message', content: 'Hi!', model: 'deepseek-chat', finishReason: 'stop' });
 
-    const fork1 = await callForkSession.call(mockCm, PARENT_ID, 2);
-    const fork2 = await callForkSession.call(mockCm, PARENT_ID, 2);
+    const { session: fork1 } = await callForkSession.call(mockCm, PARENT_ID, 2);
+    const { session: fork2 } = await callForkSession.call(mockCm, PARENT_ID, 2);
 
     const forks = await callGetSessionForks.call(mockCm, PARENT_ID);
     expect(forks).toHaveLength(2);

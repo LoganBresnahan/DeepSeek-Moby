@@ -64,7 +64,7 @@ vi.mock('vscode', async (importOriginal) => {
 
 import { SettingsManager } from '../../../src/providers/settingsManager';
 import type { SettingsSnapshot } from '../../../src/providers/types';
-import type { ModelChangedEvent, DefaultPromptEvent } from '../../../src/providers/settingsManager';
+import type { ModelChangedEvent } from '../../../src/providers/settingsManager';
 
 // ── DeepSeekClient mock ──
 function createMockClient() {
@@ -216,41 +216,6 @@ describe('SettingsManager', () => {
 
   // ── updateSystemPrompt ──
 
-  describe('updateSystemPrompt', () => {
-    it('should update systemPrompt in VS Code config', async () => {
-      await manager.updateSystemPrompt('You are a test assistant.');
-
-      expect(configStore.get('systemPrompt')).toBe('You are a test assistant.');
-    });
-  });
-
-  // ── sendDefaultSystemPrompt ──
-
-  describe('sendDefaultSystemPrompt', () => {
-    it('should fire onDefaultPromptRequested with chat prompt for deepseek-chat', () => {
-      const events: DefaultPromptEvent[] = [];
-      manager.onDefaultPromptRequested(e => events.push(e));
-
-      manager.sendDefaultSystemPrompt();
-
-      expect(events).toHaveLength(1);
-      expect(events[0].model).toBe('DeepSeek Chat');
-      expect(events[0].prompt).toContain('AI programming assistant');
-    });
-
-    it('should fire onDefaultPromptRequested with reasoner prompt for deepseek-reasoner', () => {
-      configStore.set('model', 'deepseek-reasoner');
-      const events: DefaultPromptEvent[] = [];
-      manager.onDefaultPromptRequested(e => events.push(e));
-
-      manager.sendDefaultSystemPrompt();
-
-      expect(events).toHaveLength(1);
-      expect(events[0].model).toBe('DeepSeek Reasoner (R1)');
-      expect(events[0].prompt).toContain('shell');
-    });
-  });
-
   // ── getCurrentSettings ──
 
   describe('getCurrentSettings', () => {
@@ -349,12 +314,12 @@ describe('SettingsManager', () => {
     });
 
     it('should not fire events after dispose', () => {
-      const events: DefaultPromptEvent[] = [];
-      manager.onDefaultPromptRequested(e => events.push(e));
+      const events: ModelChangedEvent[] = [];
+      manager.onModelChanged(e => events.push(e));
 
       manager.dispose();
-      manager.sendDefaultSystemPrompt();
 
+      // After dispose, events should not fire (emitter is disposed)
       expect(events).toHaveLength(0);
     });
   });

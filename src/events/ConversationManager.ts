@@ -45,6 +45,8 @@ export interface RichHistoryTurn {
   toolCalls?: Array<{ name: string; detail: string; status: string }>;
   shellResults?: Array<{ command: string; output: string; success: boolean }>;
   filesModified?: string[];
+  /** Edit mode active when this turn's file modifications were created */
+  editMode?: 'manual' | 'ask' | 'auto';
   model?: string;
   // User-only fields:
   files?: string[];
@@ -254,7 +256,7 @@ export class ConversationManager {
    * @param atSequence - Sequence number to fork at (must be a turn boundary)
    * @returns The newly created fork session
    */
-  async forkSession(parentSessionId: string, atSequence: number): Promise<Session> {
+  async forkSession(parentSessionId: string, atSequence: number): Promise<{ session: Session; forkEventType: string; lastUserMessage?: string }> {
     const parentSession = this.getSessionSync(parentSessionId);
     if (!parentSession) {
       throw new Error(`Cannot fork: parent session ${parentSessionId} not found`);
@@ -320,7 +322,12 @@ export class ConversationManager {
     );
     logger.sessionFork(parentSessionId, forkId, atSequence);
 
-    return (await this.getSession(forkId))!;
+    const session = (await this.getSession(forkId))!;
+    return {
+      session,
+      forkEventType: forkEvent.type,
+      lastUserMessage: forkEvent.type === 'user_message' ? (forkEvent as any).content : undefined
+    };
   }
 
   /**
@@ -693,13 +700,18 @@ export class ConversationManager {
             });
             toolCallMap.set(toolEvent.toolCallId, { name: 'shell', index: idx });
           } else if (toolEvent.toolName === '_file_modified') {
-            // File modification marker — extract file path
-            const filePath = (toolEvent.arguments as any)?.filePath || '';
+            // File modification marker — extract file path and editMode
+            const args = toolEvent.arguments as any;
+            const filePath = args?.filePath || '';
             if (filePath) {
               if (!currentAssistantTurn.filesModified) {
                 currentAssistantTurn.filesModified = [];
               }
               currentAssistantTurn.filesModified.push(filePath);
+              // Capture editMode from the first file modification event
+              if (!currentAssistantTurn.editMode && args?.editMode) {
+                currentAssistantTurn.editMode = args.editMode;
+              }
             }
             toolCallMap.set(toolEvent.toolCallId, { name: '_file_modified', index: -1 });
           } else {

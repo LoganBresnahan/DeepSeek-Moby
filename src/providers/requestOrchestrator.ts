@@ -34,6 +34,7 @@ import type {
   ShellResultsEvent,
 } from './types';
 import type { CommandApprovalManager } from './commandApprovalManager';
+import type { SavedPromptManager } from './savedPromptManager';
 
 export class RequestOrchestrator {
   // ── Events (streaming) ──
@@ -102,6 +103,7 @@ export class RequestOrchestrator {
     private webSearchManager: WebSearchManager,
     private fileContextManager: FileContextManager,
     private commandApprovalManager?: CommandApprovalManager,
+    private savedPromptManager?: SavedPromptManager,
   ) {
     // DiffManager needs to flush the content buffer before emitting events
     this.diffManager.setFlushCallback(() => {
@@ -120,7 +122,8 @@ export class RequestOrchestrator {
     message: string,
     currentSessionId: string | null,
     editorContextProvider: () => Promise<string>,
-    attachments?: Array<{ content: string; name: string; size: number }>
+    attachments?: Array<{ content: string; name: string; size: number }>,
+    options?: { skipRecord?: boolean }
   ): Promise<{ sessionId: string | null }> {
     // Clear processed code blocks and pending diffs for new conversation turn
     this.diffManager.clearProcessedBlocks();
@@ -145,7 +148,8 @@ export class RequestOrchestrator {
     }
 
     // Save user message to history (UI already shows it from frontend)
-    if (sessionId) {
+    // Skip when re-sending after fork (message already in event store)
+    if (sessionId && !options?.skipRecord) {
       await this.conversationManager.recordUserMessage(sessionId, message);
     }
 
@@ -473,9 +477,8 @@ export class RequestOrchestrator {
   ): Promise<string> {
     const isReasonerModel = this.deepSeekClient.isReasonerModel();
 
-    // Get custom system prompt from settings (if set)
-    const config = vscode.workspace.getConfiguration('deepseek');
-    const customSystemPrompt = config.get<string>('systemPrompt') || '';
+    // Get custom system prompt from DB (active saved prompt)
+    const customSystemPrompt = this.savedPromptManager?.getActiveContent() || '';
 
     let systemPrompt = `You are DeepSeek Moby, an expert programming assistant integrated into VS Code.\n`;
 
@@ -1013,11 +1016,12 @@ export class RequestOrchestrator {
             .filter(f => f.status === 'applied')
             .map(f => f.filePath)
         )];
+        const currentEditMode = this.diffManager.currentEditMode;
         for (const filePath of modifiedFiles) {
           const fileCallId = `fm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-          this.conversationManager.recordToolCall(sessionId, fileCallId, '_file_modified', { filePath });
+          this.conversationManager.recordToolCall(sessionId, fileCallId, '_file_modified', { filePath, editMode: currentEditMode });
           this.conversationManager.recordToolResult(sessionId, fileCallId, filePath, true);
-          logger.info(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} Recorded file modification: ${filePath}`);
+          logger.info(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} Recorded file modification: ${filePath} (editMode=${currentEditMode})`);
         }
 
         // 5. Record the assistant message with real model + finishReason

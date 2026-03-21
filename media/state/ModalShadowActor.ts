@@ -56,12 +56,14 @@ export const modalBaseStyles = `
     z-index: 10000;
     opacity: 0;
     visibility: hidden;
+    pointer-events: none;
     transition: opacity 0.2s ease, visibility 0.2s ease;
   }
 
   .modal-backdrop.visible {
     opacity: 1;
     visibility: visible;
+    pointer-events: auto;
   }
 
   /* Modal container - centered box */

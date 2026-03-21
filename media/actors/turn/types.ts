@@ -94,6 +94,8 @@ export interface PendingFile {
 export interface PendingGroup {
   containerId: string;
   files: Map<string, PendingFile>;
+  /** Edit mode at the time this group was created — determines display style permanently */
+  editMode: EditMode;
 }
 
 // ============================================

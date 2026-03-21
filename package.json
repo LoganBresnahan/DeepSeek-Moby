@@ -162,12 +162,6 @@
           "default": true,
           "description": "Enable color-coded log output"
         },
-        "deepseek.systemPrompt": {
-          "type": "string",
-          "default": "",
-          "description": "Custom system prompt to prepend to all requests (leave empty for default)",
-          "editPresentation": "multilineText"
-        },
         "deepseek.tavilySearchesPerPrompt": {
           "type": "number",
           "default": 1,
@@ -239,48 +233,8 @@
         "category": "DeepSeek Moby"
       },
       {
-        "command": "deepseek.explainCode",
-        "title": "[Experimental] DeepSeek Moby: Explain This Code",
-        "category": "DeepSeek Moby"
-      },
-      {
-        "command": "deepseek.refactorCode",
-        "title": "[Experimental] DeepSeek Moby: Refactor This Code",
-        "category": "DeepSeek Moby"
-      },
-      {
-        "command": "deepseek.documentCode",
-        "title": "[Experimental] DeepSeek Moby: Add Documentation",
-        "category": "DeepSeek Moby"
-      },
-      {
-        "command": "deepseek.fixBugs",
-        "title": "[Experimental] DeepSeek Moby: Find and Fix Bugs",
-        "category": "DeepSeek Moby"
-      },
-      {
-        "command": "deepseek.optimizeCode",
-        "title": "[Experimental] DeepSeek Moby: Optimize Performance",
-        "category": "DeepSeek Moby"
-      },
-      {
-        "command": "deepseek.generateTests",
-        "title": "[Experimental] DeepSeek Moby: Generate Tests",
-        "category": "DeepSeek Moby"
-      },
-      {
-        "command": "deepseek.clearConversation",
-        "title": "Clear Chat",
-        "category": "DeepSeek Moby"
-      },
-      {
         "command": "deepseek.newChat",
         "title": "New Chat",
-        "category": "DeepSeek Moby"
-      },
-      {
-        "command": "deepseek.insertCode",
-        "title": "[Experimental] DeepSeek Moby: Insert Generated Code",
         "category": "DeepSeek Moby"
       },
       {
@@ -314,11 +268,6 @@
         "category": "DeepSeek Moby"
       },
       {
-        "command": "deepseek.searchChatHistory",
-        "title": "DeepSeek Moby: Search Chat History",
-        "category": "DeepSeek Moby"
-      },
-      {
         "command": "deepseek.exportCurrentSession",
         "title": "DeepSeek Moby: Export Current Session",
         "category": "DeepSeek Moby"
@@ -340,38 +289,8 @@
         "icon": "$(list-unordered)"
       },
       {
-        "command": "deepseek.exportTrace",
-        "title": "DeepSeek Moby: Export Trace",
-        "category": "DeepSeek Moby"
-      },
-      {
-        "command": "deepseek.copyTrace",
-        "title": "DeepSeek Moby: Copy Trace to Clipboard",
-        "category": "DeepSeek Moby"
-      },
-      {
-        "command": "deepseek.viewTrace",
-        "title": "DeepSeek Moby: View Trace in Output",
-        "category": "DeepSeek Moby"
-      },
-      {
-        "command": "deepseek.clearTrace",
-        "title": "DeepSeek Moby: Clear Trace Buffer",
-        "category": "DeepSeek Moby"
-      },
-      {
-        "command": "deepseek.traceStats",
-        "title": "DeepSeek Moby: Trace Statistics",
-        "category": "DeepSeek Moby"
-      },
-      {
-        "command": "deepseek.exportLogsAI",
-        "title": "DeepSeek Moby: Export Logs (AI)",
-        "category": "DeepSeek Moby"
-      },
-      {
-        "command": "deepseek.exportLogsHuman",
-        "title": "DeepSeek Moby: Export Logs (Human)",
+        "command": "deepseek.exportLogs",
+        "title": "DeepSeek Moby: Export Logs",
         "category": "DeepSeek Moby"
       },
       {
@@ -396,33 +315,6 @@
       }
     ],
     "menus": {
-      "editor/context": [
-        {
-          "command": "deepseek.explainCode",
-          "when": "editorHasSelection",
-          "group": "DeepSeek"
-        },
-        {
-          "command": "deepseek.refactorCode",
-          "when": "editorHasSelection",
-          "group": "DeepSeek"
-        },
-        {
-          "command": "deepseek.documentCode",
-          "when": "editorHasSelection",
-          "group": "DeepSeek"
-        },
-        {
-          "command": "deepseek.fixBugs",
-          "when": "editorHasSelection",
-          "group": "DeepSeek"
-        },
-        {
-          "command": "deepseek.optimizeCode",
-          "when": "editorHasSelection",
-          "group": "DeepSeek"
-        }
-      ],
       "commandPalette": [
         {
           "command": "deepseek.startChat",

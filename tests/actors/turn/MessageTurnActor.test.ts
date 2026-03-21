@@ -151,7 +151,7 @@ describe('MessageTurnActor', () => {
 
       const containers = findContainers('text');
       const divider = queryInShadow(containers[0], '.message-divider-label');
-      expect(divider?.textContent).toBe('DEEPSEEK MOBY');
+      expect(divider?.textContent).toBe('MOBY');
     });
 
     it('updates text content', () => {

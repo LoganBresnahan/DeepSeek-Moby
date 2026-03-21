@@ -172,16 +172,20 @@ export class ContextBuilder {
         ?? snapshotSummary.tokenCount;
       this._tokenCache.set(snapshotSummary.snapshotId, summaryTokens);
 
-      if (usedTokens + summaryTokens <= availableBudget) {
+      const ackContent = 'I understand the context from our earlier conversation. Continuing from where we left off.';
+      const ackTokens = this.tokenCounter.countMessage('assistant', ackContent);
+      const injectionCost = summaryTokens + ackTokens;
+
+      if (usedTokens + injectionCost <= availableBudget) {
         includedMessages.unshift({
           role: 'user',
           content: `[Previous conversation context]\n${snapshotSummary.summary}`
         });
         includedMessages.splice(1, 0, {
           role: 'assistant',
-          content: 'I understand the context from our earlier conversation. Continuing from where we left off.'
+          content: ackContent
         });
-        usedTokens += summaryTokens;
+        usedTokens += injectionCost;
         summaryInjected = true;
       }
     }

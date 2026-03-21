@@ -79,5 +79,8 @@ export type { TurnData, PoolStats, VisibleRange, VirtualListConfig } from './vir
 export { DrawingServerShadowActor } from './drawing-server/DrawingServerShadowActor';
 export type { DrawingServerState } from './drawing-server/DrawingServerShadowActor';
 
+// System Prompt (modal for editing system prompt)
+export { SystemPromptModalActor } from './system-prompt';
+
 // Inspector - Dev-only tool, not exported from production actors
 // Access via: import { InspectorShadowActor } from './dev/inspector'

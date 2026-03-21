@@ -177,32 +177,51 @@ export class DiffManager {
     let document: vscode.TextDocument | undefined;
 
     if (targetFilePath) {
-      const workspaceFolders = vscode.workspace.workspaceFolders;
-      if (workspaceFolders && workspaceFolders.length > 0) {
-        for (const folder of workspaceFolders) {
-          const fullPath = vscode.Uri.joinPath(folder.uri, targetFilePath);
-          try {
-            document = await vscode.workspace.openTextDocument(fullPath);
-            this.lastActiveEditorUri = document.uri;
-            break;
-          } catch (error) {
-            continue;
-          }
-        }
+      const isAbsolute = path.isAbsolute(targetFilePath);
 
-        if (!document) {
-          logger.debug(`[DiffManager] File not found, creating new file: ${targetFilePath}`);
-          const newFileUri = vscode.Uri.joinPath(workspaceFolders[0].uri, targetFilePath);
-          const parentDir = vscode.Uri.joinPath(newFileUri, '..');
-          try { await vscode.workspace.fs.createDirectory(parentDir); } catch { /* exists */ }
-          await vscode.workspace.fs.writeFile(newFileUri, new Uint8Array());
-          document = await vscode.workspace.openTextDocument(newFileUri);
+      // Try absolute path first if the path is absolute
+      if (isAbsolute) {
+        try {
+          const absUri = vscode.Uri.file(targetFilePath);
+          document = await vscode.workspace.openTextDocument(absUri);
           this.lastActiveEditorUri = document.uri;
-          logger.debug(`[DiffManager] Created new file for diff: ${targetFilePath}`);
+        } catch {
+          // Fall through to workspace-relative resolution
         }
-      } else {
-        this._onWarning.fire({ message: 'No workspace folder open' });
-        return;
+      }
+
+      // Try workspace-relative resolution
+      if (!document) {
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        if (workspaceFolders && workspaceFolders.length > 0) {
+          for (const folder of workspaceFolders) {
+            const fullPath = vscode.Uri.joinPath(folder.uri, targetFilePath);
+            try {
+              document = await vscode.workspace.openTextDocument(fullPath);
+              this.lastActiveEditorUri = document.uri;
+              break;
+            } catch (error) {
+              continue;
+            }
+          }
+
+          if (!document) {
+            // File genuinely doesn't exist — create it
+            logger.debug(`[DiffManager] File not found, creating new file: ${targetFilePath}`);
+            const newFileUri = isAbsolute
+              ? vscode.Uri.file(targetFilePath)
+              : vscode.Uri.joinPath(workspaceFolders[0].uri, targetFilePath);
+            const parentDir = vscode.Uri.joinPath(newFileUri, '..');
+            try { await vscode.workspace.fs.createDirectory(parentDir); } catch { /* exists */ }
+            await vscode.workspace.fs.writeFile(newFileUri, new Uint8Array());
+            document = await vscode.workspace.openTextDocument(newFileUri);
+            this.lastActiveEditorUri = document.uri;
+            logger.debug(`[DiffManager] Created new file for diff: ${targetFilePath}`);
+          }
+        } else {
+          this._onWarning.fire({ message: 'No workspace folder open' });
+          return;
+        }
       }
     } else {
       if (!editor || editor.document.uri.scheme !== 'file') {
@@ -377,13 +396,26 @@ export class DiffManager {
 
         let document: vscode.TextDocument | undefined;
         let fileUri: vscode.Uri | undefined;
-        for (const folder of workspaceFolders) {
-          const fullPath = vscode.Uri.joinPath(folder.uri, targetFilePath);
+
+        // Try absolute path first
+        if (path.isAbsolute(targetFilePath)) {
           try {
-            document = await vscode.workspace.openTextDocument(fullPath);
-            fileUri = fullPath;
-            break;
-          } catch (error) { continue; }
+            const absUri = vscode.Uri.file(targetFilePath);
+            document = await vscode.workspace.openTextDocument(absUri);
+            fileUri = absUri;
+          } catch { /* fall through */ }
+        }
+
+        // Try workspace-relative
+        if (!document) {
+          for (const folder of workspaceFolders) {
+            const fullPath = vscode.Uri.joinPath(folder.uri, targetFilePath);
+            try {
+              document = await vscode.workspace.openTextDocument(fullPath);
+              fileUri = fullPath;
+              break;
+            } catch (error) { continue; }
+          }
         }
 
         if (!document || !fileUri) {
@@ -404,8 +436,13 @@ export class DiffManager {
         await vscode.workspace.applyEdit(edit);
         this.sendCodeAppliedStatus(result.success, result.success ? undefined : 'Patch applied with fallback');
 
-        // Open file in background so user can check the result
-        await vscode.window.showTextDocument(document, { preview: false, preserveFocus: true });
+        // Close the diff tab and focus the target file
+        if (targetMetadata) {
+          await this.closeSingleDiff(targetMetadata);
+          await this.focusTargetFile(targetMetadata.targetFilePath);
+        } else {
+          await vscode.window.showTextDocument(document, { preview: false, preserveFocus: true });
+        }
       } else {
         // No target file — fall back to active editor
         let editor = activeEditor;
@@ -489,17 +526,33 @@ export class DiffManager {
       }
 
       let fileUri: vscode.Uri | undefined;
-      for (const folder of workspaceFolders) {
-        const possibleUri = vscode.Uri.joinPath(folder.uri, metadata.targetFilePath);
+
+      // Try absolute path first
+      if (path.isAbsolute(metadata.targetFilePath)) {
+        const absUri = vscode.Uri.file(metadata.targetFilePath);
         try {
-          await vscode.workspace.fs.stat(possibleUri);
-          fileUri = possibleUri;
-          break;
-        } catch { /* continue */ }
+          await vscode.workspace.fs.stat(absUri);
+          fileUri = absUri;
+        } catch { /* fall through */ }
+      }
+
+      // Try workspace-relative
+      if (!fileUri) {
+        for (const folder of workspaceFolders) {
+          const possibleUri = vscode.Uri.joinPath(folder.uri, metadata.targetFilePath);
+          try {
+            await vscode.workspace.fs.stat(possibleUri);
+            fileUri = possibleUri;
+            break;
+          } catch { /* continue */ }
+        }
       }
 
       if (!fileUri) {
-        fileUri = vscode.Uri.joinPath(workspaceFolders[0].uri, metadata.targetFilePath);
+        // File genuinely doesn't exist — create it at the appropriate location
+        fileUri = path.isAbsolute(metadata.targetFilePath)
+          ? vscode.Uri.file(metadata.targetFilePath)
+          : vscode.Uri.joinPath(workspaceFolders[0].uri, metadata.targetFilePath);
         const parentDir = vscode.Uri.joinPath(fileUri, '..');
         try { await vscode.workspace.fs.createDirectory(parentDir); } catch { /* exists */ }
       }

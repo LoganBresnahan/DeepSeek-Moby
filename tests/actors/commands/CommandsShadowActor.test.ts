@@ -154,17 +154,17 @@ describe('CommandsShadowActor', () => {
     });
 
     it('sends executeCommand message when command is clicked', () => {
-      const commandItem = element.shadowRoot?.querySelector('.command-item[data-command="deepseek.newChat"]') as HTMLElement;
+      const commandItem = element.shadowRoot?.querySelector('.command-item[data-command="deepseek.exportChatHistory"]') as HTMLElement;
       commandItem?.click();
 
       expect(mockVSCode.postMessage).toHaveBeenCalledWith({
         type: 'executeCommand',
-        command: 'deepseek.newChat'
+        command: 'deepseek.exportChatHistory'
       });
     });
 
     it('closes popup after command execution', () => {
-      const commandItem = element.shadowRoot?.querySelector('.command-item[data-command="deepseek.newChat"]') as HTMLElement;
+      const commandItem = element.shadowRoot?.querySelector('.command-item[data-command="deepseek.exportChatHistory"]') as HTMLElement;
       commandItem?.click();
 
       expect(actor.isVisible()).toBe(false);
@@ -174,38 +174,10 @@ describe('CommandsShadowActor', () => {
       const handler = vi.fn();
       actor.onCommand(handler);
 
-      const commandItem = element.shadowRoot?.querySelector('.command-item[data-command="deepseek.newChat"]') as HTMLElement;
+      const commandItem = element.shadowRoot?.querySelector('.command-item[data-command="deepseek.exportChatHistory"]') as HTMLElement;
       commandItem?.click();
 
-      expect(handler).toHaveBeenCalledWith('deepseek.newChat');
-    });
-  });
-
-  describe('History command special handling', () => {
-    beforeEach(() => {
-      actor = new CommandsShadowActor(manager, element, mockVSCode);
-      actor.toggle();
-      mockVSCode.postMessage.mockClear();
-    });
-
-    it('opens history modal for showChatHistory command', () => {
-      const publishSpy = vi.spyOn(manager, 'publishDirect');
-
-      const commandItem = element.shadowRoot?.querySelector('.command-item[data-command="deepseek.showChatHistory"]') as HTMLElement;
-      commandItem?.click();
-
-      expect(publishSpy).toHaveBeenCalledWith('history.modal.open', true, expect.any(String));
-      // Should NOT send to extension
-      expect(mockVSCode.postMessage).not.toHaveBeenCalled();
-    });
-
-    it('opens history modal for searchChatHistory command', () => {
-      const publishSpy = vi.spyOn(manager, 'publishDirect');
-
-      const commandItem = element.shadowRoot?.querySelector('.command-item[data-command="deepseek.searchChatHistory"]') as HTMLElement;
-      commandItem?.click();
-
-      expect(publishSpy).toHaveBeenCalledWith('history.modal.open', true, expect.any(String));
+      expect(handler).toHaveBeenCalledWith('deepseek.exportChatHistory');
     });
   });
 

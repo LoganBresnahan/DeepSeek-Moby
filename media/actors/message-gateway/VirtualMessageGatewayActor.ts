@@ -27,7 +27,6 @@ import type { StreamingActor } from '../streaming';
 import type { SessionActor } from '../session';
 import type { EditModeActor } from '../edit-mode';
 import type { InputAreaShadowActor } from '../input-area/InputAreaShadowActor';
-import type { StatusPanelShadowActor } from '../status-panel/StatusPanelShadowActor';
 import type { ToolbarShadowActor } from '../toolbar/ToolbarShadowActor';
 import type { HistoryShadowActor } from '../history';
 import type { VirtualListActor } from '../virtual-list';
@@ -48,7 +47,6 @@ export interface VirtualActorRefs {
   editMode: EditModeActor;
   virtualList: VirtualListActor;
   inputArea: InputAreaShadowActor;
-  statusPanel: StatusPanelShadowActor;
   toolbar: ToolbarShadowActor;
   history: HistoryShadowActor;
 }
@@ -143,7 +141,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
   // ============================================
 
   private handleMessage(msg: { type: string; [key: string]: unknown }): void {
-    const { streaming, session, virtualList, statusPanel, toolbar } = this._actors;
+    const { streaming, session, virtualList, toolbar } = this._actors;
 
     // Log and trace key lifecycle messages (not per-chunk streaming messages)
     const lifecycleTypes = [
@@ -294,6 +292,10 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         });
         break;
 
+      case 'savedPrompts':
+        this._manager.publishDirect('savedPrompts.list', msg.prompts || []);
+        break;
+
       case 'settingsReset':
         this._vscode.postMessage({ type: 'getSettings' });
         break;
@@ -307,15 +309,15 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         break;
 
       case 'webSearching':
-        statusPanel.showMessage(`Searching the web (${msg.current}/${msg.total})...`);
+        this._manager.publishDirect('status.message', { type: 'info', message: `Searching the web (${msg.current}/${msg.total})...` });
         break;
 
       case 'webSearchComplete':
-        statusPanel.showMessage('Web search complete');
+        this._manager.publishDirect('status.message', { type: 'info', message: 'Web search complete' });
         break;
 
       case 'webSearchCached':
-        statusPanel.showMessage('Using cached search results');
+        this._manager.publishDirect('status.message', { type: 'info', message: 'Using cached search results' });
         break;
 
       // ---- File Messages ----
@@ -333,15 +335,15 @@ export class VirtualMessageGatewayActor extends EventStateActor {
 
       // ---- Status Messages ----
       case 'error':
-        statusPanel.showError((msg.error || msg.message || 'An error occurred') as string);
+        this._manager.publishDirect('status.message', { type: 'error', message: (msg.error || msg.message || 'An error occurred') as string });
         break;
 
       case 'warning':
-        statusPanel.showWarning(msg.message as string);
+        this._manager.publishDirect('status.message', { type: 'warning', message: msg.message as string });
         break;
 
       case 'statusMessage':
-        statusPanel.showMessage(msg.message as string);
+        this._manager.publishDirect('status.message', { type: 'info', message: msg.message as string });
         break;
 
       case 'generationStopped':
@@ -405,7 +407,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         break;
 
       case 'sessionForked':
-        this.showForkToast(msg.parentTitle as string);
+        this._manager.publishDirect('status.message', { type: 'info', message: `Forked from "${msg.parentTitle}"` });
         break;
 
       // ---- Trace Messages ----
@@ -977,6 +979,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       toolCalls?: Array<{ name: string; detail: string; status: string }>;
       shellResults?: Array<{ command: string; output: string; success: boolean }>;
       filesModified?: string[];
+      editMode?: 'manual' | 'ask' | 'auto';
       model?: string;
       timestamp?: number;
       sequence?: number;
@@ -1043,7 +1046,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
               // File modifications (appear after shells, before final text)
               if (m.filesModified && m.filesModified.length > 0) {
                 for (const filePath of m.filesModified) {
-                  virtualList.addPendingFile(turnId, { filePath, status: 'applied' });
+                  virtualList.addPendingFile(turnId, { filePath, status: 'applied', editMode: m.editMode });
                 }
               }
 
@@ -1073,7 +1076,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
 
               if (m.filesModified && m.filesModified.length > 0) {
                 for (const filePath of m.filesModified) {
-                  virtualList.addPendingFile(turnId, { filePath, status: 'applied' });
+                  virtualList.addPendingFile(turnId, { filePath, status: 'applied', editMode: m.editMode });
                 }
               }
 
@@ -1126,27 +1129,6 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         virtualList.updateTurnSequence(turnId, assistantSequence);
       }
     }
-  }
-
-  private showForkToast(parentTitle: string): void {
-    const container = document.getElementById('toastContainer');
-    if (!container) return;
-
-    const escapedTitle = parentTitle.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    const toast = document.createElement('div');
-    toast.className = 'toast fork-toast';
-    toast.innerHTML = `
-      <div class="toast-content">
-        <span class="toast-message">Forked from "${escapedTitle}"</span>
-      </div>
-      <button class="toast-close">&times;</button>
-    `;
-
-    container.innerHTML = '';
-    container.appendChild(toast);
-
-    toast.querySelector('.toast-close')?.addEventListener('click', () => { container.innerHTML = ''; });
-    setTimeout(() => { toast.classList.add('fading'); setTimeout(() => container.innerHTML = '', 300); }, 5000);
   }
 
   // ============================================

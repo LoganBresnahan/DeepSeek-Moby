@@ -796,6 +796,7 @@ body {
   flex-direction: column;
   padding: 8px;
   background: var(--vscode-sideBar-background);
+  position: relative;
 }
 
 .shadow-actors-row {
@@ -815,11 +816,15 @@ body {
   gap: 8px;
   flex: 1;
   min-width: 0;
+  overflow: visible;
 }
 
 .input-area-container {
-  flex: 1;
+  flex: 0 0 auto;
   min-width: 0;
+  height: 68px; /* matches textarea min-height — fixed footprint */
+  position: relative;
+  overflow: visible; /* allow shadow content to grow upward */
 }
 
 .status-panel-container {

@@ -15,6 +15,7 @@ import { SettingsManager } from './settingsManager';
 import { RequestOrchestrator } from './requestOrchestrator';
 import { CommandApprovalManager } from './commandApprovalManager';
 import { DrawingServer } from './drawingServer';
+import { SavedPromptManager } from './savedPromptManager';
 import { qrcodegen } from '../vendor/qrcodegen';
 
 export class ChatProvider implements vscode.WebviewViewProvider {
@@ -37,6 +38,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
   private settingsManager: SettingsManager;
   private requestOrchestrator: RequestOrchestrator;
   private commandApprovalManager: CommandApprovalManager;
+  private savedPromptManager: SavedPromptManager;
   private drawingServer: DrawingServer | null = null;
 
   constructor(
@@ -68,10 +70,13 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       this.conversationManager.getDatabase(),
       this.conversationManager.getGlobalState()
     );
+    this.savedPromptManager = new SavedPromptManager(
+      this.conversationManager.getDatabase()
+    );
     this.requestOrchestrator = new RequestOrchestrator(
       this.deepSeekClient, this.conversationManager, this.statusBar,
       this.diffManager, this.webSearchManager, this.fileContextManager,
-      this.commandApprovalManager
+      this.commandApprovalManager, this.savedPromptManager
     );
 
     // Wire manager events → webview
@@ -211,9 +216,6 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     });
     this.settingsManager.onModelChanged(data => {
       this._view?.webview.postMessage({ type: 'modelChanged', model: data.model });
-    });
-    this.settingsManager.onDefaultPromptRequested(data => {
-      this._view?.webview.postMessage({ type: 'defaultSystemPrompt', model: data.model, prompt: data.prompt });
     });
     this.settingsManager.onSettingsReset(() => {
       this.webSearchManager.resetToDefaults();
@@ -451,10 +453,49 @@ export class ChatProvider implements vscode.WebviewViewProvider {
           await this.settingsManager.updateReasonerSettings({ allowAllCommands: data.enabled });
           break;
         case 'setSystemPrompt':
-          await this.settingsManager.updateSystemPrompt(data.systemPrompt);
+          // Save as active prompt in DB (create or update)
+          {
+            const active = this.savedPromptManager.getActive();
+            if (active) {
+              this.savedPromptManager.update(active.id, active.name, data.systemPrompt, active.model ?? undefined);
+            } else if (data.systemPrompt.trim()) {
+              this.savedPromptManager.save('Custom Prompt', data.systemPrompt);
+            }
+          }
           break;
-        case 'getDefaultSystemPrompt':
-          this.settingsManager.sendDefaultSystemPrompt();
+        case 'getSavedPrompts':
+          this._view?.webview.postMessage({
+            type: 'savedPrompts',
+            prompts: this.savedPromptManager.getAll()
+          });
+          break;
+        case 'savePrompt':
+          this.savedPromptManager.save(data.name, data.content, data.model);
+          this._view?.webview.postMessage({
+            type: 'savedPrompts',
+            prompts: this.savedPromptManager.getAll()
+          });
+          break;
+        case 'updateSavedPrompt':
+          this.savedPromptManager.update(data.id, data.name, data.content, data.model);
+          this._view?.webview.postMessage({
+            type: 'savedPrompts',
+            prompts: this.savedPromptManager.getAll()
+          });
+          break;
+        case 'deleteSavedPrompt':
+          this.savedPromptManager.delete(data.id);
+          this._view?.webview.postMessage({
+            type: 'savedPrompts',
+            prompts: this.savedPromptManager.getAll()
+          });
+          break;
+        case 'setActivePrompt':
+          if (data.id) {
+            this.savedPromptManager.setActive(data.id);
+          } else {
+            this.savedPromptManager.clearActive();
+          }
           break;
         case 'getSettings':
           this.sendCurrentSettings();
@@ -836,6 +877,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       this._view.webview.postMessage({
         type: 'settings',
         ...snapshot,
+        systemPrompt: this.savedPromptManager.getActiveContent(),
         webSearch: {
           searchDepth: wsState.settings.searchDepth,
           creditsPerPrompt: wsState.settings.creditsPerPrompt,
@@ -1104,19 +1146,32 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       const parentTitle = parentSession?.title || 'Unknown';
       const parentId = this.currentSessionId;
 
-      const fork = await this.conversationManager.forkSession(this.currentSessionId, atSequence);
-      logger.info(`[ChatProvider] forkSession: ${parentId.substring(0, 8)} → ${fork.id.substring(0, 8)} at seq=${atSequence}`);
+      const { session: fork, forkEventType, lastUserMessage } = await this.conversationManager.forkSession(this.currentSessionId, atSequence);
+      logger.info(`[ChatProvider] forkSession: ${parentId.substring(0, 8)} → ${fork.id.substring(0, 8)} at seq=${atSequence} (type=${forkEventType})`);
       logger.sessionFork(parentId, fork.id, atSequence);
 
       await this.loadSession(fork.id);
 
-      // Toast notification
+      // Status panel notification
       this._view?.webview.postMessage({
         type: 'sessionForked',
         forkId: fork.id,
         parentId,
         parentTitle
       });
+
+      // Auto-send: if forking from a user message, automatically get a new response
+      if (forkEventType === 'user_message' && lastUserMessage) {
+        logger.info(`[ChatProvider] Fork auto-send: re-sending user message (${lastUserMessage.length} chars)`);
+        await this.requestOrchestrator.handleMessage(
+          lastUserMessage, this.currentSessionId,
+          () => this.fileContextManager.getEditorContext(),
+          undefined,
+          { skipRecord: true }
+        );
+        // Drain any queued messages
+        await this.drainQueue();
+      }
     } catch (error: any) {
       logger.error(`[ChatProvider] Fork failed: ${error.message}`);
       this._view?.webview.postMessage({ type: 'error', error: `Fork failed: ${error.message}` });

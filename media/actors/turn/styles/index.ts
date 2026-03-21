@@ -72,27 +72,25 @@ const textStyles = `
   margin-top: 8px;
 }
 
-/* Divider with centered label */
+/* Role divider — left-aligned label */
 .message-divider {
   display: flex;
   align-items: center;
+  gap: 8px;
   margin-bottom: 5px;
 }
 
-.message-divider::before,
-.message-divider::after {
-  content: '';
-  flex: 1;
-  border-bottom: 1px dashed var(--vscode-panel-border, #3c3c3c);
-}
-
 .message-divider-label {
-  padding: 0 12px;
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   color: var(--vscode-descriptionForeground, #8b8b8b);
+}
+
+/* User message content in italics to distinguish from assistant */
+.message.user .content {
+  font-style: italic;
 }
 
 /* Fork button — hidden by default, visible on host hover */
@@ -101,8 +99,8 @@ const textStyles = `
   border: none;
   color: var(--vscode-descriptionForeground, #8b8b8b);
   cursor: pointer;
-  font-size: 14px;
-  padding: 0 4px;
+  font-size: 16px;
+  padding: 0 2px;
   opacity: 0;
   transition: opacity 0.15s ease;
 }
@@ -170,7 +168,7 @@ const textStyles = `
 }
 
 .code-header:hover {
-  background: var(--vscode-list-hoverBackground);
+  /* hover highlight removed — clickable affordance provided by cursor: pointer */
 }
 
 .code-toggle {
@@ -437,12 +435,10 @@ const thinkingStyles = `
   margin: 8px 0;
   border: 1px dotted var(--vscode-panel-border);
   border-radius: 4px;
-  cursor: pointer;
-  user-select: none;
 }
 
 :host(.thinking-container:hover) .thinking-header {
-  background: var(--vscode-list-hoverBackground);
+  /* hover highlight removed */
 }
 
 .thinking-header {
@@ -450,6 +446,8 @@ const thinkingStyles = `
   align-items: center;
   padding: 6px 10px;
   gap: 8px;
+  cursor: pointer;
+  user-select: none;
 }
 
 .thinking-toggle {
@@ -520,19 +518,19 @@ const toolsStyles = `
   margin: 8px 0;
   border: 1px dotted var(--vscode-panel-border);
   border-radius: 4px;
-  cursor: pointer;
-  user-select: none;
 }
 
 :host(.tools-container:hover) .tools-header {
-  background: var(--vscode-list-hoverBackground);
+  /* hover highlight removed */
 }
 
 .tools-header {
   display: flex;
   align-items: center;
-  padding: 6px 10px;
+  padding: 0 10px;
   gap: 8px;
+  cursor: pointer;
+  user-select: none;
 }
 
 .tools-toggle {
@@ -653,12 +651,10 @@ const shellStyles = `
   margin: 8px 0;
   border: 1px dotted var(--vscode-panel-border);
   border-radius: 4px;
-  cursor: pointer;
-  user-select: none;
 }
 
 :host(.shell-container:hover) .shell-header {
-  background: var(--vscode-list-hoverBackground);
+  /* hover highlight removed */
 }
 
 .shell-header {
@@ -666,6 +662,8 @@ const shellStyles = `
   align-items: center;
   padding: 6px 10px;
   gap: 8px;
+  cursor: pointer;
+  user-select: none;
 }
 
 .shell-toggle {
@@ -808,19 +806,19 @@ const pendingStyles = `
   margin: 8px 0;
   border: 1px dotted var(--vscode-panel-border);
   border-radius: 4px;
-  cursor: pointer;
-  user-select: none;
 }
 
 :host(.pending-container:hover) .pending-header {
-  background: var(--vscode-list-hoverBackground);
+  /* hover highlight removed */
 }
 
 .pending-header {
   display: flex;
   align-items: center;
-  padding: 6px 10px;
+  padding: 0 10px;
   gap: 8px;
+  cursor: pointer;
+  user-select: none;
 }
 
 .pending-toggle {

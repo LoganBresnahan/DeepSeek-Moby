@@ -104,15 +104,6 @@ function createMockInputAreaActor() {
   return { destroy: vi.fn() };
 }
 
-function createMockStatusPanelActor() {
-  return {
-    showError: vi.fn(),
-    showWarning: vi.fn(),
-    showMessage: vi.fn(),
-    destroy: vi.fn()
-  };
-}
-
 function createMockToolbarActor() {
   return {
     setEditMode: vi.fn(),
@@ -158,7 +149,6 @@ describe('VirtualMessageGatewayActor', () => {
       editMode: createMockEditModeActor() as unknown as VirtualActorRefs['editMode'],
       virtualList: createMockVirtualListActor() as unknown as VirtualActorRefs['virtualList'],
       inputArea: createMockInputAreaActor() as unknown as VirtualActorRefs['inputArea'],
-      statusPanel: createMockStatusPanelActor() as unknown as VirtualActorRefs['statusPanel'],
       toolbar: createMockToolbarActor() as unknown as VirtualActorRefs['toolbar'],
       history: createMockHistoryActor() as unknown as VirtualActorRefs['history']
     };
@@ -447,22 +437,25 @@ describe('VirtualMessageGatewayActor', () => {
   });
 
   describe('status messages', () => {
-    it('routes error to status panel', () => {
+    it('routes error to status panel via pub/sub', () => {
+      const spy = vi.spyOn(manager, 'publishDirect');
       dispatchMessage({ type: 'error', error: 'API error' });
 
-      expect(mockActors.statusPanel.showError).toHaveBeenCalledWith('API error');
+      expect(spy).toHaveBeenCalledWith('status.message', { type: 'error', message: 'API error' });
     });
 
-    it('routes warning to status panel', () => {
+    it('routes warning to status panel via pub/sub', () => {
+      const spy = vi.spyOn(manager, 'publishDirect');
       dispatchMessage({ type: 'warning', message: 'Rate limited' });
 
-      expect(mockActors.statusPanel.showWarning).toHaveBeenCalledWith('Rate limited');
+      expect(spy).toHaveBeenCalledWith('status.message', { type: 'warning', message: 'Rate limited' });
     });
 
-    it('routes statusMessage to status panel', () => {
+    it('routes statusMessage to status panel via pub/sub', () => {
+      const spy = vi.spyOn(manager, 'publishDirect');
       dispatchMessage({ type: 'statusMessage', message: 'Processing...' });
 
-      expect(mockActors.statusPanel.showMessage).toHaveBeenCalledWith('Processing...');
+      expect(spy).toHaveBeenCalledWith('status.message', { type: 'info', message: 'Processing...' });
     });
   });
 

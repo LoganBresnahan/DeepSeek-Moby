@@ -24,6 +24,7 @@ import {
   FilesShadowActor,
   CommandsShadowActor,
   CommandRulesModalActor,
+  SystemPromptModalActor,
   ModelSelectorShadowActor,
   SettingsShadowActor,
   DrawingServerShadowActor
@@ -218,6 +219,13 @@ function initializeActorSystem(): void {
   document.body.appendChild(rulesHost);
   const commandRules = new CommandRulesModalActor(manager, rulesHost, vscode);
 
+  // SystemPromptModalActor - System prompt editor modal
+  const systemPromptHost = document.createElement('div');
+  systemPromptHost.id = 'systemPromptHost';
+  systemPromptHost.style.cssText = 'position: fixed; top: 0; left: 0; width: 0; height: 0;';
+  document.body.appendChild(systemPromptHost);
+  const systemPromptModal = new SystemPromptModalActor(manager, systemPromptHost, vscode);
+
   // CommandsShadowActor - Commands dropdown (positioned relative to button)
   const commandsHost = getElementOrNull<HTMLElement>('commandsBtn')?.parentElement;
   let commands: CommandsShadowActor | null = null;
@@ -375,7 +383,6 @@ function initializeActorSystem(): void {
     editMode: editModeActor,
     virtualList,
     inputArea,
-    statusPanel,
     toolbar,
     history,
   });
@@ -457,6 +464,7 @@ function initializeActorSystem(): void {
     history,
     files,
     commandRules,
+    systemPromptModal,
     commands,
     modelSelector,
     settings,

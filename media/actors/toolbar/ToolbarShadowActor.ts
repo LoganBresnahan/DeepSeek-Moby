@@ -282,6 +282,20 @@ export class ToolbarShadowActor extends ShadowActor {
       sendBtn.style.display = streaming ? 'none' : 'flex';
       stopBtn.style.display = streaming ? 'flex' : 'none';
     }
+
+    // Disable edit mode and plan buttons during streaming
+    const editBtn = this.query<HTMLButtonElement>('.edit-mode-btn');
+    const planBtn = this.query<HTMLButtonElement>('.plan-btn');
+    if (editBtn) {
+      editBtn.disabled = streaming;
+      editBtn.style.opacity = streaming ? '0.4' : '';
+      editBtn.style.pointerEvents = streaming ? 'none' : '';
+    }
+    if (planBtn) {
+      planBtn.disabled = streaming;
+      planBtn.style.opacity = streaming ? '0.4' : '';
+      planBtn.style.pointerEvents = streaming ? 'none' : '';
+    }
   }
 
   // ============================================

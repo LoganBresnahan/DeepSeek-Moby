@@ -855,7 +855,7 @@ export class VirtualListActor extends EventStateActor {
   /**
    * Add a pending file.
    */
-  addPendingFile(turnId: string, file: { filePath: string; diffId?: string; status?: 'pending' | 'applied' | 'rejected' | 'superseded' | 'error' }): string | null {
+  addPendingFile(turnId: string, file: { filePath: string; diffId?: string; status?: 'pending' | 'applied' | 'rejected' | 'superseded' | 'error'; editMode?: 'manual' | 'ask' | 'auto' }): string | null {
     const turn = this._turnMap.get(turnId);
     if (!turn) {
       log.warn(`addPendingFile: turn ${turnId} not found`);
@@ -874,7 +874,8 @@ export class VirtualListActor extends EventStateActor {
       fileName,
       diffId: file.diffId,
       status: file.status ?? 'pending',
-      iteration: fileIndex + 1
+      iteration: fileIndex + 1,
+      editMode: file.editMode ?? this._editMode
     };
 
     turn.pendingFiles.push(pendingFile);
@@ -882,7 +883,7 @@ export class VirtualListActor extends EventStateActor {
 
     const bound = this._boundActors.get(turnId);
     if (bound) {
-      bound.actor.addPendingFile({ ...file, status: pendingFile.status });
+      bound.actor.addPendingFile({ ...file, status: pendingFile.status, editMode: pendingFile.editMode });
     }
 
     return fileId;
@@ -1193,7 +1194,8 @@ export class VirtualListActor extends EventStateActor {
             actor.addPendingFile({
               filePath: file.filePath,
               diffId: file.diffId,
-              status: file.status
+              status: file.status,
+              editMode: file.editMode
             });
           }
           break;
@@ -1321,7 +1323,8 @@ export class VirtualListActor extends EventStateActor {
   setEditMode(mode: EditMode): void {
     this._editMode = mode;
 
-    // Update all bound actors
+    // Update all bound actors — this affects code block display (Apply/Diff buttons)
+    // but NOT pending file groups (they retain their original editMode from creation time)
     for (const bound of this._boundActors.values()) {
       bound.actor.setEditMode(mode);
     }

@@ -132,16 +132,8 @@ export async function activate(context: vscode.ExtensionContext) {
 function registerCommands(context: vscode.ExtensionContext) {
   const commands = [
     { name: 'startChat', handler: () => chatProvider.reveal() },
-    { name: 'explainCode', handler: () => commandProvider.explainCode() },
-    { name: 'refactorCode', handler: () => commandProvider.refactorCode() },
-    { name: 'documentCode', handler: () => commandProvider.documentCode() },
-    { name: 'fixBugs', handler: () => commandProvider.fixBugs() },
-    { name: 'optimizeCode', handler: () => commandProvider.optimizeCode() },
-    { name: 'generateTests', handler: () => commandProvider.generateTests() },
-    { name: 'clearConversation', handler: () => chatProvider.clearConversation() },
     { name: 'newChat', handler: () => chatProvider.clearConversation() },
     { name: 'switchModel', handler: () => commandProvider.switchModel() },
-    { name: 'insertCode', handler: () => commandProvider.insertCode() },
     
     // Chat History Commands
     { name: 'showChatHistory', handler: () => chatProvider.openHistoryModal() },
@@ -149,21 +141,12 @@ function registerCommands(context: vscode.ExtensionContext) {
     { name: 'exportChatHistory', handler: () => commandProvider.exportChatHistory() },
     { name: 'importChatHistory', handler: () => commandProvider.importChatHistory() },
     { name: 'clearChatHistory', handler: () => commandProvider.clearChatHistory() },
-    { name: 'searchChatHistory', handler: () => chatProvider.openHistoryModal() },
     { name: 'exportCurrentSession', handler: () => commandProvider.exportCurrentSession() },
     { name: 'showStats', handler: () => chatProvider.showStats() },
     { name: 'showLogs', handler: () => logger.show() },
 
-    // Trace Export Commands
-    { name: 'exportTrace', handler: () => commandProvider.exportTraceToFile() },
-    { name: 'copyTrace', handler: () => commandProvider.copyTraceToClipboard() },
-    { name: 'viewTrace', handler: () => commandProvider.viewTraceInOutput() },
-    { name: 'clearTrace', handler: () => commandProvider.clearTraces() },
-    { name: 'traceStats', handler: () => commandProvider.showTraceStats() },
-
-    // Unified Log Export Commands
-    { name: 'exportLogsAI', handler: () => UnifiedLogExporter.exportForAI() },
-    { name: 'exportLogsHuman', handler: () => UnifiedLogExporter.exportForHuman() },
+    // Unified Log Export
+    { name: 'exportLogs', handler: () => UnifiedLogExporter.exportForHuman() },
 
     // Diff quick pick command
     { name: 'showDiffQuickPick', handler: async () => {
