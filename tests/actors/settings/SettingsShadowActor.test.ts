@@ -142,38 +142,6 @@ describe('SettingsShadowActor', () => {
     });
   });
 
-  describe('Reset to Defaults', () => {
-    beforeEach(() => {
-      actor = new SettingsShadowActor(manager, element, mockVSCode);
-      actor.toggle();
-      mockVSCode.postMessage.mockClear();
-    });
-
-    it('renders reset defaults button', () => {
-      const btn = element.shadowRoot?.querySelector('[data-action="resetDefaults"]');
-      expect(btn).toBeTruthy();
-    });
-
-    it('confirms before resetting', () => {
-      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
-
-      const btn = element.shadowRoot?.querySelector('[data-action="resetDefaults"]') as HTMLElement;
-      btn?.click();
-
-      expect(confirmSpy).toHaveBeenCalled();
-      expect(mockVSCode.postMessage).not.toHaveBeenCalledWith({ type: 'resetAllSettings' });
-    });
-
-    it('resets when confirmed', () => {
-      vi.spyOn(window, 'confirm').mockReturnValue(true);
-
-      const btn = element.shadowRoot?.querySelector('[data-action="resetDefaults"]') as HTMLElement;
-      btn?.click();
-
-      expect(mockVSCode.postMessage).toHaveBeenCalledWith({ type: 'resetAllSettings' });
-    });
-  });
-
   describe('Settings sync via pub/sub', () => {
     beforeEach(() => {
       actor = new SettingsShadowActor(manager, element, mockVSCode);

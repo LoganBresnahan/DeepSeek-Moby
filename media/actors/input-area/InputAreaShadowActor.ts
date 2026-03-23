@@ -207,6 +207,8 @@ export class InputAreaShadowActor extends ShadowActor {
       if (!alreadyInterrupting) {
         this._onStop?.();
         this._vscode?.postMessage({ type: 'stopGeneration' });
+        // Show status feedback
+        this.manager.publishDirect('status.message', { type: 'info', message: 'Interrupting... your message will be sent next' });
       }
       return;
     }

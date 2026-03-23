@@ -201,6 +201,12 @@ export const filesShadowStyles = `
     background: var(--vscode-button-secondaryHoverBackground);
   }
 
+  .footer-hint {
+    font-size: 11px;
+    color: var(--vscode-descriptionForeground);
+    font-style: italic;
+  }
+
   /* Scrollbar */
   .open-files-list::-webkit-scrollbar,
   .file-search-results::-webkit-scrollbar {

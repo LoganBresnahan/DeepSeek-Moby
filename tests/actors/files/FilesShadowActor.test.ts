@@ -281,46 +281,6 @@ describe('FilesShadowActor', () => {
     });
   });
 
-  describe('Add/Cancel buttons', () => {
-    beforeEach(() => {
-      actor = new FilesShadowActor(manager, element, mockVSCode);
-      actor.open();
-    });
-
-    it('Add button is disabled when no files selected', () => {
-      const addBtn = element.shadowRoot?.querySelector('[data-action="add"]') as HTMLButtonElement;
-      expect(addBtn?.disabled).toBe(true);
-    });
-
-    it('Add button is enabled when files are selected', () => {
-      manager.publishDirect('files.content', { path: 'test.ts', content: 'code' });
-
-      const addBtn = element.shadowRoot?.querySelector('[data-action="add"]') as HTMLButtonElement;
-      expect(addBtn?.disabled).toBe(false);
-    });
-
-    it('Cancel button closes modal', () => {
-      const cancelBtn = element.shadowRoot?.querySelector('[data-action="cancel"]') as HTMLElement;
-      cancelBtn?.click();
-
-      expect(actor.isVisible()).toBe(false);
-    });
-
-    it('Add button sends selected files and closes', () => {
-      manager.publishDirect('files.content', { path: 'test.ts', content: 'const x = 1;' });
-      mockVSCode.postMessage.mockClear();
-
-      const addBtn = element.shadowRoot?.querySelector('[data-action="add"]') as HTMLElement;
-      addBtn?.click();
-
-      expect(mockVSCode.postMessage).toHaveBeenCalledWith({
-        type: 'setSelectedFiles',
-        files: [{ path: 'test.ts', content: 'const x = 1;' }]
-      });
-      expect(actor.isVisible()).toBe(false);
-    });
-  });
-
   describe('Clear selection', () => {
     beforeEach(() => {
       actor = new FilesShadowActor(manager, element, mockVSCode);

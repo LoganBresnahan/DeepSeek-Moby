@@ -49,6 +49,7 @@ export const popupBaseStyles = `
     top: 100%;
     left: 0;
     margin-top: 4px;
+    pointer-events: auto;
     background: var(--vscode-dropdown-background, var(--vscode-editor-background));
     border: 1px solid var(--vscode-dropdown-border, var(--vscode-widget-border, #454545));
     border-radius: 6px;
@@ -300,6 +301,9 @@ export interface PopupConfig {
 
   /** The visible state key to publish (e.g., 'commands.popup.visible') */
   visibleStateKey: string;
+
+  /** Element that triggers this popup — clicks on it are excluded from outside-click detection */
+  triggerElement?: HTMLElement;
 }
 
 // ============================================
@@ -441,20 +445,21 @@ export abstract class PopupShadowActor extends ShadowActor {
   }
 
   private handleOutsideClick(e: MouseEvent): void {
-    const target = e.target as HTMLElement;
+    const path = e.composedPath();
 
     // Check if click is inside this popup's shadow DOM
-    const path = e.composedPath();
     const clickedInsidePopup = path.some(el => {
       if (el instanceof HTMLElement) {
         return el === this.element || this.shadow.contains(el);
       }
       return false;
     });
+    if (clickedInsidePopup) return;
 
-    if (!clickedInsidePopup) {
-      this.close();
-    }
+    // Check if click is on the trigger element (may be in another shadow DOM)
+    if (this._config.triggerElement && path.includes(this._config.triggerElement)) return;
+
+    this.close();
   }
 
   private handleOpenRequest(open: boolean): void {
@@ -480,6 +485,28 @@ export abstract class PopupShadowActor extends ShadowActor {
     const container = this.query<HTMLElement>('[data-popup-container]');
     if (container) {
       container.classList.add('visible');
+
+      // When triggerElement is set, use fixed positioning to escape clipping contexts
+      if (this._config.triggerElement) {
+        const rect = this._config.triggerElement.getBoundingClientRect();
+        const position = this._config.position || 'bottom-left';
+        container.style.position = 'fixed';
+
+        if (position.includes('top')) {
+          container.style.bottom = `${window.innerHeight - rect.top + 4}px`;
+          container.style.top = 'auto';
+        } else {
+          container.style.top = `${rect.bottom + 4}px`;
+          container.style.bottom = 'auto';
+        }
+
+        if (position.includes('right')) {
+          container.style.right = `${window.innerWidth - rect.right}px`;
+          container.style.left = 'auto';
+        } else {
+          container.style.left = `${rect.left}px`;
+        }
+      }
     }
 
     // Add event listeners (use capture phase for outside click)
@@ -542,6 +569,24 @@ export abstract class PopupShadowActor extends ShadowActor {
 
   isVisible(): boolean {
     return this._visible;
+  }
+
+  /**
+   * Set the trigger element for this popup.
+   *
+   * When set, the popup automatically:
+   * - Moves its host to document.body (escapes stacking contexts)
+   * - Uses fixed positioning relative to the trigger on each open
+   * - Excludes the trigger from outside-click detection
+   */
+  setTriggerElement(el: HTMLElement): void {
+    this._config.triggerElement = el;
+
+    // Move host to document.body so it escapes any ancestor stacking/clipping contexts
+    if (this.element.parentElement !== document.body) {
+      this.element.style.cssText = 'position: fixed; z-index: 9000; pointer-events: none;';
+      document.body.appendChild(this.element);
+    }
   }
 
   // ============================================

@@ -326,11 +326,13 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         break;
 
       case 'searchResults':
-        this._manager.publishDirect('files.searchResults', msg.results || []);
+        // Include timestamp to bypass EventStateManager dedup (same query can produce same results)
+        this._manager.publishDirect('files.searchResults', { results: msg.results || [], _ts: Date.now() });
         break;
 
       case 'fileContent':
-        this._manager.publishDirect('files.content', { path: msg.filePath, content: msg.content });
+        // Include timestamp to bypass dedup (same file can be re-requested after deselection)
+        this._manager.publishDirect('files.content', { path: msg.filePath, content: msg.content, _ts: Date.now() });
         break;
 
       // ---- Status Messages ----
@@ -390,6 +392,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
           url: msg.url,
           qrMatrix: msg.qrMatrix,
           isWSL: msg.isWSL,
+          portForwardCmd: msg.portForwardCmd,
         });
         break;
 
@@ -399,6 +402,11 @@ export class VirtualMessageGatewayActor extends EventStateActor {
 
       case 'asciiDrawingReceived':
         this.handleAsciiDrawingReceived(msg);
+        break;
+
+      // ---- Plan Messages ----
+      case 'planState':
+        this._manager.publishDirect('plans.state', msg.plans || []);
         break;
 
       // ---- Fork Messages ----
@@ -1154,6 +1162,12 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         toolLimit: msg.maxToolCalls,
         maxTokens: msg.maxTokens
       });
+    }
+
+    // Sync session model so HeaderActor updates the button text
+    if (msg.model) {
+      const { session } = this._actors;
+      session.handleModelChanged({ model: msg.model as string });
     }
 
     // Apply webview log level to global log level

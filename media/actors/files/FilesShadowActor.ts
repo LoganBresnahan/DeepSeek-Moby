@@ -68,8 +68,14 @@ export class FilesShadowActor extends ModalShadowActor {
       },
       subscriptions: {
         'files.openFiles': (value: unknown) => this.handleOpenFiles(value as string[]),
-        'files.searchResults': (value: unknown) => this.handleSearchResults(value as string[]),
-        'files.content': (value: unknown) => this.handleFileContent(value as FileData)
+        'files.searchResults': (value: unknown) => {
+          const data = value as { results: string[]; _ts?: number };
+          this.handleSearchResults(Array.isArray(data) ? data : data.results);
+        },
+        'files.content': (value: unknown) => {
+          const data = value as FileData & { _ts?: number };
+          this.handleFileContent(data);
+        }
       },
       additionalStyles: filesShadowStyles,
       openRequestKey: 'files.modal.open',
@@ -127,8 +133,7 @@ export class FilesShadowActor extends ModalShadowActor {
         <button class="clear-btn" data-action="clear" style="display: none;">Clear All</button>
       </div>
       <div class="footer-right">
-        <button class="modal-btn modal-btn-secondary" data-action="cancel">Cancel</button>
-        <button class="modal-btn modal-btn-primary" data-action="add" disabled>Add Files</button>
+        <span class="footer-hint" data-footer-hint>Changes apply immediately</span>
       </div>
     `;
   }
@@ -199,15 +204,6 @@ export class FilesShadowActor extends ModalShadowActor {
       this.updateOpenFilesCheckboxes();
     });
 
-    // Cancel button
-    this.delegate('click', '[data-action="cancel"]', () => {
-      this.close();
-    });
-
-    // Add button
-    this.delegate('click', '[data-action="add"]', () => {
-      this.commitSelection();
-    });
   }
 
   // ============================================
@@ -323,7 +319,6 @@ export class FilesShadowActor extends ModalShadowActor {
     const container = this.query<HTMLElement>('[data-selected-files]');
     const countEl = this.query<HTMLElement>('[data-selected-count]');
     const clearBtn = this.query<HTMLElement>('[data-action="clear"]');
-    const addBtn = this.query<HTMLButtonElement>('[data-action="add"]');
 
     if (!container) return;
 
@@ -337,24 +332,25 @@ export class FilesShadowActor extends ModalShadowActor {
       clearBtn.style.display = count > 0 ? 'inline-block' : 'none';
     }
 
-    if (addBtn) {
-      addBtn.disabled = count === 0;
-    }
-
     if (count === 0) {
       container.innerHTML = '<div class="selected-files-empty">No files selected</div>';
-      return;
+    } else {
+      container.innerHTML = Array.from(this._selectedFiles.keys()).map(filePath => `
+        <div class="selected-file-chip" data-path="${this.escapeHtml(filePath)}">
+          <span class="selected-file-name" title="${this.escapeHtml(filePath)}">${this.escapeHtml(this.getFileName(filePath))}</span>
+          <button class="selected-file-remove" title="Remove">×</button>
+        </div>
+      `).join('');
     }
 
-    container.innerHTML = Array.from(this._selectedFiles.keys()).map(filePath => `
-      <div class="selected-file-chip" data-path="${this.escapeHtml(filePath)}">
-        <span class="selected-file-name" title="${this.escapeHtml(filePath)}">${this.escapeHtml(this.getFileName(filePath))}</span>
-        <button class="selected-file-remove" title="Remove">×</button>
-      </div>
-    `).join('');
-
-    // Publish updated selection
+    // Live sync — publish and notify extension immediately
     this.publish({ 'files.selected': this._selectedFiles });
+    const filesData = Array.from(this._selectedFiles.entries()).map(([path, content]) => ({ path, content }));
+    this._vscode.postMessage({ type: 'setSelectedFiles', files: filesData });
+
+    if (this._onFilesChange) {
+      this._onFilesChange(filesData);
+    }
   }
 
   private updateOpenFilesCheckboxes(): void {

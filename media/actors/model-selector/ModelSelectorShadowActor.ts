@@ -68,6 +68,12 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
   private _maxTokens = 8192;
   private _streaming = false;
 
+  // Per-model maxTokens storage — each model remembers its own setting
+  private _perModelMaxTokens: Map<string, number> = new Map([
+    ['deepseek-chat', 8192],
+    ['deepseek-reasoner', 8192]
+  ]);
+
   private _onModelChange: ModelChangeHandler | null = null;
   private _onSettingsChange: SettingsChangeHandler | null = null;
 
@@ -144,10 +150,10 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
     return `
       ${models.map(model => this.renderModelOption(model)).join('')}
       <div class="model-dropdown-divider"></div>
-      ${this.renderParameterControl('temperature', 'Temperature', temperature.toString(), 0, 2, 0.1, 'Controls randomness. 0 = deterministic, 2 = very creative')}
+      ${!isReasoner ? this.renderParameterControl('temperature', 'Temperature', temperature.toString(), 0, 2, 0.1, 'Controls randomness. 0 = deterministic, 2 = very creative') : ''}
       ${isReasoner
-        ? this.renderParameterControl('shellIterations', 'Shell Iterations', shellIterations.toString(), 1, 100, 1, 'Limits R1 shell command loops. 100 = No limit')
-        : this.renderParameterControl('toolLimit', 'Tool Iterations', toolLimit.toString(), 5, 100, 5, 'Limits tool calling loops. 100 = No limit')}
+        ? this.renderParameterControl('shellIterations', 'Shell Iterations', this.formatIterations(shellIterations), 1, 100, 1, 'Limits R1 shell command loops')
+        : this.renderParameterControl('toolLimit', 'Tool Iterations', this.formatIterations(toolLimit), 5, 100, 5, 'Limits tool calling loops')}
       <div class="model-dropdown-divider"></div>
       ${this.renderParameterControl('maxTokens', 'Max Output Tokens', this.formatTokens(maxTokens), 256, modelMaxTokens, 256, this.getTokenHint())}
     `;
@@ -265,6 +271,7 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
 
     if (typeof settings.maxTokens === 'number' && settings.maxTokens !== this._maxTokens) {
       this._maxTokens = settings.maxTokens;
+      this._perModelMaxTokens.set(this._selectedModel, settings.maxTokens);
       changed = true;
     }
 
@@ -278,16 +285,21 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
   // ============================================
 
   private selectModel(modelId: string): void {
+    // Save current model's maxTokens before switching
+    this._perModelMaxTokens.set(this._selectedModel, this._maxTokens);
+
     this._selectedModel = modelId;
 
-    // Clamp maxTokens to new model's limit and update slider
+    // Restore the target model's maxTokens (or clamp to its limit)
     const newModelMaxTokens = this.getSelectedModelMaxTokens();
-    if (this._maxTokens > newModelMaxTokens) {
-      this._maxTokens = newModelMaxTokens;
-      // Notify extension of the clamped value
-      this._vscode.postMessage({ type: 'setMaxTokens', maxTokens: this._maxTokens });
-      this.publish({ 'model.maxTokens': this._maxTokens });
-    }
+    const savedTokens = this._perModelMaxTokens.get(modelId);
+    this._maxTokens = savedTokens !== undefined
+      ? Math.min(savedTokens, newModelMaxTokens)
+      : newModelMaxTokens;
+
+    // Notify extension of the restored value
+    this._vscode.postMessage({ type: 'setMaxTokens', maxTokens: this._maxTokens });
+    this.publish({ 'model.maxTokens': this._maxTokens });
 
     // Re-render to update slider max and hint
     this.updateBodyContent(this.renderPopupContent());
@@ -317,20 +329,21 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
 
       case 'toolLimit':
         this._toolLimit = value;
-        if (valueEl) valueEl.textContent = value.toString();
+        if (valueEl) valueEl.textContent = this.formatIterations(value);
         this._vscode.postMessage({ type: 'setToolLimit', toolLimit: value });
         this.publish({ 'model.toolLimit': value });
         break;
 
       case 'shellIterations':
         this._shellIterations = value;
-        if (valueEl) valueEl.textContent = value.toString();
+        if (valueEl) valueEl.textContent = this.formatIterations(value);
         this._vscode.postMessage({ type: 'setShellIterations', shellIterations: value });
         this.publish({ 'model.shellIterations': value });
         break;
 
       case 'maxTokens':
         this._maxTokens = value;
+        this._perModelMaxTokens.set(this._selectedModel, value);
         if (valueEl) valueEl.textContent = this.formatTokens(value);
         this._vscode.postMessage({ type: 'setMaxTokens', maxTokens: value });
         this.publish({ 'model.maxTokens': value });
@@ -349,6 +362,10 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
 
   private formatTokens(value: number): string {
     return value >= 1000 ? `${(value / 1024).toFixed(1)}K` : value.toString();
+  }
+
+  private formatIterations(value: number): string {
+    return value >= 100 ? 'No Limit' : value.toString();
   }
 
   private getTokenHint(): string {

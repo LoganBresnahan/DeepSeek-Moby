@@ -139,4 +139,35 @@ export const drawingServerShadowStyles = `
     border-radius: 50%;
     background: var(--vscode-terminal-ansiGreen, #4ec9b0);
   }
+
+  /* WSL2 port forward section */
+  .ds-wsl-section {
+    margin-bottom: 12px;
+    padding: 8px;
+    border: 1px solid var(--vscode-panel-border);
+    border-radius: 4px;
+    background: var(--vscode-textCodeBlock-background, #1e1e1e);
+  }
+
+  .ds-wsl-label {
+    font-size: 11px;
+    color: var(--vscode-descriptionForeground);
+    margin-bottom: 6px;
+  }
+
+  .ds-wsl-cmd-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+  }
+
+  .ds-wsl-cmd {
+    font-family: var(--vscode-editor-font-family);
+    font-size: 11px;
+    color: var(--vscode-foreground);
+    word-break: break-all;
+    user-select: all;
+    flex: 1;
+    line-height: 1.4;
+  }
 `;

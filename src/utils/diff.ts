@@ -14,7 +14,7 @@ export interface DiffResult {
  * Format:
  * <<<<<<< SEARCH
  * original code
- * ======= AND
+ * =======
  * replacement code
  * >>>>>>> REPLACE
  */
@@ -56,7 +56,7 @@ export class DiffEngine {
    * # File: path/to/file.ts (optional)
    * <<<<<<< SEARCH
    * original code to find
-   * ======= AND
+   * =======
    * replacement code
    * >>>>>>> REPLACE
    */
@@ -70,10 +70,10 @@ export class DiffEngine {
     logger.info(`[DiffEngine] parseSearchReplaceBlocks input (first 200): ${normalizedContent.substring(0, 200).replace(/\n/g, '\\n')}`);
 
     // Simple regex - just match the core pattern
-    // <<<<<<< SEARCH ... ======= AND ... >>>>>>> REPLACE
+    // <<<<<<< SEARCH ... ======= ... >>>>>>> REPLACE
     // Note: (?:\n)? makes the newline before ======= optional to support empty SEARCH sections
-    // The "AND" keyword makes the middle marker more distinctive to avoid false positives
-    const regex = /<{5,9}\s*SEARCH\s*\n([\s\S]*?)(?:\n)?={5,9}\s*AND\s*\n([\s\S]*?)(?:\n)?>{5,9}\s*REPLACE/g;
+    // The SEARCH/REPLACE labels on outer markers provide sufficient disambiguation
+    const regex = /<{5,9}\s*SEARCH\s*\n([\s\S]*?)(?:\n)?={5,9}\s*\n([\s\S]*?)(?:\n)?>{5,9}\s*REPLACE/g;
 
     let match;
     while ((match = regex.exec(normalizedContent)) !== null) {

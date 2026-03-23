@@ -11,17 +11,17 @@ The LLM uses an Aider-style search/replace format for precise code modifications
 ```
 <<<<<<< SEARCH
 exact code to find (copied verbatim from file)
-======= AND
+=======
 replacement code
 >>>>>>> REPLACE
 ```
 
 **Key elements:**
 - `<<<<<<< SEARCH` - Opens the search section (5-9 `<` characters)
-- `======= AND` - Separates search from replace (5-9 `=` characters + ` AND`)
+- `=======` - Separates search from replace (5-9 `=` characters)
 - `>>>>>>> REPLACE` - Closes the block (5-9 `>` characters)
 
-The ` AND` keyword after the equals signs makes the middle marker distinctive, preventing false positives when code contains sequences of equals signs (e.g., markdown tables, ASCII art, comparison operators).
+The `SEARCH` and `REPLACE` labels on the outer markers provide sufficient disambiguation from similar patterns in source code (e.g., git merge conflicts).
 
 ### File Header
 
@@ -31,7 +31,7 @@ Each edit block should be preceded by a file header:
 # File: path/to/file.ts
 <<<<<<< SEARCH
 original code
-======= AND
+=======
 new code
 >>>>>>> REPLACE
 ```
@@ -45,7 +45,7 @@ new code
 export function calculate(x: number): number {
   return x + 1;
 }
-======= AND
+=======
 export function calculate(x: number): number {
   return x * 2;
 }
@@ -56,7 +56,7 @@ export function calculate(x: number): number {
 ```typescript
 # File: src/utils/newFile.ts
 <<<<<<< SEARCH
-======= AND
+=======
 export function newHelper(): string {
   return "hello";
 }
@@ -70,7 +70,7 @@ export function newHelper(): string {
   async fetchUser(id: string): Promise<User> {
     return this.get(`/users/${id}`);
   }
-======= AND
+=======
   async fetchUser(id: string): Promise<User> {
     return this.get(`/users/${id}`);
   }

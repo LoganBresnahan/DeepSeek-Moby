@@ -35,6 +35,7 @@ import type {
 } from './types';
 import type { CommandApprovalManager } from './commandApprovalManager';
 import type { SavedPromptManager } from './savedPromptManager';
+import type { PlanManager } from './planManager';
 
 export class RequestOrchestrator {
   // ── Events (streaming) ──
@@ -104,6 +105,7 @@ export class RequestOrchestrator {
     private fileContextManager: FileContextManager,
     private commandApprovalManager?: CommandApprovalManager,
     private savedPromptManager?: SavedPromptManager,
+    private planManager?: PlanManager,
   ) {
     // DiffManager needs to flush the content buffer before emitting events
     this.diffManager.setFlushCallback(() => {
@@ -401,7 +403,7 @@ export class RequestOrchestrator {
           const partialText = cleanPartialResponse
             ? `${cleanPartialResponse}\n\n*[Generation stopped]*`
             : '*[Generation stopped]*';
-          await this.conversationManager.recordAssistantMessage(sessionId!, partialText, model, 'length');
+          await this.conversationManager.recordAssistantMessage(sessionId!, partialText, model, 'stop');
           logger.info(`[RequestOrchestrator] Saved partial response to history`);
         }
         // Don't show error for user-initiated stops
@@ -476,62 +478,94 @@ export class RequestOrchestrator {
     editorContextProvider: () => Promise<string>
   ): Promise<string> {
     const isReasonerModel = this.deepSeekClient.isReasonerModel();
-
-    // Get custom system prompt from DB (active saved prompt)
     const customSystemPrompt = this.savedPromptManager?.getActiveContent() || '';
+    const editMode = this.diffManager.currentEditMode;
 
-    let systemPrompt = `You are DeepSeek Moby, an expert programming assistant integrated into VS Code.\n`;
+    // ── 1. Identity + Conversational Gate ──
+    let systemPrompt = `You are DeepSeek Moby, an expert programming assistant integrated into VS Code.
 
-    // Prepend custom system prompt if set
-    if (customSystemPrompt.trim()) {
-      systemPrompt = `${customSystemPrompt.trim()}\n\n---\n\n${systemPrompt}`;
-    }
+Match your response to the user's intent:
+- Questions about code → explain clearly, no edits needed
+- Requests for changes → use the edit format described below
+- Architecture or design discussions → discuss tradeoffs, only edit if asked
+- Debugging help → analyze the problem, suggest fixes only when appropriate
+Not every message needs a code edit.\n`;
 
-    // Add exploration capabilities based on model type
+    // ── 2. Model-specific capabilities ──
     const wsState = await this.webSearchManager.getSettings();
     const webSearchAutoAvailable = wsState.mode === 'auto' && wsState.configured;
     if (isReasonerModel) {
       systemPrompt += getReasonerShellPrompt({ webSearchAvailable: webSearchAutoAvailable });
     } else {
       const webSearchLine = webSearchAutoAvailable
-        ? '\n- web_search: Search the web for current information (documentation, news, recent changes)\n'
+        ? '- web_search: Search the web for current information\n'
         : '';
-      systemPrompt += `\nYou have access to tools that let you explore the codebase:\n- read_file: Read contents of any file in the workspace\n- search_files: Find files by name pattern (glob)\n- grep_content: Search for text/patterns in file contents\n- list_directory: See directory structure\n- get_file_info: Get file metadata and preview${webSearchLine}\nUSE THESE TOOLS to understand the codebase before making suggestions. When the user asks about code or wants changes:\n1. First explore relevant files using the tools\n2. Read the actual source code to understand the context\n3. Then provide accurate, informed responses\n`;
+      systemPrompt += `
+You have tools to explore the codebase:
+- read_file: Read file contents
+- search_files: Find files by name pattern
+- grep_content: Search for text/patterns in files
+- list_directory: See directory structure
+- get_file_info: Get file metadata
+${webSearchLine}
+Use tools to understand the code before responding. Read relevant files first, then provide accurate answers.\n`;
     }
 
-    // Add edit mode context to system prompt
+    // ── 3. Edit format (compact) ──
     const editModeDescriptions: Record<string, string> = {
-      manual: 'Code blocks will be displayed for reference. The user will manually copy and apply changes.',
-      ask: 'Code blocks will trigger a diff view where the user can review and accept/reject changes.',
-      auto: 'Code blocks will be automatically applied to files without user confirmation.'
+      manual: 'Code blocks are shown for reference. The user will apply changes manually.',
+      ask: 'Code blocks trigger a diff view for the user to review and accept/reject.',
+      auto: 'Code blocks are automatically applied without user confirmation.'
     };
 
-    systemPrompt += `\nIMPORTANT - Code Edit Format Requirements\n\n**Current Edit Mode: ${this.diffManager.currentEditMode.toUpperCase()}**\n${editModeDescriptions[this.diffManager.currentEditMode]}\n\n**CRITICAL FORMAT: Every code edit MUST use this exact structure:**\n\n\`\`\`<language>\n# File: path/to/file.ext\n<<<<<<< SEARCH\nexact code to find (copy from file verbatim)\n======= AND\nreplacement code\n>>>>>>> REPLACE\n\`\`\`\n\n**EXAMPLE - Editing a TypeScript function:**\n\`\`\`typescript\n# File: src/utils/helper.ts\n<<<<<<< SEARCH\nexport function calculate(x: number): number {\n  return x + 1;\n}\n======= AND\nexport function calculate(x: number): number {\n  return x * 2;  // Changed from addition to multiplication\n}\n>>>>>>> REPLACE\n\`\`\`\n\n**REQUIREMENTS (MANDATORY - edits will fail without these):**\n1. ✓ Code block must start with triple backticks and optional language\n2. ✓ First line INSIDE the code block must be "# File: <path>"\n3. ✓ SEARCH section contains EXACT code from the file (including whitespace)\n4. ✓ All markers (<<<<<<< SEARCH, ======= AND, >>>>>>> REPLACE) must be INSIDE the code block\n5. ✓ ONE code block per file edit - do NOT split into separate "before" and "after" blocks\n\n**For ADDING new code** (inserting new functions/methods):\n\`\`\`typescript\n# File: src/services/api.ts\n<<<<<<< SEARCH\n  async fetchUser(id: string): Promise<User> {\n    // existing method\n  }\n======= AND\n  async fetchUser(id: string): Promise<User> {\n    // existing method\n  }\n\n  async createUser(data: UserData): Promise<User> {\n    // new method I\'m adding\n    return this.post(\'/users\', data);\n  }\n>>>>>>> REPLACE\n\`\`\`\n\n**For CREATING new files** (empty SEARCH section):\n\`\`\`typescript\n# File: src/utils/newFile.ts\n<<<<<<< SEARCH\n======= AND\n// This is a brand new file\nexport function newHelper(): string {\n  return "hello";\n}\n>>>>>>> REPLACE\n\`\`\`\n\n**COMMON MISTAKES TO AVOID:**\n✗ Forgetting the "# File:" header (edit won\'t be detected)\n✗ Putting SEARCH/REPLACE outside code fences (won\'t be parsed)\n✗ Using separate code blocks for "before" and "after" (use ONE block)\n✗ Showing code without the edit format (won\'t be applied)\n\n`;
+    systemPrompt += `
+**Code Edit Format** (edit mode: ${editMode})
+${editModeDescriptions[editMode]}
 
-    // Add editor context
+When making code edits, use this exact format inside a fenced code block:
+
+\`\`\`<language>
+# File: path/to/file.ext
+<<<<<<< SEARCH
+exact code to find (copy verbatim)
+=======
+replacement code
+>>>>>>> REPLACE
+\`\`\`
+
+Rules: "# File:" header is required. SEARCH must match the file exactly. For new files, leave SEARCH empty.\n`;
+
+    // ── 4. Dynamic context ──
     const editorContext = await editorContextProvider();
     if (editorContext) {
       systemPrompt += `\n${editorContext}`;
     }
 
-    // Add modified files context to prevent redundant edits
     const modifiedFilesContext = this.diffManager.getModifiedFilesContext();
     if (modifiedFilesContext) {
       systemPrompt += modifiedFilesContext;
     }
 
-    // Auto web search if enabled (search BEFORE DeepSeek, not via tool calls)
+    // Auto web search
     const webSearchContext = await this.webSearchManager.searchForMessage(message);
-
-    // Add search results to system prompt with context for LLM
     if (webSearchContext) {
       const today = new Date().toLocaleDateString('en-US', {
-        weekday: 'long',
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric'
+        weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
       });
-      systemPrompt += `\n\n--- CURRENT WEB SEARCH RESULTS (${today}) ---\nThe following are real-time web search results. Use this information to answer questions\nabout current events, dates, times, news, or anything requiring up-to-date information.\nDo NOT say you lack access to current information - these results ARE current.\n\n${webSearchContext}\n--- END WEB SEARCH RESULTS ---\n`;
+      systemPrompt += `\n\n--- WEB SEARCH RESULTS (${today}) ---\n${webSearchContext}\n--- END WEB SEARCH RESULTS ---\n`;
+    }
+
+    // ── 5. Active plans ──
+    if (this.planManager) {
+      const plansContext = await this.planManager.getActivePlansContext();
+      if (plansContext) {
+        systemPrompt += plansContext;
+      }
+    }
+
+    // ── 6. Custom instructions (at the END for recency bias) ──
+    if (customSystemPrompt.trim()) {
+      systemPrompt += `\n--- USER CUSTOM INSTRUCTIONS ---\nThe following instructions from the user take priority over defaults:\n\n${customSystemPrompt.trim()}\n--- END CUSTOM INSTRUCTIONS ---\n`;
     }
 
     return systemPrompt;
@@ -575,6 +609,9 @@ export class RequestOrchestrator {
     const iterationBudget = 60_000;  // Safety cap: ~60k tokens of injected context
 
     do {
+      // Check abort at the start of each iteration
+      if (signal.aborted) break;
+
       // Track iteration-specific response
       let iterationResponse = '';
 
@@ -815,7 +852,7 @@ export class RequestOrchestrator {
             const shellStartTime = Date.now();
             logger.info(`[Timing] Shell execution started at ${new Date().toISOString()}`);
             const executedResults = approvedCommands.length > 0
-              ? await executeShellCommands(approvedCommands, workspacePath, { allowAllCommands })
+              ? await executeShellCommands(approvedCommands, workspacePath, { allowAllCommands, signal })
               : [];
             const results = [...blockedResults, ...executedResults];
             const shellDuration = Date.now() - shellStartTime;
@@ -934,7 +971,7 @@ export class RequestOrchestrator {
 
             currentHistoryMessages.push({
               role: 'user',
-              content: `You explored the codebase but didn't complete the task.\n\nORIGINAL TASK: "${originalUserMessage}"\n\nYou MUST now produce the code edits. Use the SEARCH/REPLACE format with "# File:" headers:\n\n\`\`\`<language>\n# File: path/to/file.ext\n<<<<<<< SEARCH\nexact code to find\n======= AND\nreplacement code\n>>>>>>> REPLACE\n\`\`\`\n\nDo NOT describe what to do - actually produce the code changes now.`
+              content: `You explored the codebase but didn't complete the task.\n\nORIGINAL TASK: "${originalUserMessage}"\n\nYou MUST now produce the code edits. Use the SEARCH/REPLACE format with "# File:" headers:\n\n\`\`\`<language>\n# File: path/to/file.ext\n<<<<<<< SEARCH\nexact code to find\n=======\nreplacement code\n>>>>>>> REPLACE\n\`\`\`\n\nDo NOT describe what to do - actually produce the code changes now.`
             });
 
             currentSystemPrompt = streamingSystemPrompt + `\n\nCRITICAL: The user's original task was: "${originalUserMessage}"\nYou have already explored the codebase. NOW YOU MUST produce the actual code edits.\nUse the SEARCH/REPLACE format with # File: headers. Your response MUST contain code changes.`;

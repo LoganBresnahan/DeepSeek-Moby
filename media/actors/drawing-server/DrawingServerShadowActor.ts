@@ -29,6 +29,7 @@ export interface DrawingServerState {
   url?: string;
   qrMatrix?: boolean[][];
   isWSL?: boolean;
+  portForwardCmd?: string;
 }
 
 // ============================================
@@ -128,6 +129,19 @@ export class DrawingServerShadowActor extends PopupShadowActor {
       `;
     }
 
+    // WSL2 port forward command
+    if (state.isWSL && state.portForwardCmd) {
+      html += `
+        <div class="ds-wsl-section">
+          <div class="ds-wsl-label">Run in Windows PowerShell (Admin):</div>
+          <div class="ds-wsl-cmd-row">
+            <code class="ds-wsl-cmd">${this.escapeHtml(state.portForwardCmd)}</code>
+            <button class="ds-copy-btn" data-action="copy-cmd">Copy</button>
+          </div>
+        </div>
+      `;
+    }
+
     // Stop button
     html += `<button class="ds-btn ds-btn-stop" data-action="stop">Stop Server</button>`;
 
@@ -157,6 +171,22 @@ export class DrawingServerShadowActor extends PopupShadowActor {
       this._vscode.postMessage({ type: 'copyToClipboard', text: url });
 
       // Visual feedback
+      element.textContent = 'Copied!';
+      element.classList.add('copied');
+      setTimeout(() => {
+        element.textContent = 'Copy';
+        element.classList.remove('copied');
+      }, 1500);
+    });
+
+    // Copy port forward command
+    this.delegate('click', '[data-action="copy-cmd"]', (_e, element) => {
+      const cmd = this._serverState.portForwardCmd;
+      if (!cmd) return;
+
+      log.debug('copy port forward command');
+      this._vscode.postMessage({ type: 'copyToClipboard', text: cmd });
+
       element.textContent = 'Copied!';
       element.classList.add('copied');
       setTimeout(() => {

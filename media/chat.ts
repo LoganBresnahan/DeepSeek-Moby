@@ -27,7 +27,9 @@ import {
   SystemPromptModalActor,
   ModelSelectorShadowActor,
   SettingsShadowActor,
-  DrawingServerShadowActor
+  DrawingServerShadowActor,
+  PlanPopupShadowActor,
+  WebSearchPopupShadowActor
 } from './actors';
 // Dev-only actor - not included in production bundle
 import { InspectorShadowActor } from './dev/inspector';
@@ -190,6 +192,24 @@ function initializeActorSystem(): void {
 
   // ToolbarShadowActor - owns its DOM, renders into toolbarContainer
   const toolbar = new ToolbarShadowActor(manager, toolbarContainer, vscode);
+
+  // PlanPopupShadowActor - Plans popup (trigger in toolbar shadow DOM)
+  const planPopupContainer = document.createElement('div');
+  planPopupContainer.id = 'planPopupHost';
+  toolbarContainer.appendChild(planPopupContainer);
+  const planPopup = new PlanPopupShadowActor(manager, planPopupContainer, vscode);
+  toolbar.onPlan(() => planPopup.toggle());
+  const planBtn = toolbar.getButton('.plan-btn');
+  if (planBtn) planPopup.setTriggerElement(planBtn);
+
+  // WebSearchPopupShadowActor - Web search settings popup (trigger in toolbar shadow DOM)
+  const webSearchPopupContainer = document.createElement('div');
+  webSearchPopupContainer.id = 'webSearchPopupHost';
+  toolbarContainer.appendChild(webSearchPopupContainer);
+  const webSearchPopup = new WebSearchPopupShadowActor(manager, webSearchPopupContainer, vscode);
+  toolbar.onSearch(() => webSearchPopup.toggle());
+  const searchBtn = toolbar.getButton('.search-btn');
+  if (searchBtn) webSearchPopup.setTriggerElement(searchBtn);
 
   // InspectorShadowActor - UI inspection tool, uses its own host element
   const inspectorHost = document.createElement('div');
@@ -469,6 +489,8 @@ function initializeActorSystem(): void {
     modelSelector,
     settings,
     drawingServer: drawingServerActor,
+    planPopup,
+    webSearchPopup,
     inspector,
     virtualList,
   };

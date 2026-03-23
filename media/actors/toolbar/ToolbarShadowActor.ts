@@ -102,16 +102,6 @@ export class ToolbarShadowActor extends ShadowActor {
   private _planEnabled = false;
   private _streaming = false;
 
-  // Web search settings
-  private _webSearchSettings: WebSearchSettings = {
-    creditsPerPrompt: 1,
-    maxResultsPerSearch: 5,
-    searchDepth: 'basic'
-  };
-
-  // Modals (rendered in document.body, outside shadow DOM)
-  private _webSearchModal: HTMLElement | null = null;
-
   // Handlers
   private _onEditModeChange: EditModeHandler | null = null;
   private _onWebSearchToggle: WebSearchHandler | null = null;
@@ -120,10 +110,8 @@ export class ToolbarShadowActor extends ShadowActor {
   private _onSend: SendHandler | null = null;
   private _onStop: StopHandler | null = null;
   private _onAttach: AttachHandler | null = null;
+  private _onSearch: (() => void) | null = null;
   private _vscode: VSCodeAPI | null = null;
-
-  // Bound handlers for cleanup
-  private _boundOutsideClick: ((e: MouseEvent) => void) | null = null;
 
   constructor(manager: EventStateManager, element: HTMLElement, vscode?: VSCodeAPI) {
     super({
@@ -138,7 +126,8 @@ export class ToolbarShadowActor extends ShadowActor {
         'toolbar.planEnabled': () => this._planEnabled
       },
       subscriptions: {
-        'streaming.active': (value: unknown) => this.handleStreamingChange(value as boolean)
+        'streaming.active': (value: unknown) => this.handleStreamingChange(value as boolean),
+        'plans.activeCount': (value: unknown) => this.handlePlanCountChange(value as number)
       }
     });
 
@@ -168,7 +157,7 @@ export class ToolbarShadowActor extends ShadowActor {
         <button class="btn stop-btn" title="Stop generation" style="display: none;">
           ${ICONS.stop}
         </button>
-        <button class="btn plan-btn" title="Plan (coming soon)">
+        <button class="btn plan-btn" title="Plans">
           ${ICONS.plan}
         </button>
         <button class="btn edit-mode-btn" title="Edit mode: Manual">
@@ -195,8 +184,7 @@ export class ToolbarShadowActor extends ShadowActor {
   }
 
   private setupGlobalHandlers(): void {
-    this._boundOutsideClick = this.handleOutsideClick.bind(this);
-    document.addEventListener('click', this._boundOutsideClick);
+    // No global handlers needed — popups handle their own outside click detection
   }
 
   // ============================================
@@ -225,17 +213,12 @@ export class ToolbarShadowActor extends ShadowActor {
   }
 
   private handlePlanClick(): void {
-    this._planEnabled = !this._planEnabled;
-    this.query<HTMLButtonElement>('.plan-btn')?.classList.toggle('active', this._planEnabled);
-    this._onPlan?.(this._planEnabled);
-    this._vscode?.postMessage({ type: 'togglePlan', enabled: this._planEnabled });
-    this.publish({ 'toolbar.planEnabled': this._planEnabled });
+    this._onPlan?.(true);
   }
 
   private handleSearchClick(e: Event): void {
     e.stopPropagation();
-    this.closeAllModals();
-    this.showWebSearchModal();
+    this._onSearch?.();
   }
 
   private handleAttachClick(): void {
@@ -251,22 +234,6 @@ export class ToolbarShadowActor extends ShadowActor {
     this._vscode?.postMessage({ type: 'stopGeneration' });
   }
 
-  private handleOutsideClick(e: MouseEvent): void {
-    const target = e.target as Element;
-
-    // Use data attributes for modal detection (cleaner than class names)
-    if (this._webSearchModal && !target.closest('[data-modal="web-search"]') && !this.isInsideShadow(target, '.search-btn')) {
-      this.closeWebSearchModal();
-    }
-  }
-
-  /**
-   * Check if target is inside a shadow element matching selector
-   */
-  private isInsideShadow(target: Element, selector: string): boolean {
-    const btn = this.query(selector);
-    return btn?.contains(target) || target === btn;
-  }
 
   // ============================================
   // Streaming State
@@ -296,6 +263,16 @@ export class ToolbarShadowActor extends ShadowActor {
       planBtn.style.opacity = streaming ? '0.4' : '';
       planBtn.style.pointerEvents = streaming ? 'none' : '';
     }
+  }
+
+  private handlePlanCountChange(count: number): void {
+    this._planEnabled = count > 0;
+    const planBtn = this.query<HTMLButtonElement>('.plan-btn');
+    if (planBtn) {
+      planBtn.classList.toggle('active', this._planEnabled);
+      planBtn.title = count > 0 ? `Plans (${count} active)` : 'Plans';
+    }
+    this.publish({ 'toolbar.planEnabled': this._planEnabled });
   }
 
   // ============================================
@@ -342,217 +319,6 @@ export class ToolbarShadowActor extends ShadowActor {
     }
   }
 
-  // ============================================
-  // Web Search Modal (in document.body)
-  // ============================================
-
-  private showWebSearchModal(): void {
-    const searchBtn = this.query<HTMLButtonElement>('.search-btn');
-    if (!searchBtn) return;
-
-    const isAdvanced = this._webSearchSettings.searchDepth === 'advanced';
-    const creditsMin = isAdvanced ? 2 : 1;
-    const creditsMax = isAdvanced ? 10 : 5;
-    const creditsStep = isAdvanced ? 2 : 1;
-    const credits = this._webSearchSettings.creditsPerPrompt;
-    const costPerCall = isAdvanced ? 2 : 1;
-    const requestCount = Math.floor(credits / costPerCall);
-    const isOff = this._webSearchMode === 'off';
-
-    const modal = document.createElement('div');
-    modal.className = 'web-search-modal';
-    modal.setAttribute('data-modal', 'web-search');
-    modal.innerHTML = `
-      <div class="web-search-modal-title">
-        <span>Web Search</span>
-        <button class="web-search-modal-close">&times;</button>
-      </div>
-      <div class="web-search-modal-content">
-        <div class="web-search-option">
-          <label>Mode:</label>
-          <div class="web-search-mode-options">
-            <button class="mode-btn${this._webSearchMode === 'off' ? ' active' : ''}" data-mode="off">
-              <span class="mode-name">Off</span>
-            </button>
-            <button class="mode-btn${this._webSearchMode === 'manual' ? ' active' : ''}" data-mode="manual">
-              <span class="mode-name">Manual</span>
-            </button>
-            <button class="mode-btn${this._webSearchMode === 'auto' ? ' active' : ''}" data-mode="auto">
-              <span class="mode-name">Auto</span>
-            </button>
-          </div>
-        </div>
-        <div class="web-search-settings-section${isOff ? ' disabled-section' : ''}">
-          <div class="web-search-option">
-            <label>Credits per prompt: <span id="creditsValue">${credits}</span> <span id="creditsInfo">(${requestCount} request${requestCount !== 1 ? 's' : ''})</span></label>
-            <input type="range" id="creditsSlider" min="${creditsMin}" max="${creditsMax}" step="${creditsStep}" value="${credits}"${isOff ? ' disabled' : ''}>
-          </div>
-          <div class="web-search-option">
-            <label>Results per request: <span id="maxResultsValue">${this._webSearchSettings.maxResultsPerSearch}</span></label>
-            <input type="range" id="maxResultsSlider" min="1" max="20" step="1" value="${this._webSearchSettings.maxResultsPerSearch}"${isOff ? ' disabled' : ''}>
-          </div>
-          <div class="web-search-option">
-            <label>Search depth:</label>
-            <div class="search-depth-options">
-              <button class="depth-btn ${!isAdvanced ? 'active' : ''}" data-depth="basic"${isOff ? ' disabled' : ''}>
-                <span class="depth-name">Basic</span>
-                <span class="depth-credits">1 credit</span>
-              </button>
-              <button class="depth-btn ${isAdvanced ? 'active' : ''}" data-depth="advanced"${isOff ? ' disabled' : ''}>
-                <span class="depth-name">Advanced</span>
-                <span class="depth-credits">2 credits</span>
-              </button>
-            </div>
-          </div>
-          <div class="web-search-toggle-row">
-            <button class="web-search-enable-btn${this._webSearchEnabled ? ' disabled' : ''}"${isOff ? ' disabled' : ''}>Enable</button>
-            <button class="web-search-disable-btn${!this._webSearchEnabled ? ' disabled' : ''}"${isOff ? ' disabled' : ''}>Disable</button>
-          </div>
-          <button class="web-search-clear-cache-btn"${isOff ? ' disabled' : ''}>Clear Cache</button>
-        </div>
-      </div>
-    `;
-
-    const rect = this.element.getBoundingClientRect();
-    modal.style.bottom = `${window.innerHeight - rect.top + 5}px`;
-    modal.style.left = `${rect.left}px`;
-
-    modal.querySelector('.web-search-modal-close')?.addEventListener('click', () => {
-      this.closeWebSearchModal();
-    });
-
-    // Mode selector buttons
-    modal.querySelectorAll('.mode-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const newMode = (btn as HTMLElement).dataset.mode as WebSearchMode;
-        modal.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        this._webSearchMode = newMode;
-        this._vscode?.postMessage({ type: 'setWebSearchMode', mode: newMode });
-        this.updateSearchButtonDisplay();
-        this.publish({ 'toolbar.webSearchMode': newMode });
-
-        // Toggle disabled state on settings section
-        const settingsSection = modal.querySelector('.web-search-settings-section');
-        if (settingsSection) {
-          settingsSection.classList.toggle('disabled-section', newMode === 'off');
-          // Enable/disable all interactive elements
-          settingsSection.querySelectorAll('input, button').forEach(el => {
-            (el as HTMLInputElement | HTMLButtonElement).disabled = newMode === 'off';
-          });
-        }
-
-        // If switching to off, also disable manual toggle
-        if (newMode === 'off' && this._webSearchEnabled) {
-          this._webSearchEnabled = false;
-          this._onWebSearchToggle?.(false);
-          this._vscode?.postMessage({ type: 'toggleWebSearch', enabled: false });
-          this.publish({ 'toolbar.webSearchEnabled': false });
-        }
-      });
-    });
-
-    // Credits slider
-    modal.querySelector('#creditsSlider')?.addEventListener('input', (e) => {
-      const value = parseInt((e.target as HTMLInputElement).value, 10);
-      const valueEl = modal.querySelector('#creditsValue');
-      const infoEl = modal.querySelector('#creditsInfo');
-      if (valueEl) valueEl.textContent = value.toString();
-      const cost = this._webSearchSettings.searchDepth === 'advanced' ? 2 : 1;
-      const requests = Math.floor(value / cost);
-      if (infoEl) infoEl.textContent = `(${requests} request${requests !== 1 ? 's' : ''})`;
-      this._webSearchSettings.creditsPerPrompt = value;
-      this._vscode?.postMessage({ type: 'setCreditsPerPrompt', value });
-    });
-
-    // Results slider
-    modal.querySelector('#maxResultsSlider')?.addEventListener('input', (e) => {
-      const value = parseInt((e.target as HTMLInputElement).value, 10);
-      const valueEl = modal.querySelector('#maxResultsValue');
-      if (valueEl) valueEl.textContent = value.toString();
-      this._webSearchSettings.maxResultsPerSearch = value;
-      this._vscode?.postMessage({ type: 'setMaxResultsPerSearch', value });
-    });
-
-    // Depth toggle buttons
-    modal.querySelectorAll('.depth-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        modal.querySelectorAll('.depth-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        const newDepth = (btn as HTMLElement).dataset.depth as 'basic' | 'advanced';
-        this._webSearchSettings.searchDepth = newDepth;
-
-        // Update credits slider range/step/value
-        const slider = modal.querySelector('#creditsSlider') as HTMLInputElement;
-        const newIsAdvanced = newDepth === 'advanced';
-        const newMin = newIsAdvanced ? 2 : 1;
-        const newMax = newIsAdvanced ? 10 : 5;
-        const newStep = newIsAdvanced ? 2 : 1;
-        slider.min = newMin.toString();
-        slider.max = newMax.toString();
-        slider.step = newStep.toString();
-
-        // Re-clamp credits
-        let clamped = this._webSearchSettings.creditsPerPrompt;
-        if (clamped < newMin) clamped = newMin;
-        if (clamped > newMax) clamped = newMax;
-        if (newIsAdvanced && clamped % 2 !== 0) clamped = Math.min(clamped + 1, newMax);
-        slider.value = clamped.toString();
-        this._webSearchSettings.creditsPerPrompt = clamped;
-
-        // Update display
-        const valueEl = modal.querySelector('#creditsValue');
-        const infoEl = modal.querySelector('#creditsInfo');
-        if (valueEl) valueEl.textContent = clamped.toString();
-        const cost = newIsAdvanced ? 2 : 1;
-        const requests = Math.floor(clamped / cost);
-        if (infoEl) infoEl.textContent = `(${requests} request${requests !== 1 ? 's' : ''})`;
-
-        this._vscode?.postMessage({ type: 'setSearchDepth', searchDepth: newDepth });
-        this._vscode?.postMessage({ type: 'setCreditsPerPrompt', value: clamped });
-      });
-    });
-
-    // Enable button
-    modal.querySelector('.web-search-enable-btn')?.addEventListener('click', () => {
-      this._webSearchEnabled = true;
-      this.updateSearchButtonDisplay();
-      this._onWebSearchToggle?.(true, this._webSearchSettings);
-      this._vscode?.postMessage({ type: 'toggleWebSearch', enabled: true });
-      this._vscode?.postMessage({ type: 'updateWebSearchSettings', settings: this._webSearchSettings });
-      this.closeWebSearchModal();
-      this.publish({ 'toolbar.webSearchEnabled': true });
-    });
-
-    // Disable button
-    modal.querySelector('.web-search-disable-btn')?.addEventListener('click', () => {
-      this._webSearchEnabled = false;
-      this.updateSearchButtonDisplay();
-      this._onWebSearchToggle?.(false);
-      this._vscode?.postMessage({ type: 'toggleWebSearch', enabled: false });
-      this.closeWebSearchModal();
-      this.publish({ 'toolbar.webSearchEnabled': false });
-    });
-
-    modal.querySelector('.web-search-clear-cache-btn')?.addEventListener('click', () => {
-      this._vscode?.postMessage({ type: 'clearSearchCache' });
-      this.closeWebSearchModal();
-    });
-
-    document.body.appendChild(modal);
-    this._webSearchModal = modal;
-  }
-
-  private closeWebSearchModal(): void {
-    if (this._webSearchModal) {
-      this._webSearchModal.remove();
-      this._webSearchModal = null;
-    }
-  }
-
-  private closeAllModals(): void {
-    this.closeWebSearchModal();
-  }
 
   // ============================================
   // Public API
@@ -572,6 +338,10 @@ export class ToolbarShadowActor extends ShadowActor {
 
   onPlan(handler: PlanHandler): void {
     this._onPlan = handler;
+  }
+
+  onSearch(handler: () => void): void {
+    this._onSearch = handler;
   }
 
   onSend(handler: SendHandler): void {
@@ -618,6 +388,11 @@ export class ToolbarShadowActor extends ShadowActor {
     return this._streaming;
   }
 
+  /** Get a button element from the toolbar's shadow DOM (for triggerElement wiring) */
+  getButton(selector: string): HTMLElement | null {
+    return this.query<HTMLElement>(selector);
+  }
+
   getState(): ToolbarState {
     return {
       editMode: this._editMode,
@@ -634,12 +409,6 @@ export class ToolbarShadowActor extends ShadowActor {
   // ============================================
 
   destroy(): void {
-    this.closeAllModals();
-
-    if (this._boundOutsideClick) {
-      document.removeEventListener('click', this._boundOutsideClick);
-    }
-
     this._onEditModeChange = null;
     this._onWebSearchToggle = null;
     this._onFilesOpen = null;
@@ -647,6 +416,7 @@ export class ToolbarShadowActor extends ShadowActor {
     this._onSend = null;
     this._onStop = null;
     this._onAttach = null;
+    this._onSearch = null;
     this._vscode = null;
 
     super.destroy();

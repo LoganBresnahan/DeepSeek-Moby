@@ -149,19 +149,7 @@ describe('ToolbarShadowActor', () => {
       expect(actor.getState().planEnabled).toBe(false);
     });
 
-    it('toggles plan state on click', () => {
-      const planBtn = element.shadowRoot?.querySelector('.plan-btn') as HTMLButtonElement;
-
-      planBtn.click();
-      expect(actor.getState().planEnabled).toBe(true);
-      expect(planBtn.classList.contains('active')).toBe(true);
-
-      planBtn.click();
-      expect(actor.getState().planEnabled).toBe(false);
-      expect(planBtn.classList.contains('active')).toBe(false);
-    });
-
-    it('calls handler when toggled', () => {
+    it('calls onPlan handler on click', () => {
       const handler = vi.fn();
       actor.onPlan(handler);
 
@@ -169,19 +157,27 @@ describe('ToolbarShadowActor', () => {
       planBtn.click();
 
       expect(handler).toHaveBeenCalledWith(true);
-
-      planBtn.click();
-      expect(handler).toHaveBeenCalledWith(false);
     });
 
-    it('posts message to vscode on toggle', () => {
+    it('shows active state when plans.activeCount changes', () => {
       const planBtn = element.shadowRoot?.querySelector('.plan-btn') as HTMLButtonElement;
-      planBtn.click();
 
-      expect(mockVscode.postMessage).toHaveBeenCalledWith({
-        type: 'togglePlan',
-        enabled: true
-      });
+      // Simulate plans.activeCount subscription
+      manager.publishDirect('plans.activeCount', 2);
+
+      expect(planBtn.classList.contains('active')).toBe(true);
+      expect(actor.getState().planEnabled).toBe(true);
+    });
+
+    it('removes active state when plans.activeCount is 0', () => {
+      const planBtn = element.shadowRoot?.querySelector('.plan-btn') as HTMLButtonElement;
+
+      manager.publishDirect('plans.activeCount', 2);
+      expect(planBtn.classList.contains('active')).toBe(true);
+
+      manager.publishDirect('plans.activeCount', 0);
+      expect(planBtn.classList.contains('active')).toBe(false);
+      expect(actor.getState().planEnabled).toBe(false);
     });
   });
 
@@ -190,53 +186,27 @@ describe('ToolbarShadowActor', () => {
       actor = new ToolbarShadowActor(manager, element, mockVscode);
     });
 
-    it('opens web search modal on click', () => {
+    it('calls onSearch handler on click', () => {
+      const handler = vi.fn();
+      actor.onSearch(handler);
+
       const searchBtn = element.shadowRoot?.querySelector('.search-btn') as HTMLButtonElement;
       searchBtn.click();
 
-      const modal = document.body.querySelector('.web-search-modal');
-      expect(modal).toBeTruthy();
+      expect(handler).toHaveBeenCalled();
     });
 
-    it('enables web search when enable button clicked', () => {
+    it('updates button display for auto mode', () => {
+      actor.setWebSearchMode('auto');
       const searchBtn = element.shadowRoot?.querySelector('.search-btn') as HTMLButtonElement;
-      searchBtn.click();
-
-      const enableBtn = document.body.querySelector('.web-search-enable-btn') as HTMLButtonElement;
-      enableBtn.click();
-
-      expect(actor.getState().webSearchEnabled).toBe(true);
-      // In auto mode (default), the button shows mode-auto instead of active
       expect(searchBtn.classList.contains('mode-auto')).toBe(true);
     });
 
-    it('disables web search via disable button in popup', () => {
+    it('updates button display for manual mode with enabled', () => {
+      actor.setWebSearchMode('manual');
       actor.setWebSearchEnabled(true);
-
       const searchBtn = element.shadowRoot?.querySelector('.search-btn') as HTMLButtonElement;
-      searchBtn.click();
-
-      const disableBtn = document.body.querySelector('.web-search-disable-btn') as HTMLButtonElement;
-      disableBtn.click();
-
-      expect(actor.getState().webSearchEnabled).toBe(false);
-    });
-
-    it('calls handler with settings when enabled', () => {
-      const handler = vi.fn();
-      actor.onWebSearchToggle(handler);
-
-      const searchBtn = element.shadowRoot?.querySelector('.search-btn') as HTMLButtonElement;
-      searchBtn.click();
-
-      const enableBtn = document.body.querySelector('.web-search-enable-btn') as HTMLButtonElement;
-      enableBtn.click();
-
-      expect(handler).toHaveBeenCalledWith(true, expect.objectContaining({
-        creditsPerPrompt: expect.any(Number),
-        maxResultsPerSearch: expect.any(Number),
-        searchDepth: expect.any(String)
-      }));
+      expect(searchBtn.classList.contains('active')).toBe(true);
     });
   });
 
@@ -347,18 +317,17 @@ describe('ToolbarShadowActor', () => {
   });
 
   describe('Lifecycle', () => {
-    it('cleans up modals on destroy', () => {
+    it('cleans up handlers on destroy', () => {
       actor = new ToolbarShadowActor(manager, element, mockVscode);
-
-      // Open web search modal
-      const searchBtn = element.shadowRoot?.querySelector('.search-btn') as HTMLButtonElement;
-      searchBtn.click();
-
-      expect(document.body.querySelector('.web-search-modal')).toBeTruthy();
+      const handler = vi.fn();
+      actor.onSearch(handler);
 
       actor.destroy();
 
-      expect(document.body.querySelector('.web-search-modal')).toBeNull();
+      // After destroy, handlers are nulled
+      const searchBtn = element.shadowRoot?.querySelector('.search-btn') as HTMLButtonElement;
+      searchBtn?.click();
+      expect(handler).not.toHaveBeenCalled();
     });
   });
 });

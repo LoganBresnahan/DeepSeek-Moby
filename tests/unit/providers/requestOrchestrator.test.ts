@@ -424,7 +424,7 @@ describe('RequestOrchestrator', () => {
 
       // The system prompt is passed to streamChat
       const systemPromptArg = mockClient.streamChat.mock.calls[0][2];
-      expect(systemPromptArg).toContain('ASK');
+      expect(systemPromptArg).toContain('edit mode: ask');
     });
 
     it('should include editor context from provider', async () => {
@@ -600,7 +600,7 @@ describe('RequestOrchestrator', () => {
         'session-1',
         expect.stringContaining('[Generation stopped]'),
         'deepseek-chat',
-        'length'
+        'stop'
       );
     });
 

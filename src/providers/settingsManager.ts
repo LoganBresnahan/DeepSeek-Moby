@@ -144,7 +144,7 @@ export class SettingsManager {
 
     if (settings.allowAllCommands !== undefined) {
       await config.update('allowAllShellCommands', settings.allowAllCommands, vscode.ConfigurationTarget.Global);
-      logger.settingsChanged('allowAllShellCommands', settings.allowAllCommands ? 'enabled (Wild Side)' : 'disabled');
+      logger.info(`[SettingsManager] Allow All Shell Commands: ${settings.allowAllCommands ? 'ENABLED' : 'DISABLED'}`);
     }
   }
 

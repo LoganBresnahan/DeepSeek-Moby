@@ -82,5 +82,13 @@ export type { DrawingServerState } from './drawing-server/DrawingServerShadowAct
 // System Prompt (modal for editing system prompt)
 export { SystemPromptModalActor } from './system-prompt';
 
+// Plans (popup for managing plan files)
+export { PlanPopupShadowActor } from './plans/PlanPopupShadowActor';
+export type { PlanFile } from './plans/PlanPopupShadowActor';
+
+// Web Search (popup for search settings)
+export { WebSearchPopupShadowActor } from './web-search/WebSearchPopupShadowActor';
+export type { WebSearchMode, WebSearchSettings as WebSearchPopupSettings } from './web-search/WebSearchPopupShadowActor';
+
 // Inspector - Dev-only tool, not exported from production actors
 // Access via: import { InspectorShadowActor } from './dev/inspector'

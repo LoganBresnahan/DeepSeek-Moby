@@ -93,6 +93,17 @@ export class SettingsShadowActor extends PopupShadowActor {
 
   protected renderPopupContent(): string {
     return `
+      <!-- API Keys Section -->
+      <div class="settings-section">
+        <div class="settings-section-title">API Keys</div>
+        <div class="settings-btn-row">
+          <button class="settings-action-btn" data-action="setApiKey">DeepSeek API Key</button>
+          <button class="settings-action-btn" data-action="setTavilyApiKey">Tavily API Key</button>
+        </div>
+      </div>
+
+      <div class="settings-divider"></div>
+
       <!-- Debug Section -->
       <div class="settings-section">
         <div class="settings-section-title">Debug</div>
@@ -101,13 +112,6 @@ export class SettingsShadowActor extends PopupShadowActor {
           <button class="settings-action-btn" data-action="testWarning">Test Warning</button>
           <button class="settings-action-btn" data-action="testError">Test Error</button>
         </div>
-      </div>
-
-      <div class="settings-divider"></div>
-
-      <!-- Reset Section -->
-      <div class="settings-section">
-        <button class="settings-action-btn settings-danger-btn" data-action="resetDefaults">Reset All to Defaults</button>
       </div>
     `;
   }
@@ -359,6 +363,16 @@ export class SettingsShadowActor extends PopupShadowActor {
         }
         break;
 
+      case 'setApiKey':
+        this._vscode.postMessage({ type: 'executeCommand', command: 'deepseek.setApiKey' });
+        this.close();
+        break;
+
+      case 'setTavilyApiKey':
+        this._vscode.postMessage({ type: 'executeCommand', command: 'deepseek.setTavilyApiKey' });
+        this.close();
+        break;
+
       case 'testStatus':
         this.manager.publishDirect('status.message', { type: 'info', message: 'Test status message' }, this.actorId);
         break;
@@ -371,11 +385,6 @@ export class SettingsShadowActor extends PopupShadowActor {
         this.manager.publishDirect('status.message', { type: 'error', message: 'Test error message' }, this.actorId);
         break;
 
-      case 'resetDefaults':
-        if (confirm('Reset ALL settings to defaults? This cannot be undone.')) {
-          this._vscode.postMessage({ type: 'resetAllSettings' });
-        }
-        break;
     }
   }
 

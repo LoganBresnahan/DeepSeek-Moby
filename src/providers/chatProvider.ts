@@ -16,6 +16,7 @@ import { RequestOrchestrator } from './requestOrchestrator';
 import { CommandApprovalManager } from './commandApprovalManager';
 import { DrawingServer } from './drawingServer';
 import { SavedPromptManager } from './savedPromptManager';
+import { PlanManager } from './planManager';
 import { qrcodegen } from '../vendor/qrcodegen';
 
 export class ChatProvider implements vscode.WebviewViewProvider {
@@ -39,6 +40,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
   private requestOrchestrator: RequestOrchestrator;
   private commandApprovalManager: CommandApprovalManager;
   private savedPromptManager: SavedPromptManager;
+  private planManager: PlanManager;
   private drawingServer: DrawingServer | null = null;
 
   constructor(
@@ -73,10 +75,11 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     this.savedPromptManager = new SavedPromptManager(
       this.conversationManager.getDatabase()
     );
+    this.planManager = new PlanManager();
     this.requestOrchestrator = new RequestOrchestrator(
       this.deepSeekClient, this.conversationManager, this.statusBar,
       this.diffManager, this.webSearchManager, this.fileContextManager,
-      this.commandApprovalManager, this.savedPromptManager
+      this.commandApprovalManager, this.savedPromptManager, this.planManager
     );
 
     // Wire manager events → webview
@@ -146,6 +149,11 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       this._view?.webview.postMessage({ type: 'fileContent', filePath: data.filePath, content: data.content });
     });
 
+    // PlanManager → webview
+    this.planManager.onPlanState(data => {
+      this._view?.webview.postMessage({ type: 'planState', plans: data.plans });
+    });
+
     // DiffManager → webview
     this.diffManager.onDiffListChanged(data => {
       this._view?.webview.postMessage({ type: 'diffListChanged', diffs: data.diffs, editMode: data.editMode });
@@ -209,9 +217,11 @@ export class ChatProvider implements vscode.WebviewViewProvider {
           }
         });
         const config = vscode.workspace.getConfiguration('deepseek');
-        const editMode = config.get<string>('editMode') || 'manual';
-        this.diffManager.setEditMode(editMode as 'manual' | 'ask' | 'auto');
-        this._view.webview.postMessage({ type: 'editModeSettings', mode: editMode });
+        const editMode = (config.get<string>('editMode') || 'manual') as 'manual' | 'ask' | 'auto';
+        if (editMode !== this.diffManager.currentEditMode) {
+          this.diffManager.setEditMode(editMode);
+          this._view.webview.postMessage({ type: 'editModeSettings', mode: editMode });
+        }
       }
     });
     this.settingsManager.onModelChanged(data => {
@@ -566,6 +576,24 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         case 'setSelectedFiles':
           this.fileContextManager.setSelectedFiles(data.files);
           break;
+
+        // Plan manager messages
+        case 'refreshPlans':
+          await this.planManager.refresh();
+          break;
+        case 'togglePlan':
+          await this.planManager.togglePlan(data.name);
+          break;
+        case 'createPlan':
+          await this.planManager.createPlan(data.name);
+          break;
+        case 'deletePlan':
+          await this.planManager.deletePlan(data.name);
+          break;
+        case 'openPlan':
+          await this.planManager.openPlan(data.name);
+          break;
+
         case 'setSearchDepth':
           this.webSearchManager.updateSettings({ searchDepth: data.searchDepth });
           break;
@@ -1193,7 +1221,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         ? `http://${result.phoneIP}:${result.port}`
         : result.url;
 
-      this.sendDrawingServerState(true, phoneUrl, result.isWSL);
+      this.sendDrawingServerState(true, phoneUrl, result.isWSL, result.portForwardCmd);
     } catch (err: any) {
       logger.error(`[ChatProvider] Drawing server start failed: ${err.message}`);
       this._view?.webview.postMessage({ type: 'error', error: `Drawing server failed: ${err.message}` });
@@ -1208,7 +1236,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     this.sendDrawingServerState(false);
   }
 
-  private sendDrawingServerState(running: boolean, url?: string, isWSL?: boolean): void {
+  private sendDrawingServerState(running: boolean, url?: string, isWSL?: boolean, portForwardCmd?: string): void {
     let qrMatrix: boolean[][] | undefined;
 
     if (running && url) {
@@ -1234,6 +1262,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       url,
       qrMatrix,
       isWSL,
+      portForwardCmd,
     });
   }
 

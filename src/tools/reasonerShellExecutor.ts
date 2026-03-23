@@ -189,13 +189,24 @@ export async function executeShellCommand(
   options: {
     timeout?: number;
     maxOutputSize?: number;
-    allowAllCommands?: boolean;  // "Walk on the Wild Side" mode
+    allowAllCommands?: boolean;
+    signal?: AbortSignal;
   } = {}
 ): Promise<ShellResult> {
   const startTime = Date.now();
-  const timeout = options.timeout ?? 10000;  // 10 second default
-  const maxOutputSize = options.maxOutputSize ?? 100 * 1024;  // 100KB default
+  const timeout = options.timeout ?? 10000;
+  const maxOutputSize = options.maxOutputSize ?? 100 * 1024;
   const allowAllCommands = options.allowAllCommands ?? false;
+
+  // Check abort before starting
+  if (options.signal?.aborted) {
+    return {
+      command,
+      output: 'Interrupted',
+      success: false,
+      executionTimeMs: 0
+    };
+  }
 
   // Validate command first
   const validation = validateCommand(command, allowAllCommands);
@@ -211,83 +222,147 @@ export async function executeShellCommand(
 
   logger.info(`[ReasonerShell] Executing: ${command}`);
 
-  try {
-    // Use system's default shell via shell: true
-    // Windows: cmd.exe or PowerShell
-    // Mac/Linux: /bin/sh or user's SHELL
-    const result = cp.spawnSync(command, {
+  return new Promise<ShellResult>((resolve) => {
+    let stdout = '';
+    let stderr = '';
+    let resolved = false;
+
+    const child = cp.spawn(command, {
       cwd: workspacePath,
-      encoding: 'utf-8',
-      timeout,
-      maxBuffer: maxOutputSize,
-      shell: true,  // Use system shell
-      env: {
-        ...process.env,
-        // Keep user's PATH so tools are available
+      shell: true,
+      env: { ...process.env },
+    });
+
+    // Timeout handling
+    const timeoutId = setTimeout(() => {
+      if (!resolved) {
+        resolved = true;
+        child.kill('SIGTERM');
+        setTimeout(() => child.kill('SIGKILL'), 1000);
+        const executionTimeMs = Date.now() - startTime;
+        logger.warn(`[ReasonerShell] Command timed out after ${timeout}ms`);
+        resolve({
+          command,
+          output: stdout + stderr + `\n(timed out after ${timeout}ms)`,
+          success: false,
+          executionTimeMs
+        });
+      }
+    }, timeout);
+
+    // Abort signal handling — kill the process immediately
+    const onAbort = () => {
+      if (!resolved) {
+        resolved = true;
+        clearTimeout(timeoutId);
+        child.kill('SIGTERM');
+        setTimeout(() => child.kill('SIGKILL'), 500);
+        const executionTimeMs = Date.now() - startTime;
+        logger.info(`[ReasonerShell] Command interrupted by user: ${command}`);
+        resolve({
+          command,
+          output: (stdout + stderr).trim() || 'Interrupted',
+          success: false,
+          executionTimeMs
+        });
+      }
+    };
+
+    if (options.signal) {
+      options.signal.addEventListener('abort', onAbort, { once: true });
+    }
+
+    child.stdout?.on('data', (data: Buffer) => {
+      stdout += data.toString();
+      if (stdout.length > maxOutputSize) {
+        stdout = stdout.substring(0, maxOutputSize) + '\n... (output truncated)';
       }
     });
 
-    const executionTimeMs = Date.now() - startTime;
+    child.stderr?.on('data', (data: Buffer) => {
+      stderr += data.toString();
+    });
 
-    // Combine stdout and stderr
-    let output = '';
-    if (result.stdout) {
-      output += result.stdout;
-    }
-    if (result.stderr) {
-      if (output) output += '\n';
-      output += result.stderr;
-    }
+    child.on('close', (code) => {
+      if (!resolved) {
+        resolved = true;
+        clearTimeout(timeoutId);
+        if (options.signal) {
+          options.signal.removeEventListener('abort', onAbort);
+        }
 
-    // Truncate if too large
-    if (output.length > maxOutputSize) {
-      output = output.substring(0, maxOutputSize) + '\n... (output truncated)';
-    }
+        const executionTimeMs = Date.now() - startTime;
+        let output = stdout;
+        if (stderr) {
+          if (output) output += '\n';
+          output += stderr;
+        }
+        if (output.length > maxOutputSize) {
+          output = output.substring(0, maxOutputSize) + '\n... (output truncated)';
+        }
 
-    const success = result.status === 0;
+        const success = code === 0;
+        logger.info(`[ReasonerShell] Completed in ${executionTimeMs}ms, success: ${success}, output: ${output.length} chars`);
 
-    logger.info(`[ReasonerShell] Completed in ${executionTimeMs}ms, success: ${success}, output: ${output.length} chars`);
+        resolve({
+          command,
+          output: output || '(no output)',
+          success,
+          executionTimeMs
+        });
+      }
+    });
 
-    return {
-      command,
-      output: output || '(no output)',
-      success,
-      executionTimeMs
-    };
-  } catch (error: any) {
-    const executionTimeMs = Date.now() - startTime;
+    child.on('error', (error: Error) => {
+      if (!resolved) {
+        resolved = true;
+        clearTimeout(timeoutId);
+        if (options.signal) {
+          options.signal.removeEventListener('abort', onAbort);
+        }
 
-    let errorMessage = error.message;
-    if (error.killed) {
-      errorMessage = `Command timed out after ${timeout}ms`;
-    }
-
-    logger.error(`[ReasonerShell] Error: ${errorMessage}`);
-
-    return {
-      command,
-      output: `Error: ${errorMessage}`,
-      success: false,
-      executionTimeMs
-    };
-  }
+        const executionTimeMs = Date.now() - startTime;
+        logger.error(`[ReasonerShell] Error: ${error.message}`);
+        resolve({
+          command,
+          output: `Error: ${error.message}`,
+          success: false,
+          executionTimeMs
+        });
+      }
+    });
+  });
 }
 
 /**
- * Execute multiple shell commands and return all results
+ * Execute multiple shell commands and return all results.
+ * Checks abort signal between each command.
  */
 export async function executeShellCommands(
   commands: ShellCommand[],
   workspacePath: string,
   options: {
-    allowAllCommands?: boolean;  // "Walk on the Wild Side" mode
+    allowAllCommands?: boolean;
+    signal?: AbortSignal;
   } = {}
 ): Promise<ShellResult[]> {
   const results: ShellResult[] = [];
 
   for (const cmd of commands) {
+    // Check abort between commands
+    if (options.signal?.aborted) {
+      results.push({
+        command: cmd.command,
+        output: 'Interrupted',
+        success: false,
+        executionTimeMs: 0
+      });
+      break;
+    }
+
     const result = await executeShellCommand(cmd.command, workspacePath, {
-      allowAllCommands: options.allowAllCommands
+      allowAllCommands: options.allowAllCommands,
+      signal: options.signal
     });
     results.push(result);
   }
@@ -339,74 +414,25 @@ Use web search when you need up-to-date information, recent documentation, news,
 ` : '';
 
   return `
-You have access to shell commands for exploring and modifying the codebase. To run a command, wrap it in <shell> tags:
-
+You have shell access. Run commands with <shell> tags:
 <shell>cat src/file.ts</shell>
 <shell>grep -rn "function" src/</shell>
-<shell>ls -la</shell>
 
-The system is running ${platform}. Commands are executed using the system's default shell.
+System: ${platform}. Commands run in the workspace directory.${webSearchSection}
 
-You can run any shell command - read files, search, list directories, run git commands, etc.
-Commands are executed in the workspace directory.
-
-After running commands, analyze the output and continue. You can run multiple commands if needed.${webSearchSection}
-
-**Creating New Files:**
-Use shell commands to create new files. Use cat with heredoc:
-
-<shell>cat > path/to/newfile.ts << 'EOF'
-// file contents here
-export function hello() {
-  return "world";
-}
+**New files:** Use shell commands:
+<shell>cat > path/to/file.ts << 'EOF'
+// contents
 EOF</shell>
 
-You can create multiple files with multiple shell commands. Always use 'EOF' (quoted) to prevent variable expansion.
+**Editing existing files:** Use SEARCH/REPLACE (described in the edit format section below).
 
-**Editing Existing Files (SEARCH/REPLACE format):**
-To modify code in an EXISTING file, use this EXACT format:
+**Workflow:**
+1. Explore with shell commands first
+2. New files → shell (cat > file << 'EOF')
+3. Existing files → read first, then SEARCH/REPLACE
 
-\`\`\`<language>
-# File: path/to/file.ext
-<<<<<<< SEARCH
-exact code to find (copy verbatim from file)
-======= AND
-replacement code
->>>>>>> REPLACE
-\`\`\`
-
-**Example:**
-\`\`\`typescript
-# File: src/utils/helper.ts
-<<<<<<< SEARCH
-export function oldFunction() {
-  return "old";
-}
-======= AND
-export function newFunction() {
-  return "new";
-}
->>>>>>> REPLACE
-\`\`\`
-
-**SEARCH/REPLACE requirements (edits FAIL without these):**
-1. ✓ Use triple backticks to create a code block
-2. ✓ First line inside MUST be "# File: <path>"
-3. ✓ SEARCH section = EXACT code from file (copy verbatim including whitespace)
-4. ✓ All markers must be INSIDE the code block
-5. ✓ ONE code block per file - NOT separate "before" and "after" blocks
-
-**WARNING:** SEARCH/REPLACE is ONLY for editing existing files. To create new files, use shell commands instead.
-
-**Workflow for Code Tasks:**
-1. Use shell commands to explore and understand the codebase
-2. For **new files**: create them with shell commands (cat > file << 'EOF')
-3. For **existing files**: read them first, then provide SEARCH/REPLACE edits
-
-**IMPORTANT: You MUST complete tasks in a single response.**
-- If the user asks a question or wants information, provide a clear direct answer. Do NOT create or edit files for questions.
-- If the task requires code changes, do NOT stop after exploration — produce the edits.
-- Never end your response with just shell commands or analysis — finish the task.
+If the user asks a question, answer it directly. Do NOT create or edit files for questions.
+Complete tasks fully — don't stop after exploration.
 `;
 }
