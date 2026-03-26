@@ -364,20 +364,53 @@ AGPL
 | ~~UI bug fixes: mode switching (#2e), renderPendingFiles crash, dropdown hover (#2f)~~ | editMode per-group, history restore, hover removal |
 | ~~Fork icon + UX (#2c)~~ | 🍴 emoji, auto-send on user fork, toast → status panel, divider redesign, user italics |
 | ~~Streaming guards~~ | Model selector, edit mode, and plan buttons disabled during active requests |
+| ~~Command audit (#4)~~ | Removed duplicates (newChat/clearConversation, showChatHistory/searchChatHistory), removed 7 experimental code actions, consolidated log commands (exportLogsAI removed, exportLogsHuman → exportLogs) |
+| ~~Settings cleanup (#2a)~~ | Removed logging section (default debug), reasoner section (in system commands), web search settings (dedicated popup), history section (always auto-save), reset all. Added API key buttons, kept debug buttons with pub/sub |
+| ~~System prompt modal~~ | New modal with saved prompts DB table, per-model tags, active/deactivate, unsaved changes bar, save as flow. Removed facade defaults — empty = use built-in prompt |
+| ~~Prompt improvements~~ | Trimmed system prompt, split per-model (reasoner vs chat), added conversational gate, removed "AND" from SEARCH/REPLACE separator |
+| ~~Drawing server WSL2 fix~~ | Shows netsh port-forward command for WSL2 users in drawing server popup |
+| ~~Popup architecture fix~~ | PopupShadowActor base class: triggerElement support, auto-fixed positioning. Applied to plans and web search popups |
+| ~~Model selector per-model settings~~ | maxTokens stored per-model so switching doesn't overwrite. Temperature hidden for Reasoner (not supported). "No Limit" display for shell iterations |
+| ~~Auto new session on model switch~~ | Switching models creates a new session automatically (no mixed-model conversations) |
+| ~~DiffEngine separator fix~~ | Removed "AND" from `=======` separator. Parser accepts bare `=======`. Better model compliance |
+| ~~Inline shell execution~~ | Shell commands execute inline during streaming (one at a time, interleaved with text). File watcher detects modifications. Heredoc-aware parsing |
+| ~~File context modal fixes~~ | Fixed deselect/re-select bug, search result reappear bug. Removed cancel button and add-all |
+| ~~Thinking dropdown scroll~~ | User can scroll up during streaming thinking; auto-follows when scrolled to bottom |
+| ~~Dropdown padding~~ | 6px top/bottom padding on shell, tools, pending headers (matches thinking) |
+| ~~Command approval: full command as unit~~ | No chain splitting — full command is one rule entry. Blocked commands show approval prompt (user can override) |
 
-### Remaining
+### Active Bugs
+
+| # | Bug | Status | Details |
+|---|-----|--------|---------|
+| B1 | Command approval: streaming not paused during prompt | Open | `_approvalPending` flag gates segments in `onFlush` but tokens still render. Fix applied (hold ALL segments) but not verified working |
+| B2 | Command approval: no visual feedback after decision | Open | `commandApprovalResolved` message sent but approval widget doesn't update. Logging added to diagnose `_pendingApprovalId` timing |
+| B3 | Duplicate rules in system commands modal | Open | "cat >>" appears twice. DB has unique index so not actual duplicates — likely UI rendering issue from double rules update |
+| B4 | History shows "No messages" and "0" count | Open | Session has events but metadata count not updated after messages recorded |
+| B5 | History highlight may not match active session | Open | Need to verify session ID comparison in highlight logic |
+| B6 | Web search popup: mode not restored from history | Open | Popup shows "Auto" highlighted but button color doesn't match |
+| B7 | Web search popup cleanup | Open | Remove Enable/Disable buttons (redundant with Off/Manual/Auto). Clarify Manual vs Auto |
+| B8 | Streaming disable audit | Open | Some interactive elements may still be clickable during streaming |
+| B9 | DiffManager creates new file instead of editing existing | Open | In manual/ask mode, `File not found, creating new file` for files that exist. Workspace-relative path resolution issue |
+| B10 | Manual mode: diff tab stays open after apply | Open | Question mode closes diff tab on accept, manual mode does not |
+| B11 | Dropdown text not copyable | Open | cursor: pointer on tools/shell containers prevents text selection. Code dropdown works |
+| B12 | Input box expands container instead of overlaying | Open | Should grow upward above container, not push container taller |
+
+### Remaining Work
 
 | Priority | Item | Effort | Impact |
 |----------|------|--------|--------|
+| **P0** | Fix active bugs B1-B3 (command approval) | 2-3 hrs | Core feature broken |
 | **P0** | Enable GitHub Actions CI/CD (#8) | 1-2 hrs | Blocker — can't ship without it |
 | **P0** | README overhaul (#9) | 2-3 hrs | Blocker — first thing users see |
-| **P1** | Settings cleanup: remove Debug section, simplify (#2a) | 1-2 hrs | Polish |
+| **P1** | Fix B4-B5 (history display) | 1-2 hrs | Users will see these |
+| **P1** | Fix B9-B10 (diff/apply issues) | 1-2 hrs | Core edit workflow |
 | **P1** | Hide inspector button when devMode off (#5) | 30 min | Polish |
-| **P1** | Command audit: remove drawing commands, relabel debug commands (#4) | 1 hr | Cleanup |
+| **P2** | Fix B6-B8 (web search, streaming audit) | 1-2 hrs | Polish |
+| **P2** | Fix B11-B12 (text copy, input box) | 1-2 hrs | UX |
 | **P2** | Input box improvements (#2b) | 1-2 hrs | UX |
-| **P2** | Interrupt improvements: finish reason, streaming abort check (#3) | 1-2 hrs | Reliability |
+| **P2** | Interrupt improvements (#3) | 1-2 hrs | Reliability |
 | **P2** | General styling pass (#2g) | 2-4 hrs | Owner-driven |
-| **P3** | Plan mode MVP (#6) | 2-3 hrs | Feature — differentiator but not required |
-| **P3** | Better interrupts: shell abort propagation (#3) | 2-3 hrs | Edge case |
+| **P3** | Plan mode MVP (#6) | 2-3 hrs | Feature — partially built (popup works, backend wired) |
 | **Defer** | Context warning UI (#11) | 4-6 hrs | Auto-compression works silently |
 | **Defer** | File context manager changes (#7) | — | Keep as-is |

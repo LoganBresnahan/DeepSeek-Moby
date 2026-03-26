@@ -95,6 +95,15 @@ export class RequestOrchestrator {
   // ── State ──
   private abortController: AbortController | null = null;
   private contentBuffer: ContentTransformBuffer | null = null;
+  // Queue for shell commands detected inline during streaming
+  private _pendingInlineShellCommands: Array<{ command: string }> = [];
+  // Track commands already executed inline (to avoid re-execution in batch)
+  private _inlineExecutedCommands: Set<string> = new Set();
+  // Pause token streaming during command approval
+  private _approvalPending = false;
+  private _heldSegments: Array<{ type: string; content: unknown; complete?: boolean }> = [];
+  // Promise that resolves when inline shell execution (including any approval) completes
+  private _inlineExecutionPromise: Promise<void> | null = null;
 
   constructor(
     private deepSeekClient: DeepSeekClient,
@@ -193,13 +202,66 @@ export class RequestOrchestrator {
       debug: false,
       log: (msg) => logger.debug(msg),
       onFlush: (segments) => {
-        for (const segment of segments) {
+        // SYNCHRONOUS pre-scan: if this batch contains a shell command that needs approval,
+        // set _approvalPending BEFORE processing any segments (including text before the shell tag).
+        // This prevents the race condition where text fires to the UI before the async approval starts.
+        if (!this._approvalPending) {
+          const allowAllCommands = vscode.workspace.getConfiguration('deepseek')
+            .get<boolean>('allowAllShellCommands') ?? false;
+
+          if (!allowAllCommands && this.commandApprovalManager) {
+            for (const seg of segments) {
+              if (seg.type === 'shell' && seg.complete && Array.isArray(seg.content)) {
+                const cmds = seg.content as Array<{ command: string }>;
+                for (const cmd of cmds) {
+                  const parsed = parseShellCommands(`<shell>${cmd.command}</shell>`);
+                  for (const pc of parsed) {
+                    const decision = this.commandApprovalManager.checkCommand(pc.command);
+                    if (decision !== 'allowed') {
+                      logger.info(`[ContentBuffer] Shell command needs approval — holding all segments`);
+                      this._approvalPending = true;
+                      break;
+                    }
+                  }
+                  if (this._approvalPending) break;
+                }
+                if (this._approvalPending) break;
+              }
+            }
+          }
+        }
+
+        for (let i = 0; i < segments.length; i++) {
+          const segment = segments[i];
+          const nextSegment = segments[i + 1];
+
+          // Hold text segments while waiting for command approval.
+          // Shell segments still get queued — the approval check happens in executeInlineShellCommands.
+          if (this._approvalPending && segment.type === 'text') {
+            this._heldSegments.push({ type: segment.type, content: segment.content, complete: segment.complete });
+            continue;
+          }
+
           switch (segment.type) {
-            case 'text':
-              this._onStreamToken.fire({ token: segment.content as string });
+            case 'text': {
+              let text = segment.content as string;
+              // Trim trailing newlines before shell/web_search segments to reduce visual gaps
+              if (nextSegment && (nextSegment.type === 'shell' || nextSegment.type === 'web_search')) {
+                text = text.replace(/\n+$/, '');
+              }
+              if (text) {
+                this._onStreamToken.fire({ token: text });
+              }
               break;
+            }
             case 'shell':
-              logger.debug(`[ContentBuffer] Detected shell commands, will be handled after iteration`);
+              if (segment.complete && Array.isArray(segment.content)) {
+                // Queue for inline execution during streaming
+                for (const cmd of segment.content as Array<{ command: string }>) {
+                  this._pendingInlineShellCommands.push(cmd);
+                }
+                logger.debug(`[ContentBuffer] Queued ${(segment.content as Array<{ command: string }>).length} shell command(s) for inline execution`);
+              }
               break;
             case 'thinking':
               logger.debug(`[ContentBuffer] Detected thinking tags, handled separately`);
@@ -571,6 +633,164 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
     return systemPrompt;
   }
 
+  // ── Private: Inline Shell Execution (during streaming) ──
+
+  /**
+   * Execute shell commands that were detected inline during streaming.
+   * Called from the streaming token callback when ContentTransformBuffer
+   * detects complete <shell>...</shell> tags.
+   *
+   * Each command gets its own dropdown in the UI, appearing inline
+   * with the surrounding text rather than batched at the end.
+   */
+  private async executeInlineShellCommands(
+    workspacePath: string,
+    signal: AbortSignal,
+    state: { shellResultsForHistory: ShellResult[] }
+  ): Promise<void> {
+    while (this._pendingInlineShellCommands.length > 0) {
+      if (signal.aborted) break;
+
+      const rawCmd = this._pendingInlineShellCommands.shift()!;
+
+      // Parse with heredoc-aware parser (keeps multi-line commands together)
+      const parsedCommands = parseShellCommands(`<shell>${rawCmd.command}</shell>`);
+      if (parsedCommands.length === 0) continue;
+
+      // Track the raw content for dedup against batch path
+      this._inlineExecutedCommands.add(rawCmd.command);
+
+      // Flush buffer before sending shell notification
+      if (this.contentBuffer) {
+        this.contentBuffer.flush();
+      }
+
+      // Notify frontend — single dropdown for all commands in this <shell> tag
+      const shellPayload = parsedCommands.map(c => ({
+        command: c.command,
+        description: c.command.length > 50 ? c.command.substring(0, 50) + '...' : c.command
+      }));
+      this._onShellExecuting.fire({ commands: shellPayload });
+
+      // Command approval + execution for each parsed command
+      const allowAllCommands = vscode.workspace.getConfiguration('deepseek')
+        .get<boolean>('allowAllShellCommands') ?? false;
+
+      const approvedCommands: typeof parsedCommands = [];
+      const blockedResults: ShellResult[] = [];
+
+      for (const cmd of parsedCommands) {
+        if (allowAllCommands) {
+          approvedCommands.push(cmd);
+          continue;
+        }
+
+        if (!this.commandApprovalManager) {
+          approvedCommands.push(cmd);
+          continue;
+        }
+
+        const decision = this.commandApprovalManager.checkCommand(cmd.command);
+        if (decision === 'allowed') {
+          approvedCommands.push(cmd);
+        } else {
+          // Both 'blocked' and 'ask' show the approval prompt — gives user the chance to override
+          // Note: _approvalPending was already set synchronously in onFlush pre-scan
+          const userApproval = await this.commandApprovalManager.requestApproval(cmd.command);
+          this._approvalPending = false;
+
+          // Flush text segments that were held during approval
+          if (this._heldSegments.length > 0) {
+            for (const held of this._heldSegments) {
+              if (held.type === 'text' && held.content) {
+                this._onStreamToken.fire({ token: held.content as string });
+              }
+            }
+            this._heldSegments = [];
+          }
+
+          if (userApproval.decision === 'allowed') {
+            approvedCommands.push(cmd);
+          } else {
+            blockedResults.push({
+              command: cmd.command,
+              output: `Command rejected by user: ${cmd.command}`,
+              success: false,
+              executionTimeMs: 0
+            });
+          }
+        }
+      }
+
+      // Safety: clear approval flag if pre-scan set it but no approval was needed
+      // (e.g., command became allowed between pre-scan and execution)
+      if (this._approvalPending) {
+        this._approvalPending = false;
+        if (this._heldSegments.length > 0) {
+          for (const held of this._heldSegments) {
+            if (held.type === 'text' && held.content) {
+              this._onStreamToken.fire({ token: held.content as string });
+            }
+          }
+          this._heldSegments = [];
+        }
+      }
+
+      // File watcher
+      const modifiedFiles = new Set<string>();
+      let shellFileWatcher: vscode.FileSystemWatcher | null = null;
+      try {
+        shellFileWatcher = vscode.workspace.createFileSystemWatcher(
+          new vscode.RelativePattern(workspacePath, '**/*')
+        );
+        const trackChange = (uri: vscode.Uri) => {
+          const relativePath = vscode.workspace.asRelativePath(uri, false);
+          if (!relativePath.startsWith('.git/')) {
+            modifiedFiles.add(relativePath);
+          }
+        };
+        shellFileWatcher.onDidChange(trackChange);
+        shellFileWatcher.onDidCreate(trackChange);
+      } catch {
+        shellFileWatcher = null;
+      }
+
+      // Execute approved commands
+      const executedResults = approvedCommands.length > 0
+        ? await executeShellCommands(approvedCommands, workspacePath, { allowAllCommands, signal })
+        : [];
+      const allResults = [...blockedResults, ...executedResults];
+
+      // Dispose watcher and register modified files
+      if (shellFileWatcher) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        shellFileWatcher.dispose();
+        if (modifiedFiles.size > 0) {
+          logger.info(`[R1-Shell] Inline: File watcher detected ${modifiedFiles.size} modified files: ${[...modifiedFiles].join(', ')}`);
+          this.diffManager.registerShellModifiedFiles([...modifiedFiles]);
+        }
+      }
+
+      state.shellResultsForHistory.push(...allResults);
+
+      // Notify frontend of results
+      this._onShellResults.fire({
+        results: allResults.map(r => ({
+          command: r.command,
+          output: r.output.substring(0, 500) + (r.output.length > 500 ? '...' : ''),
+          success: r.success
+        }))
+      });
+
+      // Also track individual parsed commands for batch dedup
+      for (const cmd of parsedCommands) {
+        this._inlineExecutedCommands.add(cmd.command);
+      }
+
+      logger.info(`[R1-Shell] Inline executed ${allResults.length} command(s) from <shell> tag`);
+    }
+  }
+
   // ── Private: Streaming + Shell Iteration Loop ──
 
   private async streamAndIterate(
@@ -614,6 +834,10 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
 
       // Track iteration-specific response
       let iterationResponse = '';
+      // Reset inline shell tracking for this iteration
+      this._pendingInlineShellCommands = [];
+      this._inlineExecutedCommands.clear();
+      this._inlineExecutionPromise = null;
 
       // Timing metrics for debugging
       const iterationStartTime = Date.now();
@@ -661,6 +885,17 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
             this._onStreamToken.fire({ token });
           }
 
+          // Execute any shell commands detected inline by ContentTransformBuffer
+          if (isReasonerModel && this._pendingInlineShellCommands.length > 0) {
+            const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            if (workspacePath) {
+              // Store the promise so the iteration loop can await it after streaming completes
+              this._inlineExecutionPromise = this.executeInlineShellCommands(workspacePath, signal, state);
+              await this._inlineExecutionPromise;
+              this._inlineExecutionPromise = null;
+            }
+          }
+
           // Detect complete code blocks and auto-handle in "ask" or "auto" mode
           await this.diffManager.handleCodeBlockDetection(state.accumulatedResponse);
         },
@@ -683,6 +918,16 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
         } : undefined,
         { signal }
       );
+
+      // BLOCKING: Wait for any pending inline shell execution (including command approval)
+      // The onToken callback may have started executeInlineShellCommands which awaits
+      // user approval, but streamChat doesn't await the onToken callback — so the
+      // inline execution may still be pending when streamChat returns.
+      if (this._inlineExecutionPromise) {
+        logger.info('[R1-Shell] Waiting for pending inline shell execution to complete before continuing...');
+        await this._inlineExecutionPromise;
+        this._inlineExecutionPromise = null;
+      }
 
       // Log iteration completion for debugging R1 continuation
       if (isReasonerModel) {
@@ -750,13 +995,27 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
 
         let resultsContext = '';
 
+        // Include results from inline-executed commands (already executed during streaming)
+        if (this._inlineExecutedCommands.size > 0) {
+          const inlineResults = state.shellResultsForHistory.filter(r => this._inlineExecutedCommands.has(r.command));
+          if (inlineResults.length > 0) {
+            resultsContext += formatShellResultsForContext(inlineResults);
+            logger.info(`[R1-Shell] Including ${inlineResults.length} inline-executed results in context`);
+          }
+        }
+
         // ── Execute shell commands ──
         if (hasShell) {
           const inReasoning = containsShellCommands(state.currentIterationReasoning || '');
           const inContent = containsShellCommands(iterationResponse);
           logger.info(`[R1-Shell] Iteration ${shellIteration}: found shell commands (inContent=${inContent}, inReasoning=${inReasoning})`);
 
-          const commands = parseShellCommands(combinedForShellCheck);
+          // Filter out commands already executed inline during streaming
+          const allCommands = parseShellCommands(combinedForShellCheck);
+          const commands = allCommands.filter(c => !this._inlineExecutedCommands.has(c.command));
+          if (commands.length < allCommands.length) {
+            logger.info(`[R1-Shell] Skipping ${allCommands.length - commands.length} commands already executed inline`);
+          }
           if (commandsCreateFiles(commands)) {
             shellCreatedFiles = true;
             logger.info(`[R1-Shell] Shell commands include file creation (heredoc/redirect)`);
@@ -848,15 +1107,49 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
               });
             }
 
-            // Execute approved commands
+            // Execute approved commands with file change detection
             const shellStartTime = Date.now();
             logger.info(`[Timing] Shell execution started at ${new Date().toISOString()}`);
+
+            // Watch for file changes during shell execution
+            const modifiedFiles = new Set<string>();
+            let shellFileWatcher: vscode.FileSystemWatcher | null = null;
+            if (workspacePath) {
+              try {
+                shellFileWatcher = vscode.workspace.createFileSystemWatcher(
+                  new vscode.RelativePattern(workspacePath, '**/*')
+                );
+                const trackChange = (uri: vscode.Uri) => {
+                  const relativePath = vscode.workspace.asRelativePath(uri, false);
+                  if (!relativePath.startsWith('.git/')) {
+                    modifiedFiles.add(relativePath);
+                  }
+                };
+                shellFileWatcher.onDidChange(trackChange);
+                shellFileWatcher.onDidCreate(trackChange);
+              } catch {
+                // File watcher not available (e.g., in tests)
+                shellFileWatcher = null;
+              }
+            }
+
             const executedResults = approvedCommands.length > 0
               ? await executeShellCommands(approvedCommands, workspacePath, { allowAllCommands, signal })
               : [];
             const results = [...blockedResults, ...executedResults];
             const shellDuration = Date.now() - shellStartTime;
             logger.info(`[Timing] Shell execution completed in ${shellDuration}ms`);
+
+            // Dispose watcher and notify DiffManager of modified files
+            if (shellFileWatcher) {
+              // Wait for OS file system notifications to arrive
+              await new Promise(resolve => setTimeout(resolve, 100));
+              shellFileWatcher.dispose();
+              if (modifiedFiles.size > 0) {
+                logger.info(`[R1-Shell] File watcher detected ${modifiedFiles.size} modified files: ${[...modifiedFiles].join(', ')}`);
+                this.diffManager.registerShellModifiedFiles([...modifiedFiles]);
+              }
+            }
             state.shellResultsForHistory.push(...results);
 
             // Notify frontend of results

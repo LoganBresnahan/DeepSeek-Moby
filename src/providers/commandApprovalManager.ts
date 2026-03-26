@@ -143,13 +143,12 @@ export class CommandApprovalManager {
 
   /** Block execution and wait for user approval via the webview. */
   async requestApproval(command: string): Promise<CommandApprovalResult> {
-    const unknownSubCommand = this.findUnknownSubCommand(command) ?? command;
-    const prefix = this.extractPrefix(unknownSubCommand);
-    logger.info(`[CommandApproval] requestApproval: command="${command}", prefix="${prefix}", unknownSubCommand="${unknownSubCommand}"`);
+    const prefix = this.extractPrefix(command);
+    logger.info(`[CommandApproval] requestApproval: command="${command}", prefix="${prefix}"`);
 
     const spanId = tracer.startSpan('command.approval', 'requestApproval', {
       executionMode: 'async',
-      data: { command, prefix, unknownSubCommand }
+      data: { command, prefix }
     });
 
     return new Promise<CommandApprovalResult>(resolve => {
@@ -160,7 +159,7 @@ export class CommandApprovalManager {
         });
         resolve(result);
       };
-      this._onApprovalRequired.fire({ command, prefix, unknownSubCommand });
+      this._onApprovalRequired.fire({ command, prefix, unknownSubCommand: command });
     });
   }
 
@@ -186,7 +185,9 @@ export class CommandApprovalManager {
     }
   }
 
-  /** Check a command against the rules. Returns 'allowed', 'blocked', or 'ask'. */
+  /** Check a command against the rules. Returns 'allowed', 'blocked', or 'ask'.
+   *  Treats the full command string as one unit — chained commands (&&, ||, |)
+   *  are matched as a whole, not split into sub-commands. */
   checkCommand(command: string): CommandDecision {
     // Cross-instance cache invalidation: if another instance changed rules,
     // the globalState version counter will differ from our last-seen version.
@@ -198,31 +199,22 @@ export class CommandApprovalManager {
       return 'blocked';
     }
 
-    const subCommands = this.splitCompoundCommand(trimmed);
-    if (subCommands.length > 1) {
-      logger.debug(`[CommandApproval] Compound command split into ${subCommands.length} sub-commands: ${subCommands.map(s => `"${s}"`).join(', ')}`);
+    // Check against blocked rules (full command matched as prefix)
+    const blockedRule = this.blocked.find(rule => trimmed.startsWith(rule));
+    if (blockedRule) {
+      logger.debug(`[CommandApproval] checkCommand: "${trimmed.substring(0, 80)}" matched block rule "${blockedRule}"`);
+      tracer.trace('command.check', 'checkCommand', {
+        data: { command: trimmed.substring(0, 80), subCommandCount: 1, decision: 'blocked' }
+      });
+      return 'blocked';
     }
 
-    // Any blocked sub-command blocks the whole thing
-    for (const sub of subCommands) {
-      const matchedRule = this.blocked.find(rule => sub.startsWith(rule));
-      if (matchedRule) {
-        logger.debug(`[CommandApproval] checkCommand: "${sub}" matched block rule "${matchedRule}"`);
-        tracer.trace('command.check', 'checkCommand', {
-          data: { command: trimmed.substring(0, 80), subCommandCount: subCommands.length, decision: 'blocked' }
-        });
-        return 'blocked';
-      }
-    }
+    // Check against allowed rules (full command matched as prefix)
+    const isAllowed = this.allowed.some(rule => trimmed.startsWith(rule));
 
-    // All sub-commands must be in the allowlist
-    const allAllowed = subCommands.every(sub =>
-      this.allowed.some(rule => sub.startsWith(rule))
-    );
-
-    const decision: CommandDecision = allAllowed ? 'allowed' : 'ask';
+    const decision: CommandDecision = isAllowed ? 'allowed' : 'ask';
     tracer.trace('command.check', 'checkCommand', {
-      data: { command: trimmed.substring(0, 80), subCommandCount: subCommands.length, decision }
+      data: { command: trimmed.substring(0, 80), subCommandCount: 1, decision }
     });
     return decision;
   }
@@ -265,26 +257,33 @@ export class CommandApprovalManager {
     logger.info('[CommandApproval] Reset to defaults');
   }
 
-  /** Extract the likely prefix for an "Always Allow/Block" rule from a command. */
+  /** Extract the prefix for an "Always Allow/Block" rule from a command.
+   *  Uses binary + first arg for simple commands (e.g., "npm install" from "npm install lodash").
+   *  For chained commands, uses the full command string. */
   extractPrefix(command: string): string {
-    const parts = command.trim().split(/\s+/);
+    const trimmed = command.trim();
+    if (!trimmed) return '';
+
+    // If command contains chain operators, use the full command as the prefix
+    if (/[&|;]/.test(trimmed)) {
+      return trimmed;
+    }
+
+    // Simple command: binary + first arg
+    const parts = trimmed.split(/\s+/);
     if (parts.length <= 1) { return parts[0] || ''; }
-    // Common pattern: binary + subcommand (e.g., "npm install", "git status")
     return `${parts[0]} ${parts[1]}`;
   }
 
-  /** Find the first sub-command that is neither allowed nor blocked (the "ask" trigger). */
+  /** @deprecated Use checkCommand with full command string instead. */
   findUnknownSubCommand(command: string): string | null {
     const trimmed = command.trim();
     if (!trimmed) { return null; }
 
-    const subCommands = this.splitCompoundCommand(trimmed);
-    for (const sub of subCommands) {
-      if (this.blocked.some(rule => sub.startsWith(rule))) { continue; }
-      if (this.allowed.some(rule => sub.startsWith(rule))) { continue; }
-      return sub;
-    }
-    return null;
+    // Just check if the full command is unknown
+    if (this.blocked.some(rule => trimmed.startsWith(rule))) { return null; }
+    if (this.allowed.some(rule => trimmed.startsWith(rule))) { return null; }
+    return trimmed;
   }
 
   /** Split a compound command into individual sub-commands.

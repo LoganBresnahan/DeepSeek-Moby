@@ -604,9 +604,15 @@ export class MessageTurnActor extends InterleavedShadowActor {
         const preview = container.content.querySelector('.thinking-preview');
 
         if (body) {
+          // Check if user is at (or near) the bottom before updating
+          const isAtBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 30;
+
           body.textContent = content;
-          // Auto-scroll to bottom so user follows the thinking stream
-          body.scrollTop = body.scrollHeight;
+
+          // Only auto-scroll if user was already following at the bottom
+          if (isAtBottom) {
+            body.scrollTop = body.scrollHeight;
+          }
         }
 
         // Show the start of thinking text (CSS ellipsis handles overflow)

@@ -713,8 +713,12 @@ export class VirtualMessageGatewayActor extends EventStateActor {
     const { virtualList } = this._actors;
     const decision = msg.decision as 'allowed' | 'blocked';
 
-    if (!this._currentTurnId || !this._pendingApprovalId || !decision) return;
+    if (!this._currentTurnId || !this._pendingApprovalId || !decision) {
+      log.warn(`commandApprovalResolved: skipped — turnId=${this._currentTurnId}, approvalId=${this._pendingApprovalId}, decision=${decision}`);
+      return;
+    }
 
+    log.debug(`commandApprovalResolved: resolving ${this._pendingApprovalId} with decision=${decision}`);
     virtualList.resolveCommandApproval(this._currentTurnId, this._pendingApprovalId, decision);
     this._pendingApprovalId = null;
   }

@@ -63,12 +63,12 @@ const DEFAULT_PATTERNS: TransformPattern[] = [
     startPattern: /<shell>/,
     endPattern: /<\/shell>/,
     extract: (raw: string): ShellCommand[] => {
+      // Return the entire shell tag content as a single raw command.
+      // The inline executor uses parseShellCommands() for proper
+      // heredoc-aware parsing (multi-line commands stay together).
       const inner = raw.replace(/<\/?shell>/g, '').trim();
-      return inner
-        .split('\n')
-        .map(line => line.trim())
-        .filter(line => line.length > 0)
-        .map(command => ({ command }));
+      if (!inner) return [];
+      return [{ command: inner }];
     }
   },
   {

@@ -183,6 +183,7 @@ function createMockDiffManager() {
     setFlushCallback: vi.fn(),
     waitForPendingApprovals: vi.fn(async () => []),
     cancelPendingApprovals: vi.fn(),
+    registerShellModifiedFiles: vi.fn(),
   };
 }
 
@@ -1037,13 +1038,19 @@ describe('RequestOrchestrator', () => {
       expect(mockApproval.checkCommand).toHaveBeenCalledWith('pwd');
     });
 
-    it('should skip blocked commands and include blocked feedback in results', async () => {
+    it('should show approval prompt for blocked commands and include rejected feedback in results', async () => {
       const mockApproval = createMockCommandApprovalManager();
       // Block "rm" commands, allow "ls"
       mockApproval.checkCommand.mockImplementation((cmd: string) => {
         if (cmd.startsWith('ls')) return 'allowed';
         if (cmd.startsWith('rm')) return 'blocked';
         return 'ask';
+      });
+      // Simulate user rejecting the blocked command in the approval prompt
+      mockApproval.requestApproval.mockResolvedValue({
+        command: 'rm -rf /tmp/test',
+        decision: 'blocked',
+        persistent: false,
       });
 
       const orch = new RequestOrchestrator(
@@ -1073,15 +1080,18 @@ describe('RequestOrchestrator', () => {
 
       await orch.handleMessage('Clean up', 'session-1', async () => '', undefined);
 
-      // Should have results for both commands
-      expect(shellResults.length).toBeGreaterThan(0);
-      const allResults = shellResults[0].results;
+      // Blocked commands now show approval prompt instead of silently skipping
+      expect(mockApproval.requestApproval).toHaveBeenCalled();
 
-      // The blocked command should show up with a blocked message
+      // Inline execution fires per-command shell results
+      expect(shellResults.length).toBeGreaterThan(0);
+      const allResults = shellResults.flatMap(e => e.results);
+
+      // The rejected command should show up with a rejected message
       const blockedResult = allResults.find(r => r.command === 'rm -rf /tmp/test');
       expect(blockedResult).toBeDefined();
       expect(blockedResult!.success).toBe(false);
-      expect(blockedResult!.output).toContain('blocked');
+      expect(blockedResult!.output).toContain('rejected');
     });
 
     it('should block "ask" commands and await requestApproval', async () => {
@@ -1124,12 +1134,13 @@ describe('RequestOrchestrator', () => {
       // requestApproval should have been called
       expect(mockApproval.requestApproval).toHaveBeenCalledWith('curl https://example.com');
 
-      // Blocked result should appear in shell results
+      // Blocked result should appear in shell results (inline execution fires per-command)
       expect(shellResults.length).toBeGreaterThan(0);
-      const result = shellResults[0].results.find(r => r.command.includes('curl'));
+      const allResults = shellResults.flatMap(e => e.results);
+      const result = allResults.find(r => r.command.includes('curl'));
       expect(result).toBeDefined();
       expect(result!.success).toBe(false);
-      expect(result!.output).toContain('blocked');
+      expect(result!.output).toContain('rejected');
     });
 
     it('should bypass approval gate when allowAllShellCommands is true', async () => {

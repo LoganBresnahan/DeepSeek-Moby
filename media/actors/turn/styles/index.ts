@@ -678,6 +678,15 @@ const shellStyles = `
   flex-shrink: 0;
 }
 
+:host(.shell-container:not(.complete)) .shell-icon {
+  animation: shell-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes shell-pulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
 .shell-title {
   color: var(--vscode-foreground);
   font-weight: 500;

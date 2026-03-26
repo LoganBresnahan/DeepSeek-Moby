@@ -32,12 +32,15 @@ export interface HistoryMessage {
 export interface HistorySession {
   id: string;
   title: string;
-  messages: HistoryMessage[];
+  messages?: HistoryMessage[];
   createdAt: Date | string;
   updatedAt: Date | string;
   model: string;
   parentSessionId?: string;
   forkSequence?: number;
+  eventCount?: number;
+  firstUserMessage?: string;
+  lastActivityPreview?: string;
 }
 
 interface VSCodeAPI {
@@ -174,7 +177,7 @@ export class HistoryShadowActor extends ShadowActor {
     const timestamp = this.formatFullTimestamp(session.updatedAt);
     const modelIcon = session.model === 'deepseek-reasoner' ? '🧠' : '💬';
     const modelLabel = session.model === 'deepseek-reasoner' ? 'R1' : 'Chat';
-    const messageCount = session.messages?.length || 0;
+    const messageCount = session.eventCount || session.messages?.length || 0;
 
     // Fork badge: show "Fork of [parent]" if this session has a parent
     const forkBadge = session.parentSessionId
@@ -317,18 +320,24 @@ export class HistoryShadowActor extends ShadowActor {
   }
 
   private getSessionPreview(session: HistorySession): string {
-    if (!session.messages || session.messages.length === 0) {
-      return 'No messages';
+    // Use pre-computed metadata from the session (populated by updateSessionMetadata)
+    if (session.lastActivityPreview) {
+      return session.lastActivityPreview;
     }
 
-    // Get last user message for preview
-    const lastUserMsg = [...session.messages]
-      .reverse()
-      .find(m => m.role === 'user');
+    if (session.firstUserMessage) {
+      return session.firstUserMessage;
+    }
 
-    if (lastUserMsg) {
-      const content = lastUserMsg.content || '';
-      return content.length > 100 ? content.substring(0, 100) + '...' : content;
+    // Fallback to messages array if present (legacy)
+    if (session.messages && session.messages.length > 0) {
+      const lastUserMsg = [...session.messages]
+        .reverse()
+        .find(m => m.role === 'user');
+      if (lastUserMsg) {
+        const content = lastUserMsg.content || '';
+        return content.length > 100 ? content.substring(0, 100) + '...' : content;
+      }
     }
 
     return 'No messages';

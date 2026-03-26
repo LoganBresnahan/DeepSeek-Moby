@@ -429,9 +429,20 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         case 'updateSettings':
           await this.settingsManager.updateSettings(data.settings);
           break;
-        case 'selectModel':
-          await this.settingsManager.updateSettings({ model: data.model });
+        case 'selectModel': {
+          const currentModel = this.deepSeekClient.getModel();
+          if (data.model !== currentModel) {
+            // If the current session has messages, start a new session
+            if (this.currentSessionId && this.conversationManager.sessionHasEvents(this.currentSessionId)) {
+              await this.settingsManager.updateSettings({ model: data.model });
+              await this.clearConversation();
+            } else {
+              // Empty session — just switch the model in place
+              await this.settingsManager.updateSettings({ model: data.model });
+            }
+          }
           break;
+        }
         case 'setTemperature':
           await this.settingsManager.updateSettings({ temperature: data.temperature });
           break;

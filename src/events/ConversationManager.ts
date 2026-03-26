@@ -220,6 +220,14 @@ export class ConversationManager {
   }
 
   /**
+   * Check if a session has any events (messages, tool calls, etc.).
+   */
+  sessionHasEvents(sessionId: string): boolean {
+    const events = this.eventStore.getEvents(sessionId);
+    return events.length > 0;
+  }
+
+  /**
    * Get all sessions, sorted by most recently updated.
    */
   async getAllSessions(): Promise<Session[]> {

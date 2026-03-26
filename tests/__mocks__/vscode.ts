@@ -60,7 +60,14 @@ export const workspace = {
     createDirectory: vi.fn()
   },
   openTextDocument: vi.fn(),
-  applyEdit: vi.fn()
+  applyEdit: vi.fn(),
+  createFileSystemWatcher: vi.fn(() => ({
+    onDidChange: vi.fn(),
+    onDidCreate: vi.fn(),
+    onDidDelete: vi.fn(),
+    dispose: vi.fn()
+  })),
+  asRelativePath: vi.fn((uri: any) => typeof uri === 'string' ? uri : uri?.fsPath || '')
 };
 
 export const commands = {
@@ -74,6 +81,10 @@ export const Uri = {
   parse: vi.fn((uri: string) => ({ fsPath: uri, scheme: 'file', path: uri })),
   joinPath: vi.fn()
 };
+
+export class RelativePattern {
+  constructor(public base: string, public pattern: string) {}
+}
 
 export const Range = vi.fn().mockImplementation((startLine: number, startChar: number, endLine: number, endChar: number) => ({
   start: { line: startLine, character: startChar },

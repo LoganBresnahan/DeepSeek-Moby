@@ -1159,6 +1159,29 @@ which I already edited - would you like me to update it?"
     this.notifyAutoAppliedFilesChanged();
   }
 
+  /**
+   * Register files modified by shell commands (bypassed the diff engine).
+   * Adds them to the auto-applied list so the "Modified Files" dropdown shows them.
+   */
+  registerShellModifiedFiles(filePaths: string[]): void {
+    if (filePaths.length === 0) return;
+
+    for (const filePath of filePaths) {
+      const currentCount = this.fileEditCounts.get(filePath) || 0;
+      const iteration = currentCount + 1;
+      this.fileEditCounts.set(filePath, iteration);
+      const diffId = `${filePath}-${Date.now()}-${iteration}`;
+
+      logger.info(`[DiffManager] Shell modified file: ${filePath}`);
+
+      this.autoAppliedFiles.push({ filePath, timestamp: Date.now(), description: 'Modified by shell command' });
+      this.resolvedDiffs.push({ filePath, timestamp: Date.now(), status: 'applied', iteration, diffId });
+      this.currentResponseFileChanges.push({ filePath, status: 'applied', iteration });
+    }
+
+    this.notifyAutoAppliedFilesChanged();
+  }
+
   // ── Quick Pick ──
 
   async showDiffQuickPick(): Promise<void> {

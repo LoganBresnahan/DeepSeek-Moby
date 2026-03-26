@@ -89,15 +89,14 @@ describe('ContentTransformBuffer', () => {
       });
     });
 
-    it('parses multiple commands in shell tag', () => {
+    it('returns multi-line shell content as single raw command', () => {
       buffer.append('<shell>ls -la\ncat file.txt\npwd</shell>');
 
       expect(flushedSegments).toHaveLength(1);
       expect(flushedSegments[0].type).toBe('shell');
+      // Raw content returned as single command — parseShellCommands handles splitting
       expect(flushedSegments[0].content).toEqual([
-        { command: 'ls -la' },
-        { command: 'cat file.txt' },
-        { command: 'pwd' }
+        { command: 'ls -la\ncat file.txt\npwd' }
       ]);
     });
 
