@@ -24,6 +24,10 @@ export interface ShellResult {
   output: string;
   success: boolean;
   executionTimeMs: number;
+  /** How the command was approved: 'auto' (rule matched), 'user-allowed', 'user-blocked', 'rule-blocked' */
+  approvalStatus?: 'auto' | 'user-allowed' | 'user-blocked' | 'rule-blocked';
+  /** Which reasoning iteration (0-based) produced this shell command */
+  iterationIndex?: number;
 }
 
 // Minimal blocklist - only truly catastrophic operations

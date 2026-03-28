@@ -41,9 +41,9 @@ export interface RichHistoryTurn {
   content: string;
   // Assistant-only fields:
   reasoning_iterations?: string[];
-  contentIterations?: string[];
+  contentIterations?: Array<{ text: string; iterationIndex: number }>;
   toolCalls?: Array<{ name: string; detail: string; status: string }>;
-  shellResults?: Array<{ command: string; output: string; success: boolean }>;
+  shellResults?: Array<{ command: string; output: string; success: boolean; approvalStatus?: string; iterationIndex?: number }>;
   filesModified?: string[];
   /** Edit mode active when this turn's file modifications were created */
   editMode?: 'manual' | 'ask' | 'auto';
@@ -436,7 +436,7 @@ export class ConversationManager {
     model: string,
     finishReason: 'stop' | 'tool_calls' | 'length' | 'error',
     usage?: { promptTokens: number; completionTokens: number },
-    contentIterations?: string[]
+    contentIterations?: Array<{ text: string; iterationIndex: number }>
   ): Promise<ConversationEvent> {
     const event = this.eventStore.append({
       sessionId,
@@ -699,12 +699,18 @@ export class ConversationManager {
           }
           const toolEvent = event as ToolCallEvent;
           if (toolEvent.toolName === 'shell') {
-            const command = (toolEvent.arguments as any)?.command || '';
+            const args = toolEvent.arguments as any;
+            const command = args?.command || '';
+            const approvalStatus = args?.approvalStatus;
+            const iterationIndex = args?.iterationIndex;
             const idx = currentAssistantTurn.shellResults!.length;
+            console.log(`[RichHistory] shell[${idx}]: command="${command.substring(0, 50)}", approvalStatus=${approvalStatus ?? 'MISSING'}, iterationIndex=${iterationIndex ?? 'MISSING'}, args=`, JSON.stringify(args));
             currentAssistantTurn.shellResults!.push({
               command,
               output: '',
-              success: true
+              success: true,
+              ...(approvalStatus ? { approvalStatus } : {}),
+              ...(iterationIndex !== undefined ? { iterationIndex } : {})
             });
             toolCallMap.set(toolEvent.toolCallId, { name: 'shell', index: idx });
           } else if (toolEvent.toolName === '_file_modified') {
@@ -768,8 +774,11 @@ export class ConversationManager {
           currentAssistantTurn.model = assistantEvent.model;
           currentAssistantTurn.sequence = event.sequence;
           // Extract per-iteration content text (for correct interleaving during restore)
+          // Handle both old format (string[]) and new format ({ text, iterationIndex }[])
           if (assistantEvent.contentIterations && assistantEvent.contentIterations.length > 0) {
-            currentAssistantTurn.contentIterations = assistantEvent.contentIterations;
+            currentAssistantTurn.contentIterations = assistantEvent.contentIterations.map((c: any, i: number) =>
+              typeof c === 'string' ? { text: c, iterationIndex: i } : c
+            );
           }
           // Finalize this assistant turn
           turns.push(currentAssistantTurn);

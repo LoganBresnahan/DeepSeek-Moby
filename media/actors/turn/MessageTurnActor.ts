@@ -58,7 +58,7 @@ export interface MessageTurnActorConfig {
   /** Callback when pending file action is triggered */
   onPendingFileAction?: (action: 'accept' | 'reject' | 'focus', fileId: string, diffId?: string, filePath?: string) => void;
   /** Callback when command approval action is triggered */
-  onCommandApprovalAction?: (command: string, decision: 'allowed' | 'blocked', persistent: boolean, prefix: string) => void;
+  onCommandApprovalAction?: (command: string, decision: 'allowed' | 'blocked', persistent: boolean, prefix: string, approvalId?: string) => void;
 }
 
 // ============================================
@@ -115,7 +115,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
   // Command Approval State
   // ============================================
 
-  private _commandApprovals: Map<string, { id: string; command: string; prefix: string; unknownSubCommand: string; status: 'pending' | 'allowed' | 'blocked'; containerId: string }> = new Map();
+  private _commandApprovals: Map<string, { id: string; command: string; prefix: string; unknownSubCommand: string; status: 'pending' | 'allowed' | 'blocked'; persistent?: boolean; containerId: string }> = new Map();
   private _approvalCounter = 0;
 
   // ============================================
@@ -156,7 +156,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
   private _editMode: EditMode = 'manual';
   private readonly _postMessage: ((message: Record<string, unknown>) => void) | null;
   private readonly _onPendingFileAction: ((action: 'accept' | 'reject' | 'focus', fileId: string, diffId?: string, filePath?: string) => void) | null;
-  private readonly _onCommandApprovalAction: ((command: string, decision: 'allowed' | 'blocked', persistent: boolean, prefix: string) => void) | null;
+  private readonly _onCommandApprovalAction: ((command: string, decision: 'allowed' | 'blocked', persistent: boolean, prefix: string, approvalId?: string) => void) | null;
 
   // ============================================
   // Constructor
@@ -1375,11 +1375,14 @@ export class MessageTurnActor extends InterleavedShadowActor {
   /**
    * Resolve a command approval (update status).
    */
-  resolveCommandApproval(approvalId: string, decision: 'allowed' | 'blocked'): void {
+  resolveCommandApproval(approvalId: string, decision: 'allowed' | 'blocked', persistent?: boolean): void {
     const approval = this._commandApprovals.get(approvalId);
     if (!approval) return;
 
     approval.status = decision;
+    if (persistent !== undefined) {
+      approval.persistent = persistent;
+    }
     this.renderCommandApproval(approvalId);
   }
 
@@ -1416,11 +1419,20 @@ export class MessageTurnActor extends InterleavedShadowActor {
       `;
     } else {
       const icon = isAllowed ? '✓' : '✗';
-      const label = isAllowed ? 'Allowed' : 'Blocked';
+      let displayText: string;
+      if (approval.persistent) {
+        // Persistent rule — show the prefix that was saved
+        const action = isAllowed ? 'Always allowed' : 'Always blocked';
+        displayText = `${action}: <code>${this.escapeHtml(approval.prefix)}</code>`;
+      } else {
+        // One-time decision — show the full command
+        const action = isAllowed ? 'Allowed' : 'Blocked';
+        displayText = `${action}: <code>${this.escapeHtml(approval.command)}</code>`;
+      }
       container.content.innerHTML = `
         <div class="approval-header resolved">
           <span class="approval-icon">${icon}</span>
-          <span class="approval-title">${label}: <code>${this.escapeHtml(approval.command)}</code></span>
+          <span class="approval-title">${displayText}</span>
         </div>
       `;
     }
@@ -1438,8 +1450,12 @@ export class MessageTurnActor extends InterleavedShadowActor {
       const approval = this._commandApprovals.get(approvalId);
       if (!approval || approval.status !== 'pending') return;
 
+      // Update the widget immediately for instant visual feedback
+      // (don't wait for the extension round-trip)
+      this.resolveCommandApproval(approvalId, decision, persistent);
+
       if (this._onCommandApprovalAction) {
-        this._onCommandApprovalAction(approval.command, decision, persistent, approval.prefix);
+        this._onCommandApprovalAction(approval.command, decision, persistent, approval.prefix, approvalId);
       }
     });
   }

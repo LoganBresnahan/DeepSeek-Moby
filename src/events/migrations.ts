@@ -14,7 +14,7 @@
 import { Database } from './SqlJsWrapper';
 import { logger } from '../utils/logger';
 
-const LATEST_VERSION = 2;
+const LATEST_VERSION = 1;
 
 export function runMigrations(db: Database): void {
   const version = db.pragmaGet('user_version');
@@ -86,21 +86,6 @@ export function runMigrations(db: Database): void {
         ON command_rules(prefix, type);
 
       -- Saved system prompts
-      CREATE TABLE IF NOT EXISTS saved_prompts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        content TEXT NOT NULL,
-        model TEXT,
-        is_active INTEGER NOT NULL DEFAULT 0,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
-      );
-    `);
-  }
-
-  if (version < 2) {
-    logger.info('[Migrations] Applying version 2: saved_prompts table');
-    db.exec(`
       CREATE TABLE IF NOT EXISTS saved_prompts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,

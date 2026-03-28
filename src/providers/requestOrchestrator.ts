@@ -102,8 +102,6 @@ export class RequestOrchestrator {
   // Pause token streaming during command approval
   private _approvalPending = false;
   private _heldSegments: Array<{ type: string; content: unknown; complete?: boolean }> = [];
-  // Promise that resolves when inline shell execution (including any approval) completes
-  private _inlineExecutionPromise: Promise<void> | null = null;
 
   constructor(
     private deepSeekClient: DeepSeekClient,
@@ -176,7 +174,7 @@ export class RequestOrchestrator {
       accumulatedResponse: '',
       reasoningIterations: [] as string[],
       currentIterationReasoning: '',
-      contentIterations: [] as string[],
+      contentIterations: [] as Array<{ text: string; iterationIndex: number }>,
       currentIterationContent: '',
       shellResultsForHistory: [] as ShellResult[],
     };
@@ -646,7 +644,8 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
   private async executeInlineShellCommands(
     workspacePath: string,
     signal: AbortSignal,
-    state: { shellResultsForHistory: ShellResult[] }
+    state: { shellResultsForHistory: ShellResult[] },
+    iterationIndex: number
   ): Promise<void> {
     while (this._pendingInlineShellCommands.length > 0) {
       if (signal.aborted) break;
@@ -678,6 +677,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
 
       const approvedCommands: typeof parsedCommands = [];
       const blockedResults: ShellResult[] = [];
+      const approvalStatuses = new Map<string, 'auto' | 'user-allowed'>();
 
       for (const cmd of parsedCommands) {
         if (allowAllCommands) {
@@ -693,6 +693,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
         const decision = this.commandApprovalManager.checkCommand(cmd.command);
         if (decision === 'allowed') {
           approvedCommands.push(cmd);
+          approvalStatuses.set(cmd.command, 'auto');
         } else {
           // Both 'blocked' and 'ask' show the approval prompt — gives user the chance to override
           // Note: _approvalPending was already set synchronously in onFlush pre-scan
@@ -711,12 +712,15 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
 
           if (userApproval.decision === 'allowed') {
             approvedCommands.push(cmd);
+            approvalStatuses.set(cmd.command, 'user-allowed');
           } else {
             blockedResults.push({
               command: cmd.command,
               output: `Command rejected by user: ${cmd.command}`,
               success: false,
-              executionTimeMs: 0
+              executionTimeMs: 0,
+              approvalStatus: 'user-blocked',
+              iterationIndex,
             });
           }
         }
@@ -759,6 +763,12 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
       const executedResults = approvedCommands.length > 0
         ? await executeShellCommands(approvedCommands, workspacePath, { allowAllCommands, signal })
         : [];
+      // Tag results with approval status and iteration index for history persistence
+      for (const r of executedResults) {
+        r.approvalStatus = approvalStatuses.get(r.command) ?? 'auto';
+        r.iterationIndex = iterationIndex;
+        logger.debug(`[R1-Shell] Tagged result approvalStatus="${r.approvalStatus}" iterationIndex=${iterationIndex} for command="${r.command.substring(0, 50)}"`);
+      }
       const allResults = [...blockedResults, ...executedResults];
 
       // Dispose watcher and register modified files
@@ -805,7 +815,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
       fullReasoning: string;
       reasoningIterations: string[];
       currentIterationReasoning: string;
-      contentIterations: string[];
+      contentIterations: Array<{ text: string; iterationIndex: number }>;
       currentIterationContent: string;
       shellResultsForHistory: ShellResult[];
     }
@@ -837,7 +847,6 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
       // Reset inline shell tracking for this iteration
       this._pendingInlineShellCommands = [];
       this._inlineExecutedCommands.clear();
-      this._inlineExecutionPromise = null;
 
       // Timing metrics for debugging
       const iterationStartTime = Date.now();
@@ -889,10 +898,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
           if (isReasonerModel && this._pendingInlineShellCommands.length > 0) {
             const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
             if (workspacePath) {
-              // Store the promise so the iteration loop can await it after streaming completes
-              this._inlineExecutionPromise = this.executeInlineShellCommands(workspacePath, signal, state);
-              await this._inlineExecutionPromise;
-              this._inlineExecutionPromise = null;
+              await this.executeInlineShellCommands(workspacePath, signal, state, shellIteration);
             }
           }
 
@@ -919,14 +925,13 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
         { signal }
       );
 
-      // BLOCKING: Wait for any pending inline shell execution (including command approval)
+      // BLOCKING: Wait for any pending command approval before continuing to next iteration.
       // The onToken callback may have started executeInlineShellCommands which awaits
       // user approval, but streamChat doesn't await the onToken callback — so the
-      // inline execution may still be pending when streamChat returns.
-      if (this._inlineExecutionPromise) {
-        logger.info('[R1-Shell] Waiting for pending inline shell execution to complete before continuing...');
-        await this._inlineExecutionPromise;
-        this._inlineExecutionPromise = null;
+      // approval may still be pending when streamChat returns.
+      if (this.commandApprovalManager?.hasPendingApproval()) {
+        logger.info('[R1-Shell] Waiting for pending command approval before continuing...');
+        await this.commandApprovalManager.waitForPendingApproval();
       }
 
       // Log iteration completion for debugging R1 continuation
@@ -942,7 +947,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
           state.currentIterationReasoning = '';
         }
         if (state.currentIterationContent) {
-          state.contentIterations.push(state.currentIterationContent);
+          state.contentIterations.push({ text: state.currentIterationContent, iterationIndex: shellIteration });
           state.currentIterationContent = '';
         }
       }
@@ -1052,6 +1057,9 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
               data: { commandCount: commands.length, bypass: allowAllCommands }
             });
 
+            // Track approval decisions for history persistence
+            const gateApprovalStatuses = new Map<string, 'auto' | 'user-allowed' | 'user-blocked' | 'rule-blocked'>();
+
             if (!allowAllCommands && this.commandApprovalManager) {
               approvedCommands = [];
               let askedCount = 0;
@@ -1060,13 +1068,17 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
                 if (decision === 'allowed') {
                   logger.debug(`[CommandApproval] ALLOWED (rule match): "${cmd.command}"`);
                   approvedCommands.push(cmd);
+                  gateApprovalStatuses.set(cmd.command, 'auto');
                 } else if (decision === 'blocked') {
                   logger.info(`[CommandApproval] BLOCKED: "${cmd.command}"`);
+                  gateApprovalStatuses.set(cmd.command, 'rule-blocked');
                   blockedResults.push({
                     command: cmd.command,
                     output: 'Command blocked by security rules.',
                     success: false,
                     executionTimeMs: 0,
+                    approvalStatus: 'rule-blocked',
+                    iterationIndex: shellIteration,
                   });
                 } else {
                   // 'ask' — block and wait for user approval via webview
@@ -1083,13 +1095,17 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
                   if (result.decision === 'allowed') {
                     logger.info(`[CommandApproval] APPROVED${result.persistent ? ' (always)' : ''}: "${cmd.command}"`);
                     approvedCommands.push(cmd);
+                    gateApprovalStatuses.set(cmd.command, 'user-allowed');
                   } else {
                     logger.info(`[CommandApproval] DENIED${result.persistent ? ' (always)' : ''}: "${cmd.command}"`);
+                    gateApprovalStatuses.set(cmd.command, 'user-blocked');
                     blockedResults.push({
                       command: cmd.command,
                       output: 'Command blocked by user.',
                       success: false,
                       executionTimeMs: 0,
+                      approvalStatus: 'user-blocked',
+                      iterationIndex: shellIteration,
                     });
                   }
                 }
@@ -1136,6 +1152,12 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
             const executedResults = approvedCommands.length > 0
               ? await executeShellCommands(approvedCommands, workspacePath, { allowAllCommands, signal })
               : [];
+            // Tag executed results with approval status and iteration index from gate decisions
+            for (const r of executedResults) {
+              r.approvalStatus = gateApprovalStatuses.get(r.command) ?? 'auto';
+              r.iterationIndex = shellIteration;
+              logger.debug(`[R1-Shell] Gate tagged result approvalStatus="${r.approvalStatus}" iterationIndex=${shellIteration} for command="${r.command.substring(0, 50)}"`);
+            }
             const results = [...blockedResults, ...executedResults];
             const shellDuration = Date.now() - shellStartTime;
             logger.info(`[Timing] Shell execution completed in ${shellDuration}ms`);
@@ -1287,7 +1309,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
 
     // Push final iteration's content (if the loop exited without shell commands)
     if (state.currentIterationContent) {
-      state.contentIterations.push(state.currentIterationContent);
+      state.contentIterations.push({ text: state.currentIterationContent, iterationIndex: shellIteration });
       state.currentIterationContent = '';
     }
 
@@ -1301,7 +1323,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
     fullReasoning: string,
     model: string,
     reasoningIterations: string[],
-    contentIterations: string[],
+    contentIterations: Array<{ text: string; iterationIndex: number }>,
     toolCallsForHistory: Array<{ name: string; detail: string; status: string }>,
     shellResultsForHistory: ShellResult[]
   ): Promise<void> {
@@ -1332,12 +1354,18 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
           logger.info(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} Recorded tool call: ${tc.name}`);
         }
 
-        // 3. Record shell results with richer data
+        // 3. Record shell results with richer data (including approval status and iteration index)
         for (const sr of shellResultsForHistory) {
           const shellCallId = `sh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-          this.conversationManager.recordToolCall(sessionId, shellCallId, 'shell', { command: sr.command });
+          const savedApprovalStatus = sr.approvalStatus || 'auto';
+          const savedIterationIndex = sr.iterationIndex ?? 0;
+          this.conversationManager.recordToolCall(sessionId, shellCallId, 'shell', {
+            command: sr.command,
+            approvalStatus: savedApprovalStatus,
+            iterationIndex: savedIterationIndex
+          });
           this.conversationManager.recordToolResult(sessionId, shellCallId, sr.output, sr.success, sr.executionTimeMs);
-          logger.info(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} Recorded shell: ${sr.command.substring(0, 50)}`);
+          logger.info(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} Recorded shell: ${sr.command.substring(0, 50)} (approvalStatus=${savedApprovalStatus}, iterationIndex=${savedIterationIndex})`);
         }
 
         // 4. Record file modifications (for restore of "Modified Files" dropdown)
@@ -1356,7 +1384,9 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
 
         // 5. Record the assistant message with real model + finishReason
         const cleanedContentIterations = contentIterations.length > 0
-          ? contentIterations.map(c => stripShellTags(stripDSML(c)).trim()).filter(c => c.length > 0)
+          ? contentIterations
+              .map(c => ({ text: stripShellTags(stripDSML(c.text)).trim(), iterationIndex: c.iterationIndex }))
+              .filter(c => c.text.length > 0)
           : undefined;
         await this.conversationManager.recordAssistantMessage(sessionId, cleanResponse, model, 'stop', undefined, cleanedContentIterations);
         logger.info(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} Recorded assistant message (${cleanResponse.length} chars, model=${model}, contentIts=${cleanedContentIterations?.length || 0})`);

@@ -596,7 +596,7 @@ describe('VirtualMessageGatewayActor', () => {
     });
 
     it('restores Reasoner with files after shells but before final text', () => {
-      // 2 reasoning iterations, 1 shell (after first), 2 content iterations
+      // 2 reasoning iterations, 1 shell (in iteration 0), 2 content iterations
       // Order: thinking[0] → content[0] (inline) → shell[0] → thinking[1] → files → content[1] (final)
       dispatchMessage({
         type: 'loadHistory',
@@ -607,8 +607,11 @@ describe('VirtualMessageGatewayActor', () => {
             content: 'Added animals.',
             model: 'deepseek-reasoner',
             reasoning_iterations: ['Checking file...', 'Now editing...'],
-            shellResults: [{ command: 'cat test.txt', output: 'contents', success: true }],
-            contentIterations: ['Let me check first', 'Added animals.'],
+            shellResults: [{ command: 'cat test.txt', output: 'contents', success: true, iterationIndex: 0 }],
+            contentIterations: [
+              { text: 'Let me check first', iterationIndex: 0 },
+              { text: 'Added animals.', iterationIndex: 1 }
+            ],
             filesModified: ['test.txt'],
             timestamp: 2000
           }
@@ -621,14 +624,11 @@ describe('VirtualMessageGatewayActor', () => {
         status: 'applied'
       });
 
-      // Order: shell before files, files before final text
+      // Order: content[0] → shell → content[1] → files
+      // Content is now grouped by iterationIndex, so content[1] renders in iteration 1 before files
       const shellCall = mockActors.virtualList.createShellSegment.mock.invocationCallOrder[0];
       const fileCall = mockActors.virtualList.addPendingFile.mock.invocationCallOrder[0];
-      // Final text is addTextSegment call [2]: [0]=user text, [1]=inline content[0], [2]=remaining content[1]
-      const textCalls = (mockActors.virtualList.addTextSegment as ReturnType<typeof vi.fn>).mock.invocationCallOrder;
-      const finalTextCall = textCalls[textCalls.length - 1]; // last addTextSegment call
       expect(shellCall).toBeLessThan(fileCall);
-      expect(fileCall).toBeLessThan(finalTextCall);
     });
 
     it('falls back to full content when contentIterations is missing (legacy data)', () => {

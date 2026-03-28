@@ -378,16 +378,17 @@ AGPL
 | ~~Thinking dropdown scroll~~ | User can scroll up during streaming thinking; auto-follows when scrolled to bottom |
 | ~~Dropdown padding~~ | 6px top/bottom padding on shell, tools, pending headers (matches thinking) |
 | ~~Command approval: full command as unit~~ | No chain splitting — full command is one rule entry. Blocked commands show approval prompt (user can override) |
+| ~~File notification queuing~~ | Async file watcher notifications queued during streaming, flushed at natural break points (shell, iteration, endResponse). Prevents text splitting mid-word |
 
 ### Active Bugs
 
 | # | Bug | Status | Details |
 |---|-----|--------|---------|
-| B1 | Command approval: streaming not paused during prompt | Open | `_approvalPending` flag gates segments in `onFlush` but tokens still render. Fix applied (hold ALL segments) but not verified working |
-| B2 | Command approval: no visual feedback after decision | Open | `commandApprovalResolved` message sent but approval widget doesn't update. Logging added to diagnose `_pendingApprovalId` timing |
+| B1 | Command approval: iteration loop continues during prompt | Fixed | `commandApprovalManager.waitForPendingApproval()` blocks iteration loop after `streamChat` returns. Text before shell tag still shows (acceptable — provides context) |
+| B2 | Command approval: no visual feedback after decision | Fixed | Click handler calls `resolveCommandApproval` immediately. Shows "Always allowed: prefix" for persistent rules, "Allowed: full command" for one-time |
 | B3 | Duplicate rules in system commands modal | Open | "cat >>" appears twice. DB has unique index so not actual duplicates — likely UI rendering issue from double rules update |
-| B4 | History shows "No messages" and "0" count | Open | Session has events but metadata count not updated after messages recorded |
-| B5 | History highlight may not match active session | Open | Need to verify session ID comparison in highlight logic |
+| B4 | History shows "No messages" and "0" count | Fixed | Session has events but metadata count not updated after messages recorded |
+| B5 | History highlight may not match active session | Fixed | Session ID comparison verified working |
 | B6 | Web search popup: mode not restored from history | Open | Popup shows "Auto" highlighted but button color doesn't match |
 | B7 | Web search popup cleanup | Open | Remove Enable/Disable buttons (redundant with Off/Manual/Auto). Clarify Manual vs Auto |
 | B8 | Streaming disable audit | Open | Some interactive elements may still be clickable during streaming |
@@ -395,6 +396,9 @@ AGPL
 | B10 | Manual mode: diff tab stays open after apply | Open | Question mode closes diff tab on accept, manual mode does not |
 | B11 | Dropdown text not copyable | Open | cursor: pointer on tools/shell containers prevents text selection. Code dropdown works |
 | B12 | Input box expands container instead of overlaying | Open | Should grow upward above container, not push container taller |
+| B13 | Scroll-to-bottom button should be removed | Open | Round div with down arrow appears on scroll up. Remove — let users use the scrollbar |
+| B14 | Approval widget reverts on turn rebind | Fixed | Approval status + persistent flag persisted in VirtualListActor data, approval status stored in event history for session reload |
+| B15 | Web search button clickable without Tavily API key | Open | If no Tavily API key is set, web search button should be disabled or show a prompt to set the key |
 
 ### Remaining Work
 

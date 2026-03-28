@@ -171,7 +171,11 @@ function initializeActorSystem(): void {
         vscode.postMessage({ type: 'focusFile', diffId, filePath });
       }
     },
-    onCommandApprovalAction: (command, decision, persistent, prefix) => {
+    onCommandApprovalAction: (command, decision, persistent, prefix, approvalId) => {
+      // Persist the decision in VirtualListActor data so it survives rebind
+      if (approvalId) {
+        virtualList.resolveCommandApprovalByActorId(approvalId, decision, persistent);
+      }
       vscode.postMessage({
         type: 'commandApprovalResponse',
         command,

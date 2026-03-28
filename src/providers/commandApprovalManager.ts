@@ -122,6 +122,7 @@ export class CommandApprovalManager {
 
   // Pending approval promise (one at a time — orchestrator awaits each sequentially)
   private _pendingResolve: ((result: CommandApprovalResult) => void) | null = null;
+  private _pendingPromise: Promise<CommandApprovalResult> | null = null;
 
   // ── Events ──
   private readonly _onApprovalRequired = new vscode.EventEmitter<{ command: string; prefix: string; unknownSubCommand: string }>();
@@ -151,8 +152,9 @@ export class CommandApprovalManager {
       data: { command, prefix }
     });
 
-    return new Promise<CommandApprovalResult>(resolve => {
+    this._pendingPromise = new Promise<CommandApprovalResult>(resolve => {
       this._pendingResolve = (result) => {
+        this._pendingPromise = null;
         tracer.endSpan(spanId, {
           status: result.decision === 'allowed' ? 'completed' : 'failed',
           data: { decision: result.decision, persistent: result.persistent }
@@ -161,6 +163,7 @@ export class CommandApprovalManager {
       };
       this._onApprovalRequired.fire({ command, prefix, unknownSubCommand: command });
     });
+    return this._pendingPromise;
   }
 
   /** Resolve a pending approval (called by ChatProvider when webview responds). */
@@ -180,8 +183,21 @@ export class CommandApprovalManager {
     if (this._pendingResolve) {
       const resolve = this._pendingResolve;
       this._pendingResolve = null;
+      this._pendingPromise = null;
       resolve({ command: '', decision: 'blocked', persistent: false });
       logger.info('[CommandApproval] Cancelled pending approval');
+    }
+  }
+
+  /** Check if there's a pending approval awaiting user response. */
+  hasPendingApproval(): boolean {
+    return this._pendingPromise !== null;
+  }
+
+  /** Wait for the pending approval to resolve. Returns immediately if none pending. */
+  async waitForPendingApproval(): Promise<void> {
+    if (this._pendingPromise) {
+      await this._pendingPromise;
     }
   }
 

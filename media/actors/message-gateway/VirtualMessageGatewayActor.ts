@@ -88,6 +88,9 @@ export class VirtualMessageGatewayActor extends EventStateActor {
   /** Message counter for generating turn IDs */
   private _messageCounter = 0;
 
+  /** Queued file notifications to flush at natural break points (prevents text splitting) */
+  private _pendingFileNotifications: Array<{ filePath: string; diffId?: string; status: string; editMode?: string }> = [];
+
   // Message handler reference for cleanup
   private _messageHandler: ((event: MessageEvent) => void) | null = null;
 
@@ -569,6 +572,9 @@ export class VirtualMessageGatewayActor extends EventStateActor {
 
     log.debug(`iterationStart: iteration=${msg.iteration}`);
 
+    // Flush any queued file notifications at the iteration boundary
+    this.flushPendingFileNotifications();
+
     // Finalize text segment before thinking
     if (!this._hasInterleaved) {
       const finalized = virtualList.finalizeCurrentSegment(this._currentTurnId);
@@ -585,6 +591,9 @@ export class VirtualMessageGatewayActor extends EventStateActor {
     const { streaming, virtualList } = this._actors;
 
     log.debug(`endResponse: ending stream`);
+
+    // Flush any queued file notifications before ending the response
+    this.flushPendingFileNotifications();
 
     // End streaming
     streaming.endStream();
@@ -611,6 +620,37 @@ export class VirtualMessageGatewayActor extends EventStateActor {
     this.publishCoordinationState();
   }
 
+  /**
+   * Flush queued file notifications at a natural break point.
+   * Called before shell segments, iteration boundaries, and endResponse
+   * to avoid splitting text segments with async file watcher events.
+   */
+  private flushPendingFileNotifications(): void {
+    if (this._pendingFileNotifications.length === 0) return;
+
+    const { virtualList } = this._actors;
+    const turnId = this._currentTurnId || this._lastStreamingTurnId;
+    if (!turnId) return;
+
+    // Finalize current text segment before inserting file dropdowns
+    const finalized = virtualList.finalizeCurrentSegment(turnId);
+    if (finalized) {
+      this._hasInterleaved = true;
+    }
+
+    for (const notification of this._pendingFileNotifications) {
+      log.debug(`flushPendingFileNotifications: adding ${notification.filePath} to turn ${turnId}`);
+      virtualList.addPendingFile(turnId, {
+        filePath: notification.filePath,
+        diffId: notification.diffId,
+        status: notification.status as 'pending' | 'applied' | 'rejected' | 'superseded' | 'error',
+        editMode: notification.editMode as any
+      });
+    }
+
+    this._pendingFileNotifications = [];
+  }
+
   // ============================================
   // Shell Message Handlers
   // ============================================
@@ -631,6 +671,9 @@ export class VirtualMessageGatewayActor extends EventStateActor {
     }
 
     log.debug(`shellExecuting: ${commands.length} commands for turn ${this._currentTurnId}`);
+
+    // Flush any queued file notifications before the shell segment
+    this.flushPendingFileNotifications();
 
     // Finalize text segment before shell
     if (!this._hasInterleaved) {
@@ -714,7 +757,8 @@ export class VirtualMessageGatewayActor extends EventStateActor {
     const decision = msg.decision as 'allowed' | 'blocked';
 
     if (!this._currentTurnId || !this._pendingApprovalId || !decision) {
-      log.warn(`commandApprovalResolved: skipped — turnId=${this._currentTurnId}, approvalId=${this._pendingApprovalId}, decision=${decision}`);
+      // Widget already updated by the click handler — this round-trip message is redundant
+      log.debug(`commandApprovalResolved: already resolved by click handler (approvalId=${this._pendingApprovalId})`);
       return;
     }
 
@@ -804,8 +848,10 @@ export class VirtualMessageGatewayActor extends EventStateActor {
 
     log.debug(`diffListChanged: ${diffs.length} diffs for turn ${turnId}`);
 
-    // Only finalize text segment if still streaming (don't do it for late-arriving messages)
-    if (this._currentTurnId && !this._hasInterleaved && diffs.length > 0) {
+    // Don't finalize text segment here during streaming — file notifications will be
+    // queued and flushed at natural break points to prevent splitting text segments.
+    // Only finalize for late-arriving messages (after endResponse).
+    if (!this._currentTurnId && this._lastStreamingTurnId && !this._hasInterleaved && diffs.length > 0) {
       const finalized = virtualList.finalizeCurrentSegment(turnId);
       if (finalized) {
         this._hasInterleaved = true;
@@ -857,13 +903,24 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         }
       }
 
-      // Truly new diff — add to current turn
-      log.debug(`diffListChanged: new pending file ${diff.filePath} (diffId=${diff.diffId}) status=${status}`);
-      virtualList.addPendingFile(turnId, {
-        filePath: diff.filePath,
-        diffId: diff.diffId,
-        status
-      });
+      // Truly new diff — during streaming, queue it to prevent splitting text segments.
+      // It will be flushed at the next natural break point (shell segment, iteration boundary, or endResponse).
+      if (this._currentTurnId && this._phase === 'streaming') {
+        log.debug(`diffListChanged: queuing new file ${diff.filePath} (diffId=${diff.diffId}) — streaming active`);
+        this._pendingFileNotifications.push({
+          filePath: diff.filePath,
+          diffId: diff.diffId,
+          status,
+          editMode: msg.editMode as string | undefined
+        });
+      } else {
+        log.debug(`diffListChanged: new pending file ${diff.filePath} (diffId=${diff.diffId}) status=${status}`);
+        virtualList.addPendingFile(turnId, {
+          filePath: diff.filePath,
+          diffId: diff.diffId,
+          status
+        });
+      }
     }
 
     // Update edit mode if provided
@@ -987,7 +1044,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       content: string;
       files?: string[];
       reasoning_iterations?: string[];
-      contentIterations?: string[];
+      contentIterations?: Array<string | { text: string; iterationIndex: number }>;
       toolCalls?: Array<{ name: string; detail: string; status: string }>;
       shellResults?: Array<{ command: string; output: string; success: boolean }>;
       filesModified?: string[];
@@ -1023,53 +1080,93 @@ export class VirtualMessageGatewayActor extends EventStateActor {
             });
 
             const reasoning = m.reasoning_iterations || [];
-            const contentIts = m.contentIterations || [];
+            const rawContentIts = m.contentIterations || [];
             const shells = m.shellResults || [];
             const tools = m.toolCalls || [];
 
+            // Normalize contentIterations: handle both old format (string[]) and new format ({ text, iterationIndex }[])
+            const contentIts = rawContentIts.map((c, i) =>
+              typeof c === 'string' ? { text: c, iterationIndex: i } : c
+            );
+
             log.debug(`[VirtualGateway] restore turn ${turnId}: reasoning=${reasoning.length}, contentIts=${contentIts.length}, shells=${shells.length}, tools=${tools.length}, files=${m.filesModified?.length || 0}`);
+
+            // Diagnostic: log shell and content iteration details for debugging history restore
+            for (let si = 0; si < shells.length; si++) {
+              const sr = shells[si] as { command: string; output: string; success: boolean; approvalStatus?: string; iterationIndex?: number };
+              log.debug(`[VirtualGateway] restore shell[${si}]: command="${sr.command.substring(0, 50)}", success=${sr.success}, approvalStatus=${sr.approvalStatus ?? 'MISSING'}, iterationIndex=${sr.iterationIndex ?? 'MISSING'}`);
+            }
+            for (let ci = 0; ci < contentIts.length; ci++) {
+              log.debug(`[VirtualGateway] restore content[${ci}]: iterationIndex=${contentIts[ci].iterationIndex}, length=${contentIts[ci].text.length}`);
+            }
 
             if (reasoning.length > 0) {
               // ── Reasoner model restore ──
-              // Interleave: thinking[i] → content[i] → shell[i] → files → ... → final text
-              let contentUsedInline = 0;
+              // Group shells and content by iterationIndex so they render with the correct reasoning block.
+              const shellsByIteration = new Map<number, typeof shells>();
+              for (const sr of shells) {
+                const srTyped = sr as { command: string; output: string; success: boolean; approvalStatus?: string; iterationIndex?: number };
+                const idx = srTyped.iterationIndex ?? 0;
+                if (!shellsByIteration.has(idx)) {
+                  shellsByIteration.set(idx, []);
+                }
+                shellsByIteration.get(idx)!.push(sr);
+              }
+
+              const contentByIteration = new Map<number, Array<{ text: string; iterationIndex: number }>>();
+              for (const c of contentIts) {
+                const idx = c.iterationIndex;
+                if (!contentByIteration.has(idx)) {
+                  contentByIteration.set(idx, []);
+                }
+                contentByIteration.get(idx)!.push(c);
+              }
 
               for (let i = 0; i < reasoning.length; i++) {
                 virtualList.startThinkingIteration(turnId);
                 virtualList.updateThinkingContent(turnId, reasoning[i]);
                 virtualList.completeThinkingIteration(turnId);
 
-                // Content text from this iteration (appears between thinking and shell)
-                if (i < contentIts.length && contentIts[i] && i < shells.length) {
-                  virtualList.addTextSegment(turnId, contentIts[i]);
-                  contentUsedInline++;
+                const iterationShells = shellsByIteration.get(i) || [];
+                const iterationContent = contentByIteration.get(i) || [];
+
+                // Content text from this iteration (appears between thinking and shells)
+                for (const c of iterationContent) {
+                  if (c.text) {
+                    virtualList.addTextSegment(turnId, c.text);
+                  }
                 }
 
-                // Shell command from this iteration
-                if (i < shells.length) {
-                  const sr = shells[i];
-                  const segmentId = virtualList.createShellSegment(turnId, [{ command: sr.command }]);
+                // Shell commands from this iteration (may be multiple)
+                for (const sr of iterationShells) {
+                  const srTyped = sr as { command: string; output: string; success: boolean; approvalStatus?: string };
+
+                  // Render shell segment first, then approval widget (matches live stream order)
+                  const segmentId = virtualList.createShellSegment(turnId, [{ command: srTyped.command }]);
                   if (segmentId) {
-                    virtualList.setShellResults(turnId, segmentId, [{ output: sr.output, success: sr.success }]);
+                    virtualList.setShellResults(turnId, segmentId, [{ output: srTyped.output, success: srTyped.success }]);
+                  }
+
+                  // Restore approval widget for commands that needed user approval
+                  if (srTyped.approvalStatus === 'user-allowed' || srTyped.approvalStatus === 'user-blocked') {
+                    const decision = srTyped.approvalStatus === 'user-allowed' ? 'allowed' : 'blocked';
+                    const approvalId = virtualList.createCommandApproval(turnId, srTyped.command, srTyped.command, srTyped.command);
+                    if (approvalId) {
+                      virtualList.resolveCommandApproval(turnId, approvalId, decision);
+                    }
                   }
                 }
               }
 
-              // File modifications (appear after shells, before final text)
+              // File modifications (appear after all iterations)
               if (m.filesModified && m.filesModified.length > 0) {
                 for (const filePath of m.filesModified) {
                   virtualList.addPendingFile(turnId, { filePath, status: 'applied', editMode: m.editMode });
                 }
               }
 
-              // Remaining content iterations (after the last shell) — the "real" response text
-              if (contentIts.length > contentUsedInline) {
-                for (let i = contentUsedInline; i < contentIts.length; i++) {
-                  if (contentIts[i]) {
-                    virtualList.addTextSegment(turnId, contentIts[i]);
-                  }
-                }
-              } else if (contentIts.length === 0 && m.content) {
+              // Fallback: if no contentIterations data, use the full content
+              if (contentIts.length === 0 && m.content) {
                 virtualList.addTextSegment(turnId, m.content);
               }
             } else {
