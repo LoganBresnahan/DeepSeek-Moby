@@ -237,65 +237,6 @@ describe('MessageTurnActor', () => {
   });
 
   // ============================================
-  // Interleaving Tests
-  // ============================================
-
-  describe('Interleaving', () => {
-    beforeEach(() => {
-      actor = new MessageTurnActor({ manager, element });
-      actor.bind({ turnId: 'turn-1', role: 'assistant', timestamp: Date.now() });
-      actor.startStreaming();
-    });
-
-    it('finalizeCurrentSegment returns false when no segment exists', () => {
-      const result = actor.finalizeCurrentSegment();
-      expect(result).toBe(false);
-      expect(actor.needsNewSegment()).toBe(false);
-    });
-
-    it('finalizeCurrentSegment returns true when segment exists', () => {
-      actor.createTextSegment('Content');
-
-      const result = actor.finalizeCurrentSegment();
-      expect(result).toBe(true);
-      expect(actor.needsNewSegment()).toBe(true);
-    });
-
-    it('finalizeCurrentSegment sets hasInterleaved', () => {
-      actor.createTextSegment('Content');
-      expect(actor.hasInterleaved()).toBe(false);
-
-      actor.finalizeCurrentSegment();
-      expect(actor.hasInterleaved()).toBe(true);
-    });
-
-    it('resumeWithNewSegment creates continuation segment', () => {
-      actor.createTextSegment('First segment');
-      expect(element.children.length).toBe(2); // header + text
-
-      actor.finalizeCurrentSegment();
-      actor.resumeWithNewSegment();
-
-      expect(element.children.length).toBe(3); // header + text + continuation text
-
-      const containers = findContainers('text');
-      expect(containers[1].classList.contains('continuation')).toBe(true);
-    });
-
-    it('continuation segment hides divider', () => {
-      actor.createTextSegment('First');
-      actor.finalizeCurrentSegment();
-      actor.resumeWithNewSegment();
-      actor.updateTextContent('Second');
-
-      const containers = findContainers('text');
-      const divider = queryInShadow(containers[1], '.message-divider');
-      // Continuation should either not have divider or have it hidden via CSS
-      expect(divider === null || getComputedStyle(divider).display === 'none').toBe(true);
-    });
-  });
-
-  // ============================================
   // Thinking Tests
   // ============================================
 
@@ -732,36 +673,12 @@ describe('MessageTurnActor', () => {
       expect(contentEl.innerHTML).toBe(firstHtml);
     });
 
-    it('finalizeCurrentSegment removes placeholder from finalized segment', () => {
+    it('complete code block renders as dropdown', () => {
       actor.startStreaming();
       actor.createTextSegment('');
-      // Segment has complete block + incomplete block → dropdown + placeholder
-      actor.updateTextContent('```python\ndef a():\n    pass\n```\n\n```javascript\nconst x');
+      actor.updateTextContent('Done:\n```python\nprint("hi")\n```');
 
       const containers = findContainers('text');
-      // Before finalize: placeholder should be present
-      expect(queryInShadow(containers[0], '.code-generating')).toBeTruthy();
-
-      // Finalize the segment (simulates interleaving for diffListChanged)
-      actor.finalizeCurrentSegment();
-
-      // After finalize: placeholder should be removed, code block dropdown kept
-      expect(queryInShadow(containers[0], '.code-generating')).toBeNull();
-      expect(queryInShadow(containers[0], '.code-block')).toBeTruthy();
-    });
-
-    it('finalized segment does not show raw code from incomplete block', () => {
-      actor.startStreaming();
-      actor.createTextSegment('');
-      actor.updateTextContent('Done:\n```python\nprint("hi")\n```\n\n```javascript\nconst x = 1;');
-
-      actor.finalizeCurrentSegment();
-
-      const containers = findContainers('text');
-      const contentEl = queryInShadow(containers[0], '.content') as HTMLElement;
-      // The raw "const x = 1;" from the incomplete block should not appear
-      expect(contentEl.textContent).not.toContain('const x = 1;');
-      // The complete python block should still be a dropdown
       expect(queryInShadow(containers[0], '.code-block')).toBeTruthy();
     });
   });
@@ -1038,8 +955,7 @@ describe('MessageTurnActor', () => {
       // First text segment
       actor.createTextSegment('Let me help you with that.');
 
-      // Thinking interrupts
-      actor.finalizeCurrentSegment();
+      // Thinking interrupts (CQRS projector creates these directly)
       actor.startThinkingIteration();
       actor.updateThinkingContent('Analyzing the problem...');
 
@@ -1048,9 +964,8 @@ describe('MessageTurnActor', () => {
       actor.updateTool(0, 'done');
       actor.completeToolBatch();
 
-      // Resume text
-      actor.resumeWithNewSegment();
-      actor.updateTextContent('Based on the file, here is the solution.');
+      // Continuation text (CQRS creates new segment via createTextSegment)
+      actor.createTextSegment('Based on the file, here is the solution.', { isContinuation: true });
 
       // End streaming
       actor.endStreaming();
@@ -1073,15 +988,13 @@ describe('MessageTurnActor', () => {
       actor.bind({ turnId: 'turn-1', role: 'assistant', timestamp: Date.now() });
       actor.startStreaming();
 
-      // Text → tool calls → approval → text continuation
+      // Text → tool calls → approval → text continuation (CQRS creates separate segments)
       actor.createTextSegment('Running tests...');
-      actor.finalizeCurrentSegment();
       actor.startToolBatch([{ name: 'run_command', detail: 'npm test' }]);
       actor.completeToolBatch();
       const approvalId = actor.createCommandApproval('npm test', 'npm', 'npm test');
       actor.resolveCommandApproval(approvalId, 'allowed');
-      actor.resumeWithNewSegment();
-      actor.updateTextContent('Tests passed!');
+      actor.createTextSegment('Tests passed!', { isContinuation: true });
       actor.endStreaming();
 
       // header + text + tools + approval + text(continuation)

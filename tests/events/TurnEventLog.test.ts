@@ -405,4 +405,123 @@ describe('TurnEventLog', () => {
       expect(log.getByType('tool-update')).toHaveLength(1);
     });
   });
+
+  describe('consolidateForSave', () => {
+    it('merges consecutive text-append events into single content block', () => {
+      log.append({ type: 'text-append', content: 'Hello', iteration: 0, ts: 1 });
+      log.append({ type: 'text-append', content: ' ', iteration: 0, ts: 2 });
+      log.append({ type: 'text-append', content: 'world', iteration: 0, ts: 3 });
+      log.append({ type: 'text-finalize', iteration: 0, ts: 4 });
+
+      const consolidated = log.consolidateForSave();
+      expect(consolidated).toHaveLength(2);
+      expect(consolidated[0]).toEqual({ type: 'text-append', content: 'Hello world', iteration: 0, ts: 1 });
+      expect(consolidated[1]).toEqual({ type: 'text-finalize', iteration: 0, ts: 4 });
+    });
+
+    it('merges consecutive thinking-content events into single block', () => {
+      log.append({ type: 'thinking-start', iteration: 0, ts: 1 });
+      log.append({ type: 'thinking-content', content: 'Let me ', iteration: 0, ts: 2 });
+      log.append({ type: 'thinking-content', content: 'think about ', iteration: 0, ts: 3 });
+      log.append({ type: 'thinking-content', content: 'this.', iteration: 0, ts: 4 });
+      log.append({ type: 'thinking-complete', iteration: 0, ts: 5 });
+
+      const consolidated = log.consolidateForSave();
+      expect(consolidated).toHaveLength(3);
+      expect(consolidated[0]).toEqual({ type: 'thinking-start', iteration: 0, ts: 1 });
+      expect(consolidated[1]).toEqual({ type: 'thinking-content', content: 'Let me think about this.', iteration: 0, ts: 2 });
+      expect(consolidated[2]).toEqual({ type: 'thinking-complete', iteration: 0, ts: 5 });
+    });
+
+    it('preserves structural events (shell, approval, file-modified)', () => {
+      log.append({ type: 'text-append', content: 'Before', iteration: 0, ts: 1 });
+      log.append({ type: 'text-finalize', iteration: 0, ts: 2 });
+      log.append({ type: 'shell-start', id: 'sh-1', commands: [{ command: 'ls' }], iteration: 0, ts: 3 });
+      log.append({ type: 'approval-created', id: 'ap-1', command: 'rm -rf', prefix: 'bash', shellId: 'sh-1', ts: 4 });
+      log.append({ type: 'approval-resolved', id: 'ap-1', decision: 'allowed', persistent: false, ts: 5 });
+      log.append({ type: 'shell-complete', id: 'sh-1', results: [{ output: 'ok', success: true }], ts: 6 });
+      log.append({ type: 'file-modified', path: 'test.txt', status: 'applied', ts: 7 });
+      log.append({ type: 'text-append', content: 'After', iteration: 0, ts: 8 });
+
+      const consolidated = log.consolidateForSave();
+      expect(consolidated).toHaveLength(8); // All events preserved, text not merged across structural boundaries
+      expect(consolidated[0]).toEqual({ type: 'text-append', content: 'Before', iteration: 0, ts: 1 });
+      expect(consolidated[2].type).toBe('shell-start');
+      expect(consolidated[3].type).toBe('approval-created');
+      expect(consolidated[4].type).toBe('approval-resolved');
+      expect(consolidated[5].type).toBe('shell-complete');
+      expect(consolidated[6].type).toBe('file-modified');
+      expect(consolidated[7]).toEqual({ type: 'text-append', content: 'After', iteration: 0, ts: 8 });
+    });
+
+    it('handles R1 multi-iteration flow with many tokens', () => {
+      // Simulate 100 thinking tokens + 50 text tokens per iteration, 2 iterations
+      log.append({ type: 'thinking-start', iteration: 0, ts: 1 });
+      for (let i = 0; i < 100; i++) {
+        log.append({ type: 'thinking-content', content: `t${i} `, iteration: 0, ts: 2 + i });
+      }
+      log.append({ type: 'thinking-complete', iteration: 0, ts: 103 });
+      for (let i = 0; i < 50; i++) {
+        log.append({ type: 'text-append', content: `w${i} `, iteration: 0, ts: 104 + i });
+      }
+      log.append({ type: 'text-finalize', iteration: 0, ts: 155 });
+
+      log.append({ type: 'shell-start', id: 'sh-1', commands: [{ command: 'echo hi' }], iteration: 0, ts: 156 });
+      log.append({ type: 'shell-complete', id: 'sh-1', results: [{ output: 'hi', success: true }], ts: 157 });
+
+      log.append({ type: 'thinking-start', iteration: 1, ts: 158 });
+      for (let i = 0; i < 100; i++) {
+        log.append({ type: 'thinking-content', content: `r${i} `, iteration: 1, ts: 159 + i });
+      }
+      log.append({ type: 'thinking-complete', iteration: 1, ts: 260 });
+      for (let i = 0; i < 50; i++) {
+        log.append({ type: 'text-append', content: `x${i} `, iteration: 1, ts: 261 + i });
+      }
+
+      expect(log.length).toBe(307); // Many per-token events
+      const consolidated = log.consolidateForSave();
+      // Should be: thinking-start, thinking-content(merged), thinking-complete, text-append(merged), text-finalize,
+      //            shell-start, shell-complete,
+      //            thinking-start, thinking-content(merged), thinking-complete, text-append(merged)
+      expect(consolidated).toHaveLength(11);
+      expect(consolidated[1].type).toBe('thinking-content');
+      expect((consolidated[1] as any).content).toContain('t0');
+      expect((consolidated[1] as any).content).toContain('t99');
+      expect(consolidated[3].type).toBe('text-append');
+      expect((consolidated[3] as any).content).toContain('w0');
+      expect((consolidated[3] as any).content).toContain('w49');
+    });
+
+    it('flushes text across iteration boundaries', () => {
+      log.append({ type: 'text-append', content: 'iter0 text', iteration: 0, ts: 1 });
+      log.append({ type: 'text-append', content: 'iter1 text', iteration: 1, ts: 2 });
+
+      const consolidated = log.consolidateForSave();
+      expect(consolidated).toHaveLength(2);
+      expect(consolidated[0]).toEqual({ type: 'text-append', content: 'iter0 text', iteration: 0, ts: 1 });
+      expect(consolidated[1]).toEqual({ type: 'text-append', content: 'iter1 text', iteration: 1, ts: 2 });
+    });
+
+    it('flushes thinking before text when structural event interrupts both buffers', () => {
+      // Simulates R1 flow: thinking tokens arrive first, then text tokens,
+      // then a structural event (file-modified) forces both buffers to flush.
+      // Thinking started earlier (ts=1) so it should be flushed before text (ts=100).
+      log.append({ type: 'thinking-start', iteration: 0, ts: 0 });
+      log.append({ type: 'thinking-content', content: 'reasoning...', iteration: 0, ts: 1 });
+      log.append({ type: 'text-append', content: 'response text', iteration: 0, ts: 100 });
+      log.append({ type: 'file-modified', path: 'test.txt', status: 'applied', ts: 101 });
+
+      const consolidated = log.consolidateForSave();
+      // thinking-start, thinking-content, text-append, file-modified (thinking before text)
+      expect(consolidated).toHaveLength(4);
+      expect(consolidated[0].type).toBe('thinking-start');
+      expect(consolidated[1].type).toBe('thinking-content');
+      expect(consolidated[2].type).toBe('text-append');
+      expect(consolidated[3].type).toBe('file-modified');
+    });
+
+    it('returns empty array for empty log', () => {
+      expect(log.consolidateForSave()).toEqual([]);
+    });
+  });
 });

@@ -20,7 +20,8 @@ import { EventStateManager } from '../../state/EventStateManager';
 import type { ActorConfig } from '../../state/types';
 import { webviewTracer } from '../../tracing';
 import { createLogger, setLogLevel, LogLevel } from '../../logging';
-import { hasIncompleteFence } from '../../utils/codeBlocks';
+import { TurnEventLog, TurnEvent } from '../../events/TurnEventLog';
+import { TurnProjector, ViewSegment, ViewMutation } from '../../events/TurnProjector';
 
 // Import actor types for type safety
 import type { StreamingActor } from '../streaming';
@@ -67,15 +68,6 @@ export class VirtualMessageGatewayActor extends EventStateActor {
   // Coordination State
   // ============================================
 
-  /** Accumulated content for the current streaming segment */
-  private _segmentContent = '';
-
-  /** Whether tools/thinking interrupted text flow */
-  private _hasInterleaved = false;
-
-  /** Pending shell segment awaiting results */
-  private _shellSegmentId: string | null = null;
-
   /** Current phase for debugging */
   private _phase: GatewayPhase = 'idle';
 
@@ -91,6 +83,34 @@ export class VirtualMessageGatewayActor extends EventStateActor {
   // Message handler reference for cleanup
   private _messageHandler: ((event: MessageEvent) => void) | null = null;
 
+  // ============================================
+  // CQRS Event Infrastructure
+  // ============================================
+
+  /** Per-turn event logs (turnId → TurnEventLog) */
+  private _turnLogs = new Map<string, TurnEventLog>();
+
+  /** Shared projector instance */
+  private _projector = new TurnProjector();
+
+  /** Current iteration counter (incremented by iterationStart) */
+  private _currentIteration = 0;
+
+  /** Counter for generating unique shell/approval IDs */
+  private _eventIdCounter = 0;
+
+  /** Last shell ID for causal linking of file-modified events */
+  private _lastShellId: string | null = null;
+
+  /** Current view model segments for the active streaming turn */
+  private _currentViewSegments: ViewSegment[] = [];
+
+  /** Maps CQRS shell IDs to VirtualListActor segment IDs (for shell result updates) */
+  private _shellSegmentMap = new Map<string, string>();
+
+  /** Maps CQRS approval IDs to VirtualListActor approval IDs */
+  private _approvalSegmentMap = new Map<string, string>();
+
   constructor(
     manager: EventStateManager,
     element: HTMLElement,
@@ -101,8 +121,6 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       manager,
       element,
       publications: {
-        'gateway.segmentContent': () => this._segmentContent,
-        'gateway.interleaved': () => this._hasInterleaved,
         'gateway.phase': () => this._phase,
         'gateway.currentTurn': () => this._currentTurnId,
       },
@@ -134,6 +152,367 @@ export class VirtualMessageGatewayActor extends EventStateActor {
     };
 
     window.addEventListener('message', this._messageHandler);
+  }
+
+  // ============================================
+  // CQRS Helpers
+  // ============================================
+
+  /** Get or create the event log for a turn. */
+  private getTurnLog(turnId: string): TurnEventLog {
+    let tl = this._turnLogs.get(turnId);
+    if (!tl) {
+      tl = new TurnEventLog(turnId);
+      this._turnLogs.set(turnId, tl);
+    }
+    return tl;
+  }
+
+  /** Summarize a ViewSegment for logging. */
+  private summarizeSegment(s: ViewSegment): string {
+    switch (s.type) {
+      case 'text': return `text(len=${s.content.length}, cont=${s.continuation}, complete=${s.complete})`;
+      case 'thinking': return `thinking(iter=${s.iteration}, complete=${s.complete})`;
+      case 'shell': return `shell(id=${s.id}, cmds=${s.commands.length}, complete=${s.complete})`;
+      case 'approval': return `approval(id=${s.id}, status=${s.status})`;
+      case 'file-modified': return `file(path=${s.path}, status=${s.status})`;
+      case 'tool-batch': return `tools(${s.tools.length}, complete=${s.complete})`;
+      case 'code-block': return `code(lang=${s.language})`;
+      case 'drawing': return `drawing`;
+      default: return (s as any).type;
+    }
+  }
+
+  /** Generate a unique ID for shell/approval events. */
+  private generateEventId(prefix: string): string {
+    return `${prefix}-${++this._eventIdCounter}`;
+  }
+
+  /**
+   * Emit text-finalize only if the event log has an open text segment
+   * (a text-append not followed by a text-finalize). Prevents spurious
+   * and duplicate finalize events.
+   */
+  private emitTextFinalizeIfOpen(turnId: string): void {
+    const tl = this._turnLogs.get(turnId);
+    if (!tl) return;
+
+    // Walk backwards to find the last text-related event
+    const events = tl.getAll();
+    for (let i = events.length - 1; i >= 0; i--) {
+      const e = events[i];
+      if (e.type === 'text-finalize') {
+        // Already finalized — skip
+        return;
+      }
+      if (e.type === 'text-append') {
+        // Found open text — finalize it
+        tl.append({ type: 'text-finalize', iteration: this._currentIteration, ts: Date.now() });
+        return;
+      }
+      // Skip non-text events (thinking-content, shell events, etc.) and keep looking
+    }
+    // No text-append found at all — nothing to finalize
+  }
+
+  /**
+   * Emit thinking-complete only if the event log has an open thinking block
+   * (a thinking-start not followed by a thinking-complete for the same iteration).
+   * Prevents spurious and duplicate complete events.
+   */
+  private emitThinkingCompleteIfOpen(turnId: string): void {
+    const tl = this._turnLogs.get(turnId);
+    if (!tl) return;
+
+    const events = tl.getAll();
+    for (let i = events.length - 1; i >= 0; i--) {
+      const e = events[i];
+      if (e.type === 'thinking-complete') {
+        // Already completed — skip
+        return;
+      }
+      if (e.type === 'thinking-start') {
+        // Found open thinking — complete it
+        tl.append({ type: 'thinking-complete', iteration: e.iteration, ts: Date.now() });
+        return;
+      }
+    }
+  }
+
+  /**
+   * Emit a turn event: append to the log and apply incremental projection.
+   * For normal streaming events (text, thinking, shell, approval, tools, etc.)
+   */
+  private emitTurnEvent(turnId: string, event: TurnEvent): void {
+    const tl = this.getTurnLog(turnId);
+    const index = tl.append(event);
+    const mutations = this._projector.projectIncremental(this._currentViewSegments, event, index);
+    this.applyMutations(turnId, mutations);
+  }
+
+  /**
+   * Apply incremental view mutations to VirtualListActor.
+   */
+  private applyMutations(turnId: string, mutations: ViewMutation[]): void {
+    const { virtualList } = this._actors;
+
+    for (const mutation of mutations) {
+      switch (mutation.op) {
+        case 'append':
+          this.renderSegment(turnId, mutation.segment);
+          break;
+        case 'update':
+          this.updateRenderedSegment(turnId, mutation.segmentIndex, mutation.segment);
+          break;
+        case 'insert':
+          // Insert is rare (only for causal) — handled by reconcileFull instead
+          break;
+      }
+    }
+  }
+
+  /**
+   * Render a single ViewSegment into VirtualListActor.
+   * Maps ViewSegment types to VirtualListActor method calls.
+   */
+  private renderSegment(turnId: string, segment: ViewSegment): void {
+    const { virtualList } = this._actors;
+
+    log.debug(`[${turnId}] RENDER: ${this.summarizeSegment(segment)}`);
+
+    switch (segment.type) {
+      case 'text':
+        virtualList.addTextSegment(turnId, segment.content);
+        break;
+
+      case 'thinking': {
+        virtualList.startThinkingIteration(turnId);
+        if (segment.content) {
+          virtualList.updateThinkingContent(turnId, segment.content);
+        }
+        if (segment.complete) {
+          virtualList.completeThinkingIteration(turnId);
+        }
+        break;
+      }
+
+      case 'shell': {
+        const segmentId = virtualList.createShellSegment(turnId, segment.commands);
+        if (segmentId) {
+          this._shellSegmentMap.set(segment.id, segmentId);
+          if (segment.results) {
+            virtualList.setShellResults(turnId, segmentId, segment.results.map(r => ({
+              output: r.output,
+              success: r.success
+            })));
+          }
+        }
+        break;
+      }
+
+      case 'approval': {
+        const approvalId = virtualList.createCommandApproval(
+          turnId, segment.command, segment.prefix, segment.command
+        );
+        if (approvalId) {
+          this._approvalSegmentMap.set(segment.id, approvalId);
+        }
+        if (approvalId && segment.status !== 'pending') {
+          virtualList.resolveCommandApproval(
+            turnId, approvalId, segment.status as 'allowed' | 'blocked'
+          );
+        }
+        break;
+      }
+
+      case 'file-modified':
+        virtualList.addPendingFile(turnId, {
+          filePath: segment.path,
+          status: segment.status as 'pending' | 'applied' | 'rejected',
+          editMode: segment.editMode as EditMode | undefined,
+        });
+        break;
+
+      case 'tool-batch': {
+        virtualList.startToolBatch(turnId, segment.tools.map(t => ({
+          name: t.name,
+          detail: t.detail
+        })));
+        for (let i = 0; i < segment.tools.length; i++) {
+          if (segment.tools[i].status) {
+            virtualList.updateTool(turnId, i, segment.tools[i].status as 'done' | 'error');
+          }
+        }
+        if (segment.complete) {
+          virtualList.completeToolBatch(turnId);
+        }
+        break;
+      }
+
+      case 'code-block':
+        // Code blocks are rendered as text segments with fenced content
+        virtualList.addTextSegment(turnId, '```' + segment.language + '\n' + segment.content + '\n```');
+        break;
+
+      case 'drawing':
+        // Drawing segments — delegate to virtual list if method exists
+        break;
+    }
+  }
+
+  /**
+   * Update a rendered segment in place (for incremental updates like text accumulation).
+   */
+  private updateRenderedSegment(turnId: string, segmentIndex: number, segment: ViewSegment): void {
+    const { virtualList, streaming } = this._actors;
+
+    switch (segment.type) {
+      case 'text': {
+        // For text updates during streaming, use updateTextContent
+        const isReasonerMode = this._actors.session.model === 'deepseek-reasoner';
+        const displayContent = isReasonerMode
+          ? segment.content.replace(/<shell>[\s\S]*?<\/shell>/gi, '').trim()
+          : segment.content;
+        virtualList.updateTextContent(turnId, displayContent);
+        break;
+      }
+
+      case 'thinking':
+        virtualList.updateThinkingContent(turnId, segment.content);
+        if (segment.complete) {
+          virtualList.completeThinkingIteration(turnId);
+        }
+        break;
+
+      case 'shell': {
+        const actorSegmentId = this._shellSegmentMap.get(segment.id);
+        if (actorSegmentId && segment.results) {
+          virtualList.setShellResults(turnId, actorSegmentId, segment.results.map(r => ({
+            output: r.output,
+            success: r.success
+          })));
+        }
+        break;
+      }
+
+      case 'approval': {
+        const actorApprovalId = this._approvalSegmentMap.get(segment.id);
+        if (actorApprovalId && segment.status !== 'pending') {
+          virtualList.resolveCommandApproval(
+            turnId, actorApprovalId, segment.status as 'allowed' | 'blocked'
+          );
+        }
+        break;
+      }
+
+      case 'tool-batch': {
+        // Full batch update (handles both new tools and status changes)
+        virtualList.updateToolBatch(turnId, segment.tools.map(t => ({
+          name: t.name,
+          detail: t.detail,
+          status: t.status
+        })));
+        if (segment.complete) {
+          virtualList.completeToolBatch(turnId);
+        }
+        break;
+      }
+    }
+  }
+
+  /**
+   * Convert a RichHistoryTurn (from ConversationManager) into TurnEvent[].
+   * This bridges the existing history format with the CQRS event log.
+   */
+  private convertHistoryToEvents(m: {
+    content: string;
+    reasoning_iterations?: string[];
+    contentIterations?: string[];
+    toolCalls?: Array<{ name: string; detail: string; status: string }>;
+    shellResults?: Array<{ command: string; output: string; success: boolean }>;
+    filesModified?: string[];
+    editMode?: string;
+  }): TurnEvent[] {
+    const events: TurnEvent[] = [];
+    const reasoning = m.reasoning_iterations || [];
+    const contentIts = m.contentIterations || [];
+    const shells = m.shellResults || [];
+    const tools = m.toolCalls || [];
+    let ts = 0;
+
+    if (reasoning.length > 0) {
+      // ── Reasoner model: interleave thinking → content → shells ──
+      // Build a shell index by iteration (shells are sequential, map to iterations)
+      let shellIdx = 0;
+
+      for (let i = 0; i < reasoning.length; i++) {
+        // Thinking
+        events.push({ type: 'thinking-start', iteration: i, ts: ++ts });
+        events.push({ type: 'thinking-content', content: reasoning[i], iteration: i, ts: ++ts });
+        events.push({ type: 'thinking-complete', iteration: i, ts: ++ts });
+
+        // Content for this iteration (if exists and there are shells for it)
+        const contentForIteration = i < contentIts.length ? contentIts[i] : null;
+        if (contentForIteration) {
+          events.push({ type: 'text-append', content: contentForIteration, iteration: i, ts: ++ts });
+          events.push({ type: 'text-finalize', iteration: i, ts: ++ts });
+        }
+
+        // Shell commands — assign remaining shells to this iteration
+        // Heuristic: distribute one shell per iteration, remaining go to last
+        if (shellIdx < shells.length && i < reasoning.length - 1) {
+          // One shell per reasoning iteration (except the last which gets remaining content)
+          const sr = shells[shellIdx];
+          const shellId = `sh-restore-${shellIdx}`;
+          events.push({ type: 'shell-start', id: shellId, commands: [{ command: sr.command }], iteration: i, ts: ++ts });
+          events.push({ type: 'shell-complete', id: shellId, results: [{ output: sr.output, success: sr.success }], ts: ++ts });
+          shellIdx++;
+        }
+      }
+
+      // Remaining shells (if more shells than reasoning iterations)
+      while (shellIdx < shells.length) {
+        const sr = shells[shellIdx];
+        const shellId = `sh-restore-${shellIdx}`;
+        const lastIter = reasoning.length - 1;
+        events.push({ type: 'shell-start', id: shellId, commands: [{ command: sr.command }], iteration: lastIter, ts: ++ts });
+        events.push({ type: 'shell-complete', id: shellId, results: [{ output: sr.output, success: sr.success }], ts: ++ts });
+        shellIdx++;
+      }
+
+      // File modifications
+      if (m.filesModified && m.filesModified.length > 0) {
+        for (const filePath of m.filesModified) {
+          events.push({ type: 'file-modified', path: filePath, status: 'applied', editMode: m.editMode, ts: ++ts });
+        }
+      }
+
+      // Remaining content that wasn't paired with iterations (fallback: full content)
+      if (contentIts.length === 0 && m.content) {
+        events.push({ type: 'text-append', content: m.content, iteration: 0, ts: ++ts });
+      }
+    } else {
+      // ── Chat model: tools → files → content ──
+      if (tools.length > 0) {
+        events.push({ type: 'tool-batch-start', tools: tools.map(t => ({ name: t.name, detail: t.detail })), ts: ++ts });
+        for (let i = 0; i < tools.length; i++) {
+          events.push({ type: 'tool-update', index: i, status: tools[i].status, ts: ++ts });
+        }
+        events.push({ type: 'tool-batch-complete', ts: ++ts });
+      }
+
+      if (m.filesModified && m.filesModified.length > 0) {
+        for (const filePath of m.filesModified) {
+          events.push({ type: 'file-modified', path: filePath, status: 'applied', editMode: m.editMode, ts: ++ts });
+        }
+      }
+
+      if (m.content) {
+        events.push({ type: 'text-append', content: m.content, iteration: 0, ts: ++ts });
+      }
+    }
+
+    return events;
   }
 
   // ============================================
@@ -200,7 +579,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
 
       case 'toolCallsEnd':
         if (this._currentTurnId) {
-          virtualList.completeToolBatch(this._currentTurnId);
+          this.emitTurnEvent(this._currentTurnId, { type: 'tool-batch-complete', ts: Date.now() });
         }
         break;
 
@@ -214,10 +593,6 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         break;
 
       // ---- Pending Files Messages ----
-      case 'pendingFileAdd':
-        this.handlePendingFileAdd(msg);
-        break;
-
       case 'pendingFileUpdate':
         if (msg.fileId && msg.status && this._currentTurnId) {
           virtualList.updatePendingStatus(
@@ -451,30 +826,33 @@ export class VirtualMessageGatewayActor extends EventStateActor {
 
     log.debug('startResponse: beginning new stream');
 
-    // Set the correlation ID for cross-boundary tracing (if provided)
     if (msg.correlationId) {
       webviewTracer.setExtensionCorrelationId(msg.correlationId as string);
     }
 
-    // Reset coordination state
-    this._segmentContent = '';
-    this._hasInterleaved = false;
     this._phase = 'streaming';
 
-    // Create a new turn for the assistant response
+    // Reset CQRS state for new turn
+    this._currentIteration = 0;
+    this._lastShellId = null;
+    this._currentViewSegments = [];
+    this._eventIdCounter = 0;
+    this._shellSegmentMap.clear();
+    this._approvalSegmentMap.clear();
+
     const turnId = `turn-${++this._messageCounter}`;
     this._currentTurnId = turnId;
 
-    // Add turn to virtual list
+    // Create fresh event log for this turn
+    this._turnLogs.delete(turnId);
+    this.getTurnLog(turnId);
+
     virtualList.addTurn(turnId, 'assistant', {
       model: session.model,
       timestamp: Date.now()
     });
-
-    // Start streaming on the turn
     virtualList.startStreamingTurn(turnId);
 
-    // Start stream in StreamingActor
     streaming.startStream(
       (msg.messageId as string) || `msg-${Date.now()}`,
       session.model
@@ -484,101 +862,46 @@ export class VirtualMessageGatewayActor extends EventStateActor {
   }
 
   private handleStreamToken(msg: { type: string; [key: string]: unknown }): void {
-    const { streaming, session, virtualList } = this._actors;
+    const { streaming } = this._actors;
     const token = msg.token as string;
 
     if (!this._currentTurnId) return;
 
-    const turn = virtualList.getTurn(this._currentTurnId);
-    if (!turn) return;
-
-    // Check if we need to create a new segment after interleaving
-    const boundActor = virtualList.getBoundActor(this._currentTurnId);
-    if (boundActor?.needsNewSegment()) {
-      log.debug('streamToken: resuming with new segment after interleave');
-
-      // Carry forward any incomplete code block from the finalized segment.
-      // When a chunk spans the closing ``` of one block and the opening ``` of the next,
-      // the segment is finalized with the opening ``` inside it. Without carry-forward,
-      // the new segment would miss the opening ``` and render code as raw text.
-      // Uses fence-length-aware detection (CommonMark spec) for nested fences.
-      const isReasonerMode = session.model === 'deepseek-reasoner';
-      const displayContent = isReasonerMode
-        ? this._segmentContent.replace(/<shell>[\s\S]*?<\/shell>/gi, '').trim()
-        : this._segmentContent;
-      const fenceState = hasIncompleteFence(displayContent);
-
-      virtualList.resumeWithNewSegment(this._currentTurnId);
-      this._segmentContent = fenceState.incomplete
-        ? displayContent.substring(fenceState.lastOpenIndex)
-        : '';
-      this._hasInterleaved = false;
-    }
-
-    // Accumulate content
-    this._segmentContent += token;
-
-    // Strip shell tags in reasoner mode
-    const isReasonerMode = session.model === 'deepseek-reasoner';
-    const displayContent = isReasonerMode
-      ? this._segmentContent.replace(/<shell>[\s\S]*?<\/shell>/gi, '').trim()
-      : this._segmentContent;
-
-    // Create text segment if needed, then update
-    if (turn.textSegments.length === 0) {
-      virtualList.addTextSegment(this._currentTurnId, displayContent);
-    } else {
-      virtualList.updateTextContent(this._currentTurnId, displayContent);
-    }
+    // CQRS: Record event → projector produces mutations → render
+    this.emitTurnEvent(this._currentTurnId, {
+      type: 'text-append', content: token, iteration: this._currentIteration, ts: Date.now()
+    });
 
     streaming.handleContentChunk(token);
-    this.publishCoordinationState();
   }
 
   private handleStreamReasoning(msg: { type: string; [key: string]: unknown }): void {
-    const { streaming, virtualList } = this._actors;
+    const { streaming } = this._actors;
 
     if (!this._currentTurnId) return;
 
-    // Finalize text segment before thinking
-    if (!this._hasInterleaved) {
-      const finalized = virtualList.finalizeCurrentSegment(this._currentTurnId);
-      if (finalized) {
-        this._hasInterleaved = true;
-      }
-    }
-
-    // Update thinking content in current iteration
-    const turn = virtualList.getTurn(this._currentTurnId);
-    if (turn && turn.thinkingIterations.length > 0) {
-      const lastIteration = turn.thinkingIterations[turn.thinkingIterations.length - 1];
-      if (!lastIteration.complete) {
-        const currentContent = lastIteration.content || '';
-        virtualList.updateThinkingContent(this._currentTurnId, currentContent + (msg.token as string));
-      }
-    }
+    // CQRS: Record event → projector produces mutations → render
+    this.emitTurnEvent(this._currentTurnId, {
+      type: 'thinking-content', content: msg.token as string, iteration: this._currentIteration, ts: Date.now()
+    });
 
     streaming.handleThinkingChunk(msg.token as string);
-    this.publishCoordinationState();
   }
 
   private handleIterationStart(msg: { type: string; [key: string]: unknown }): void {
-    const { virtualList } = this._actors;
-
     if (!this._currentTurnId) return;
 
     log.debug(`iterationStart: iteration=${msg.iteration}`);
 
-    // Finalize text segment before thinking
-    if (!this._hasInterleaved) {
-      const finalized = virtualList.finalizeCurrentSegment(this._currentTurnId);
-      if (finalized) {
-        this._hasInterleaved = true;
-      }
-    }
+    // Finalize previous thinking and text (only if open)
+    this.emitThinkingCompleteIfOpen(this._currentTurnId);
+    this.emitTextFinalizeIfOpen(this._currentTurnId);
 
-    virtualList.startThinkingIteration(this._currentTurnId);
-    this.publishCoordinationState();
+    // Start new thinking iteration
+    this._currentIteration = (msg.iteration as number) - 1; // Convert 1-based to 0-based
+    this.emitTurnEvent(this._currentTurnId, {
+      type: 'thinking-start', iteration: this._currentIteration, ts: Date.now()
+    });
   }
 
   private handleEndResponse(msg: { type: string; [key: string]: unknown }): void {
@@ -586,23 +909,30 @@ export class VirtualMessageGatewayActor extends EventStateActor {
 
     log.debug(`endResponse: ending stream`);
 
-    // End streaming
+    // CQRS: Finalize event log
+    if (this._currentTurnId) {
+      const tl = this.getTurnLog(this._currentTurnId);
+      this.emitThinkingCompleteIfOpen(this._currentTurnId);
+      this.emitTextFinalizeIfOpen(this._currentTurnId);
+
+      log.debug(`endResponse: event log for ${this._currentTurnId} has ${tl.length} events`);
+
+      // Send consolidated events to extension for DB persistence
+      const consolidated = tl.consolidateForSave();
+      log.debug(`endResponse: consolidated ${tl.length} → ${consolidated.length} events for save`);
+      this._vscode.postMessage({ type: 'turnEventsForSave', events: consolidated });
+    }
+
     streaming.endStream();
 
     if (this._currentTurnId) {
       virtualList.endStreamingTurn();
     }
 
-    // Save last streaming turn ID for late-arriving messages (diffListChanged, codeApplied)
     this._lastStreamingTurnId = this._currentTurnId;
-
-    // Reset coordination state
-    this._segmentContent = '';
-    this._hasInterleaved = false;
     this._phase = 'idle';
     this._currentTurnId = null;
 
-    // Clear the correlation ID now that the flow is complete
     webviewTracer.setExtensionCorrelationId(null);
 
     // Force sync traces to extension at end of response
@@ -616,10 +946,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
   // ============================================
 
   private handleShellExecuting(msg: { type: string; [key: string]: unknown }): void {
-    const { virtualList } = this._actors;
     const commands = msg.commands as Array<{ command: string; description?: string }>;
-
-    log.debug(`shellExecuting: raw commands:`, commands);
 
     if (!this._currentTurnId) {
       log.warn(`shellExecuting: NO CURRENT TURN ID - dropping message!`);
@@ -632,95 +959,72 @@ export class VirtualMessageGatewayActor extends EventStateActor {
 
     log.debug(`shellExecuting: ${commands.length} commands for turn ${this._currentTurnId}`);
 
-    // Finalize text segment before shell
-    if (!this._hasInterleaved) {
-      const finalized = virtualList.finalizeCurrentSegment(this._currentTurnId);
-      if (finalized) {
-        this._hasInterleaved = true;
-      }
-    }
+    const shellId = this.generateEventId('sh');
+    this._lastShellId = shellId;
+    this.emitTextFinalizeIfOpen(this._currentTurnId);
+    this.emitTurnEvent(this._currentTurnId, {
+      type: 'shell-start', id: shellId, commands: commands.map(c => ({ command: c.command })), iteration: this._currentIteration, ts: Date.now()
+    });
 
-    // Create shell segment
-    this._shellSegmentId = virtualList.createShellSegment(
-      this._currentTurnId,
-      commands.map(c => ({ command: c.command }))
-    );
-
-    if (this._shellSegmentId) {
-      this._phase = 'waiting-for-results';
-      virtualList.startShellSegment(this._currentTurnId, this._shellSegmentId);
-    }
-
-    this.publishCoordinationState();
+    this._phase = 'waiting-for-results';
   }
 
   private handleShellResults(msg: { type: string; [key: string]: unknown }): void {
-    const { virtualList } = this._actors;
     const results = msg.results as Array<{ output?: string; success?: boolean; exitCode?: number }>;
 
-    if (!this._currentTurnId || !results || !Array.isArray(results) || !this._shellSegmentId) return;
+    if (!this._currentTurnId || !results || !Array.isArray(results) || !this._lastShellId) return;
 
-    virtualList.setShellResults(
-      this._currentTurnId,
-      this._shellSegmentId,
-      results.map(result => ({
-        success: result.success !== undefined ? result.success : (result.exitCode === 0),
-        output: result.output || ''
-      }))
-    );
+    this.emitTurnEvent(this._currentTurnId, {
+      type: 'shell-complete', id: this._lastShellId,
+      results: results.map(r => ({ output: r.output || '', success: r.success !== undefined ? r.success : (r.exitCode === 0) })),
+      ts: Date.now()
+    });
 
-    this._shellSegmentId = null;
     this._phase = 'streaming';
-    this.publishCoordinationState();
   }
 
   // ============================================
   // Command Approval Message Handlers
   // ============================================
 
-  private _pendingApprovalId: string | null = null;
-
   private handleCommandApprovalRequired(msg: { type: string; [key: string]: unknown }): void {
-    const { virtualList } = this._actors;
     const command = msg.command as string;
     const prefix = msg.prefix as string;
-    const unknownSubCommand = (msg.unknownSubCommand as string) || command;
 
     if (!this._currentTurnId || !command) {
       log.warn('commandApprovalRequired: no current turn or missing command');
       return;
     }
 
-    // Finalize text segment before approval widget
-    if (!this._hasInterleaved) {
-      const finalized = virtualList.finalizeCurrentSegment(this._currentTurnId);
-      if (finalized) {
-        this._hasInterleaved = true;
-      }
-    }
+    const approvalEventId = this.generateEventId('ap');
+    this.emitTurnEvent(this._currentTurnId, {
+      type: 'approval-created', id: approvalEventId, command, prefix, shellId: this._lastShellId || '', ts: Date.now()
+    });
 
-    this._pendingApprovalId = virtualList.createCommandApproval(
-      this._currentTurnId,
-      command,
-      prefix,
-      unknownSubCommand
-    );
-
-    log.debug(`commandApprovalRequired: created approval ${this._pendingApprovalId} for "${command}"`);
+    log.debug(`commandApprovalRequired: created approval ${approvalEventId} for "${command.substring(0, 40)}"`);
   }
 
   private handleCommandApprovalResolved(msg: { type: string; [key: string]: unknown }): void {
-    const { virtualList } = this._actors;
     const decision = msg.decision as 'allowed' | 'blocked';
+    const turnId = this._currentTurnId || this._lastStreamingTurnId;
 
-    if (!this._currentTurnId || !this._pendingApprovalId || !decision) {
-      log.warn(`commandApprovalResolved: skipped — turnId=${this._currentTurnId}, approvalId=${this._pendingApprovalId}, decision=${decision}`);
-      return;
+    if (!turnId || !decision) return;
+
+    // Record event (with dedup check — UI click handler may have already resolved via postMessage round-trip)
+    const tl = this._turnLogs.get(turnId);
+    if (tl) {
+      const approvalEvents = tl.getByType('approval-created');
+      const lastApproval = approvalEvents[approvalEvents.length - 1];
+      if (lastApproval) {
+        const resolvedEvents = tl.getByType('approval-resolved');
+        const alreadyResolved = resolvedEvents.some(e => e.id === lastApproval.id);
+        if (!alreadyResolved) {
+          this.emitTurnEvent(turnId, {
+            type: 'approval-resolved', id: lastApproval.id, decision, persistent: false, ts: Date.now()
+          });
+        }
+      }
     }
-
-    log.debug(`commandApprovalResolved: resolving ${this._pendingApprovalId} with decision=${decision}`);
-    virtualList.resolveCommandApproval(this._currentTurnId, this._pendingApprovalId, decision);
-    this._pendingApprovalId = null;
   }
 
   // ============================================
@@ -728,102 +1032,58 @@ export class VirtualMessageGatewayActor extends EventStateActor {
   // ============================================
 
   private handleToolCallsStart(msg: { type: string; [key: string]: unknown }): void {
-    const { virtualList } = this._actors;
     const tools = msg.tools as Array<{ name: string; detail: string }>;
 
     if (!this._currentTurnId || !tools || !Array.isArray(tools)) return;
 
     log.debug(`toolCallsStart: ${tools.length} tools`);
 
-    // Finalize text segment before tools
-    if (!this._hasInterleaved) {
-      const finalized = virtualList.finalizeCurrentSegment(this._currentTurnId);
-      if (finalized) {
-        this._hasInterleaved = true;
-      }
-    }
-
-    virtualList.startToolBatch(this._currentTurnId, tools);
-    this.publishCoordinationState();
+    this.emitTurnEvent(this._currentTurnId, {
+      type: 'tool-batch-start', tools: tools.map(t => ({ name: t.name, detail: t.detail })), ts: Date.now()
+    });
   }
 
   private handleToolCallUpdate(msg: { type: string; [key: string]: unknown }): void {
-    const { virtualList } = this._actors;
-
     if (!this._currentTurnId || msg.index === undefined || !msg.status) return;
 
-    virtualList.updateTool(
-      this._currentTurnId,
-      msg.index as number,
-      msg.status as 'pending' | 'running' | 'done' | 'error'
-    );
+    this.emitTurnEvent(this._currentTurnId, {
+      type: 'tool-update', index: msg.index as number, status: msg.status as string, ts: Date.now()
+    });
   }
 
   private handleToolCallsUpdate(msg: { type: string; [key: string]: unknown }): void {
-    const { virtualList } = this._actors;
     const tools = msg.tools as Array<{ name: string; detail: string; status?: string }>;
 
     if (!this._currentTurnId || !tools || !Array.isArray(tools)) return;
 
-    // Update the entire tool batch (adds new tools and updates status)
-    virtualList.updateToolBatch(this._currentTurnId, tools);
+    this.emitTurnEvent(this._currentTurnId, {
+      type: 'tool-batch-update', tools: tools.map(t => ({ name: t.name, detail: t.detail, status: t.status })), ts: Date.now()
+    });
   }
 
   // ============================================
   // Pending Files Message Handlers
   // ============================================
 
-  private handlePendingFileAdd(msg: { type: string; [key: string]: unknown }): void {
-    const { virtualList } = this._actors;
-
-    if (!this._currentTurnId || !msg.filePath) return;
-
-    // Finalize text segment before pending files
-    if (!this._hasInterleaved) {
-      const finalized = virtualList.finalizeCurrentSegment(this._currentTurnId);
-      if (finalized) {
-        this._hasInterleaved = true;
-      }
-    }
-
-    virtualList.addPendingFile(this._currentTurnId, {
-      filePath: msg.filePath as string,
-      diffId: msg.diffId as string | undefined
-    });
-
-    this.publishCoordinationState();
-  }
-
   private handleDiffListChanged(msg: { type: string; [key: string]: unknown }): void {
     const { virtualList } = this._actors;
     const diffs = msg.diffs as Array<{ filePath: string; status: string; diffId?: string; iteration?: number; superseded?: boolean }>;
+    const source = (msg.source as string) || 'unknown';
 
-    // Use current turn or fall back to last streaming turn (for late-arriving messages after endResponse)
     const turnId = this._currentTurnId || this._lastStreamingTurnId;
     if (!turnId || !diffs || !Array.isArray(diffs)) return;
 
-    log.debug(`diffListChanged: ${diffs.length} diffs for turn ${turnId}`);
+    log.debug(`diffListChanged: ${diffs.length} diffs for turn ${turnId} (source=${source})`);
 
-    // Only finalize text segment if still streaming (don't do it for late-arriving messages)
-    if (this._currentTurnId && !this._hasInterleaved && diffs.length > 0) {
-      const finalized = virtualList.finalizeCurrentSegment(turnId);
-      if (finalized) {
-        this._hasInterleaved = true;
-      }
-    }
-
-    // Get current pending files for this turn
     const turn = virtualList.getTurn(turnId);
     if (!turn) return;
 
-    const currentDiffIds = new Map(turn.pendingFiles.map(f => [f.diffId, f]));
     const currentPaths = new Map(turn.pendingFiles.map(f => [f.filePath, f]));
 
     for (const diff of diffs) {
       const status = diff.status as 'pending' | 'applied' | 'rejected' | 'superseded' | 'error';
 
-      // First: check if this diff exists in ANY turn (global search by diffId).
-      // This prevents resolved diffs from previous turns being re-added to the current turn.
+      // Check if this diff exists in ANY turn (global search by diffId)
       if (diff.diffId) {
         const globalMatch = virtualList.findPendingFileGlobal(diff.diffId);
         if (globalMatch) {
@@ -835,18 +1095,15 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         }
       }
 
-      // Second: check current turn by filePath (same file re-edited with new diffId)
+      // Check current turn by filePath (same file re-edited with new diffId)
       const existingByPath = currentPaths.get(diff.filePath);
       if (existingByPath) {
-        // If the existing entry is already resolved (rejected/applied) and this is a new diffId,
-        // treat it as a new entry so retries get their own pending group
         const isResolved = existingByPath.status === 'rejected' || existingByPath.status === 'applied';
         if (isResolved && diff.diffId && existingByPath.diffId !== diff.diffId) {
           log.debug(`diffListChanged: ${diff.filePath} resolved (${existingByPath.status}) with new diffId — creating new pending entry`);
           // Fall through to create a new pending file entry
         } else {
           if (diff.diffId && existingByPath.diffId !== diff.diffId) {
-            log.debug(`diffListChanged: updating diffId for ${diff.filePath}: ${existingByPath.diffId}→${diff.diffId}`);
             existingByPath.diffId = diff.diffId;
           }
           if (existingByPath.status !== status) {
@@ -857,8 +1114,26 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         }
       }
 
-      // Truly new diff — add to current turn
-      log.debug(`diffListChanged: new pending file ${diff.filePath} (diffId=${diff.diffId}) status=${status}`);
+      // Truly new diff — record in CQRS event log (for history save/restore)
+      log.debug(`diffListChanged: new pending file ${diff.filePath} (diffId=${diff.diffId}) status=${status} source=${source}`);
+
+      const tl = this._turnLogs.get(turnId);
+      if (tl) {
+        // Only use causal insertion for shell-sourced file changes (file watcher after shell execution).
+        // Diff-engine (auto-applied SEARCH/REPLACE from content) changes are not caused by shell commands
+        // and should be appended at the current stream position.
+        if (source === 'shell' && this._lastShellId) {
+          tl.insertCausal({
+            type: 'file-modified', path: diff.filePath, status, causedBy: this._lastShellId, ts: Date.now()
+          });
+        } else {
+          tl.append({
+            type: 'file-modified', path: diff.filePath, status, editMode: msg.editMode as string | undefined, ts: Date.now()
+          });
+        }
+      }
+
+      // Render directly (not via projector — diffId needed for status tracking)
       virtualList.addPendingFile(turnId, {
         filePath: diff.filePath,
         diffId: diff.diffId,
@@ -866,7 +1141,6 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       });
     }
 
-    // Update edit mode if provided
     if (msg.editMode && ['manual', 'ask', 'auto'].includes(msg.editMode as string)) {
       virtualList.setEditMode(msg.editMode as EditMode);
     }
@@ -995,12 +1269,14 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       model?: string;
       timestamp?: number;
       sequence?: number;
+      turnEvents?: Array<Record<string, unknown>>;
     }>;
 
     log.debug(`[VirtualGateway] handleLoadHistory: ${history?.length ?? 0} turns`);
 
     session.handleLoadHistory();
     virtualList.clear();
+    this._turnLogs.clear();
     this._messageCounter = 0;
 
     if (history && Array.isArray(history)) {
@@ -1022,79 +1298,23 @@ export class VirtualMessageGatewayActor extends EventStateActor {
               sequence: m.sequence
             });
 
-            const reasoning = m.reasoning_iterations || [];
-            const contentIts = m.contentIterations || [];
-            const shells = m.shellResults || [];
-            const tools = m.toolCalls || [];
+            // ── CQRS: Load events and project ──
+            // Prefer turnEvents (raw event log from DB) over fragment conversion
+            const events = m.turnEvents && m.turnEvents.length > 0
+              ? m.turnEvents as TurnEvent[]
+              : this.convertHistoryToEvents(m);
+            const source = m.turnEvents && m.turnEvents.length > 0 ? 'turnEvents' : 'converted';
+            const tl = this.getTurnLog(turnId);
+            tl.load(events);
 
-            log.debug(`[VirtualGateway] restore turn ${turnId}: reasoning=${reasoning.length}, contentIts=${contentIts.length}, shells=${shells.length}, tools=${tools.length}, files=${m.filesModified?.length || 0}`);
+            log.debug(`[VirtualGateway] restore turn ${turnId}: ${events.length} events from ${source}`);
 
-            if (reasoning.length > 0) {
-              // ── Reasoner model restore ──
-              // Interleave: thinking[i] → content[i] → shell[i] → files → ... → final text
-              let contentUsedInline = 0;
+            const segments = this._projector.projectFull(tl);
 
-              for (let i = 0; i < reasoning.length; i++) {
-                virtualList.startThinkingIteration(turnId);
-                virtualList.updateThinkingContent(turnId, reasoning[i]);
-                virtualList.completeThinkingIteration(turnId);
+            log.debug(`[VirtualGateway] projected ${turnId}: ${segments.length} segments — [${segments.map((s, i) => `${i}:${this.summarizeSegment(s)}`).join(', ')}]`);
 
-                // Content text from this iteration (appears between thinking and shell)
-                if (i < contentIts.length && contentIts[i] && i < shells.length) {
-                  virtualList.addTextSegment(turnId, contentIts[i]);
-                  contentUsedInline++;
-                }
-
-                // Shell command from this iteration
-                if (i < shells.length) {
-                  const sr = shells[i];
-                  const segmentId = virtualList.createShellSegment(turnId, [{ command: sr.command }]);
-                  if (segmentId) {
-                    virtualList.setShellResults(turnId, segmentId, [{ output: sr.output, success: sr.success }]);
-                  }
-                }
-              }
-
-              // File modifications (appear after shells, before final text)
-              if (m.filesModified && m.filesModified.length > 0) {
-                for (const filePath of m.filesModified) {
-                  virtualList.addPendingFile(turnId, { filePath, status: 'applied', editMode: m.editMode });
-                }
-              }
-
-              // Remaining content iterations (after the last shell) — the "real" response text
-              if (contentIts.length > contentUsedInline) {
-                for (let i = contentUsedInline; i < contentIts.length; i++) {
-                  if (contentIts[i]) {
-                    virtualList.addTextSegment(turnId, contentIts[i]);
-                  }
-                }
-              } else if (contentIts.length === 0 && m.content) {
-                virtualList.addTextSegment(turnId, m.content);
-              }
-            } else {
-              // ── Chat model restore ──
-              // Order matches live streaming: tools → files → text content
-              if (tools.length > 0) {
-                virtualList.startToolBatch(turnId, tools.map(tc => ({
-                  name: tc.name,
-                  detail: tc.detail
-                })));
-                tools.forEach((tc, i) => {
-                  virtualList.updateTool(turnId, i, tc.status as 'done' | 'error');
-                });
-                virtualList.completeToolBatch(turnId);
-              }
-
-              if (m.filesModified && m.filesModified.length > 0) {
-                for (const filePath of m.filesModified) {
-                  virtualList.addPendingFile(turnId, { filePath, status: 'applied', editMode: m.editMode });
-                }
-              }
-
-              if (m.content) {
-                virtualList.addTextSegment(turnId, m.content);
-              }
+            for (const segment of segments) {
+              this.renderSegment(turnId, segment);
             }
           }
         });
@@ -1109,13 +1329,17 @@ export class VirtualMessageGatewayActor extends EventStateActor {
 
     virtualList.clear();
     this._messageCounter = 0;
-
-    // Reset coordination state
-    this._shellSegmentId = null;
-    this._segmentContent = '';
-    this._hasInterleaved = false;
     this._phase = 'idle';
     this._currentTurnId = null;
+
+    // Clear CQRS state
+    this._turnLogs.clear();
+    this._currentIteration = 0;
+    this._lastShellId = null;
+    this._currentViewSegments = [];
+    this._eventIdCounter = 0;
+    this._shellSegmentMap.clear();
+    this._approvalSegmentMap.clear();
 
     this.publishCoordinationState();
   }
@@ -1225,8 +1449,6 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       virtualList.endStreamingTurn();
     }
 
-    this._segmentContent = '';
-    this._hasInterleaved = false;
     this._phase = 'idle';
     this._currentTurnId = null;
 
@@ -1239,8 +1461,6 @@ export class VirtualMessageGatewayActor extends EventStateActor {
 
   private publishCoordinationState(): void {
     this.publish({
-      'gateway.segmentContent': this._segmentContent,
-      'gateway.interleaved': this._hasInterleaved,
       'gateway.phase': this._phase,
       'gateway.currentTurn': this._currentTurnId,
     });
@@ -1250,20 +1470,8 @@ export class VirtualMessageGatewayActor extends EventStateActor {
   // Public API
   // ============================================
 
-  get segmentContent(): string {
-    return this._segmentContent;
-  }
-
-  get hasInterleaved(): boolean {
-    return this._hasInterleaved;
-  }
-
   get phase(): GatewayPhase {
     return this._phase;
-  }
-
-  get shellSegmentId(): string | null {
-    return this._shellSegmentId;
   }
 
   get currentTurnId(): string | null {

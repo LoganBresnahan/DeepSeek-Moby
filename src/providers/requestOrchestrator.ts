@@ -104,6 +104,9 @@ export class RequestOrchestrator {
   private _heldSegments: Array<{ type: string; content: unknown; complete?: boolean }> = [];
   // Promise that resolves when inline shell execution (including any approval) completes
   private _inlineExecutionPromise: Promise<void> | null = null;
+  // CQRS: Deferred turn events from webview (set before endResponse, resolved when webview sends back)
+  private _turnEventsResolve: ((events: Array<Record<string, unknown>>) => void) | null = null;
+  private _turnEventsPromise: Promise<Array<Record<string, unknown>>> | null = null;
 
   constructor(
     private deepSeekClient: DeepSeekClient,
@@ -394,6 +397,9 @@ export class RequestOrchestrator {
           logger.info(`[RequestOrchestrator] End-of-response approval results:\n${feedbackLines.join('\n')}`);
         }
       }
+
+      // Prepare to receive turn events from webview (must be before endResponse.fire)
+      this.prepareTurnEventsReceiver();
 
       // Finalize response
       this._onEndResponse.fire({
@@ -1293,6 +1299,40 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
 
   }
 
+  // ── CQRS: Turn Events from Webview ──
+
+  /**
+   * Set up a promise that will resolve when the webview sends back its
+   * consolidated turn events. Called just before firing endResponse.
+   */
+  private prepareTurnEventsReceiver(): void {
+    this._turnEventsPromise = new Promise<Array<Record<string, unknown>>>((resolve) => {
+      this._turnEventsResolve = resolve;
+      // Timeout: if webview doesn't respond within 2s, save without turn events
+      setTimeout(() => {
+        if (this._turnEventsResolve === resolve) {
+          logger.warn('[RequestOrchestrator] turnEventsForSave timeout — saving without webview events');
+          resolve([]);
+          this._turnEventsResolve = null;
+        }
+      }, 2000);
+    });
+  }
+
+  /**
+   * Called by ChatProvider when the webview sends turnEventsForSave.
+   * Resolves the pending promise so saveToHistory can proceed with the events.
+   */
+  receiveTurnEvents(events: Array<Record<string, unknown>>): void {
+    if (this._turnEventsResolve) {
+      logger.info(`[RequestOrchestrator] Received ${events.length} turn events from webview`);
+      this._turnEventsResolve(events);
+      this._turnEventsResolve = null;
+    } else {
+      logger.warn(`[RequestOrchestrator] Received turn events but no pending receiver`);
+    }
+  }
+
   // ── Private: History Save Pipeline ──
 
   private async saveToHistory(
@@ -1354,12 +1394,14 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
           logger.info(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} Recorded file modification: ${filePath} (editMode=${currentEditMode})`);
         }
 
-        // 5. Record the assistant message with real model + finishReason
-        const cleanedContentIterations = contentIterations.length > 0
-          ? contentIterations.map(c => stripShellTags(stripDSML(c)).trim()).filter(c => c.length > 0)
-          : undefined;
-        await this.conversationManager.recordAssistantMessage(sessionId, cleanResponse, model, 'stop', undefined, cleanedContentIterations);
-        logger.info(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} Recorded assistant message (${cleanResponse.length} chars, model=${model}, contentIts=${cleanedContentIterations?.length || 0})`);
+        // 5. Await turn events from webview (CQRS: webview's event log is the source of truth)
+        const turnEvents = this._turnEventsPromise ? await this._turnEventsPromise : [];
+        this._turnEventsPromise = null;
+        logger.info(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} Received ${turnEvents.length} consolidated turn events from webview`);
+
+        // 6. Record the assistant message with turn events
+        await this.conversationManager.recordAssistantMessage(sessionId, cleanResponse, model, 'stop', undefined, undefined, turnEvents);
+        logger.info(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} Recorded assistant message (${cleanResponse.length} chars, model=${model}, turnEvents=${turnEvents.length})`);
 
         // Fire turn sequence update so webview can show fork buttons on live turns
         const seqs = this.conversationManager.getRecentTurnSequences(sessionId);

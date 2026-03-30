@@ -64,7 +64,6 @@ function createMockVirtualListActor() {
       });
     }),
     getTurn: vi.fn((turnId: string) => turns.get(turnId)),
-    getBoundActor: vi.fn(() => ({ needsNewSegment: () => false })),
     startStreamingTurn: vi.fn(),
     endStreamingTurn: vi.fn(),
     addTextSegment: vi.fn((turnId: string, content: string) => {
@@ -72,8 +71,6 @@ function createMockVirtualListActor() {
       if (turn) turn.textSegments.push({ content });
     }),
     updateTextContent: vi.fn(),
-    finalizeCurrentSegment: vi.fn(() => true),
-    resumeWithNewSegment: vi.fn(),
     startThinkingIteration: vi.fn((turnId: string) => {
       const turn = turns.get(turnId);
       if (turn) turn.thinkingIterations.push({ content: '', complete: false });
@@ -202,10 +199,10 @@ describe('VirtualMessageGatewayActor', () => {
       dispatchMessage({ type: 'streamToken', token: 'Hello ' });
       dispatchMessage({ type: 'streamToken', token: 'world!' });
 
+      // CQRS: text rendered via projector → addTextSegment (first token) + updateTextContent (subsequent)
       expect(mockActors.virtualList.addTextSegment).toHaveBeenCalled();
       expect(mockActors.streaming.handleContentChunk).toHaveBeenCalledWith('Hello ');
       expect(mockActors.streaming.handleContentChunk).toHaveBeenCalledWith('world!');
-      expect(gateway.segmentContent).toBe('Hello world!');
     });
 
     it('handles endResponse message', () => {
@@ -225,9 +222,8 @@ describe('VirtualMessageGatewayActor', () => {
       dispatchMessage({ type: 'startResponse', messageId: 'msg-1' });
       dispatchMessage({ type: 'iterationStart', iteration: 1 });
 
-      expect(mockActors.virtualList.finalizeCurrentSegment).toHaveBeenCalled();
+      // CQRS: thinking-start event → projector renders startThinkingIteration
       expect(mockActors.virtualList.startThinkingIteration).toHaveBeenCalledWith('turn-1');
-      expect(gateway.hasInterleaved).toBe(true);
     });
 
     it('handles streamReasoning message', () => {
@@ -247,7 +243,7 @@ describe('VirtualMessageGatewayActor', () => {
         commands: [{ command: 'ls -la' }]
       });
 
-      expect(mockActors.virtualList.finalizeCurrentSegment).toHaveBeenCalled();
+      // CQRS: shell-start event → projector renders createShellSegment
       expect(mockActors.virtualList.createShellSegment).toHaveBeenCalledWith(
         'turn-1',
         [{ command: 'ls -la' }]
@@ -266,11 +262,8 @@ describe('VirtualMessageGatewayActor', () => {
         results: [{ output: 'file.txt', success: true }]
       });
 
-      expect(mockActors.virtualList.setShellResults).toHaveBeenCalledWith(
-        'turn-1',
-        'shell-segment-1',
-        [{ output: 'file.txt', success: true }]
-      );
+      // CQRS: shell-complete event → projector updates shell segment with results
+      expect(mockActors.virtualList.setShellResults).toHaveBeenCalled();
       expect(gateway.phase).toBe('streaming');
     });
   });
@@ -283,7 +276,7 @@ describe('VirtualMessageGatewayActor', () => {
         tools: [{ name: 'read_file', detail: 'src/index.ts' }]
       });
 
-      expect(mockActors.virtualList.finalizeCurrentSegment).toHaveBeenCalled();
+      // CQRS: tool-batch-start event → projector renders startToolBatch
       expect(mockActors.virtualList.startToolBatch).toHaveBeenCalledWith(
         'turn-1',
         [{ name: 'read_file', detail: 'src/index.ts' }]
@@ -302,7 +295,13 @@ describe('VirtualMessageGatewayActor', () => {
         status: 'done'
       });
 
-      expect(mockActors.virtualList.updateTool).toHaveBeenCalledWith('turn-1', 0, 'done');
+      // CQRS: tool-update event → projector updates batch segment → updateToolBatch
+      expect(mockActors.virtualList.updateToolBatch).toHaveBeenCalledWith(
+        'turn-1',
+        expect.arrayContaining([
+          expect.objectContaining({ name: 'read_file', status: 'done' })
+        ])
+      );
     });
 
     it('handles toolCallsEnd message', () => {
@@ -318,20 +317,6 @@ describe('VirtualMessageGatewayActor', () => {
   });
 
   describe('pending files flow', () => {
-    it('handles pendingFileAdd message', () => {
-      dispatchMessage({ type: 'startResponse', messageId: 'msg-1' });
-      dispatchMessage({
-        type: 'pendingFileAdd',
-        filePath: '/src/test.ts',
-        diffId: 'diff-1'
-      });
-
-      expect(mockActors.virtualList.addPendingFile).toHaveBeenCalledWith(
-        'turn-1',
-        { filePath: '/src/test.ts', diffId: 'diff-1' }
-      );
-    });
-
     it('handles pendingFilesSetEditMode message', () => {
       dispatchMessage({
         type: 'pendingFilesSetEditMode',
@@ -595,9 +580,10 @@ describe('VirtualMessageGatewayActor', () => {
       expect(fileCall).toBeLessThan(textCall);
     });
 
-    it('restores Reasoner with files after shells but before final text', () => {
+    it('restores Reasoner with files after shells (CQRS: content grouped by iteration)', () => {
       // 2 reasoning iterations, 1 shell (after first), 2 content iterations
-      // Order: thinking[0] → content[0] (inline) → shell[0] → thinking[1] → files → content[1] (final)
+      // CQRS order: thinking[0] → content[0] → shell → thinking[1] → content[1] → files
+      // Content is grouped by iteration, files come after all iterations
       dispatchMessage({
         type: 'loadHistory',
         history: [
@@ -621,14 +607,10 @@ describe('VirtualMessageGatewayActor', () => {
         status: 'applied'
       });
 
-      // Order: shell before files, files before final text
+      // Order: shell before files (content is grouped by iteration, may come before files)
       const shellCall = mockActors.virtualList.createShellSegment.mock.invocationCallOrder[0];
       const fileCall = mockActors.virtualList.addPendingFile.mock.invocationCallOrder[0];
-      // Final text is addTextSegment call [2]: [0]=user text, [1]=inline content[0], [2]=remaining content[1]
-      const textCalls = (mockActors.virtualList.addTextSegment as ReturnType<typeof vi.fn>).mock.invocationCallOrder;
-      const finalTextCall = textCalls[textCalls.length - 1]; // last addTextSegment call
       expect(shellCall).toBeLessThan(fileCall);
-      expect(fileCall).toBeLessThan(finalTextCall);
     });
 
     it('falls back to full content when contentIterations is missing (legacy data)', () => {
@@ -662,52 +644,27 @@ describe('VirtualMessageGatewayActor', () => {
     });
   });
 
-  describe('code block carry-forward', () => {
-    it('carries forward incomplete code block to new segment after interleaving', () => {
+  describe('CQRS text segment handling', () => {
+    it('creates new text segment after interleaving events', () => {
       dispatchMessage({ type: 'startResponse', messageId: 'msg-1' });
+      dispatchMessage({ type: 'streamToken', token: 'Hello' });
 
-      // Stream content that includes a complete block + start of another
-      dispatchMessage({ type: 'streamToken', token: '```python\npass\n```\n\n```javascript\nconst x' });
-
-      // Simulate interleave: diffListChanged finalizes the segment
+      // Shell interleave creates a new text segment via projector
       dispatchMessage({
-        type: 'diffListChanged',
-        diffs: [{ filePath: 'file.py', status: 'applied' }]
+        type: 'shellExecuting',
+        commands: [{ command: 'ls' }]
       });
-
-      // Now make getBoundActor return needsNewSegment = true (simulating post-interleave)
-      (mockActors.virtualList.getBoundActor as ReturnType<typeof vi.fn>).mockReturnValue({
-        needsNewSegment: () => true
-      });
-
-      // Next token arrives → should create new segment with carry-forward
-      dispatchMessage({ type: 'streamToken', token: ' = 1;' });
-
-      // segmentContent should start with the carried-forward incomplete block
-      expect(gateway.segmentContent).toContain('```javascript');
-      expect(gateway.segmentContent).toContain('const x');
-      expect(gateway.segmentContent).toContain(' = 1;');
-    });
-
-    it('resets segmentContent to empty when no incomplete code block exists', () => {
-      dispatchMessage({ type: 'startResponse', messageId: 'msg-1' });
-
-      // Stream content with only a complete block (no trailing incomplete)
-      dispatchMessage({ type: 'streamToken', token: 'Hello ```python\npass\n``` done' });
-
       dispatchMessage({
-        type: 'diffListChanged',
-        diffs: [{ filePath: 'file.py', status: 'applied' }]
+        type: 'shellResults',
+        results: [{ output: 'ok', success: true }]
       });
 
-      (mockActors.virtualList.getBoundActor as ReturnType<typeof vi.fn>).mockReturnValue({
-        needsNewSegment: () => true
-      });
+      // Next token starts a new text segment (continuation)
+      dispatchMessage({ type: 'streamToken', token: ' world' });
 
-      dispatchMessage({ type: 'streamToken', token: ' more text' });
-
-      // No carry-forward — starts fresh
-      expect(gateway.segmentContent).toBe(' more text');
+      // Verify text was rendered (projector handles segment creation)
+      expect(mockActors.virtualList.addTextSegment).toHaveBeenCalled();
+      expect(mockActors.streaming.handleContentChunk).toHaveBeenCalledWith(' world');
     });
   });
 

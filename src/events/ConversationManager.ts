@@ -48,6 +48,8 @@ export interface RichHistoryTurn {
   /** Edit mode active when this turn's file modifications were created */
   editMode?: 'manual' | 'ask' | 'auto';
   model?: string;
+  /** CQRS turn events — when present, history restore uses these directly */
+  turnEvents?: Array<Record<string, unknown>>;
   // User-only fields:
   files?: string[];
   timestamp: number;
@@ -436,7 +438,8 @@ export class ConversationManager {
     model: string,
     finishReason: 'stop' | 'tool_calls' | 'length' | 'error',
     usage?: { promptTokens: number; completionTokens: number },
-    contentIterations?: string[]
+    contentIterations?: string[],
+    turnEvents?: Array<Record<string, unknown>>
   ): Promise<ConversationEvent> {
     const event = this.eventStore.append({
       sessionId,
@@ -446,7 +449,8 @@ export class ConversationManager {
       model,
       finishReason,
       usage,
-      contentIterations: contentIterations && contentIterations.length > 0 ? contentIterations : undefined
+      contentIterations: contentIterations && contentIterations.length > 0 ? contentIterations : undefined,
+      turnEvents: turnEvents && turnEvents.length > 0 ? turnEvents : undefined
     });
 
     // Update session metadata
@@ -770,6 +774,10 @@ export class ConversationManager {
           // Extract per-iteration content text (for correct interleaving during restore)
           if (assistantEvent.contentIterations && assistantEvent.contentIterations.length > 0) {
             currentAssistantTurn.contentIterations = assistantEvent.contentIterations;
+          }
+          // Extract CQRS turn events (when present, takes priority over fragment-based restore)
+          if (assistantEvent.turnEvents && assistantEvent.turnEvents.length > 0) {
+            currentAssistantTurn.turnEvents = assistantEvent.turnEvents;
           }
           // Finalize this assistant turn
           turns.push(currentAssistantTurn);

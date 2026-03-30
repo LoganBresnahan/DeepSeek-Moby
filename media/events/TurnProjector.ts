@@ -241,6 +241,14 @@ export class TurnProjector {
           break;
         }
 
+        case 'tool-batch-update': {
+          const batch = this.findLastIncomplete<ToolBatchSegment>(segments, 'tool-batch');
+          if (batch) {
+            batch.tools = event.tools.map(t => ({ ...t }));
+          }
+          break;
+        }
+
         case 'tool-update': {
           const batch = this.findLastIncomplete<ToolBatchSegment>(segments, 'tool-batch');
           if (batch && event.index < batch.tools.length) {
@@ -313,13 +321,16 @@ export class TurnProjector {
 
     switch (event.type) {
       case 'text-append': {
-        const lastSegment = segments[segments.length - 1];
-        if (lastSegment && lastSegment.type === 'text' && !lastSegment.complete) {
-          // Update existing text segment
-          lastSegment.content += event.content;
-          return [{ op: 'update', segmentIndex: segments.length - 1, segment: lastSegment }];
+        // Find the last incomplete text segment — may not be the last segment overall.
+        // e.g., file-modified can be appended mid-stream without closing text flow,
+        // matching projectFull behavior where currentText persists across non-breaking events.
+        const openText = this.findLastIncomplete<TextSegment>(segments, 'text');
+        if (openText) {
+          openText.content += event.content;
+          const idx = segments.indexOf(openText);
+          return [{ op: 'update', segmentIndex: idx, segment: openText }];
         } else {
-          // Create new text segment
+          // No open text segment — create new one
           const newSeg: TextSegment = {
             type: 'text',
             content: event.content,
@@ -456,6 +467,16 @@ export class TurnProjector {
         };
         segments.push(newSeg);
         return [{ op: 'append', segment: newSeg }];
+      }
+
+      case 'tool-batch-update': {
+        const batch = this.findLastIncomplete<ToolBatchSegment>(segments, 'tool-batch');
+        if (batch) {
+          batch.tools = event.tools.map(t => ({ ...t }));
+          const idx = segments.indexOf(batch);
+          return [{ op: 'update', segmentIndex: idx, segment: batch }];
+        }
+        return [];
       }
 
       case 'tool-update': {

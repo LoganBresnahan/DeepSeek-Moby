@@ -56,8 +56,8 @@ declare function acquireVsCodeApi(): VSCodeAPI;
 // ============================================
 
 // All coordination state is managed by VirtualMessageGatewayActor:
-// - Streaming state: gateway.segmentContent, gateway.interleaved, gateway.phase
-// - Shell segment tracking: internal to gateway
+// - Streaming state: gateway.phase, gateway.currentTurn
+// - CQRS: TurnEventLog per turn → TurnProjector → VirtualListActor
 // - Edit mode: EditModeActor
 // - Session/model: SessionActor
 //

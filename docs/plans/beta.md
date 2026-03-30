@@ -378,16 +378,19 @@ AGPL
 | ~~Thinking dropdown scroll~~ | User can scroll up during streaming thinking; auto-follows when scrolled to bottom |
 | ~~Dropdown padding~~ | 6px top/bottom padding on shell, tools, pending headers (matches thinking) |
 | ~~Command approval: full command as unit~~ | No chain splitting — full command is one rule entry. Blocked commands show approval prompt (user can override) |
+| ~~CQRS unified rendering~~ | Real-time CQRS: TurnEventLog + TurnProjector. Live streaming and history restore use same code path. Eliminates text splitting, ordering bugs, missing approvals/shells in history. 1902 tests passing |
+| ~~CQRS event persistence~~ | Webview's event log sent to extension for DB storage (replaces lossy `buildTurnEvents` reconstruction). `consolidateForSave()` compresses ~2000 per-token events to ~20-50 structural events |
+| ~~Command approval bugs (B1-B2)~~ | `updateLayout()` → `measureTurnHeight()` fix. Approval events always recorded in CQRS log. Shell/diff-engine source distinction for causal linking |
 
 ### Active Bugs
 
 | # | Bug | Status | Details |
 |---|-----|--------|---------|
-| B1 | Command approval: streaming not paused during prompt | Open | `_approvalPending` flag gates segments in `onFlush` but tokens still render. Fix applied (hold ALL segments) but not verified working |
-| B2 | Command approval: no visual feedback after decision | Open | `commandApprovalResolved` message sent but approval widget doesn't update. Logging added to diagnose `_pendingApprovalId` timing |
+| B1 | Command approval: streaming not paused during prompt | **Fixed** | CQRS Step 6: projector handles segment flow. `updateLayout()` → `measureTurnHeight()` fix. Approval widget renders and resolves correctly |
+| B2 | Command approval: no visual feedback after decision | **Fixed** | Root cause: `createCommandApproval` threw from missing `updateLayout()`, so `_pendingApprovalId` was never set. Fixed + CQRS approval events always recorded |
 | B3 | Duplicate rules in system commands modal | Open | "cat >>" appears twice. DB has unique index so not actual duplicates — likely UI rendering issue from double rules update |
-| B4 | History shows "No messages" and "0" count | Open | Session has events but metadata count not updated after messages recorded |
-| B5 | History highlight may not match active session | Open | Need to verify session ID comparison in highlight logic |
+| B4 | History restore ordering differs from live | **Fixed** | CQRS architecture: unified event log + projector for both live streaming and history restore. `buildTurnEvents` (lossy reconstruction) replaced with webview's actual event log sent to extension for DB storage |
+| B5 | History text splitting around file modifications | **Fixed** | `projectIncremental` text-append uses `findLastIncomplete('text')` instead of checking last segment. File-modified events no longer split text flow |
 | B6 | Web search popup: mode not restored from history | Open | Popup shows "Auto" highlighted but button color doesn't match |
 | B7 | Web search popup cleanup | Open | Remove Enable/Disable buttons (redundant with Off/Manual/Auto). Clarify Manual vs Auto |
 | B8 | Streaming disable audit | Open | Some interactive elements may still be clickable during streaming |
@@ -400,10 +403,11 @@ AGPL
 
 | Priority | Item | Effort | Impact |
 |----------|------|--------|--------|
-| **P0** | Fix active bugs B1-B3 (command approval) | 2-3 hrs | Core feature broken |
+| **P0** | ~~Fix active bugs B1-B2 (command approval)~~ | **Done** | Fixed via CQRS + `updateLayout()` bug |
+| **P0** | Fix B3 (duplicate rules in modal) | 1 hr | UI rendering issue |
 | **P0** | Enable GitHub Actions CI/CD (#8) | 1-2 hrs | Blocker — can't ship without it |
 | **P0** | README overhaul (#9) | 2-3 hrs | Blocker — first thing users see |
-| **P1** | Fix B4-B5 (history display) | 1-2 hrs | Users will see these |
+| **P0** | ~~Fix B4-B5 (history restore ordering/splitting)~~ | **Done** | Fixed via CQRS unified event log + projector |
 | **P1** | Fix B9-B10 (diff/apply issues) | 1-2 hrs | Core edit workflow |
 | **P1** | Hide inspector button when devMode off (#5) | 30 min | Polish |
 | **P2** | Fix B6-B8 (web search, streaming audit) | 1-2 hrs | Polish |
