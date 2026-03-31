@@ -545,14 +545,17 @@ describe('ConversationManager.getSessionRichHistory', () => {
       content: 'Full accumulated text',
       model: 'deepseek-reasoner',
       finishReason: 'stop',
-      contentIterations: ['Check the file first', 'Here are the results with changes']
+      contentIterations: [
+        { text: 'Check the file first', iterationIndex: 0 },
+        { text: 'Here are the results with changes', iterationIndex: 1 }
+      ]
     });
 
     const turns = await callRichHistory(SESSION_ID);
     const assistantTurn = turns[1];
     expect(assistantTurn.contentIterations).toEqual([
-      'Check the file first',
-      'Here are the results with changes'
+      { text: 'Check the file first', iterationIndex: 0 },
+      { text: 'Here are the results with changes', iterationIndex: 1 }
     ]);
     expect(assistantTurn.reasoning_iterations).toHaveLength(2);
     expect(assistantTurn.shellResults).toHaveLength(1);
@@ -596,7 +599,10 @@ describe('ConversationManager.getSessionRichHistory', () => {
       content: 'I added 10 new animals to the list.',
       model: 'deepseek-reasoner',
       finishReason: 'stop',
-      contentIterations: ['Let me check the file', 'I added 10 new animals to the list.']
+      contentIterations: [
+        { text: 'Let me check the file', iterationIndex: 0 },
+        { text: 'I added 10 new animals to the list.', iterationIndex: 1 }
+      ]
     });
 
     const turns = await callRichHistory(SESSION_ID);
@@ -618,8 +624,8 @@ describe('ConversationManager.getSessionRichHistory', () => {
     ]);
     expect(assistant.filesModified).toEqual(['test.txt']);
     expect(assistant.contentIterations).toEqual([
-      'Let me check the file',
-      'I added 10 new animals to the list.'
+      { text: 'Let me check the file', iterationIndex: 0 },
+      { text: 'I added 10 new animals to the list.', iterationIndex: 1 }
     ]);
     expect(assistant.content).toBe('I added 10 new animals to the list.');
     expect(assistant.toolCalls).toBeUndefined(); // Only shell and _file_modified, no regular tools

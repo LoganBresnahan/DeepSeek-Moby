@@ -350,18 +350,25 @@ npm run test
 </shell>
 ```
 
-Detection in RequestOrchestrator.streamAndIterate():
+**Inline execution (primary path):** Shell commands are detected by `ContentTransformBuffer` during streaming. Each `<shell>` tag is extracted, parsed with the heredoc-aware `parseShellCommands()`, and executed immediately — one command at a time, interleaved with surrounding text. Each command gets its own dropdown in the UI.
 
 ```typescript
-// Inside the do-while shell iteration loop
-if (isReasonerModel && containsShellCommands(iterResult.combined)) {
-  const commands = parseShellCommands(iterResult.combined);
-  this._onShellExecuting.fire({ commands });
-  const results = await executeShellCommands(commands, workspacePath);
-  this._onShellResults.fire({ results });
-  // Inject results into context for next iteration
-}
+// ContentTransformBuffer detects complete <shell>...</shell> tags
+// and queues them for inline execution via onFlush callback
+case 'shell':
+  this._pendingInlineShellCommands.push(cmd);
+
+// RequestOrchestrator.executeInlineShellCommands() processes the queue
+// - Command approval check (may block for user input)
+// - File watcher for detecting modifications
+// - Results injected into context for next iteration
 ```
+
+**Command approval:** Before executing each command, `commandApprovalManager.checkCommand()` is called synchronously. If the command needs approval (`'blocked'` or `'ask'`), the approval prompt is shown and the iteration loop blocks until the user decides. The `onFlush` pre-scan detects this synchronously and holds text segments in the same batch to prevent them from rendering while approval is pending.
+
+**Iteration loop blocking:** After `streamChat` returns, the iteration loop checks `commandApprovalManager.hasPendingApproval()` and awaits it before starting the next iteration. This prevents iteration 2 from starting while a command from iteration 1 is still awaiting approval.
+
+**Batch fallback path:** After streaming, `streamAndIterate()` also checks for shell commands in the full response text and runs any that weren't already handled inline (deduplication via `_inlineExecutedCommands` set).
 
 ### Tool Loop
 
@@ -433,39 +440,58 @@ Status: ✓ done  ⟳ running  ○ pending  ✗ error
 ### File Modification Flow
 
 ```
-Tool: write_file(path, content)
-              │
-              ▼
-     ┌────────────────────┐
-     │ Check editMode     │
-     │ (manual/ask/auto)  │
-     └─────────┬──────────┘
-               │
-    ┌──────────┼──────────┐
-    │          │          │
-    ▼          ▼          ▼
- manual      ask        auto
-    │          │          │
-    ▼          ▼          ▼
- Create     Create     Apply
- diff &     diff &     directly
- wait       prompt
-    │          │          │
-    └──────────┴──────────┘
-               │
-               ▼
-    ┌─────────────────────┐
-    │ postMessage:        │
-    │ pendingFileAdd      │
-    │ diffListChanged     │
-    └─────────────────────┘
-               │
-               ▼
-    ┌─────────────────────┐
-    │ PendingChanges      │
-    │ ShadowActor updates │
-    └─────────────────────┘
+Tool: write_file(path, content)    Shell: cat >> file.txt << 'EOF'
+              │                              │
+              ▼                              ▼
+     ┌────────────────────┐        ┌──────────────────┐
+     │ Check editMode     │        │ FileSystemWatcher │
+     │ (manual/ask/auto)  │        │ detects change    │
+     └─────────┬──────────┘        │ (async, ~100ms)   │
+               │                   └────────┬─────────┘
+    ┌──────────┼──────────┐                 │
+    │          │          │                 │
+    ▼          ▼          ▼                 │
+ manual      ask        auto               │
+    │          │          │                 │
+    └──────────┴──────────┘                 │
+               │                            │
+               ▼                            ▼
+    ┌─────────────────────────────────────────────┐
+    │ postMessage: diffListChanged                 │
+    └─────────────────┬───────────────────────────┘
+                      │
+                      ▼
+            ┌───────────────────┐
+            │ Gateway: queued   │ ← During streaming, notifications
+            │ or immediate?    │   are QUEUED to prevent splitting
+            └────────┬──────────┘   text segments mid-word
+                     │
+         ┌───────────┴───────────┐
+         │ Streaming active      │ Not streaming
+         ▼                       ▼
+  Queue in                Insert immediately
+  _pendingFileNotifications  via addPendingFile()
+         │
+         │ Flush at natural break:
+         │ - Next shell command
+         │ - Iteration boundary
+         │ - End of response
+         ▼
+  Insert via addPendingFile()
 ```
+
+### File Notification Queuing
+
+During live streaming, `diffListChanged` messages from the file watcher arrive asynchronously and can land in the middle of a text segment (e.g., splitting "I've" into "I" and "'ve"). To prevent this:
+
+1. `VirtualMessageGatewayActor.handleDiffListChanged()` checks if streaming is active
+2. If active, new file notifications are queued in `_pendingFileNotifications`
+3. `flushPendingFileNotifications()` is called at natural break points:
+   - `handleShellExecuting()` — before a new shell dropdown
+   - `handleIterationStart()` — before a new thinking iteration
+   - `handleEndResponse()` — before the stream finalizes
+
+This ensures the Modified Files dropdown never interrupts flowing text. See [cqrs-webui.md](../plans/cqrs-webui.md) for the architectural context.
 
 ### Diff States
 
@@ -534,25 +560,37 @@ Time(ms)  Extension                 Webview                 DOM
  100      │ startResponse ─────────▶ streaming.start()
           │                         message.prepare()
           │
- 150      │ streamToken ───────────▶ update segment     ─▶ Text appears
- 160      │ streamToken ───────────▶ update segment     ─▶ More text
- 170      │ streamToken ───────────▶ update segment
+ 150      │ streamReasoning ───────▶ thinking.start()   ─▶ Thinking box
+ 160      │ streamReasoning ───────▶ thinking.append()  ─▶ Thinking grows
           │
- 200      │ streamReasoning ───────▶ finalize segment   ─▶ Text frozen
-          │                         thinking.start()    ─▶ Thinking box
- 210      │ streamReasoning ───────▶ thinking.append()  ─▶ Thinking grows
+ 300      │ iterationStart ────────▶ flush queued files
+          │                         finalize segment
           │
- 300      │ iterationEnd
-          │ streamToken ───────────▶ needsNewSegment!
-          │                         resumeWithNew()     ─▶ New text area
+ 350      │ streamToken ───────────▶ update segment     ─▶ Text appears
+ 360      │ streamToken ───────────▶ update segment     ─▶ More text
           │
- 400      │ shellExecuting ────────▶ finalize segment
-          │                         shell.start()       ─▶ Shell box
- 450      │ shellResults ──────────▶ shell.complete()   ─▶ Results shown
+ 400      │ <shell> tag detected
+          │ shellExecuting ────────▶ flush queued files
+          │                         finalize segment
+          │                         shell.start()       ─▶ Shell dropdown
+          │ executeInlineShell()
+          │   ├─ checkCommand()
+          │   ├─ (if needs approval: block iteration loop)
+          │   └─ execute command
           │
- 500      │ streamToken ───────────▶ resumeWithNew()    ─▶ More text
+ 410      │ File watcher fires
+          │ diffListChanged ───────▶ QUEUED (streaming)  ─▶ (nothing yet)
           │
- 600      │ endResponse ───────────▶ streaming.end()
+ 450      │ streamToken ───────────▶ resumeWithNew()    ─▶ More text
+          │                                                 (not split!)
+          │
+ 500      │ <shell> tag detected
+          │ shellExecuting ────────▶ flush queued files  ─▶ Modified Files
+          │                         finalize segment        dropdown appears
+          │                         shell.start()       ─▶ Shell dropdown
+          │
+ 600      │ endResponse ───────────▶ flush queued files
+          │                         streaming.end()
           │                         finalize all
 ────────────────────────────────────────────────────────────────────
 ```
@@ -628,3 +666,6 @@ window.actorManager.getState('streaming.active')
 | Missing continuation | `needsNewSegment` not set | Call `resumeWithNewSegment()` |
 | Thinking in wrong place | Not finalizing before thinking | Call `finalizeCurrentSegment()` |
 | Styles leaking | Light DOM used instead of Shadow | Use `ShadowActor` pattern |
+| Text split mid-word by dropdown | Async notification (diffListChanged) arrives during text streaming | Queue in `_pendingFileNotifications`, flush at natural break points |
+| Iteration continues during approval | `streamChat` doesn't await `onToken` callback | Check `commandApprovalManager.hasPendingApproval()` after `streamChat` returns |
+| Approval widget reverts on scroll | Decision not persisted in VirtualListActor data | Call `resolveCommandApprovalByActorId()` from click handler to persist in turn data |

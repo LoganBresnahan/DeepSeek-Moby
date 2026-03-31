@@ -122,7 +122,7 @@ export interface EndResponseEvent {
   content: string;
   reasoning_content?: string;
   reasoning_iterations?: string[];
-  content_iterations?: string[];
+  content_iterations?: Array<{ text: string; iterationIndex: number }>;
   editMode: 'manual' | 'ask' | 'auto';
 }
 

@@ -832,7 +832,7 @@ describe('MessageTurnActor', () => {
       const allowOnce = queryInShadow(containers[0], '.allow-once') as HTMLButtonElement;
       allowOnce?.click();
 
-      expect(approvalCallback).toHaveBeenCalledWith('npm test', 'allowed', false, 'npm');
+      expect(approvalCallback).toHaveBeenCalledWith('npm test', 'allowed', false, 'npm', expect.any(String));
     });
 
     it('clicking always allow calls callback with persistent=true', () => {
@@ -842,7 +842,7 @@ describe('MessageTurnActor', () => {
       const alwaysAllow = queryInShadow(containers[0], '.always-allow') as HTMLButtonElement;
       alwaysAllow?.click();
 
-      expect(approvalCallback).toHaveBeenCalledWith('npm test', 'allowed', true, 'npm');
+      expect(approvalCallback).toHaveBeenCalledWith('npm test', 'allowed', true, 'npm', expect.any(String));
     });
 
     it('clicking block once calls callback with blocked decision', () => {
@@ -852,7 +852,7 @@ describe('MessageTurnActor', () => {
       const blockOnce = queryInShadow(containers[0], '.block-once') as HTMLButtonElement;
       blockOnce?.click();
 
-      expect(approvalCallback).toHaveBeenCalledWith('npm test', 'blocked', false, 'npm');
+      expect(approvalCallback).toHaveBeenCalledWith('npm test', 'blocked', false, 'npm', expect.any(String));
     });
 
     it('clicking always block calls callback with persistent=true', () => {
@@ -862,7 +862,7 @@ describe('MessageTurnActor', () => {
       const alwaysBlock = queryInShadow(containers[0], '.always-block') as HTMLButtonElement;
       alwaysBlock?.click();
 
-      expect(approvalCallback).toHaveBeenCalledWith('npm test', 'blocked', true, 'npm');
+      expect(approvalCallback).toHaveBeenCalledWith('npm test', 'blocked', true, 'npm', expect.any(String));
     });
 
     it('does not fire callback when approval already resolved', () => {

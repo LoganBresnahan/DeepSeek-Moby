@@ -133,7 +133,7 @@ export class VirtualListActor extends EventStateActor {
 
   private readonly _postMessage: ((message: Record<string, unknown>) => void) | null;
   private readonly _onPendingFileAction: ((action: 'accept' | 'reject' | 'focus', fileId: string, diffId?: string, filePath?: string) => void) | null;
-  private readonly _onCommandApprovalAction: ((command: string, decision: 'allowed' | 'blocked', persistent: boolean, prefix: string) => void) | null;
+  private readonly _onCommandApprovalAction: ((command: string, decision: 'allowed' | 'blocked', persistent: boolean, prefix: string, approvalId?: string) => void) | null;
 
   // ============================================
   // Constructor
@@ -146,7 +146,7 @@ export class VirtualListActor extends EventStateActor {
       config?: VirtualListConfig;
       postMessage?: (message: Record<string, unknown>) => void;
       onPendingFileAction?: (action: 'accept' | 'reject' | 'focus', fileId: string, diffId?: string, filePath?: string) => void;
-      onCommandApprovalAction?: (command: string, decision: 'allowed' | 'blocked', persistent: boolean, prefix: string) => void;
+      onCommandApprovalAction?: (command: string, decision: 'allowed' | 'blocked', persistent: boolean, prefix: string, approvalId?: string) => void;
     }
   ) {
     // Create content container inside scroll container
@@ -785,17 +785,38 @@ export class VirtualListActor extends EventStateActor {
   /**
    * Resolve a command approval (update status in data and UI).
    */
-  resolveCommandApproval(turnId: string, approvalId: string, decision: 'allowed' | 'blocked'): void {
+  resolveCommandApproval(turnId: string, approvalId: string, decision: 'allowed' | 'blocked', persistent?: boolean): void {
     const turn = this._turnMap.get(turnId);
     if (!turn) return;
 
     const approval = turn.commandApprovals.find(a => a.id === approvalId);
     if (approval) {
       approval.status = decision;
+      if (persistent !== undefined) {
+        approval.persistent = persistent;
+      }
 
       const bound = this._boundActors.get(turnId);
       if (bound && approval.actorApprovalId) {
-        bound.actor.resolveCommandApproval(approval.actorApprovalId, decision);
+        bound.actor.resolveCommandApproval(approval.actorApprovalId, decision, persistent);
+      }
+    }
+  }
+
+  /**
+   * Resolve a command approval by the actor's internal approval ID.
+   * Used when the click handler fires directly on MessageTurnActor and
+   * needs to persist the decision in VirtualListActor's data for rebind survival.
+   */
+  resolveCommandApprovalByActorId(actorApprovalId: string, decision: 'allowed' | 'blocked', persistent?: boolean): void {
+    for (const turn of this._turnMap.values()) {
+      const approval = turn.commandApprovals.find(a => a.actorApprovalId === actorApprovalId);
+      if (approval) {
+        approval.status = decision;
+        if (persistent !== undefined) {
+          approval.persistent = persistent;
+        }
+        return;
       }
     }
   }
@@ -1155,7 +1176,7 @@ export class VirtualListActor extends EventStateActor {
             const actorApprovalId = actor.createCommandApproval(approval.command, approval.prefix, approval.unknownSubCommand);
             approval.actorApprovalId = actorApprovalId;
             if (approval.status !== 'pending' && actorApprovalId) {
-              actor.resolveCommandApproval(actorApprovalId, approval.status);
+              actor.resolveCommandApproval(actorApprovalId, approval.status, approval.persistent);
             }
           }
           break;

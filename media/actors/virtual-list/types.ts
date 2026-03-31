@@ -150,6 +150,8 @@ export interface CommandApprovalData {
   /** The specific sub-command that triggered the approval (for compound commands) */
   unknownSubCommand: string;
   status: 'pending' | 'allowed' | 'blocked';
+  /** Whether the decision was persistent (Always Allow/Block) */
+  persistent?: boolean;
   /** Actor's internal approval ID when bound */
   actorApprovalId?: string;
 }

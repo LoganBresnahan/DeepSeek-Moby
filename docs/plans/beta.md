@@ -378,6 +378,7 @@ AGPL
 | ~~Thinking dropdown scroll~~ | User can scroll up during streaming thinking; auto-follows when scrolled to bottom |
 | ~~Dropdown padding~~ | 6px top/bottom padding on shell, tools, pending headers (matches thinking) |
 | ~~Command approval: full command as unit~~ | No chain splitting — full command is one rule entry. Blocked commands show approval prompt (user can override) |
+| ~~File notification queuing~~ | Async file watcher notifications queued during streaming, flushed at natural break points (shell, iteration, endResponse). Prevents text splitting mid-word |
 | ~~CQRS unified rendering~~ | Real-time CQRS: TurnEventLog + TurnProjector. Live streaming and history restore use same code path. Eliminates text splitting, ordering bugs, missing approvals/shells in history. 1902 tests passing |
 | ~~CQRS event persistence~~ | Webview's event log sent to extension for DB storage (replaces lossy `buildTurnEvents` reconstruction). `consolidateForSave()` compresses ~2000 per-token events to ~20-50 structural events |
 | ~~Command approval bugs (B1-B2)~~ | `updateLayout()` → `measureTurnHeight()` fix. Approval events always recorded in CQRS log. Shell/diff-engine source distinction for causal linking |
@@ -398,6 +399,9 @@ AGPL
 | B10 | Manual mode: diff tab stays open after apply | Open | Question mode closes diff tab on accept, manual mode does not |
 | B11 | Dropdown text not copyable | Open | cursor: pointer on tools/shell containers prevents text selection. Code dropdown works |
 | B12 | Input box expands container instead of overlaying | Open | Should grow upward above container, not push container taller |
+| B13 | Scroll-to-bottom button should be removed | Open | Round div with down arrow appears on scroll up. Remove — let users use the scrollbar |
+| B14 | Approval widget reverts on turn rebind | Fixed | Approval status + persistent flag persisted in VirtualListActor data, approval status stored in event history for session reload |
+| B15 | Web search button clickable without Tavily API key | Open | If no Tavily API key is set, web search button should be disabled or show a prompt to set the key |
 
 ### Remaining Work
 
