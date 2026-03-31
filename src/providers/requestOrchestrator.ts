@@ -407,7 +407,9 @@ export class RequestOrchestrator {
         content: cleanResponse,
         reasoning_content: streamState.fullReasoning || undefined,
         reasoning_iterations: streamState.reasoningIterations.length > 0 ? streamState.reasoningIterations : undefined,
-        content_iterations: streamState.contentIterations.length > 0 ? streamState.contentIterations : undefined,
+        content_iterations: streamState.contentIterations.length > 0
+          ? streamState.contentIterations.map((text, i) => ({ text, iterationIndex: i }))
+          : undefined,
         editMode: this.diffManager.currentEditMode
       });
 
