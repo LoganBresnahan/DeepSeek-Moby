@@ -350,10 +350,9 @@ describe('VirtualListActor', () => {
         actor.addTurn('turn-1', 'assistant');
         actor.startStreamingTurn('turn-1');
         actor.addTextSegment('turn-1', 'Content');
-        actor.finalizeCurrentSegment('turn-1');
 
         const turn = actor.getTurn('turn-1');
-        expect(turn?.textSegments[0].complete).toBe(true);
+        expect(turn?.textSegments[0].content).toBe('Content');
       });
     });
 
@@ -854,7 +853,6 @@ describe('VirtualListActor', () => {
 
       // First text
       actor.addTextSegment('turn-2', 'Let me help you.');
-      actor.finalizeCurrentSegment('turn-2');
 
       // Thinking
       actor.startThinkingIteration('turn-2');
@@ -865,9 +863,8 @@ describe('VirtualListActor', () => {
       actor.updateTool('turn-2', 0, 'done');
       actor.completeToolBatch('turn-2');
 
-      // Resume text
-      actor.resumeWithNewSegment('turn-2');
-      actor.updateTextContent('turn-2', 'Based on the file...');
+      // Continuation text (CQRS creates new segment via addTextSegment)
+      actor.addTextSegment('turn-2', 'Based on the file...');
 
       // End streaming
       actor.endStreamingTurn();

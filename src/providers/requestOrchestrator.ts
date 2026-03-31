@@ -102,6 +102,11 @@ export class RequestOrchestrator {
   // Pause token streaming during command approval
   private _approvalPending = false;
   private _heldSegments: Array<{ type: string; content: unknown; complete?: boolean }> = [];
+  // Promise that resolves when inline shell execution (including any approval) completes
+  private _inlineExecutionPromise: Promise<void> | null = null;
+  // CQRS: Deferred turn events from webview (set before endResponse, resolved when webview sends back)
+  private _turnEventsResolve: ((events: Array<Record<string, unknown>>) => void) | null = null;
+  private _turnEventsPromise: Promise<Array<Record<string, unknown>>> | null = null;
 
   constructor(
     private deepSeekClient: DeepSeekClient,
@@ -174,7 +179,7 @@ export class RequestOrchestrator {
       accumulatedResponse: '',
       reasoningIterations: [] as string[],
       currentIterationReasoning: '',
-      contentIterations: [] as Array<{ text: string; iterationIndex: number }>,
+      contentIterations: [] as string[],
       currentIterationContent: '',
       shellResultsForHistory: [] as ShellResult[],
     };
@@ -393,13 +398,18 @@ export class RequestOrchestrator {
         }
       }
 
+      // Prepare to receive turn events from webview (must be before endResponse.fire)
+      this.prepareTurnEventsReceiver();
+
       // Finalize response
       this._onEndResponse.fire({
         role: 'assistant',
         content: cleanResponse,
         reasoning_content: streamState.fullReasoning || undefined,
         reasoning_iterations: streamState.reasoningIterations.length > 0 ? streamState.reasoningIterations : undefined,
-        content_iterations: streamState.contentIterations.length > 0 ? streamState.contentIterations : undefined,
+        content_iterations: streamState.contentIterations.length > 0
+          ? streamState.contentIterations.map((text, i) => ({ text, iterationIndex: i }))
+          : undefined,
         editMode: this.diffManager.currentEditMode
       });
 
@@ -644,8 +654,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
   private async executeInlineShellCommands(
     workspacePath: string,
     signal: AbortSignal,
-    state: { shellResultsForHistory: ShellResult[] },
-    iterationIndex: number
+    state: { shellResultsForHistory: ShellResult[] }
   ): Promise<void> {
     while (this._pendingInlineShellCommands.length > 0) {
       if (signal.aborted) break;
@@ -677,7 +686,6 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
 
       const approvedCommands: typeof parsedCommands = [];
       const blockedResults: ShellResult[] = [];
-      const approvalStatuses = new Map<string, 'auto' | 'user-allowed'>();
 
       for (const cmd of parsedCommands) {
         if (allowAllCommands) {
@@ -693,7 +701,6 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
         const decision = this.commandApprovalManager.checkCommand(cmd.command);
         if (decision === 'allowed') {
           approvedCommands.push(cmd);
-          approvalStatuses.set(cmd.command, 'auto');
         } else {
           // Both 'blocked' and 'ask' show the approval prompt — gives user the chance to override
           // Note: _approvalPending was already set synchronously in onFlush pre-scan
@@ -712,15 +719,12 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
 
           if (userApproval.decision === 'allowed') {
             approvedCommands.push(cmd);
-            approvalStatuses.set(cmd.command, 'user-allowed');
           } else {
             blockedResults.push({
               command: cmd.command,
               output: `Command rejected by user: ${cmd.command}`,
               success: false,
-              executionTimeMs: 0,
-              approvalStatus: 'user-blocked',
-              iterationIndex,
+              executionTimeMs: 0
             });
           }
         }
@@ -763,12 +767,6 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
       const executedResults = approvedCommands.length > 0
         ? await executeShellCommands(approvedCommands, workspacePath, { allowAllCommands, signal })
         : [];
-      // Tag results with approval status and iteration index for history persistence
-      for (const r of executedResults) {
-        r.approvalStatus = approvalStatuses.get(r.command) ?? 'auto';
-        r.iterationIndex = iterationIndex;
-        logger.debug(`[R1-Shell] Tagged result approvalStatus="${r.approvalStatus}" iterationIndex=${iterationIndex} for command="${r.command.substring(0, 50)}"`);
-      }
       const allResults = [...blockedResults, ...executedResults];
 
       // Dispose watcher and register modified files
@@ -815,7 +813,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
       fullReasoning: string;
       reasoningIterations: string[];
       currentIterationReasoning: string;
-      contentIterations: Array<{ text: string; iterationIndex: number }>;
+      contentIterations: string[];
       currentIterationContent: string;
       shellResultsForHistory: ShellResult[];
     }
@@ -847,6 +845,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
       // Reset inline shell tracking for this iteration
       this._pendingInlineShellCommands = [];
       this._inlineExecutedCommands.clear();
+      this._inlineExecutionPromise = null;
 
       // Timing metrics for debugging
       const iterationStartTime = Date.now();
@@ -898,7 +897,10 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
           if (isReasonerModel && this._pendingInlineShellCommands.length > 0) {
             const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
             if (workspacePath) {
-              await this.executeInlineShellCommands(workspacePath, signal, state, shellIteration);
+              // Store the promise so the iteration loop can await it after streaming completes
+              this._inlineExecutionPromise = this.executeInlineShellCommands(workspacePath, signal, state);
+              await this._inlineExecutionPromise;
+              this._inlineExecutionPromise = null;
             }
           }
 
@@ -925,13 +927,14 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
         { signal }
       );
 
-      // BLOCKING: Wait for any pending command approval before continuing to next iteration.
+      // BLOCKING: Wait for any pending inline shell execution (including command approval)
       // The onToken callback may have started executeInlineShellCommands which awaits
       // user approval, but streamChat doesn't await the onToken callback — so the
-      // approval may still be pending when streamChat returns.
-      if (this.commandApprovalManager?.hasPendingApproval()) {
-        logger.info('[R1-Shell] Waiting for pending command approval before continuing...');
-        await this.commandApprovalManager.waitForPendingApproval();
+      // inline execution may still be pending when streamChat returns.
+      if (this._inlineExecutionPromise) {
+        logger.info('[R1-Shell] Waiting for pending inline shell execution to complete before continuing...');
+        await this._inlineExecutionPromise;
+        this._inlineExecutionPromise = null;
       }
 
       // Log iteration completion for debugging R1 continuation
@@ -947,7 +950,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
           state.currentIterationReasoning = '';
         }
         if (state.currentIterationContent) {
-          state.contentIterations.push({ text: state.currentIterationContent, iterationIndex: shellIteration });
+          state.contentIterations.push(state.currentIterationContent);
           state.currentIterationContent = '';
         }
       }
@@ -1057,9 +1060,6 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
               data: { commandCount: commands.length, bypass: allowAllCommands }
             });
 
-            // Track approval decisions for history persistence
-            const gateApprovalStatuses = new Map<string, 'auto' | 'user-allowed' | 'user-blocked' | 'rule-blocked'>();
-
             if (!allowAllCommands && this.commandApprovalManager) {
               approvedCommands = [];
               let askedCount = 0;
@@ -1068,17 +1068,13 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
                 if (decision === 'allowed') {
                   logger.debug(`[CommandApproval] ALLOWED (rule match): "${cmd.command}"`);
                   approvedCommands.push(cmd);
-                  gateApprovalStatuses.set(cmd.command, 'auto');
                 } else if (decision === 'blocked') {
                   logger.info(`[CommandApproval] BLOCKED: "${cmd.command}"`);
-                  gateApprovalStatuses.set(cmd.command, 'rule-blocked');
                   blockedResults.push({
                     command: cmd.command,
                     output: 'Command blocked by security rules.',
                     success: false,
                     executionTimeMs: 0,
-                    approvalStatus: 'rule-blocked',
-                    iterationIndex: shellIteration,
                   });
                 } else {
                   // 'ask' — block and wait for user approval via webview
@@ -1095,17 +1091,13 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
                   if (result.decision === 'allowed') {
                     logger.info(`[CommandApproval] APPROVED${result.persistent ? ' (always)' : ''}: "${cmd.command}"`);
                     approvedCommands.push(cmd);
-                    gateApprovalStatuses.set(cmd.command, 'user-allowed');
                   } else {
                     logger.info(`[CommandApproval] DENIED${result.persistent ? ' (always)' : ''}: "${cmd.command}"`);
-                    gateApprovalStatuses.set(cmd.command, 'user-blocked');
                     blockedResults.push({
                       command: cmd.command,
                       output: 'Command blocked by user.',
                       success: false,
                       executionTimeMs: 0,
-                      approvalStatus: 'user-blocked',
-                      iterationIndex: shellIteration,
                     });
                   }
                 }
@@ -1152,12 +1144,6 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
             const executedResults = approvedCommands.length > 0
               ? await executeShellCommands(approvedCommands, workspacePath, { allowAllCommands, signal })
               : [];
-            // Tag executed results with approval status and iteration index from gate decisions
-            for (const r of executedResults) {
-              r.approvalStatus = gateApprovalStatuses.get(r.command) ?? 'auto';
-              r.iterationIndex = shellIteration;
-              logger.debug(`[R1-Shell] Gate tagged result approvalStatus="${r.approvalStatus}" iterationIndex=${shellIteration} for command="${r.command.substring(0, 50)}"`);
-            }
             const results = [...blockedResults, ...executedResults];
             const shellDuration = Date.now() - shellStartTime;
             logger.info(`[Timing] Shell execution completed in ${shellDuration}ms`);
@@ -1309,10 +1295,44 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
 
     // Push final iteration's content (if the loop exited without shell commands)
     if (state.currentIterationContent) {
-      state.contentIterations.push({ text: state.currentIterationContent, iterationIndex: shellIteration });
+      state.contentIterations.push(state.currentIterationContent);
       state.currentIterationContent = '';
     }
 
+  }
+
+  // ── CQRS: Turn Events from Webview ──
+
+  /**
+   * Set up a promise that will resolve when the webview sends back its
+   * consolidated turn events. Called just before firing endResponse.
+   */
+  private prepareTurnEventsReceiver(): void {
+    this._turnEventsPromise = new Promise<Array<Record<string, unknown>>>((resolve) => {
+      this._turnEventsResolve = resolve;
+      // Timeout: if webview doesn't respond within 2s, save without turn events
+      setTimeout(() => {
+        if (this._turnEventsResolve === resolve) {
+          logger.warn('[RequestOrchestrator] turnEventsForSave timeout — saving without webview events');
+          resolve([]);
+          this._turnEventsResolve = null;
+        }
+      }, 2000);
+    });
+  }
+
+  /**
+   * Called by ChatProvider when the webview sends turnEventsForSave.
+   * Resolves the pending promise so saveToHistory can proceed with the events.
+   */
+  receiveTurnEvents(events: Array<Record<string, unknown>>): void {
+    if (this._turnEventsResolve) {
+      logger.info(`[RequestOrchestrator] Received ${events.length} turn events from webview`);
+      this._turnEventsResolve(events);
+      this._turnEventsResolve = null;
+    } else {
+      logger.warn(`[RequestOrchestrator] Received turn events but no pending receiver`);
+    }
   }
 
   // ── Private: History Save Pipeline ──
@@ -1323,7 +1343,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
     fullReasoning: string,
     model: string,
     reasoningIterations: string[],
-    contentIterations: Array<{ text: string; iterationIndex: number }>,
+    contentIterations: string[],
     toolCallsForHistory: Array<{ name: string; detail: string; status: string }>,
     shellResultsForHistory: ShellResult[]
   ): Promise<void> {
@@ -1354,18 +1374,12 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
           logger.info(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} Recorded tool call: ${tc.name}`);
         }
 
-        // 3. Record shell results with richer data (including approval status and iteration index)
+        // 3. Record shell results with richer data
         for (const sr of shellResultsForHistory) {
           const shellCallId = `sh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-          const savedApprovalStatus = sr.approvalStatus || 'auto';
-          const savedIterationIndex = sr.iterationIndex ?? 0;
-          this.conversationManager.recordToolCall(sessionId, shellCallId, 'shell', {
-            command: sr.command,
-            approvalStatus: savedApprovalStatus,
-            iterationIndex: savedIterationIndex
-          });
+          this.conversationManager.recordToolCall(sessionId, shellCallId, 'shell', { command: sr.command });
           this.conversationManager.recordToolResult(sessionId, shellCallId, sr.output, sr.success, sr.executionTimeMs);
-          logger.info(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} Recorded shell: ${sr.command.substring(0, 50)} (approvalStatus=${savedApprovalStatus}, iterationIndex=${savedIterationIndex})`);
+          logger.info(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} Recorded shell: ${sr.command.substring(0, 50)}`);
         }
 
         // 4. Record file modifications (for restore of "Modified Files" dropdown)
@@ -1382,14 +1396,14 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
           logger.info(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} Recorded file modification: ${filePath} (editMode=${currentEditMode})`);
         }
 
-        // 5. Record the assistant message with real model + finishReason
-        const cleanedContentIterations = contentIterations.length > 0
-          ? contentIterations
-              .map(c => ({ text: stripShellTags(stripDSML(c.text)).trim(), iterationIndex: c.iterationIndex }))
-              .filter(c => c.text.length > 0)
-          : undefined;
-        await this.conversationManager.recordAssistantMessage(sessionId, cleanResponse, model, 'stop', undefined, cleanedContentIterations);
-        logger.info(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} Recorded assistant message (${cleanResponse.length} chars, model=${model}, contentIts=${cleanedContentIterations?.length || 0})`);
+        // 5. Await turn events from webview (CQRS: webview's event log is the source of truth)
+        const turnEvents = this._turnEventsPromise ? await this._turnEventsPromise : [];
+        this._turnEventsPromise = null;
+        logger.info(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} Received ${turnEvents.length} consolidated turn events from webview`);
+
+        // 6. Record the assistant message with turn events
+        await this.conversationManager.recordAssistantMessage(sessionId, cleanResponse, model, 'stop', undefined, undefined, turnEvents);
+        logger.info(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} Recorded assistant message (${cleanResponse.length} chars, model=${model}, turnEvents=${turnEvents.length})`);
 
         // Fire turn sequence update so webview can show fork buttons on live turns
         const seqs = this.conversationManager.getRecentTurnSequences(sessionId);

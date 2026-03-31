@@ -245,6 +245,12 @@ describe('RequestOrchestrator', () => {
       undefined, // commandApprovalManager
       { getActiveContent: () => '' } as any, // savedPromptManager
     );
+
+    // CQRS: In production, the webview sends turnEventsForSave after endResponse.
+    // In tests, there's no webview — immediately resolve with empty events.
+    orchestrator.onEndResponse(() => {
+      orchestrator.receiveTurnEvents([]);
+    });
   });
 
   // ── Session Management ──

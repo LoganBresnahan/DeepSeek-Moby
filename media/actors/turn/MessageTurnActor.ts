@@ -85,7 +85,6 @@ export class MessageTurnActor extends InterleavedShadowActor {
   private _textSegmentCounter = 0;
   private _currentSegmentContent = '';
   private _lastFormattedHtml = '';
-  private _segmentsPaused = false;
 
   // ============================================
   // Thinking State
@@ -211,7 +210,6 @@ export class MessageTurnActor extends InterleavedShadowActor {
     this._textSegmentCounter = 0;
     this._currentSegmentContent = '';
     this._lastFormattedHtml = '';
-    this._segmentsPaused = false;
 
     // Reset thinking
     this._thinkingIterations.clear();
@@ -385,7 +383,6 @@ export class MessageTurnActor extends InterleavedShadowActor {
     this._currentTextContainerId = container.id;
     this._currentSegmentContent = content;
     this._lastFormattedHtml = '';
-    this._segmentsPaused = false;
 
     this.renderTextSegment(segment, container);
     this.setupTextSegmentHandlers(container.id);
@@ -435,65 +432,6 @@ export class MessageTurnActor extends InterleavedShadowActor {
    */
   getCurrentSegmentContent(): string {
     return this._currentSegmentContent;
-  }
-
-  /**
-   * Finalize the current segment before tool/thinking content.
-   * Returns true if a segment was finalized.
-   */
-  finalizeCurrentSegment(): boolean {
-    if (!this._currentTextContainerId) {
-      return false;
-    }
-
-    const container = this.getContainer(this._currentTextContainerId);
-    if (container) {
-      container.host.classList.remove('streaming');
-
-      // Re-render without the streaming placeholder: strip any trailing
-      // incomplete code block so the finalized segment doesn't show a stuck
-      // "Developing..." placeholder.  The gateway carries the incomplete
-      // tail forward to the next segment.
-      if (this._isStreaming && this._currentSegmentContent) {
-        const contentEl = container.content.querySelector('.content');
-        if (contentEl) {
-          // Use fence-length-aware detection (CommonMark spec)
-          const fenceState = hasIncompleteFence(this._currentSegmentContent);
-          const cleaned = fenceState.incomplete
-            ? this._currentSegmentContent.substring(0, fenceState.lastOpenIndex)
-            : this._currentSegmentContent;
-          const wasStreaming = this._isStreaming;
-          this._isStreaming = false;
-          contentEl.innerHTML = this.formatContent(cleaned);
-          this._isStreaming = wasStreaming;
-          this._lastFormattedHtml = '';
-        }
-      }
-    }
-
-    this._currentTextContainerId = null;
-    this._segmentsPaused = true;
-    this._hasInterleaved = true;
-
-    this.publish({ 'turn.hasInterleaved': true });
-
-    return true;
-  }
-
-  /**
-   * Check if we need a new segment after interleaving.
-   */
-  needsNewSegment(): boolean {
-    return this._segmentsPaused && this._isStreaming;
-  }
-
-  /**
-   * Resume with a new continuation segment after tool/thinking content.
-   */
-  resumeWithNewSegment(): void {
-    if (!this._segmentsPaused) return;
-
-    this.createTextSegment('', { isContinuation: true });
   }
 
   // ============================================

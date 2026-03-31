@@ -156,10 +156,10 @@ export class ChatProvider implements vscode.WebviewViewProvider {
 
     // DiffManager → webview
     this.diffManager.onDiffListChanged(data => {
-      this._view?.webview.postMessage({ type: 'diffListChanged', diffs: data.diffs, editMode: data.editMode });
+      this._view?.webview.postMessage({ type: 'diffListChanged', diffs: data.diffs, editMode: data.editMode, source: 'shell' });
     });
     this.diffManager.onAutoAppliedFilesChanged(data => {
-      this._view?.webview.postMessage({ type: 'diffListChanged', diffs: data.diffs, editMode: data.editMode });
+      this._view?.webview.postMessage({ type: 'diffListChanged', diffs: data.diffs, editMode: data.editMode, source: 'diff-engine' });
     });
     this.diffManager.onCodeApplied(data => {
       this._view?.webview.postMessage({ type: 'codeApplied', success: data.success, error: data.error, filePath: data.filePath });
@@ -425,6 +425,9 @@ export class ChatProvider implements vscode.WebviewViewProvider {
           break;
         case 'stopGeneration':
           this.requestOrchestrator.stopGeneration();
+          break;
+        case 'turnEventsForSave':
+          this.requestOrchestrator.receiveTurnEvents(data.events || []);
           break;
         case 'updateSettings':
           await this.settingsManager.updateSettings(data.settings);

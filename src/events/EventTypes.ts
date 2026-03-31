@@ -62,7 +62,10 @@ export interface AssistantMessageEvent extends BaseEvent {
     promptTokens: number;
     completionTokens: number;
   };
-  contentIterations?: Array<{ text: string; iterationIndex: number }>;
+  contentIterations?: string[];
+  /** CQRS turn events — full ordered event log for this turn's content.
+   *  When present, history restore uses these instead of reconstructing from fragments. */
+  turnEvents?: Array<Record<string, unknown>>;
 }
 
 /**

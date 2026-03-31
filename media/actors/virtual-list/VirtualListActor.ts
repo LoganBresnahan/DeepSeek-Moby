@@ -486,58 +486,6 @@ export class VirtualListActor extends EventStateActor {
   }
 
   /**
-   * Finalize current segment before interleaving.
-   */
-  finalizeCurrentSegment(turnId: string): boolean {
-    const turn = this._turnMap.get(turnId);
-    if (!turn) return false;
-
-    const lastSegment = turn.textSegments[turn.textSegments.length - 1];
-    if (lastSegment) {
-      lastSegment.complete = true;
-    }
-
-    const bound = this._boundActors.get(turnId);
-    if (bound) {
-      return bound.actor.finalizeCurrentSegment();
-    }
-
-    return false;
-  }
-
-  /**
-   * Resume with a new segment after interleaving.
-   * Creates a continuation segment in both data and actor.
-   *
-   * IMPORTANT: We add data directly here instead of using addTextSegment
-   * because resumeWithNewSegment() already creates the segment in the actor,
-   * and addTextSegment would create a duplicate.
-   */
-  resumeWithNewSegment(turnId: string): void {
-    const turn = this._turnMap.get(turnId);
-    if (!turn) return;
-
-    // Create segment in actor (if bound)
-    const bound = this._boundActors.get(turnId);
-    if (bound) {
-      bound.actor.resumeWithNewSegment();
-    }
-
-    // Add segment data directly (NOT via addTextSegment which would create again in actor)
-    const segmentIndex = turn.textSegments.length;
-    const segmentId = `${turnId}-text-${segmentIndex + 1}`;
-    const segment: TextSegmentData = {
-      id: segmentId,
-      content: '',
-      isContinuation: true,
-      complete: false
-    };
-
-    turn.textSegments.push(segment);
-    turn.contentOrder.push({ type: 'text', index: segmentIndex });
-  }
-
-  /**
    * Start a thinking iteration.
    */
   startThinkingIteration(turnId: string): number {
@@ -1386,6 +1334,10 @@ export class VirtualListActor extends EventStateActor {
     });
   }
 
+  /**
+   * Clear all content within a single turn (for CQRS full reconciliation).
+   * Resets contentOrder and all content arrays, then re-renders if bound.
+   */
   // ============================================
   // Statistics
   // ============================================
