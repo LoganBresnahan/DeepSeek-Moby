@@ -184,8 +184,10 @@ export class CommandRulesModalActor extends ModalShadowActor {
   // ============================================
 
   protected onOpen(): void {
-    log.debug('opened, requesting rules from extension');
-    this._vscode.postMessage({ type: 'getCommandRules' });
+    log.debug('opened');
+    // Rules are already sent by the extension before the modal opens
+    // (via sendCommandRules() in openRulesModal or getCommandRules handler).
+    // No need to request again — avoids double render.
   }
 
   // ============================================

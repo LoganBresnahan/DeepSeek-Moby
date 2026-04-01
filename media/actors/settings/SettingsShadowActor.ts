@@ -104,6 +104,16 @@ export class SettingsShadowActor extends PopupShadowActor {
 
       <div class="settings-divider"></div>
 
+      <!-- Database Encryption Key Section -->
+      <div class="settings-section">
+        <div class="settings-section-title">Database Encryption Key</div>
+        <div class="settings-btn-row">
+          <button class="settings-action-btn" data-action="manageEncryptionKey">Manage Key</button>
+        </div>
+      </div>
+
+      <div class="settings-divider"></div>
+
       <!-- Debug Section -->
       <div class="settings-section">
         <div class="settings-section-title">Debug</div>
@@ -370,6 +380,11 @@ export class SettingsShadowActor extends PopupShadowActor {
 
       case 'setTavilyApiKey':
         this._vscode.postMessage({ type: 'executeCommand', command: 'deepseek.setTavilyApiKey' });
+        this.close();
+        break;
+
+      case 'manageEncryptionKey':
+        this._vscode.postMessage({ type: 'executeCommand', command: 'deepseek.manageEncryptionKey' });
         this.close();
         break;
 

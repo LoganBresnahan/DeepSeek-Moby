@@ -312,6 +312,11 @@
         "command": "deepseek.setTavilyApiKey",
         "title": "DeepSeek Moby: Set Tavily API Key",
         "category": "DeepSeek Moby"
+      },
+      {
+        "command": "deepseek.manageEncryptionKey",
+        "title": "DeepSeek Moby: Manage Database Encryption Key",
+        "category": "DeepSeek Moby"
       }
     ],
     "menus": {

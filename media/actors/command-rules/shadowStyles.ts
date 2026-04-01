@@ -6,6 +6,11 @@
  */
 
 export const commandRulesShadowStyles = `
+  /* Lock modal to max height so switching filters doesn't resize */
+  .modal-container {
+    height: 80vh;
+  }
+
   /* Allow-all toggle bar */
   .allow-all-bar {
     display: flex;
@@ -115,9 +120,8 @@ export const commandRulesShadowStyles = `
   /* Rules list (multi-column grid) */
   .rules-list {
     padding: 8px 12px;
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-    gap: 2px 12px;
+    columns: 2;
+    column-gap: 12px;
   }
 
   /* Rule item row */
@@ -129,6 +133,7 @@ export const commandRulesShadowStyles = `
     border-radius: 4px;
     transition: background-color 0.1s;
     min-width: 0;
+    break-inside: avoid;
   }
 
   .rule-item:hover {

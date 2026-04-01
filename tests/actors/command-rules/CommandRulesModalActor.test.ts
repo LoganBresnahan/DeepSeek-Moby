@@ -133,10 +133,12 @@ describe('CommandRulesModalActor', () => {
       expect(backdrop?.classList.contains('visible')).toBe(false);
     });
 
-    it('requests rules on open', () => {
+    it('opens without requesting rules (rules sent by extension before open)', () => {
       manager.publishDirect('rules.modal.open', true);
 
-      expect(mockVSCode.postMessage).toHaveBeenCalledWith({ type: 'getCommandRules' });
+      // Rules are already sent by the extension before the modal opens,
+      // so no getCommandRules request is needed
+      expect(mockVSCode.postMessage).not.toHaveBeenCalledWith({ type: 'getCommandRules' });
     });
 
     it('publishes visible state', () => {
