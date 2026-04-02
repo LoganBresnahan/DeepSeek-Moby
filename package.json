@@ -56,60 +56,45 @@
           ],
           "description": "Which DeepSeek model to use"
         },
-        "deepseek.enableCompletions": {
-          "type": "boolean",
-          "default": true,
-          "description": "Enable inline code completions"
-        },
         "deepseek.temperature": {
           "type": "number",
           "default": 0.7,
           "minimum": 0,
           "maximum": 2,
-          "description": "Creativity level (0=deterministic, 2=creative)"
+          "description": "[Chat model only] Creativity level (0=deterministic, 2=creative). Reasoner does not support temperature."
         },
         "deepseek.maxToolCalls": {
           "type": "number",
           "default": 100,
           "minimum": 5,
           "maximum": 100,
-          "description": "Maximum tool calling iterations per request. Each iteration can have multiple tool calls. (100=no limit, only applies to Chat model)"
+          "description": "[Chat model only] Maximum tool calling iterations per request. Each iteration can have multiple tool calls. (100 = no limit)"
         },
         "deepseek.maxShellIterations": {
           "type": "number",
           "default": 100,
           "minimum": 1,
           "maximum": 100,
-          "description": "Maximum shell iterations per request for Reasoner model. (100=no limit)"
+          "description": "[Reasoner model only] Maximum shell command iterations per request. (100 = no limit)"
         },
-        "deepseek.maxTokens": {
+        "deepseek.maxTokensChatModel": {
           "type": "number",
           "default": 8192,
           "minimum": 256,
+          "maximum": 8192,
+          "description": "[Chat model only] Maximum output tokens per response. Max: 8,192"
+        },
+        "deepseek.maxTokensReasonerModel": {
+          "type": "number",
+          "default": 65536,
+          "minimum": 256,
           "maximum": 65536,
-          "description": "Maximum output tokens per response. Chat: up to 8K, Reasoner: up to 64K"
-        },
-        "deepseek.autoFormat": {
-          "type": "boolean",
-          "default": true,
-          "description": "Automatically format code responses"
-        },
-        "deepseek.useLanguageFormatter": {
-          "type": "boolean",
-          "default": true,
-          "description": "Use VS Code's language formatter after AI responses"
+          "description": "[Reasoner model only] Maximum output tokens per response. Max: 65,536"
         },
         "deepseek.showStatusBar": {
           "type": "boolean",
           "default": true,
           "description": "Show status bar with token usage"
-        },
-        "deepseek.maxHistorySessions": {
-          "type": "number",
-          "default": 100,
-          "minimum": 10,
-          "maximum": 1000,
-          "description": "Maximum number of chat sessions to keep in history"
         },
         "deepseek.autoSaveHistory": {
           "type": "boolean",
@@ -156,11 +141,6 @@
           "type": "boolean",
           "default": true,
           "description": "Enable trace collection for debugging and AI-agent observability"
-        },
-        "deepseek.logColors": {
-          "type": "boolean",
-          "default": true,
-          "description": "Enable color-coded log output"
         },
         "deepseek.tavilySearchesPerPrompt": {
           "type": "number",
@@ -215,7 +195,7 @@
         "deepseek.allowAllShellCommands": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "**Walk on the Wild Side**: Allow ALL shell commands for the Reasoner model (R1). Disables the safety blocklist that prevents catastrophic operations like `rm -rf /`. Only enable if you trust R1 completely.",
+          "markdownDescription": "Allow ALL shell commands without approval prompts. Disables the safety blocklist that prevents destructive operations like `rm -rf /`. Use with caution.",
           "scope": "application"
         },
         "deepseek.devMode": {

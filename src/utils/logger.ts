@@ -88,7 +88,7 @@ class Logger {
 
     // Listen for config changes
     vscode.workspace.onDidChangeConfiguration(e => {
-      if (e.affectsConfiguration('deepseek.logLevel') || e.affectsConfiguration('deepseek.logColors')) {
+      if (e.affectsConfiguration('deepseek.logLevel')) {
         this.loadSettings();
       }
     });

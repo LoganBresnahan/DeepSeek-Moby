@@ -340,8 +340,29 @@ export class MessageTurnActor extends InterleavedShadowActor {
     return this._isStreaming;
   }
 
+  /** Check if ANY turn is currently streaming (global state). */
+  private isGlobalStreaming(): boolean {
+    return !!this.manager.getState('streaming.active');
+  }
+
   hasInterleaved(): boolean {
     return this._hasInterleaved;
+  }
+
+  /**
+   * Reset diff/apply button state on all code blocks.
+   * Called when the diff tab is manually closed by the user.
+   */
+  resetDiffState(): void {
+    // Code blocks are inside shadow DOM containers — must query within each shadow root
+    this.containers.forEach(container => {
+      const diffedBlocks = container.content.querySelectorAll('.code-block.diffed');
+      diffedBlocks.forEach(block => {
+        block.classList.remove('diffed');
+        const diffBtn = block.querySelector('.diff-btn');
+        if (diffBtn) diffBtn.classList.remove('active');
+      });
+    });
   }
 
   // ============================================
@@ -1187,6 +1208,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
 
     this.delegateInContainer(containerId, 'click', '.apply-btn', (e, btn) => {
       e.stopPropagation();
+      if (this.isGlobalStreaming()) return;
       const codeBlock = btn.closest('.code-block');
       if (!codeBlock?.classList.contains('diffed') || codeBlock?.classList.contains('applied')) return;
 
@@ -1258,6 +1280,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
     // Accept button
     this.delegateInContainer(containerId, 'click', '.accept-btn', (e, btn) => {
       e.stopPropagation();
+      if (this.isGlobalStreaming()) return;
       const fileId = btn.getAttribute('data-file-id');
       const diffId = btn.getAttribute('data-diff-id');
       if (fileId && this._onPendingFileAction) {
@@ -1268,6 +1291,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
     // Reject button
     this.delegateInContainer(containerId, 'click', '.reject-btn', (e, btn) => {
       e.stopPropagation();
+      if (this.isGlobalStreaming()) return;
       const fileId = btn.getAttribute('data-file-id');
       const diffId = btn.getAttribute('data-diff-id');
       if (fileId && this._onPendingFileAction) {
@@ -1610,6 +1634,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
   private setupForkHandlers(containerId: string): void {
     this.delegateInContainer(containerId, 'click', '.fork-btn', (e, btn) => {
       e.stopPropagation();
+      if (this.isGlobalStreaming()) return;
       const seq = parseInt(btn.getAttribute('data-sequence') || '0', 10);
       if (seq > 0) this.showForkPopup(btn as HTMLElement, seq);
     });

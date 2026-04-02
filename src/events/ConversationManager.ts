@@ -645,7 +645,7 @@ export class ConversationManager {
     for (const e of events) {
       typeCounts[e.type] = (typeCounts[e.type] || 0) + 1;
     }
-    console.log(`[RichHistory] Session ${sessionId}: ${events.length} events`, JSON.stringify(typeCounts));
+    logger.debug(`[RichHistory] Session ${sessionId}: ${events.length} events ${JSON.stringify(typeCounts)}`);
 
     const turns: RichHistoryTurn[] = [];
     let currentAssistantTurn: RichHistoryTurn | null = null;
@@ -808,7 +808,7 @@ export class ConversationManager {
       if (t.role === 'user') return `turn[${i}]: user (${t.content.length} chars)`;
       return `turn[${i}]: assistant (${t.content.length} chars, reasoning=${t.reasoning_iterations?.length || 0}, tools=${t.toolCalls?.length || 0}, shells=${t.shellResults?.length || 0}, files=${t.filesModified?.length || 0}, model=${t.model})`;
     });
-    console.log(`[RichHistory] Returning ${turns.length} turns:`, turnSummary);
+    logger.debug(`[RichHistory] Returning ${turns.length} turns: ${JSON.stringify(turnSummary)}`);
 
     return turns;
   }

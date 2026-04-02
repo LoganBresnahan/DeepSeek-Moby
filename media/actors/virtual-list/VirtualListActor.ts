@@ -1335,9 +1335,15 @@ export class VirtualListActor extends EventStateActor {
   }
 
   /**
-   * Clear all content within a single turn (for CQRS full reconciliation).
-   * Resets contentOrder and all content arrays, then re-renders if bound.
+   * Reset diff/apply button state on all bound turns.
+   * Called when the user manually closes a diff tab.
    */
+  resetDiffState(): void {
+    for (const [, bound] of this._boundActors) {
+      bound.actor.resetDiffState();
+    }
+  }
+
   // ============================================
   // Statistics
   // ============================================

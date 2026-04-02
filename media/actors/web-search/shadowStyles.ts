@@ -136,52 +136,6 @@ export const webSearchShadowStyles = `
     opacity: 0.8;
   }
 
-  /* Enable/Disable toggle */
-  .ws-toggle-row {
-    display: flex;
-    gap: 8px;
-    margin-bottom: 8px;
-  }
-
-  .ws-enable-btn,
-  .ws-disable-btn {
-    flex: 1;
-    padding: 10px;
-    border: none;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 12px;
-    font-weight: 500;
-    transition: background 0.15s, opacity 0.15s;
-  }
-
-  .ws-enable-btn {
-    background: var(--vscode-button-background);
-    color: var(--vscode-button-foreground);
-  }
-
-  .ws-enable-btn:hover {
-    background: var(--vscode-button-hoverBackground);
-  }
-
-  .ws-disable-btn {
-    background: var(--vscode-inputValidation-errorBackground, rgba(231, 72, 86, 0.15));
-    color: var(--vscode-errorForeground, #e74856);
-    border: 1px solid var(--vscode-inputValidation-errorBorder, rgba(231, 72, 86, 0.3));
-  }
-
-  .ws-disable-btn:hover {
-    background: var(--vscode-inputValidation-errorBackground, rgba(231, 72, 86, 0.25));
-    filter: brightness(1.1);
-  }
-
-  .ws-enable-btn.disabled,
-  .ws-disable-btn.disabled {
-    opacity: 0.35;
-    cursor: default;
-    pointer-events: none;
-  }
-
   /* Clear cache */
   .ws-clear-cache-btn {
     width: 100%;

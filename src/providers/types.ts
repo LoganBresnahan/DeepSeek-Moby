@@ -77,7 +77,6 @@ export interface SettingsSnapshot {
   logLevel: string;
   webviewLogLevel: string;
   tracingEnabled: boolean;
-  logColors: boolean;
   systemPrompt: string;
   autoSaveHistory: boolean;
   allowAllCommands: boolean;

@@ -71,7 +71,7 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
   // Per-model maxTokens storage — each model remembers its own setting
   private _perModelMaxTokens: Map<string, number> = new Map([
     ['deepseek-chat', 8192],
-    ['deepseek-reasoner', 8192]
+    ['deepseek-reasoner', 65536]
   ]);
 
   private _onModelChange: ModelChangeHandler | null = null;
@@ -298,7 +298,7 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
       : newModelMaxTokens;
 
     // Notify extension of the restored value
-    this._vscode.postMessage({ type: 'setMaxTokens', maxTokens: this._maxTokens });
+    this._vscode.postMessage({ type: 'setMaxTokens', maxTokens: this._maxTokens, model: this._selectedModel });
     this.publish({ 'model.maxTokens': this._maxTokens });
 
     // Re-render to update slider max and hint

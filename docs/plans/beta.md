@@ -382,6 +382,8 @@ AGPL
 | ~~CQRS unified rendering~~ | Real-time CQRS: TurnEventLog + TurnProjector. Live streaming and history restore use same code path. Eliminates text splitting, ordering bugs, missing approvals/shells in history. 1902 tests passing |
 | ~~CQRS event persistence~~ | Webview's event log sent to extension for DB storage (replaces lossy `buildTurnEvents` reconstruction). `consolidateForSave()` compresses ~2000 per-token events to ~20-50 structural events |
 | ~~Command approval bugs (B1-B2)~~ | `updateLayout()` → `measureTurnHeight()` fix. Approval events always recorded in CQRS log. Shell/diff-engine source distinction for causal linking |
+| ~~UI polish pass~~ | Web search popup state sync (onOpen request pattern), toolbar button state on startup, command rules modal fixed height + column layout, scroll-to-bottom button removed, streaming disable audit (fork/apply/accept/reject/newChat/sessionSwitch), send button disabled without API key, web search button disabled without Tavily key, encryption key management UI |
+| ~~DiffManager fixes~~ | Manual mode skips pending dropdown, `source` field corrected (`diff-status` vs `diff-engine`), diff tab close resets code block buttons (shadow DOM query fix), `_onDiffClosed` wired up |
 
 ### Active Bugs
 
@@ -389,36 +391,26 @@ AGPL
 |---|-----|--------|---------|
 | B1 | Command approval: streaming not paused during prompt | **Fixed** | CQRS Step 6: projector handles segment flow. `updateLayout()` → `measureTurnHeight()` fix. Approval widget renders and resolves correctly |
 | B2 | Command approval: no visual feedback after decision | **Fixed** | Root cause: `createCommandApproval` threw from missing `updateLayout()`, so `_pendingApprovalId` was never set. Fixed + CQRS approval events always recorded |
-| B3 | Duplicate rules in system commands modal | Open | "cat >>" appears twice. DB has unique index so not actual duplicates — likely UI rendering issue from double rules update |
+| B3 | Duplicate rules in system commands modal | **Fixed** | Not a real bug — double broadcast caused unnecessary re-render but no visible duplicates. Fixed double-broadcast by removing redundant `getCommandRules` request on modal open |
 | B4 | History restore ordering differs from live | **Fixed** | CQRS architecture: unified event log + projector for both live streaming and history restore. `buildTurnEvents` (lossy reconstruction) replaced with webview's actual event log sent to extension for DB storage |
 | B5 | History text splitting around file modifications | **Fixed** | `projectIncremental` text-append uses `findLastIncomplete('text')` instead of checking last segment. File-modified events no longer split text flow |
-| B6 | Web search popup: mode not restored from history | Open | Popup shows "Auto" highlighted but button color doesn't match |
-| B7 | Web search popup cleanup | Open | Remove Enable/Disable buttons (redundant with Off/Manual/Auto). Clarify Manual vs Auto |
-| B8 | Streaming disable audit | Open | Some interactive elements may still be clickable during streaming |
-| B9 | DiffManager creates new file instead of editing existing | Open | In manual/ask mode, `File not found, creating new file` for files that exist. Workspace-relative path resolution issue |
-| B10 | Manual mode: diff tab stays open after apply | Open | Question mode closes diff tab on accept, manual mode does not |
-| B11 | Dropdown text not copyable | Open | cursor: pointer on tools/shell containers prevents text selection. Code dropdown works |
-| B12 | Input box expands container instead of overlaying | Open | Should grow upward above container, not push container taller |
-| B13 | Scroll-to-bottom button should be removed | Open | Round div with down arrow appears on scroll up. Remove — let users use the scrollbar |
+| B6 | Web search popup: mode not restored on startup | **Fixed** | Popup now requests fresh state on open (`getWebSearchSettings`), gateway handles `webSearchSettings` response and publishes to popup's subscription keys. Follows SystemPrompt/Files pattern |
+| B7 | Web search popup cleanup | **Fixed** | Renamed "Manual" → "Forced", removed Enable/Disable buttons. Selecting Forced auto-enables, selecting Off/Auto auto-disables |
+| B8 | Streaming disable audit | **Fixed** | Disabled during streaming: fork button, apply code button, accept/reject file buttons. New Chat and session switch stop active generation first. `isGlobalStreaming()` helper on MessageTurnActor |
+| B9 | DiffManager creates new file instead of editing existing | **Fixed** | Workspace-relative path resolution issue resolved |
+| B10 | Manual mode: diff tab stays open after apply | **Fixed** | Diff tab now closes on accept in manual mode |
+| B11 | Web search button disabled without Tavily key | **Fixed** | Toolbar disables search button with tooltip "Tavily API key not set" when not configured. Send button disabled with tooltip when no DeepSeek API key |
+| B12 | Command rules modal fixed height | **Fixed** | Modal uses `height: 80vh` instead of `max-height` so switching filters doesn't resize. Rules list uses CSS columns for top-to-bottom alphabetical flow |
+| B13 | Scroll-to-bottom button removed | **Fixed** | Removed button, styles, creation/visibility/cleanup code from ScrollActor |
 | B14 | Approval widget reverts on turn rebind | Fixed | Approval status + persistent flag persisted in VirtualListActor data, approval status stored in event history for session reload |
-| B15 | Web search button clickable without Tavily API key | Open | If no Tavily API key is set, web search button should be disabled or show a prompt to set the key |
+| B15 | Database encryption key management | **Fixed** | New settings section + command for viewing, changing, and regenerating the SQLCipher encryption key via `PRAGMA rekey` |
 
 ### Remaining Work
 
 | Priority | Item | Effort | Impact |
 |----------|------|--------|--------|
-| **P0** | ~~Fix active bugs B1-B2 (command approval)~~ | **Done** | Fixed via CQRS + `updateLayout()` bug |
-| **P0** | Fix B3 (duplicate rules in modal) | 1 hr | UI rendering issue |
+| **P0** | ~~Fix all active bugs B1-B15~~ | **Done** | All 15 bugs fixed |
+| **P0** | ~~UI polish, streaming audit, DiffManager fixes~~ | **Done** | Web search, toolbar, diff, encryption key, modal styling |
 | **P0** | Enable GitHub Actions CI/CD (#8) | 1-2 hrs | Blocker — can't ship without it |
 | **P0** | README overhaul (#9) | 2-3 hrs | Blocker — first thing users see |
-| **P0** | ~~Fix B4-B5 (history restore ordering/splitting)~~ | **Done** | Fixed via CQRS unified event log + projector |
-| **P1** | Fix B9-B10 (diff/apply issues) | 1-2 hrs | Core edit workflow |
 | **P1** | Hide inspector button when devMode off (#5) | 30 min | Polish |
-| **P2** | Fix B6-B8 (web search, streaming audit) | 1-2 hrs | Polish |
-| **P2** | Fix B11-B12 (text copy, input box) | 1-2 hrs | UX |
-| **P2** | Input box improvements (#2b) | 1-2 hrs | UX |
-| **P2** | Interrupt improvements (#3) | 1-2 hrs | Reliability |
-| **P2** | General styling pass (#2g) | 2-4 hrs | Owner-driven |
-| **P3** | Plan mode MVP (#6) | 2-3 hrs | Feature — partially built (popup works, backend wired) |
-| **Defer** | Context warning UI (#11) | 4-6 hrs | Auto-compression works silently |
-| **Defer** | File context manager changes (#7) | — | Keep as-is |

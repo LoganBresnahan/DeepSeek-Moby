@@ -169,7 +169,7 @@ export const settingsShadowStyles = `
     color: var(--vscode-editor-background);
   }
 
-  /* Wild side label */
+  /* Allow all commands label */
   .settings-wild-label {
     display: flex !important;
     align-items: center;

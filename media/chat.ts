@@ -31,8 +31,6 @@ import {
   PlanPopupShadowActor,
   WebSearchPopupShadowActor
 } from './actors';
-// Dev-only actor - not included in production bundle
-import { InspectorShadowActor } from './dev/inspector';
 import { AnimationHelper } from './utils';
 import { webviewTracer } from './tracing';
 import { createLogger, webviewLogBuffer } from './logging';
@@ -215,13 +213,6 @@ function initializeActorSystem(): void {
   const searchBtn = toolbar.getButton('.search-btn');
   if (searchBtn) webSearchPopup.setTriggerElement(searchBtn);
 
-  // InspectorShadowActor - UI inspection tool, uses its own host element
-  const inspectorHost = document.createElement('div');
-  inspectorHost.id = 'inspectorHost';
-  inspectorHost.style.cssText = 'position: fixed; top: 0; left: 0; width: 0; height: 0; z-index: 999999;';
-  document.body.appendChild(inspectorHost);
-  const inspector = new InspectorShadowActor(manager, inspectorHost);
-
   // HistoryShadowActor - History modal, uses its own host element
   const historyHost = document.createElement('div');
   historyHost.id = 'historyHost';
@@ -300,20 +291,6 @@ function initializeActorSystem(): void {
     drawingServerBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       drawingServerActor!.toggle();
-    });
-  }
-
-  // Wire up inspector toggle button
-  const inspectorBtn = getElementOrNull<HTMLButtonElement>('inspectorBtn');
-  if (inspectorBtn) {
-    inspectorBtn.addEventListener('click', () => {
-      inspector.toggle();
-      inspectorBtn.classList.toggle('active', inspector.isVisible());
-    });
-
-    // Listen for inspector close (e.g., when closed via X button)
-    inspectorHost.addEventListener('inspector-hidden', () => {
-      inspectorBtn.classList.remove('active');
     });
   }
 
@@ -495,7 +472,6 @@ function initializeActorSystem(): void {
     drawingServer: drawingServerActor,
     planPopup,
     webSearchPopup,
-    inspector,
     virtualList,
   };
 

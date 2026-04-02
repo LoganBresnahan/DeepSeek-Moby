@@ -126,6 +126,11 @@ export const toolbarShadowStyles = `
   background: var(--vscode-terminal-ansiBrightBlue, #5ca8ff);
 }
 
+.btn.search-btn.disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
 /* Attach button */
 .btn.attach-btn {
   opacity: 0.7;

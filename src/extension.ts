@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
 import { DeepSeekClient } from './deepseekClient';
 import { ChatProvider } from './providers/chatProvider';
-import { CompletionProvider } from './providers/completionProvider';
 import { CommandProvider } from './providers/commandProvider';
 import { StatusBar } from './views/statusBar';
 import { ConfigManager } from './utils/config';
@@ -14,7 +13,6 @@ import { DrawingServer } from './providers/drawingServer';
 import * as crypto from 'crypto';
 
 let chatProvider: ChatProvider;
-let completionProvider: CompletionProvider;
 let commandProvider: CommandProvider;
 let statusBar: StatusBar;
 let deepSeekClient: DeepSeekClient;
@@ -91,9 +89,6 @@ export async function activate(context: vscode.ExtensionContext) {
     drawingServer
   );
 
-  // Initialize completion provider (inline suggestions)
-  completionProvider = new CompletionProvider(deepSeekClient);
-  
   // Initialize command provider (code actions)
   commandProvider = new CommandProvider(
     deepSeekClient, statusBar, conversationManager,
@@ -108,16 +103,6 @@ export async function activate(context: vscode.ExtensionContext) {
       { webviewOptions: { retainContextWhenHidden: true } }
     )
   );
-
-  // Register inline completions if enabled
-  if (config.get<boolean>('enableCompletions')) {
-    context.subscriptions.push(
-      vscode.languages.registerInlineCompletionItemProvider(
-        { pattern: '**' },
-        completionProvider
-      )
-    );
-  }
 
   // Register commands
   registerCommands(context);

@@ -112,9 +112,10 @@ export class SettingsShadowActor extends PopupShadowActor {
         </div>
       </div>
 
+      ${document.body.getAttribute('data-dev-mode') === 'true' ? `
       <div class="settings-divider"></div>
 
-      <!-- Debug Section -->
+      <!-- Debug Section (devMode only) -->
       <div class="settings-section">
         <div class="settings-section-title">Debug</div>
         <div class="settings-btn-row">
@@ -123,6 +124,7 @@ export class SettingsShadowActor extends PopupShadowActor {
           <button class="settings-action-btn" data-action="testError">Test Error</button>
         </div>
       </div>
+      ` : ''}
     `;
   }
 

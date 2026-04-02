@@ -508,6 +508,11 @@ export class RequestOrchestrator {
     return { sessionId };
   }
 
+  /** Check if a request is currently in progress. */
+  isGenerating(): boolean {
+    return this.abortController !== null;
+  }
+
   /** Abort current request. */
   stopGeneration(): void {
     if (this.abortController) {
@@ -1045,7 +1050,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
             logger.info(`[Frontend] Sending shellExecuting message: ${shellCommandsPayload.length} commands`);
             this._onShellExecuting.fire({ commands: shellCommandsPayload });
 
-            // Check "Walk on the Wild Side" setting
+            // Check allowAllShellCommands setting
             const shellConfig = vscode.workspace.getConfiguration('deepseek');
             const allowAllCommands = shellConfig.get<boolean>('allowAllShellCommands') ?? false;
 

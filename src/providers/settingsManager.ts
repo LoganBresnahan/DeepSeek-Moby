@@ -27,7 +27,6 @@ export interface SettingsUpdateInput {
   temperature?: number;
   maxToolCalls?: number;
   maxShellIterations?: number;
-  maxTokens?: number;
   autoSaveHistory?: boolean;
 }
 
@@ -78,10 +77,7 @@ export class SettingsManager {
       logger.settingsChanged('maxShellIterations', settings.maxShellIterations);
     }
 
-    if (settings.maxTokens !== undefined) {
-      await config.update('maxTokens', settings.maxTokens, vscode.ConfigurationTarget.Global);
-      logger.settingsChanged('maxTokens', settings.maxTokens);
-    }
+    // maxTokens is now per-model, handled directly in chatProvider setMaxTokens handler
 
     if (settings.autoSaveHistory !== undefined) {
       await config.update('autoSaveHistory', settings.autoSaveHistory, vscode.ConfigurationTarget.Global);
@@ -90,19 +86,14 @@ export class SettingsManager {
   }
 
   /**
-   * Update log-related settings (logLevel, logColors).
+   * Update log-related settings (logLevel).
    */
-  async updateLogSettings(settings: { logLevel?: string; logColors?: boolean }): Promise<void> {
+  async updateLogSettings(settings: { logLevel?: string }): Promise<void> {
     const config = vscode.workspace.getConfiguration('deepseek');
 
     if (settings.logLevel !== undefined) {
       await config.update('logLevel', settings.logLevel, vscode.ConfigurationTarget.Global);
       logger.settingsChanged('logLevel', settings.logLevel);
-    }
-
-    if (settings.logColors !== undefined) {
-      await config.update('logColors', settings.logColors, vscode.ConfigurationTarget.Global);
-      logger.settingsChanged('logColors', settings.logColors);
     }
   }
 
@@ -148,6 +139,14 @@ export class SettingsManager {
     }
   }
 
+  private getMaxTokensForCurrentModel(config: vscode.WorkspaceConfiguration): number {
+    const model = this.deepSeekClient.getModel();
+    if (model === 'deepseek-reasoner') {
+      return config.get<number>('maxTokensReasonerModel') ?? 65536;
+    }
+    return config.get<number>('maxTokensChatModel') ?? 8192;
+  }
+
   /**
    * Read all current settings from VS Code config and return a snapshot.
    * Also syncs tracer.enabled to match config.
@@ -164,11 +163,10 @@ export class SettingsManager {
       temperature: config.get<number>('temperature') ?? 0.7,
       maxToolCalls: config.get<number>('maxToolCalls') ?? 100,
       maxShellIterations: config.get<number>('maxShellIterations') ?? 100,
-      maxTokens: config.get<number>('maxTokens') ?? 8192,
+      maxTokens: this.getMaxTokensForCurrentModel(config),
       logLevel: config.get<string>('logLevel') || 'WARN',
       webviewLogLevel: config.get<string>('webviewLogLevel') || 'WARN',
       tracingEnabled,
-      logColors: config.get<boolean>('logColors') ?? true,
       systemPrompt: '', // Now stored in DB, not VS Code settings
       autoSaveHistory: config.get<boolean>('autoSaveHistory') ?? true,
       allowAllCommands: config.get<boolean>('allowAllShellCommands') ?? false,
@@ -194,8 +192,8 @@ export class SettingsManager {
       await config.update('logLevel', undefined, vscode.ConfigurationTarget.Global);
       await config.update('webviewLogLevel', undefined, vscode.ConfigurationTarget.Global);
       await config.update('tracing.enabled', undefined, vscode.ConfigurationTarget.Global);
-      await config.update('logColors', undefined, vscode.ConfigurationTarget.Global);
-      await config.update('maxTokens', undefined, vscode.ConfigurationTarget.Global);
+      await config.update('maxTokensChatModel', undefined, vscode.ConfigurationTarget.Global);
+      await config.update('maxTokensReasonerModel', undefined, vscode.ConfigurationTarget.Global);
       await config.update('maxToolCalls', undefined, vscode.ConfigurationTarget.Global);
       await config.update('maxShellIterations', undefined, vscode.ConfigurationTarget.Global);
       await config.update('editMode', undefined, vscode.ConfigurationTarget.Global);

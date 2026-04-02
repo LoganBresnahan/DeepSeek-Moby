@@ -683,6 +683,28 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         toolbar.setWebSearchMode(msg.mode as 'off' | 'manual' | 'auto');
         break;
 
+      case 'webSearchSettings': {
+        // Response to getWebSearchSettings request — publish to popup's subscription keys
+        const wsMode = msg.mode as string | undefined;
+        const wsSettings = msg.settings as Record<string, unknown> | undefined;
+        const wsEnabled = msg.enabled as boolean | undefined;
+        if (wsMode) {
+          toolbar.setWebSearchMode(wsMode as 'off' | 'manual' | 'auto');
+          this._manager.publishDirect('webSearch.mode', wsMode);
+        }
+        if (wsSettings) {
+          this._manager.publishDirect('webSearch.settings', wsSettings);
+        }
+        if (wsEnabled !== undefined) {
+          toolbar.setWebSearchEnabled(wsEnabled);
+          this._manager.publishDirect('webSearch.enabled', wsEnabled);
+        }
+        if (msg.configured !== undefined) {
+          toolbar.setWebSearchConfigured(msg.configured as boolean);
+        }
+        break;
+      }
+
       case 'webSearching':
         this._manager.publishDirect('status.message', { type: 'info', message: `Searching the web (${msg.current}/${msg.total})...` });
         break;
@@ -758,6 +780,11 @@ export class VirtualMessageGatewayActor extends EventStateActor {
 
       case 'codeApplied':
         this.handleCodeApplied(msg);
+        break;
+
+      case 'diffClosed':
+        // Diff tab was manually closed — reset code block diff/apply button state
+        virtualList.resetDiffState();
         break;
 
       // ---- Drawing Server Messages ----
@@ -1115,14 +1142,11 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       }
 
       // Truly new diff — record in CQRS event log (for history save/restore)
-      log.debug(`diffListChanged: new pending file ${diff.filePath} (diffId=${diff.diffId}) status=${status} source=${source}`);
+      log.debug(`diffListChanged: new pending file ${diff.filePath} (diffId=${diff.diffId}) status=${status} source=${source} editMode=${msg.editMode}`);
 
       const tl = this._turnLogs.get(turnId);
       if (tl) {
-        // Only use causal insertion for shell-sourced file changes (file watcher after shell execution).
-        // Diff-engine (auto-applied SEARCH/REPLACE from content) changes are not caused by shell commands
-        // and should be appended at the current stream position.
-        if (source === 'shell' && this._lastShellId) {
+        if (source === 'diff-engine' && this._lastShellId) {
           tl.insertCausal({
             type: 'file-modified', path: diff.filePath, status, causedBy: this._lastShellId, ts: Date.now()
           });
@@ -1133,7 +1157,13 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         }
       }
 
-      // Render directly (not via projector — diffId needed for status tracking)
+      // In manual mode, diffs are managed entirely via VS Code diff tabs — no webview dropdown needed.
+      // Only show pending files dropdown in ask/auto modes.
+      const editMode = msg.editMode as string | undefined;
+      if (editMode === 'manual') {
+        continue;
+      }
+
       virtualList.addPendingFile(turnId, {
         filePath: diff.filePath,
         diffId: diff.diffId,
@@ -1398,6 +1428,12 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       session.handleModelChanged({ model: msg.model as string });
     }
 
+    // Sync API key configured state to toolbar (disables send button when no key)
+    if (msg.apiKeyConfigured !== undefined) {
+      const { toolbar } = this._actors;
+      toolbar.setApiKeyConfigured(msg.apiKeyConfigured as boolean);
+    }
+
     // Apply webview log level to global log level
     if (msg.webviewLogLevel !== undefined) {
       const levelMap: Record<string, number> = {
@@ -1417,12 +1453,17 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       log.debug('Tracing enabled:', msg.tracingEnabled);
     }
 
-    const webSearch = msg.webSearch as { searchDepth?: string; creditsPerPrompt?: number; maxResultsPerSearch?: number; cacheDuration?: number; mode?: string } | undefined;
+    const webSearch = msg.webSearch as { searchDepth?: string; creditsPerPrompt?: number; maxResultsPerSearch?: number; cacheDuration?: number; mode?: string; configured?: boolean } | undefined;
 
-    // Sync web search mode to toolbar
+    // Sync web search mode and configured state to toolbar
+    // (popup gets its state via onOpen → getWebSearchSettings → webSearchSettings response)
     if (webSearch?.mode) {
       const { toolbar } = this._actors;
       toolbar.setWebSearchMode(webSearch.mode as 'off' | 'manual' | 'auto');
+    }
+    if (webSearch?.configured !== undefined) {
+      const { toolbar } = this._actors;
+      toolbar.setWebSearchConfigured(webSearch.configured);
     }
 
     this._manager.publishDirect('settings.values', {

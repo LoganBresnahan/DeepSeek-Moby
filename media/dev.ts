@@ -39,9 +39,25 @@ const log = createLogger('DevTools');
   // Create inspector actor
   const inspector = new InspectorShadowActor(devManager, inspectorHost);
 
+  // Wire up the inspector button in the header (rendered by extension when devMode is true)
+  const inspectorBtn = document.getElementById('inspectorBtn') as HTMLButtonElement | null;
+  if (inspectorBtn) {
+    inspectorBtn.addEventListener('click', () => {
+      inspector.toggle();
+      inspectorBtn.classList.toggle('active', inspector.isVisible());
+    });
+
+    inspectorHost.addEventListener('inspector-hidden', () => {
+      inspectorBtn.classList.remove('active');
+    });
+  }
+
   // Toggle function for console access
   function toggle() {
     inspector.toggle();
+    if (inspectorBtn) {
+      inspectorBtn.classList.toggle('active', inspector.isVisible());
+    }
   }
 
   // Expose for console access

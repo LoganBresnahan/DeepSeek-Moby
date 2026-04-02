@@ -76,6 +76,15 @@ export class WebSearchPopupShadowActor extends PopupShadowActor {
   }
 
   // ============================================
+  // Popup Lifecycle
+  // ============================================
+
+  protected onOpen(): void {
+    // Request fresh state from extension (same pattern as Files and SystemPrompt modals)
+    this._vscode.postMessage({ type: 'getWebSearchSettings' });
+  }
+
+  // ============================================
   // State handlers
   // ============================================
 
@@ -94,13 +103,6 @@ export class WebSearchPopupShadowActor extends PopupShadowActor {
     if (this.isVisible()) this.updateBodyContent(this.renderPopupContent());
   }
 
-  /** Set initial state (called from chat.ts after construction) */
-  setState(mode: WebSearchMode, enabled: boolean, settings: WebSearchSettings): void {
-    this._mode = mode;
-    this._enabled = enabled;
-    this._settings = { ...settings };
-    this.updateBodyContent(this.renderPopupContent());
-  }
 
   // ============================================
   // Rendering
@@ -121,7 +123,7 @@ export class WebSearchPopupShadowActor extends PopupShadowActor {
     return `
       <div class="ws-mode-options">
         <button class="ws-mode-btn${mode === 'off' ? ' active' : ''}" data-mode="off">Off</button>
-        <button class="ws-mode-btn${mode === 'manual' ? ' active' : ''}" data-mode="manual">Manual</button>
+        <button class="ws-mode-btn${mode === 'manual' ? ' active' : ''}" data-mode="manual">Forced</button>
         <button class="ws-mode-btn${mode === 'auto' ? ' active' : ''}" data-mode="auto">Auto</button>
       </div>
       <div class="ws-settings${isOff ? ' disabled-section' : ''}">
@@ -146,10 +148,6 @@ export class WebSearchPopupShadowActor extends PopupShadowActor {
             </button>
           </div>
         </div>
-        <div class="ws-toggle-row">
-          <button class="ws-enable-btn${this._enabled ? ' disabled' : ''}"${isOff ? ' disabled' : ''}>Enable</button>
-          <button class="ws-disable-btn${!this._enabled ? ' disabled' : ''}"${isOff ? ' disabled' : ''}>Disable</button>
-        </div>
         <button class="ws-clear-cache-btn"${isOff ? ' disabled' : ''}>Clear Cache</button>
       </div>
     `;
@@ -169,8 +167,14 @@ export class WebSearchPopupShadowActor extends PopupShadowActor {
       this._vscode.postMessage({ type: 'setWebSearchMode', mode: newMode });
       this.publish({ 'toolbar.webSearchMode': newMode });
 
-      // If switching to off, also disable
-      if (newMode === 'off' && this._enabled) {
+      // Forced (manual) mode: auto-enable search
+      // Off or Auto mode: auto-disable manual toggle
+      if (newMode === 'manual' && !this._enabled) {
+        this._enabled = true;
+        this._vscode.postMessage({ type: 'toggleWebSearch', enabled: true });
+        this._vscode.postMessage({ type: 'updateWebSearchSettings', settings: this._settings });
+        this.publish({ 'toolbar.webSearchEnabled': true });
+      } else if (newMode !== 'manual' && this._enabled) {
         this._enabled = false;
         this._vscode.postMessage({ type: 'toggleWebSearch', enabled: false });
         this.publish({ 'toolbar.webSearchEnabled': false });
@@ -222,23 +226,6 @@ export class WebSearchPopupShadowActor extends PopupShadowActor {
       this._vscode.postMessage({ type: 'setCreditsPerPrompt', value: clamped });
 
       this.updateBodyContent(this.renderPopupContent());
-    });
-
-    // Enable
-    this.delegate('click', '.ws-enable-btn', () => {
-      this._enabled = true;
-      this._vscode.postMessage({ type: 'toggleWebSearch', enabled: true });
-      this._vscode.postMessage({ type: 'updateWebSearchSettings', settings: this._settings });
-      this.publish({ 'toolbar.webSearchEnabled': true });
-      this.close();
-    });
-
-    // Disable
-    this.delegate('click', '.ws-disable-btn', () => {
-      this._enabled = false;
-      this._vscode.postMessage({ type: 'toggleWebSearch', enabled: false });
-      this.publish({ 'toolbar.webSearchEnabled': false });
-      this.close();
     });
 
     // Clear cache

@@ -89,7 +89,7 @@ const BLOCKED_PATTERNS: RegExp[] = [
 ];
 
 function validateCommand(command: string, allowAll: boolean = false): { valid: boolean; reason?: string } {
-  // "Walk on the Wild Side" - allow all commands if setting is enabled
+  // Allow all commands if setting is enabled
   if (allowAll) {
     return { valid: true };
   }
@@ -342,7 +342,7 @@ Some code here`;
       expect(validateCommand('mkfs.ext4 /dev/sda1').valid).toBe(false);
     });
 
-    describe('Walk on the Wild Side (allowAll)', () => {
+    describe('allowAll bypass', () => {
       it('allows blocked commands when allowAll is true', () => {
         // These would normally be blocked
         expect(validateCommand('rm -rf /', true).valid).toBe(true);

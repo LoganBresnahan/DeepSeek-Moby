@@ -33,18 +33,9 @@ describe('ScrollActor Snapshots', () => {
     document.body.innerHTML = '';
   });
 
-  describe('injected styles', () => {
-    it('injects styles via EventStateManager', () => {
-      // Manager should have scroll styles registered
-      expect(manager.hasStyles('scroll')).toBe(true);
-
-      // Shared style element should exist
-      const styleTag = document.getElementById('actor-styles');
-      expect(styleTag).toBeTruthy();
-      expect(styleTag?.getAttribute('data-managed-by')).toBe('EventStateManager');
-
-      // Should contain scroll styles (marked with comment)
-      expect(manager.getStyleContent()).toContain('/* === scroll === */');
+  describe('initialization', () => {
+    it('initializes without style injection (no scroll button styles needed)', () => {
+      expect(manager.hasStyles('scroll')).toBe(false);
     });
   });
 });

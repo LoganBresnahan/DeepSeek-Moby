@@ -1,101 +1,304 @@
 
+<p align="center">
+  <img src="media/moby.png" height="120px" alt="DeepSeek Moby" />
+</p>
 
-# DeepSeek Moby
-<img src="media/moby.png" height="100px" alt="DeepSeek Moby" />
+<h1 align="center">DeepSeek Moby</h1>
 
-An unofficial DeepSeek AI assistant for Visual Studio Code.
+<p align="center">
+  <strong>An AI coding assistant for VS Code, powered by DeepSeek.</strong>
+  <br />
+  Chat, edit, search, execute — all from your editor.
+</p>
+
+<p align="center">
+  <a href="#features">Features</a> &middot;
+  <a href="#getting-started">Getting Started</a> &middot;
+  <a href="#configuration">Configuration</a> &middot;
+  <a href="#commands">Commands</a> &middot;
+  <a href="#architecture">Architecture</a> &middot;
+  <a href="#roadmap">Roadmap</a>
+</p>
+
+---
+
+<!-- TODO: Replace with actual demo video -->
+<p align="center">
+  <em>[Demo video placeholder — coming soon]</em>
+</p>
+
+---
 
 ## Features
 
-### Chat Interface
-- Sidebar chat with streaming responses
-- Full conversation history with search, export, and import
-- Session management and statistics tracking
-- Code-aware context from your active editor
+### Two Models, One Interface
 
-### Model Selection
-- **DeepSeek-V3** (`deepseek-chat`) - Fast, general-purpose model
-- **DeepSeek-R1** (`deepseek-reasoner`) - Reasoning model with chain-of-thought, better for complex problems
+Switch between DeepSeek's models based on your task:
 
-### Workspace Tools
-The chat model can explore your codebase using built-in tools:
-- Read and analyze files in your workspace
-- Search for code patterns and symbols
-- List directory contents
-- Context-aware responses based on your project structure
+| Model | Best For | Context | Max Output |
+|-------|----------|---------|------------|
+| **DeepSeek Chat (V3)** | Fast answers, tool use, code generation | 128K tokens | 8K tokens |
+| **DeepSeek Reasoner (R1)** | Complex problems, chain-of-thought reasoning | 128K tokens | 64K tokens |
 
-### Web Search
-Optional web search integration via Tavily API:
-- Real-time information retrieval during chat
-- Configurable search depth and frequency
+- **Chat (V3)** uses structured tool calls — file reads, searches, code edits — orchestrated by the API
+- **Reasoner (R1)** uses shell commands — `cat`, `grep`, `sed`, heredocs — with full terminal access
+- Switching models automatically creates a new session (no mixed-model conversations)
+- Reasoning tokens are displayed in expandable "Thinking" dropdowns so you can follow the model's logic
 
-### Code Actions (Experimental)
-Right-click selected code to access:
-- **Explain Code** - Get detailed explanations
-- **Refactor Code** - Improve structure and readability
-- **Document Code** - Generate documentation
-- **Find and Fix Bugs** - Identify potential issues
-- **Optimize Performance** - Get optimization suggestions
-- **Generate Tests** - Create test cases
+### Three Edit Modes
 
-### Inline Completions
-- Context-aware code suggestions as you type
-- Works with any programming language
+Control how code changes are applied to your files:
 
-## Installation
+- **Manual (M)** — Code diffs appear in a collapsible dropdown. You click Diff to view, then Apply to write
+- **Ask (Q)** — Diffs auto-display in a side-by-side view. You confirm or reject each change
+- **Auto (A)** — Changes are applied immediately. A "Modified Files" dropdown shows what was changed
 
-### From VSIX
-1. Download the `.vsix` file from releases
-2. In VS Code: Extensions view → `...` menu → "Install from VSIX..."
+All edits use a precise SEARCH/REPLACE format with multi-strategy matching (exact, fuzzy whitespace, patch-based, location-based fallback).
 
-### From Source
-1. Clone this repository
-2. Run `npm install`
-3. Run `npm run package`
-4. Press F5 to debug, or install the generated `.vsix`
+### Web Search (Tavily)
+
+Real-time web search integrated into the conversation:
+
+- **Off** — Disabled
+- **Auto** — The model decides when to search (recommended)
+- **Forced** — Every request includes a web search
+- Results cached in-memory with configurable duration
+- Requires a [Tavily API key](https://tavily.com) (free tier available)
+
+### Shell Command Security
+
+Every shell command goes through an approval system before execution:
+
+- **Inline approval prompts** — When the model attempts to run a command you haven't seen before, an approval widget appears during streaming. You choose:
+  - **Allow Once** — Run this command now, ask again next time
+  - **Always Allow** — Add this command prefix to your permanent allowlist
+  - **Block Once** — Reject this command, the model will adapt
+  - **Always Block** — Add this command prefix to your permanent blocklist
+- **Command Rules modal** — View and edit your full allowlist/blocklist via the Commands popup or Command Palette. Ships with platform-specific defaults (Linux/macOS and Windows have separate rule sets tailored to each OS's command-line tools)
+- **Override toggle** — "Allow All Commands" setting bypasses all checks (use with caution)
+- Commands execute inline during streaming, one at a time, with results visible immediately
+
+### Conversation History
+
+Event-sourced conversation storage with full session management:
+
+- **Forking** — Click the fork button (🍴) on any message to branch the conversation. Forking from a user message auto-sends it for a fresh response
+- **Search** — Full-text search across all sessions
+- **Export** — JSON, Markdown, or plain text format
+- **Import** — Load sessions from JSON files
+- **Auto-save** — Every message persisted automatically
+
+### Plan Mode
+
+Create and manage plan files that are injected into every request:
+
+- Click the **P** button to open the plans popup
+- Create named plan files (stored in `.moby-plans/` in your workspace)
+- Toggle plans active/inactive — only active plans are included in context
+- Multiple plans can be active simultaneously
+- Plans are regular Markdown files — edit them in VS Code with full editor features
+
+### Custom System Prompts
+
+Add custom instructions that get prepended to every request:
+
+- Accessible via the Commands popup or toolbar
+- Saved prompts stored in the encrypted database with per-model tags
+- Multiple named prompts with load/save/delete
+- Active prompt indicator with deactivation support
+- Empty = use built-in defaults (no prompt overhead)
+
+### Drawing Server
+
+Start a local server for desktop or phone/tablet-based drawing input:
+
+- ASCII diagram mode for text-based sketches — send diagrams directly to the model as context
+- Freehand drawing pad with touch support (brush color, size, undo/redo) — *note: drawing pad output is image-based and not currently usable by DeepSeek models, which do not support image input*
+- QR code for quick phone connection
+- WSL2 support with port forwarding instructions
+
+### File Context Selection
+
+Manually curate which files the model sees:
+
+- Modal with live list of open editor tabs
+- Workspace search for finding files in large repos
+- Selected files injected as full content into the system prompt
+- Independent of the model's tool-based file reading
+
+### Context Window Management
+
+Automatic context budgeting so conversations can run indefinitely:
+
+- 128K token context window for both models
+- Oldest messages dropped first when budget is exceeded
+- Compressed summaries injected to preserve key context
+- WASM-based tokenizer for exact token counting (fallback estimation available)
+- Silent operation — no user intervention needed
+
+### Encrypted Storage
+
+All conversation data stored in an encrypted SQLite database:
+
+- **SQLCipher** (AES-256-CBC) — the same encryption library used by Signal
+- Encryption key auto-generated and stored in your OS keychain via VS Code's SecretStorage API
+- Key management UI for viewing, changing, or regenerating the encryption key
+- WAL mode for crash safety and concurrent access
+- Stored data: conversations, session metadata, command rules, saved prompts, context snapshots
+
+### Shadow DOM Isolation
+
+The entire chat UI is built with Shadow DOM encapsulation:
+
+- Each UI component (messages, toolbars, popups, modals) renders in its own shadow root
+- CSS styles cannot leak between components or be affected by other extensions
+- DOM isolation prevents other extensions from reading or manipulating the chat content
+- VS Code theme variables (`--vscode-*`) flow through for consistent theming
+- Actor-based architecture with pub/sub communication between isolated components
+
+---
+
+## Getting Started
+
+### 1. Install
+
+**From VSIX:**
+1. Download the `.vsix` file from [Releases](https://github.com/LoganBresnahan/deepseek-vscode-extension/releases)
+2. In VS Code: Extensions view &rarr; `...` menu &rarr; "Install from VSIX..."
+
+**From Source:**
+```bash
+git clone https://github.com/LoganBresnahan/deepseek-vscode-extension.git
+cd deepseek-vscode-extension
+npm install
+npm run package
+# Press F5 to debug, or install the generated .vsix
+```
+
+### 2. Set Your API Key
+
+Open the Command Palette (`Ctrl+Shift+P`) and run:
+- **DeepSeek Moby: Set API Key** — Enter your key from [platform.deepseek.com](https://platform.deepseek.com)
+- **DeepSeek Moby: Set Tavily API Key** — (Optional) For web search, get a key from [tavily.com](https://tavily.com)
+
+### 3. Start Chatting
+
+Click the Moby icon in the sidebar activity bar, type a message, and press Enter.
+
+---
 
 ## Configuration
 
-1. Get your API key from [platform.deepseek.com](https://platform.deepseek.com)
-2. Open VS Code Settings (`Ctrl+,` / `Cmd+,`)
-3. Search for "DeepSeek" and enter your API key
-
-### Available Settings
-
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `deepseek.apiKey` | - | Your DeepSeek API key |
-| `deepseek.model` | `deepseek-chat` | Model to use (`deepseek-chat` or `deepseek-reasoner`) |
-| `deepseek.temperature` | `0.7` | Creativity level (0-2) |
-| `deepseek.maxTokens` | `4096` | Max tokens per response (up to 64K for reasoner) |
-| `deepseek.maxToolCalls` | `25` | Max tool calls per request (chat model only) |
-| `deepseek.enableCompletions` | `true` | Enable inline code completions |
-| `deepseek.autoFormat` | `true` | Auto-format code responses |
-| `deepseek.showStatusBar` | `true` | Show token usage in status bar |
-| `deepseek.maxHistorySessions` | `100` | Max chat sessions to retain |
-| `deepseek.tavilyApiKey` | - | Tavily API key for web search |
-| `deepseek.tavilySearchDepth` | `basic` | Search depth (`basic` or `advanced`) |
+| `deepseek.model` | `deepseek-chat` | Active model: `deepseek-chat` (V3) or `deepseek-reasoner` (R1) |
+| `deepseek.temperature` | `0.7` | Creativity (0-2). Chat model only — Reasoner uses fixed temperature |
+| `deepseek.maxTokensChatModel` | `8192` | Max output tokens for Chat (V3). Range: 256-8,192 |
+| `deepseek.maxTokensReasonerModel` | `65536` | Max output tokens for Reasoner (R1). Range: 256-65,536 |
+| `deepseek.maxToolCalls` | `100` | Tool call iteration limit (Chat model). 100 = no limit |
+| `deepseek.maxShellIterations` | `100` | Shell command iteration limit (Reasoner). 100 = no limit |
+| `deepseek.editMode` | `manual` | How code changes apply: `manual`, `ask`, or `auto` |
+| `deepseek.webSearchMode` | `auto` | Web search: `off`, `manual` (forced), or `auto` |
+| `deepseek.tavilySearchDepth` | `basic` | Search depth: `basic` (1 credit) or `advanced` (2 credits) |
+| `deepseek.allowAllShellCommands` | `false` | Bypass command approval system |
+| `deepseek.logLevel` | `WARN` | Extension log level: `DEBUG`, `INFO`, `WARN`, `ERROR`, `OFF` |
+| `deepseek.tracing.enabled` | `true` | Enable trace collection for debugging |
+| `deepseek.devMode` | `false` | Enable developer tools (inspector panel) |
 
-## Usage
+---
 
-### Chat
-1. Click the DeepSeek Moby icon in the activity bar
-2. Type your message and press Enter
-3. Use the History panel to browse and search past conversations
+## Commands
 
-### Code Actions
-1. Select code in the editor
-2. Right-click and choose a DeepSeek action from the context menu
+Open the Command Palette (`Ctrl+Shift+P`) and search "DeepSeek Moby":
 
-### Commands
-Open the command palette (`Ctrl+Shift+P` / `Cmd+Shift+P`) and search for "DeepSeek Moby" to see all available commands.
+| Command | Description |
+|---------|-------------|
+| **Open Chat** | Open the chat sidebar |
+| **New Chat** | Start a fresh conversation |
+| **Switch Model** | Toggle between Chat (V3) and Reasoner (R1) |
+| **Set API Key** | Configure your DeepSeek API key |
+| **Set Tavily API Key** | Configure web search API key |
+| **Show Chat History** | Browse, search, and manage past conversations |
+| **Export All Chat History** | Export all sessions as JSON, Markdown, or text |
+| **Import Chat History** | Load sessions from a JSON file |
+| **Clear All Chat History** | Delete all saved conversations |
+| **Export Current Session** | Export the active session |
+| **Command Rules** | View and edit shell command approval rules |
+| **Statistics** | View token usage and API call stats |
+| **Show Log** | Open the extension output channel |
+| **Export Logs** | Export logs and traces for bug reports |
+| **Show Pending Diffs** | Quick pick for pending code changes (`Ctrl+Shift+D`) |
+| **Start Drawing Server** | Launch the drawing pad server |
+| **Stop Drawing Server** | Shut down the drawing server |
+| **Manage Encryption Key** | View or regenerate the database encryption key |
 
-## Privacy
+---
 
-- API keys are stored locally in VS Code settings
-- Conversations are stored locally on your machine
-- Data is only sent to DeepSeek API (and Tavily if web search is enabled)
+## Architecture
+
+Moby is built with a layered architecture designed for reliability and extensibility:
+
+```
+┌─────────────────────────────────────────────────┐
+│  VS Code Extension (Node.js)                     │
+│  ┌─────────────┐  ┌──────────────────────────┐  │
+│  │ DeepSeek API │  │ Managers                  │  │
+│  │  Client      │  │  ├─ RequestOrchestrator   │  │
+│  │  (Chat, R1,  │  │  ├─ DiffManager           │  │
+│  │   FIM)       │  │  ├─ WebSearchManager      │  │
+│  └─────────────┘  │  ├─ FileContextManager    │  │
+│                    │  ├─ CommandApprovalMgr    │  │
+│  ┌─────────────┐  │  ├─ PlanManager           │  │
+│  │ SQLCipher DB │  │  └─ SettingsManager       │  │
+│  │ (Encrypted)  │  └──────────────────────────┘  │
+│  └─────────────┘                                 │
+│         ↕ postMessage                            │
+│  ┌───────────────────────────────────────────┐   │
+│  │  Webview (Browser)                         │   │
+│  │  ┌─────────────────────────────────────┐  │   │
+│  │  │ Actor System (Shadow DOM)            │  │   │
+│  │  │  ├─ EventStateManager (pub/sub)      │  │   │
+│  │  │  ├─ VirtualListActor (pooling)       │  │   │
+│  │  │  ├─ MessageTurnActor (per-message)   │  │   │
+│  │  │  ├─ ToolbarShadowActor              │  │   │
+│  │  │  ├─ InputAreaShadowActor            │  │   │
+│  │  │  └─ PopupShadowActor (base)         │  │   │
+│  │  └─────────────────────────────────────┘  │   │
+│  └───────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────┘
+```
+
+**Key design decisions:**
+
+- **Event-sourced persistence** — Conversations stored as append-only event logs. Enables forking (zero-copy via join table), compression snapshots, and reliable history restore
+- **Actor model UI** — Each UI component is a ShadowActor with its own shadow root, styles, and lifecycle. Communication via EventStateManager pub/sub. No global CSS, no DOM conflicts
+- **Coordinator pattern** — ChatProvider routes messages between managers. Managers own their domain logic and communicate via VS Code EventEmitters
+- **Streaming pipeline** — ContentTransformBuffer handles token-by-token streaming with progressive flush (emit safe content immediately, hold back potential `<shell>` tags until complete)
+
+For contributors, see the full architecture documentation in `docs/architecture/`.
+
+---
+
+## Privacy & Security
+
+- **API keys** stored in VS Code's encrypted SecretStorage (OS keychain)
+- **Conversations** stored locally in an AES-256 encrypted SQLite database
+- **No telemetry** — no data sent anywhere except the DeepSeek API (and Tavily if web search is enabled)
+- **Shell commands** gated by an approval system with user-configurable rules
+- **Shadow DOM isolation** prevents other extensions from accessing chat content
+
+---
+
+## Roadmap
+
+Planned features for future releases:
+
+- **Custom model endpoints** — Connect to local models (Ollama, LM Studio) or any OpenAI-compatible API
+- **Sub-agent parallelization** — Multiple LLM calls running concurrently for complex tasks
+- **Plugin system** — Extensible tool definitions for domain-specific workflows
+
+---
 
 ## License
 
-AGPL
+[AGPL-3.0](LICENSE.txt)

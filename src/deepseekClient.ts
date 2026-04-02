@@ -1,6 +1,5 @@
 import * as vscode from 'vscode';
 import { HttpClient, HttpError, createStreamReader } from './utils/httpClient';
-import { FormattingEngine } from './utils/formatting';
 import { ConfigManager } from './utils/config';
 import { logger } from './utils/logger';
 import { TokenCounter, EstimationTokenCounter, countRequestTokens } from './services/tokenCounter';
@@ -63,15 +62,6 @@ export interface ChatResponse {
   };
 }
 
-export interface FIMResponse {
-  completion: string;
-  usage?: {
-    prompt_tokens: number;
-    completion_tokens: number;
-    total_tokens: number;
-  };
-}
-
 export interface ChatOptions {
   tools?: Tool[];
   jsonMode?: boolean;
@@ -82,8 +72,6 @@ export interface ChatOptions {
 
 export class DeepSeekClient {
   private httpClient: HttpClient;
-  private betaHttpClient: HttpClient;
-  private formattingEngine: FormattingEngine;
   private config: ConfigManager;
   private context: vscode.ExtensionContext;
   private modelOverride: string | null = null;
@@ -93,7 +81,6 @@ export class DeepSeekClient {
   constructor(context: vscode.ExtensionContext, tokenCounter?: TokenCounter) {
     this.context = context;
     this.config = ConfigManager.getInstance();
-    this.formattingEngine = new FormattingEngine();
     this.tokenCounter = tokenCounter ?? new EstimationTokenCounter();
     this.contextBuilder = new ContextBuilder(this.tokenCounter);
 
@@ -106,15 +93,11 @@ export class DeepSeekClient {
       }
     });
 
-    // Beta API endpoint (for FIM)
-    this.betaHttpClient = new HttpClient({
-      baseURL: 'https://api.deepseek.com/beta',
-      timeout: 60000,
-      headers: {
-        'Content-Type': 'application/json',
-      }
-    });
+  }
 
+  async isApiKeyConfigured(): Promise<boolean> {
+    const key = await this.context.secrets.get('deepseek.apiKey');
+    return !!key;
   }
 
   private async getApiKey(): Promise<string> {
@@ -148,6 +131,14 @@ export class DeepSeekClient {
     return this.isReasonerModel() ? 65536 : 8192;
   }
 
+  /** Read the per-model maxTokens from VS Code config. */
+  private getConfigMaxTokens(): number {
+    if (this.isReasonerModel()) {
+      return this.config.get<number>('maxTokensReasonerModel') ?? 65536;
+    }
+    return this.config.get<number>('maxTokensChatModel') ?? 8192;
+  }
+
   /**
    * Clamp max_tokens to the model's valid range [1, modelMax]
    */
@@ -166,7 +157,7 @@ export class DeepSeekClient {
       const apiKey = await this.getApiKey();
       const model = this.getModel();
       const temperature = options?.temperature ?? this.config.get<number>('temperature') ?? 0.7;
-      const rawMaxTokens = options?.maxTokens ?? this.config.get<number>('maxTokens') ?? 8192;
+      const rawMaxTokens = options?.maxTokens ?? this.getConfigMaxTokens();
       const maxTokens = this.clampMaxTokens(rawMaxTokens);
 
       const requestMessages = [...messages].map(m => ({
@@ -242,10 +233,7 @@ export class DeepSeekClient {
       const apiKey = await this.getApiKey();
       const model = this.getModel();
       const temperature = options?.temperature ?? this.config.get<number>('temperature') ?? 0.7;
-      // Reasoner model can use up to 64K for reasoning chain + code edits
-      // Chat model supports up to 8K output
-      const defaultMaxTokens = this.isReasonerModel() ? 16384 : 8192;
-      const rawMaxTokens = options?.maxTokens ?? this.config.get<number>('maxTokens') ?? defaultMaxTokens;
+      const rawMaxTokens = options?.maxTokens ?? this.getConfigMaxTokens();
       const maxTokens = this.clampMaxTokens(rawMaxTokens);
 
       const requestMessages = [...messages].map(m => ({
@@ -444,156 +432,6 @@ export class DeepSeekClient {
       : 'Respond with valid JSON only.';
 
     return this.chat(messages, jsonSystemPrompt, { jsonMode: true });
-  }
-
-  // FIM (Fill-in-Middle) completion - uses beta endpoint
-  async fimCompletion(
-    prefix: string,
-    suffix: string,
-    maxTokens: number = 128
-  ): Promise<FIMResponse> {
-    try {
-      const apiKey = await this.getApiKey();
-
-      const response = await this.betaHttpClient.post<{
-        choices: Array<{ text?: string }>;
-        usage?: FIMResponse['usage'];
-      }>('/completions', {
-        model: 'deepseek-chat',
-        prompt: prefix,
-        suffix: suffix,
-        max_tokens: maxTokens,
-        temperature: 0.2,
-        stop: ['\n\n', '```']
-      }, {
-        headers: {
-          'Authorization': `Bearer ${apiKey}`
-        }
-      });
-
-      const completion = response.data.choices[0]?.text || '';
-      const usage = response.data.usage;
-
-      return { completion, usage };
-    } catch (error: unknown) {
-      const httpError = error as HttpError;
-      const errorData = httpError.response?.data as { error?: { message?: string } } | undefined;
-      logger.apiError('DeepSeek FIM error', errorData?.error?.message || httpError.message);
-      throw this.handleError(httpError);
-    }
-  }
-
-  // Get code completions using FIM
-  async getCodeCompletions(prompt: string, language: string, maxTokens: number = 100): Promise<string[]> {
-    try {
-      const apiKey = await this.getApiKey();
-
-      // Use the beta endpoint for FIM
-      const response = await this.betaHttpClient.post<{
-        choices: Array<{ text: string }>;
-      }>('/completions', {
-        model: 'deepseek-chat',
-        prompt,
-        max_tokens: maxTokens,
-        temperature: 0.2,
-        stop: ['\n\n', '```', '\n#', '\n//', '\n/*']
-      }, {
-        headers: {
-          'Authorization': `Bearer ${apiKey}`
-        }
-      });
-
-      const completions = response.data.choices.map((choice) => {
-        let completion = choice.text;
-
-        // Apply formatting if enabled
-        if (this.config.get<boolean>('autoFormat')) {
-          completion = this.formattingEngine.formatCode(completion, language);
-        }
-
-        return completion;
-      });
-
-      return completions;
-    } catch (error: unknown) {
-      const httpError = error as HttpError;
-      logger.apiError('DeepSeek completions error', httpError.message);
-      throw this.handleError(httpError);
-    }
-  }
-
-  // Context-aware FIM completion for editor
-  async getContextualFIMCompletion(
-    editor: vscode.TextEditor,
-    position: vscode.Position
-  ): Promise<string> {
-    const document = editor.document;
-    const text = document.getText();
-    const offset = document.offsetAt(position);
-
-    const prefix = text.substring(0, offset);
-    const suffix = text.substring(offset);
-
-    // Limit context size
-    const maxPrefixChars = 4000;
-    const maxSuffixChars = 2000;
-
-    const limitedPrefix = prefix.length > maxPrefixChars
-      ? prefix.substring(prefix.length - maxPrefixChars)
-      : prefix;
-    const limitedSuffix = suffix.length > maxSuffixChars
-      ? suffix.substring(0, maxSuffixChars)
-      : suffix;
-
-    const result = await this.fimCompletion(limitedPrefix, limitedSuffix, 128);
-    return result.completion;
-  }
-
-  // Formatting methods
-  async formatCodeResponse(code: string, language: string, context?: string): Promise<string> {
-    const autoFormat = this.config.get<boolean>('autoFormat');
-    const useLanguageFormatter = this.config.get<boolean>('useLanguageFormatter');
-
-    let formattedCode = code;
-
-    // Step 1: Clean up markdown code blocks
-    formattedCode = this.formattingEngine.extractCodeFromMarkdown(formattedCode);
-
-    // Step 2: Apply DeepSeek's smart formatting
-    if (autoFormat) {
-      formattedCode = this.formattingEngine.formatCode(formattedCode, language, context);
-    }
-
-    // Step 3: Use VS Code's formatter for final polish
-    if (useLanguageFormatter) {
-      formattedCode = await this.formattingEngine.applyVSCodeFormatter(formattedCode, language);
-    }
-
-    return formattedCode;
-  }
-
-  async getContextualCompletion(editor: vscode.TextEditor, position: vscode.Position): Promise<string> {
-    const document = editor.document;
-    const language = document.languageId;
-
-    // Get context around cursor
-    const line = position.line;
-    const startLine = Math.max(0, line - 10);
-    const endLine = Math.min(document.lineCount, line + 10);
-
-    let context = '';
-    for (let i = startLine; i < endLine; i++) {
-      context += document.lineAt(i).text + '\n';
-    }
-
-    // Get current line prefix
-    const lineText = document.lineAt(line).text;
-    const prefix = lineText.substring(0, position.character);
-
-    const prompt = `${context}\n// Complete the following:\n${prefix}`;
-
-    const completions = await this.getCodeCompletions(prompt, language, 50);
-    return completions[0] || '';
   }
 
   // Token estimation for chat history (uses calibrating estimation counter)

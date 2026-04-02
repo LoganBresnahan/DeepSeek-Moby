@@ -35,11 +35,11 @@ vi.mock('vscode', async (importOriginal) => {
             'temperature': 0.7,
             'maxToolCalls': 100,
             'maxShellIterations': 100,
-            'maxTokens': 8192,
+            'maxTokensChatModel': 8192,
+            'maxTokensReasonerModel': 65536,
             'logLevel': 'WARN',
             'webviewLogLevel': 'WARN',
             'tracing.enabled': true,
-            'logColors': true,
             'systemPrompt': '',
             'autoSaveHistory': true,
             'allowAllShellCommands': false,
@@ -102,12 +102,6 @@ describe('SettingsManager', () => {
       expect(configStore.get('maxToolCalls')).toBe(10);
     });
 
-    it('should update maxTokens in VS Code config', async () => {
-      await manager.updateSettings({ maxTokens: 4096 });
-
-      expect(configStore.get('maxTokens')).toBe(4096);
-    });
-
     it('should update autoSaveHistory in VS Code config', async () => {
       await manager.updateSettings({ autoSaveHistory: false });
 
@@ -138,12 +132,10 @@ describe('SettingsManager', () => {
     it('should handle multiple settings at once', async () => {
       await manager.updateSettings({
         temperature: 0.3,
-        maxTokens: 2048,
         maxToolCalls: 5
       });
 
       expect(configStore.get('temperature')).toBe(0.3);
-      expect(configStore.get('maxTokens')).toBe(2048);
       expect(configStore.get('maxToolCalls')).toBe(5);
     });
 
@@ -166,18 +158,6 @@ describe('SettingsManager', () => {
       expect(configStore.get('logLevel')).toBe('DEBUG');
     });
 
-    it('should update logColors in VS Code config', async () => {
-      await manager.updateLogSettings({ logColors: false });
-
-      expect(configStore.get('logColors')).toBe(false);
-    });
-
-    it('should handle both settings at once', async () => {
-      await manager.updateLogSettings({ logLevel: 'ERROR', logColors: false });
-
-      expect(configStore.get('logLevel')).toBe('ERROR');
-      expect(configStore.get('logColors')).toBe(false);
-    });
   });
 
   // ── updateWebviewLogSettings ──
@@ -230,7 +210,6 @@ describe('SettingsManager', () => {
       expect(snapshot.logLevel).toBe('WARN');
       expect(snapshot.webviewLogLevel).toBe('WARN');
       expect(snapshot.tracingEnabled).toBe(true);
-      expect(snapshot.logColors).toBe(true);
       expect(snapshot.systemPrompt).toBe('');
       expect(snapshot.autoSaveHistory).toBe(true);
       expect(snapshot.allowAllCommands).toBe(false);
@@ -239,13 +218,15 @@ describe('SettingsManager', () => {
     it('should reflect updated values from config store', () => {
       configStore.set('model', 'deepseek-reasoner');
       configStore.set('temperature', 0.3);
-      configStore.set('maxTokens', 2048);
+      configStore.set('maxTokensReasonerModel', 32768);
+      // Mock client must reflect the model for per-model maxTokens lookup
+      (mockClient.getModel as ReturnType<typeof vi.fn>).mockReturnValue('deepseek-reasoner');
 
       const snapshot = manager.getCurrentSettings();
 
       expect(snapshot.model).toBe('deepseek-reasoner');
       expect(snapshot.temperature).toBe(0.3);
-      expect(snapshot.maxTokens).toBe(2048);
+      expect(snapshot.maxTokens).toBe(32768);
     });
 
     it('should include webSearch defaults', () => {
@@ -268,7 +249,7 @@ describe('SettingsManager', () => {
       // Set some values first
       configStore.set('logLevel', 'DEBUG');
       configStore.set('temperature', 0.3);
-      configStore.set('maxTokens', 2048);
+      configStore.set('maxTokensChatModel', 4096);
 
       await manager.resetToDefaults();
 
@@ -276,9 +257,9 @@ describe('SettingsManager', () => {
       expect(configStore.has('logLevel')).toBe(false);
       expect(configStore.has('webviewLogLevel')).toBe(false);
       expect(configStore.has('tracing.enabled')).toBe(false);
-      expect(configStore.has('logColors')).toBe(false);
       expect(configStore.has('systemPrompt')).toBe(false);
-      expect(configStore.has('maxTokens')).toBe(false);
+      expect(configStore.has('maxTokensChatModel')).toBe(false);
+      expect(configStore.has('maxTokensReasonerModel')).toBe(false);
       expect(configStore.has('maxToolCalls')).toBe(false);
       expect(configStore.has('maxShellIterations')).toBe(false);
       expect(configStore.has('editMode')).toBe(false);

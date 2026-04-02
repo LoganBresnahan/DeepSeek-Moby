@@ -98,6 +98,8 @@ export class ToolbarShadowActor extends ShadowActor {
   private _editMode: EditMode = 'manual';
   private _webSearchMode: WebSearchMode = 'auto';
   private _webSearchEnabled = false;
+  private _webSearchConfigured = true;
+  private _apiKeyConfigured = true;
   private _filesModalOpen = false;
   private _planEnabled = false;
   private _streaming = false;
@@ -135,6 +137,10 @@ export class ToolbarShadowActor extends ShadowActor {
     this.renderToolbar();
     this.setupEventHandlers();
     this.setupGlobalHandlers();
+
+    // Apply initial button states (before settings arrive from extension)
+    this.updateSearchButtonDisplay();
+    this.updateSendButtonDisplay();
   }
 
   // ============================================
@@ -248,6 +254,11 @@ export class ToolbarShadowActor extends ShadowActor {
     if (sendBtn && stopBtn) {
       sendBtn.style.display = streaming ? 'none' : 'flex';
       stopBtn.style.display = streaming ? 'flex' : 'none';
+
+      // Re-apply API key disabled state when send button becomes visible again
+      if (!streaming) {
+        this.updateSendButtonDisplay();
+      }
     }
 
     // Disable edit mode and plan buttons during streaming
@@ -303,17 +314,23 @@ export class ToolbarShadowActor extends ShadowActor {
     const searchBtn = this.query<HTMLButtonElement>('.search-btn');
     if (!searchBtn) return;
 
-    searchBtn.classList.remove('active', 'mode-auto', 'mode-manual');
+    searchBtn.classList.remove('active', 'mode-auto', 'mode-manual', 'disabled');
+
+    if (!this._webSearchConfigured) {
+      searchBtn.classList.add('disabled');
+      searchBtn.title = 'Web search: Tavily API key not set';
+      searchBtn.disabled = true;
+      return;
+    }
+
+    searchBtn.disabled = false;
 
     if (this._webSearchMode === 'auto') {
       searchBtn.classList.add('mode-auto');
       searchBtn.title = 'Web search: Auto (LLM decides)';
     } else if (this._webSearchMode === 'manual') {
-      if (this._webSearchEnabled) {
-        searchBtn.classList.add('active');
-      }
-      searchBtn.classList.add('mode-manual');
-      searchBtn.title = `Web search: Manual (${this._webSearchEnabled ? 'enabled' : 'disabled'})`;
+      searchBtn.classList.add('active', 'mode-manual');
+      searchBtn.title = 'Web search: Forced (every message)';
     } else {
       searchBtn.title = 'Web search: Off';
     }
@@ -367,15 +384,45 @@ export class ToolbarShadowActor extends ShadowActor {
   }
 
   setWebSearchEnabled(enabled: boolean): void {
-    this._webSearchEnabled = enabled;
+    // In auto/off mode, ignore enabled state — only manual (forced) mode uses it
+    if (this._webSearchMode !== 'manual') {
+      this._webSearchEnabled = false;
+    } else {
+      this._webSearchEnabled = enabled;
+    }
     this.updateSearchButtonDisplay();
-    this.publish({ 'toolbar.webSearchEnabled': enabled });
+    this.publish({ 'toolbar.webSearchEnabled': this._webSearchEnabled });
   }
 
   setWebSearchMode(mode: WebSearchMode): void {
     this._webSearchMode = mode;
     this.updateSearchButtonDisplay();
     this.publish({ 'toolbar.webSearchMode': mode });
+  }
+
+  setWebSearchConfigured(configured: boolean): void {
+    this._webSearchConfigured = configured;
+    this.updateSearchButtonDisplay();
+  }
+
+  setApiKeyConfigured(configured: boolean): void {
+    this._apiKeyConfigured = configured;
+    this.updateSendButtonDisplay();
+  }
+
+  private updateSendButtonDisplay(): void {
+    const sendBtn = this.query<HTMLButtonElement>('.send-btn');
+    if (!sendBtn) return;
+
+    if (!this._apiKeyConfigured) {
+      sendBtn.disabled = true;
+      sendBtn.classList.add('disabled');
+      sendBtn.title = 'Send: DeepSeek API key not set';
+    } else {
+      sendBtn.disabled = false;
+      sendBtn.classList.remove('disabled');
+      sendBtn.title = 'Send message';
+    }
   }
 
   closeFilesModal(): void {

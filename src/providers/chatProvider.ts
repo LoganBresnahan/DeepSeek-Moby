@@ -33,6 +33,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
   // Message queuing during post-response summarization
   private _summarizing = false;
   private _pendingMessages: Array<{ message: string; attachments?: Array<{ content: string; name: string; size: number }> }> = [];
+  private _lastPendingDiffCount = 0;
   private webSearchManager: WebSearchManager;
   private fileContextManager: FileContextManager;
   private diffManager: DiffManager;
@@ -156,7 +157,13 @@ export class ChatProvider implements vscode.WebviewViewProvider {
 
     // DiffManager → webview
     this.diffManager.onDiffListChanged(data => {
-      this._view?.webview.postMessage({ type: 'diffListChanged', diffs: data.diffs, editMode: data.editMode, source: 'shell' });
+      // Detect diff removal: if pending diffs decreased, a diff tab was closed
+      const pendingCount = data.diffs.filter(d => d.status === 'pending').length;
+      if (pendingCount < this._lastPendingDiffCount) {
+        this._view?.webview.postMessage({ type: 'diffClosed' });
+      }
+      this._lastPendingDiffCount = pendingCount;
+      this._view?.webview.postMessage({ type: 'diffListChanged', diffs: data.diffs, editMode: data.editMode, source: 'diff-status' });
     });
     this.diffManager.onAutoAppliedFilesChanged(data => {
       this._view?.webview.postMessage({ type: 'diffListChanged', diffs: data.diffs, editMode: data.editMode, source: 'diff-engine' });
@@ -455,14 +462,15 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         case 'setShellIterations':
           await this.settingsManager.updateSettings({ maxShellIterations: data.shellIterations });
           break;
-        case 'setMaxTokens':
-          await this.settingsManager.updateSettings({ maxTokens: data.maxTokens });
+        case 'setMaxTokens': {
+          const model = data.model as string || this.deepSeekClient.getModel();
+          const configKey = model === 'deepseek-reasoner' ? 'maxTokensReasonerModel' : 'maxTokensChatModel';
+          const config = vscode.workspace.getConfiguration('deepseek');
+          await config.update(configKey, data.maxTokens, vscode.ConfigurationTarget.Global);
           break;
+        }
         case 'setLogLevel':
           await this.settingsManager.updateLogSettings({ logLevel: data.logLevel });
-          break;
-        case 'setLogColors':
-          await this.settingsManager.updateLogSettings({ logColors: data.enabled });
           break;
         case 'setWebviewLogLevel':
           await this.settingsManager.updateWebviewLogSettings({ webviewLogLevel: data.logLevel });
@@ -874,6 +882,11 @@ export class ChatProvider implements vscode.WebviewViewProvider {
   // ── Settings & Search Helpers ──
 
   public async clearConversation() {
+    // Block if currently streaming — stop first, then clear
+    if (this.requestOrchestrator.isGenerating()) {
+      this.requestOrchestrator.stopGeneration();
+    }
+
     // Clear current conversation but keep session
     if (this._view) {
       this._view.webview.postMessage({ type: 'clearChat' });
@@ -909,6 +922,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
   private async sendCurrentSettings() {
     const snapshot = this.settingsManager.getCurrentSettings();
     const wsState = await this.webSearchManager.getSettings();
+    const apiKeyConfigured = await this.deepSeekClient.isApiKeyConfigured();
     const config = vscode.workspace.getConfiguration('deepseek');
     const editMode = config.get<string>('editMode') || 'manual';
 
@@ -919,13 +933,15 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       this._view.webview.postMessage({
         type: 'settings',
         ...snapshot,
+        apiKeyConfigured,
         systemPrompt: this.savedPromptManager.getActiveContent(),
         webSearch: {
           searchDepth: wsState.settings.searchDepth,
           creditsPerPrompt: wsState.settings.creditsPerPrompt,
           maxResultsPerSearch: wsState.settings.maxResultsPerSearch,
           cacheDuration: wsState.settings.cacheDuration,
-          mode: wsState.mode
+          mode: wsState.mode,
+          configured: wsState.configured
         }
       });
       // Send edit mode separately
@@ -937,12 +953,13 @@ export class ChatProvider implements vscode.WebviewViewProvider {
   }
 
   private async sendWebSearchSettings() {
-    const { enabled, settings, configured } = await this.webSearchManager.getSettings();
+    const { enabled, settings, configured, mode } = await this.webSearchManager.getSettings();
     this._view?.webview.postMessage({
       type: 'webSearchSettings',
       enabled,
       settings,
-      configured
+      configured,
+      mode
     });
   }
 
@@ -1145,6 +1162,11 @@ export class ChatProvider implements vscode.WebviewViewProvider {
   }
 
   public async loadSession(sessionId: string) {
+    // Stop active generation before switching sessions
+    if (this.requestOrchestrator.isGenerating()) {
+      this.requestOrchestrator.stopGeneration();
+    }
+
     const session = await this.conversationManager.getSession(sessionId);
     logger.info(`[loadSession] session=${sessionId}, found=${!!session}, view=${!!this._view}`);
     if (session && this._view) {
@@ -1360,11 +1382,11 @@ export class ChatProvider implements vscode.WebviewViewProvider {
                   <path d="M8 1a7 7 0 1 1 0 14A7 7 0 0 1 8 1zm0 1a6 6 0 1 0 0 12A6 6 0 0 0 8 2zm-.5 2h1v4.25l2.85 1.65-.5.85L7.5 8.75V4z"/>
                 </svg>
               </button>
-              <button id="inspectorBtn" class="inspector-btn" title="UI Inspector">
+              ${isDevMode ? `<button id="inspectorBtn" class="inspector-btn" title="UI Inspector">
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
                   <path d="M14.4 3.6L12.5 5.5a2.5 2.5 0 0 1-3.5 3.5l-5 5a1.4 1.4 0 0 1-2-2l5-5a2.5 2.5 0 0 1 3.5-3.5l1.9-1.9c.2-.2.5-.2.7 0l.3.3c.2.2.2.5 0 .7z"/>
                 </svg>
-              </button>
+              </button>` : ''}
               <!-- Commands dropdown - button acts as click target, parent is Shadow DOM host -->
               <div class="commands-selector">
                 <button id="commandsBtn" class="commands-btn" title="Commands">

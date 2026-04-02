@@ -163,10 +163,10 @@ export function commandsCreateFiles(commands: ShellCommand[]): boolean {
  * Minimal validation - only block truly catastrophic operations
  *
  * @param command - The shell command to validate
- * @param allowAll - If true, skip validation ("Walk on the Wild Side" mode)
+ * @param allowAll - If true, skip validation (allowAllShellCommands setting)
  */
 export function validateCommand(command: string, allowAll: boolean = false): { valid: boolean; reason?: string } {
-  // "Walk on the Wild Side" - allow all commands if setting is enabled
+  // Allow all commands if setting is enabled
   if (allowAll) {
     return { valid: true };
   }

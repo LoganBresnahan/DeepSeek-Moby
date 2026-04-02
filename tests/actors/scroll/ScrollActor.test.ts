@@ -40,10 +40,8 @@ describe('ScrollActor', () => {
       expect(state.nearBottom).toBe(true);
     });
 
-    it('injects styles via EventStateManager', () => {
-      expect(manager.hasStyles('scroll')).toBe(true);
-      const styleTag = document.getElementById('actor-styles');
-      expect(styleTag).toBeTruthy();
+    it('initializes without style injection (no scroll button styles needed)', () => {
+      expect(manager.hasStyles('scroll')).toBe(false);
     });
   });
 

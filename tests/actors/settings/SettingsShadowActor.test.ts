@@ -29,12 +29,15 @@ describe('SettingsShadowActor', () => {
     element = document.createElement('div');
     element.id = 'settings-container';
     document.body.appendChild(element);
+    // Enable devMode so debug section renders in tests
+    document.body.setAttribute('data-dev-mode', 'true');
     mockVSCode = createMockVSCode();
   });
 
   afterEach(() => {
     actor?.destroy();
     document.body.innerHTML = '';
+    document.body.removeAttribute('data-dev-mode');
   });
 
   describe('Shadow DOM creation', () => {

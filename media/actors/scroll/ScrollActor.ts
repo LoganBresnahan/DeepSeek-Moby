@@ -17,7 +17,6 @@
 import { EventStateActor } from '../../state/EventStateActor';
 import { EventStateManager } from '../../state/EventStateManager';
 import type { ActorConfig } from '../../state/types';
-import { scrollStyles as styles } from './styles';
 
 export interface ScrollState {
   autoScroll: boolean;
@@ -64,8 +63,6 @@ export class ScrollActor extends EventStateActor {
   // Debounce timer for scroll trailing
   private _trailTimer: ReturnType<typeof setTimeout> | null = null;
 
-  // Scroll-to-bottom button element
-  private _scrollButton: HTMLButtonElement | null = null;
 
   constructor(manager: EventStateManager, element: HTMLElement) {
     const config: ActorConfig = {
@@ -85,7 +82,6 @@ export class ScrollActor extends EventStateActor {
     };
 
     super(config);
-    manager.injectStyles('scroll', styles);
     this.setupScrollTracking();
   }
 
@@ -150,8 +146,6 @@ export class ScrollActor extends EventStateActor {
       characterData: true
     });
 
-    // Create scroll-to-bottom button
-    this.createScrollButton();
   }
 
   /**
@@ -166,52 +160,6 @@ export class ScrollActor extends EventStateActor {
         this._resizeObserver!.observe(child);
       }
     });
-  }
-
-  /**
-   * Create the scroll-to-bottom button
-   */
-  private createScrollButton(): void {
-    if (!this._scrollContainer) return;
-
-    this._scrollButton = document.createElement('button');
-    this._scrollButton.className = 'scroll-to-bottom';
-    this._scrollButton.setAttribute('aria-label', 'Scroll to bottom');
-    this._scrollButton.setAttribute('title', 'Scroll to bottom');
-
-    this._scrollButton.addEventListener('click', () => {
-      this.scrollToBottom(true);
-    });
-
-    // Insert button near the scroll container
-    // Find parent that can hold absolute positioned element
-    const parent = this._scrollContainer.parentElement;
-    if (parent) {
-      // Ensure parent is positioned for absolute child
-      const parentPosition = getComputedStyle(parent).position;
-      if (parentPosition === 'static') {
-        parent.style.position = 'relative';
-      }
-      parent.appendChild(this._scrollButton);
-    }
-  }
-
-  /**
-   * Update scroll button visibility
-   */
-  private updateScrollButtonVisibility(): void {
-    if (!this._scrollButton) return;
-
-    // Show button when:
-    // 1. Streaming is active
-    // 2. User has scrolled up (not near bottom)
-    const shouldShow = this._isStreaming && this._userScrolled && !this._nearBottom;
-
-    if (shouldShow) {
-      this._scrollButton.classList.add('visible');
-    } else {
-      this._scrollButton.classList.remove('visible');
-    }
   }
 
   /**
@@ -240,7 +188,7 @@ export class ScrollActor extends EventStateActor {
         'scroll.userScrolled': false,
         'scroll.autoScroll': true
       });
-      this.updateScrollButtonVisibility();
+  
     }
 
     // Handle content shrinking (jarring collapse)
@@ -323,7 +271,7 @@ export class ScrollActor extends EventStateActor {
     }
 
     // Update button visibility
-    this.updateScrollButtonVisibility();
+
   }
 
   private handleMessageCount(): void {
@@ -372,7 +320,7 @@ export class ScrollActor extends EventStateActor {
       'scroll.userScrolled': true,
       'scroll.autoScroll': false
     });
-    this.updateScrollButtonVisibility();
+
   }
 
   private handleScroll(): void {
@@ -395,7 +343,7 @@ export class ScrollActor extends EventStateActor {
           'scroll.autoScroll': true,
           'scroll.nearBottom': true
         });
-        this.updateScrollButtonVisibility();
+    
       }
     }
 
@@ -455,7 +403,7 @@ export class ScrollActor extends EventStateActor {
     });
 
     // Hide the scroll button
-    this.updateScrollButtonVisibility();
+
   }
 
   /**
@@ -552,11 +500,6 @@ export class ScrollActor extends EventStateActor {
     }
 
     // Remove scroll button
-    if (this._scrollButton) {
-      this._scrollButton.remove();
-      this._scrollButton = null;
-    }
-
     this._scrollHandler = null;
     this._mouseMoveHandler = null;
     this._scrollContainer = null;
