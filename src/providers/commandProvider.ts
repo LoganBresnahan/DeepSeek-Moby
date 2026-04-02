@@ -122,7 +122,7 @@ export class CommandProvider {
     });
 
     if (selected) {
-      vscode.commands.executeCommand('deepseek.showChatHistory');
+      vscode.commands.executeCommand('moby.showChatHistory');
     }
   }
 

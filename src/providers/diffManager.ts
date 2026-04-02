@@ -74,7 +74,7 @@ export class DiffManager {
       vscode.StatusBarAlignment.Left,
       100
     );
-    this.diffStatusBarItem.command = 'deepseek.showDiffQuickPick';
+    this.diffStatusBarItem.command = 'moby.showDiffQuickPick';
     this.diffStatusBarItem.tooltip = 'Click to review pending diffs';
     this.disposables.push(this.diffStatusBarItem);
 
@@ -154,7 +154,7 @@ export class DiffManager {
   setEditMode(mode: 'manual' | 'ask' | 'auto'): void {
     this.editMode = mode;
     logger.info(`[DiffManager] Edit mode changed to: ${mode}`);
-    const config = vscode.workspace.getConfiguration('deepseek');
+    const config = vscode.workspace.getConfiguration('moby');
     config.update('editMode', mode, vscode.ConfigurationTarget.Global);
   }
 

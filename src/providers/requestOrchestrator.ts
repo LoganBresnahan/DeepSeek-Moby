@@ -209,7 +209,7 @@ export class RequestOrchestrator {
         // set _approvalPending BEFORE processing any segments (including text before the shell tag).
         // This prevents the race condition where text fires to the UI before the async approval starts.
         if (!this._approvalPending) {
-          const allowAllCommands = vscode.workspace.getConfiguration('deepseek')
+          const allowAllCommands = vscode.workspace.getConfiguration('moby')
             .get<boolean>('allowAllShellCommands') ?? false;
 
           if (!allowAllCommands && this.commandApprovalManager) {
@@ -686,7 +686,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
       this._onShellExecuting.fire({ commands: shellPayload });
 
       // Command approval + execution for each parsed command
-      const allowAllCommands = vscode.workspace.getConfiguration('deepseek')
+      const allowAllCommands = vscode.workspace.getConfiguration('moby')
         .get<boolean>('allowAllShellCommands') ?? false;
 
       const approvedCommands: typeof parsedCommands = [];
@@ -824,7 +824,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
     }
   ): Promise<void> {
     // Reasoner shell loop - run shell commands if R1 outputs them
-    const shellConfig = vscode.workspace.getConfiguration('deepseek');
+    const shellConfig = vscode.workspace.getConfiguration('moby');
     const configuredShellLimit = shellConfig.get<number>('maxShellIterations') ?? 100;
     const maxShellIterations = configuredShellLimit >= 100 ? Infinity : configuredShellLimit;
     let shellIteration = 0;
@@ -1051,7 +1051,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
             this._onShellExecuting.fire({ commands: shellCommandsPayload });
 
             // Check allowAllShellCommands setting
-            const shellConfig = vscode.workspace.getConfiguration('deepseek');
+            const shellConfig = vscode.workspace.getConfiguration('moby');
             const allowAllCommands = shellConfig.get<boolean>('allowAllShellCommands') ?? false;
 
             // ── Command Approval Gate ──
@@ -1432,7 +1432,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
   ): Promise<{ toolMessages: ApiMessage[]; limitReached: boolean; budgetExceeded: boolean; allToolDetails: Array<{ name: string; detail: string; status: string }> }> {
     const toolMessages: ApiMessage[] = [];
     // Get max tool calls from config (100 = no limit)
-    const config = vscode.workspace.getConfiguration('deepseek');
+    const config = vscode.workspace.getConfiguration('moby');
     const configuredLimit = config.get<number>('maxToolCalls') ?? 25;
     const maxIterations = configuredLimit >= 100 ? Infinity : configuredLimit;
     let iterations = 0;

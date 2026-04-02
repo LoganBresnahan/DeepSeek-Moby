@@ -376,17 +376,17 @@ export class SettingsShadowActor extends PopupShadowActor {
         break;
 
       case 'setApiKey':
-        this._vscode.postMessage({ type: 'executeCommand', command: 'deepseek.setApiKey' });
+        this._vscode.postMessage({ type: 'executeCommand', command: 'moby.setApiKey' });
         this.close();
         break;
 
       case 'setTavilyApiKey':
-        this._vscode.postMessage({ type: 'executeCommand', command: 'deepseek.setTavilyApiKey' });
+        this._vscode.postMessage({ type: 'executeCommand', command: 'moby.setTavilyApiKey' });
         this.close();
         break;
 
       case 'manageEncryptionKey':
-        this._vscode.postMessage({ type: 'executeCommand', command: 'deepseek.manageEncryptionKey' });
+        this._vscode.postMessage({ type: 'executeCommand', command: 'moby.manageEncryptionKey' });
         this.close();
         break;
 

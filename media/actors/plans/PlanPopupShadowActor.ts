@@ -47,7 +47,7 @@ export class PlanPopupShadowActor extends PopupShadowActor {
       vscode,
       header: 'Plans',
       position: 'top-left',
-      width: '280px',
+      width: '320px',
       maxHeight: '400px',
       publications: {
         'plans.activeCount': () => (this._plans || []).filter((p: PlanFile) => p.active).length,

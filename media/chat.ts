@@ -476,7 +476,7 @@ function initializeActorSystem(): void {
   };
 
   // Dev tools are loaded separately via <script> tag injection by the extension
-  // when deepseek.devMode is enabled. This keeps dev code out of production bundle.
+  // when moby.devMode is enabled. This keeps dev code out of production bundle.
 }
 
 // Initialize when DOM is ready

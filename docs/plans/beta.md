@@ -404,6 +404,18 @@ AGPL
 | B13 | Scroll-to-bottom button removed | **Fixed** | Removed button, styles, creation/visibility/cleanup code from ScrollActor |
 | B14 | Approval widget reverts on turn rebind | Fixed | Approval status + persistent flag persisted in VirtualListActor data, approval status stored in event history for session reload |
 | B15 | Database encryption key management | **Fixed** | New settings section + command for viewing, changing, and regenerating the SQLCipher encryption key via `PRAGMA rekey` |
+| B16 | Modified files dropdown ordering vs "Seeking..." text | **Open** | During streaming, the Moby "diving/seeking" animation appears ABOVE the modified files dropdown. Should be below it. Also need to verify modified files dropdown isn't being incorrectly split across iterations |
+| B17 | Rejected edit not restored from history | **Open** | In ask mode, rejecting an edit then restoring from history loses the pending files dropdown entirely. The rejected status should be preserved and shown on restore |
+| B18 | File context button color indicator | **Open** | When files are selected for context, the files button should change color (same as plan button when plans are active) to indicate files are attached |
+
+### Testing Audit Needed
+
+Modified files and pending files dropdowns need comprehensive testing across all edit modes:
+- Auto mode: file watcher detection, multiple files, ordering vs text
+- Ask mode: accept/reject flow, history restore of accepted AND rejected states
+- Manual mode: diff/apply flow, history restore
+- Reasoner shell modifications: file watcher → modified files dropdown ordering
+- Multiple iterations: do modified files correctly group or split?
 
 ### Remaining Work
 

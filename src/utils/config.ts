@@ -14,7 +14,7 @@ export class ConfigManager {
 
   // Get fresh config on each access to avoid stale cached values
   private getConfig(): vscode.WorkspaceConfiguration {
-    return vscode.workspace.getConfiguration('deepseek');
+    return vscode.workspace.getConfiguration('moby');
   }
 
   get<T>(key: string): T | undefined {

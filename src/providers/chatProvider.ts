@@ -61,7 +61,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     // Create managers
     this.webSearchManager = new WebSearchManager(this.tavilyClient);
     this.fileContextManager = new FileContextManager();
-    const config = vscode.workspace.getConfiguration('deepseek');
+    const config = vscode.workspace.getConfiguration('moby');
     // Initialize web search mode from persisted setting
     const webSearchMode = (config.get<string>('webSearchMode') || 'auto') as 'off' | 'manual' | 'auto';
     this.webSearchManager.setMode(webSearchMode);
@@ -223,7 +223,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
             mode: wsState.mode
           }
         });
-        const config = vscode.workspace.getConfiguration('deepseek');
+        const config = vscode.workspace.getConfiguration('moby');
         const editMode = (config.get<string>('editMode') || 'manual') as 'manual' | 'ask' | 'auto';
         if (editMode !== this.diffManager.currentEditMode) {
           this.diffManager.setEditMode(editMode);
@@ -465,7 +465,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         case 'setMaxTokens': {
           const model = data.model as string || this.deepSeekClient.getModel();
           const configKey = model === 'deepseek-reasoner' ? 'maxTokensReasonerModel' : 'maxTokensChatModel';
-          const config = vscode.workspace.getConfiguration('deepseek');
+          const config = vscode.workspace.getConfiguration('moby');
           await config.update(configKey, data.maxTokens, vscode.ConfigurationTarget.Global);
           break;
         }
@@ -542,7 +542,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
           const mode = data.mode as 'off' | 'manual' | 'auto';
           this.webSearchManager.setMode(mode);
           // Persist to VS Code settings
-          const wsConfig = vscode.workspace.getConfiguration('deepseek');
+          const wsConfig = vscode.workspace.getConfiguration('moby');
           await wsConfig.update('webSearchMode', mode, vscode.ConfigurationTarget.Global);
           break;
         }
@@ -783,6 +783,14 @@ export class ChatProvider implements vscode.WebviewViewProvider {
   }
 
   /**
+   * Re-send current settings to the webview.
+   * Called after API key changes to update button states.
+   */
+  public refreshSettings() {
+    this.sendCurrentSettings();
+  }
+
+  /**
    * Open the history modal in the chat view.
    * Reveals the chat panel and triggers the history modal to open.
    */
@@ -811,7 +819,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
 
   private sendCommandRules(): void {
     const rules = this.commandApprovalManager.getAllRules();
-    const allowAll = vscode.workspace.getConfiguration('deepseek').get<boolean>('allowAllShellCommands') ?? false;
+    const allowAll = vscode.workspace.getConfiguration('moby').get<boolean>('allowAllShellCommands') ?? false;
     this._view?.webview.postMessage({ type: 'commandRulesList', rules, allowAll });
   }
 
@@ -923,7 +931,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     const snapshot = this.settingsManager.getCurrentSettings();
     const wsState = await this.webSearchManager.getSettings();
     const apiKeyConfigured = await this.deepSeekClient.isApiKeyConfigured();
-    const config = vscode.workspace.getConfiguration('deepseek');
+    const config = vscode.workspace.getConfiguration('moby');
     const editMode = config.get<string>('editMode') || 'manual';
 
     // Sync edit mode with config
@@ -1142,7 +1150,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     const history = await this.conversationManager.getSessionRichHistory(currentSession.id);
     if (history.length > 0) {
       // Send edit mode BEFORE history so webview has correct mode when rendering pending files
-      const config = vscode.workspace.getConfiguration('deepseek');
+      const config = vscode.workspace.getConfiguration('moby');
       const editMode = config.get<string>('editMode') || 'manual';
       this._view.webview.postMessage({ type: 'editModeSettings', mode: editMode });
 
@@ -1181,7 +1189,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       // The model dropdown reflects user preference, not per-session setting
 
       // Send edit mode BEFORE history so webview has correct mode when rendering pending files
-      const config = vscode.workspace.getConfiguration('deepseek');
+      const config = vscode.workspace.getConfiguration('moby');
       const editMode = config.get<string>('editMode') || 'manual';
       this._view.webview.postMessage({ type: 'editModeSettings', mode: editMode });
 
@@ -1336,7 +1344,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     );
 
     // Check if dev mode is enabled (via config or extension development host)
-    const config = vscode.workspace.getConfiguration('deepseek');
+    const config = vscode.workspace.getConfiguration('moby');
     const isDevMode = config.get<boolean>('devMode', false);
 
     // Dev script is a SEPARATE bundle - only loaded when devMode is true

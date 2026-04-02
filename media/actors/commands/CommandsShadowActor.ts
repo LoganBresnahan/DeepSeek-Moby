@@ -42,12 +42,12 @@ export type CommandHandler = (commandId: string) => void;
 
 const DEFAULT_COMMANDS: CommandItem[] = [
   // History section
-  { id: 'deepseek.exportChatHistory', name: 'Export History', description: 'Export all chats', icon: '📤', section: 'History' },
+  { id: 'moby.exportChatHistory', name: 'Export History', description: 'Export all chats', icon: '📤', section: 'History' },
   // Logs section
-  { id: 'deepseek.exportLogs', name: 'Export Logs', description: 'Export all logs and traces', icon: '📝', section: 'Logs' },
+  { id: 'moby.exportLogs', name: 'Export Logs', description: 'Export all logs and traces', icon: '📝', section: 'Logs' },
   // Settings section
-  { id: 'deepseek.editSystemPrompt', name: 'System Prompt', description: 'Edit system prompt', icon: '✏️', section: 'Settings' },
-  { id: 'deepseek.openCommandRules', name: 'System Rules', description: 'Manage command approval rules', icon: '🛡️', section: 'Settings' }
+  { id: 'moby.editSystemPrompt', name: 'System Prompt', description: 'Edit system prompt', icon: '✏️', section: 'Settings' },
+  { id: 'moby.openCommandRules', name: 'System Rules', description: 'Manage command approval rules', icon: '🛡️', section: 'Settings' }
 ];
 
 // ============================================
@@ -143,21 +143,21 @@ export class CommandsShadowActor extends PopupShadowActor {
     webviewTracer.trace('user.click', `command:${commandId}`, { level: 'info', data: { commandId } });
 
     // Special handling for history commands - open modal instead
-    if (commandId === 'deepseek.showChatHistory') {
+    if (commandId === 'moby.showChatHistory') {
       log.debug('routing to history modal');
       this.manager.publishDirect('history.modal.open', true, this.actorId);
       return;
     }
 
     // Special handling for system prompt - open modal
-    if (commandId === 'deepseek.editSystemPrompt') {
+    if (commandId === 'moby.editSystemPrompt') {
       log.debug('routing to system prompt modal');
       this.manager.publishDirect('systemPrompt.modal.open', true, this.actorId);
       return;
     }
 
     // Special handling for command rules - open rules modal
-    if (commandId === 'deepseek.openCommandRules') {
+    if (commandId === 'moby.openCommandRules') {
       log.debug('routing to rules modal');
       this._vscode.postMessage({ type: 'getCommandRules' });
       this.manager.publishDirect('rules.modal.open', true, this.actorId);

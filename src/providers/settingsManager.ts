@@ -6,7 +6,7 @@
  * and forwards them to the webview via postMessage.
  *
  * No state variables live here — settings are read on-demand from
- * vscode.workspace.getConfiguration('deepseek'). This class consolidates
+ * vscode.workspace.getConfiguration('moby'). This class consolidates
  * the 12 settings methods and provides a clean event-based interface.
  */
 
@@ -50,7 +50,7 @@ export class SettingsManager {
    * Persists to VS Code config and fires onSettingsChanged + onModelChanged as appropriate.
    */
   async updateSettings(settings: SettingsUpdateInput): Promise<void> {
-    const config = vscode.workspace.getConfiguration('deepseek');
+    const config = vscode.workspace.getConfiguration('moby');
 
     if (settings.model !== undefined) {
       // Set model immediately on client (VS Code config has propagation delay)
@@ -89,7 +89,7 @@ export class SettingsManager {
    * Update log-related settings (logLevel).
    */
   async updateLogSettings(settings: { logLevel?: string }): Promise<void> {
-    const config = vscode.workspace.getConfiguration('deepseek');
+    const config = vscode.workspace.getConfiguration('moby');
 
     if (settings.logLevel !== undefined) {
       await config.update('logLevel', settings.logLevel, vscode.ConfigurationTarget.Global);
@@ -102,7 +102,7 @@ export class SettingsManager {
    * Fires onSettingsChanged so webview can apply the new log level immediately.
    */
   async updateWebviewLogSettings(settings: { webviewLogLevel?: string }): Promise<void> {
-    const config = vscode.workspace.getConfiguration('deepseek');
+    const config = vscode.workspace.getConfiguration('moby');
 
     if (settings.webviewLogLevel !== undefined) {
       await config.update('webviewLogLevel', settings.webviewLogLevel, vscode.ConfigurationTarget.Global);
@@ -117,7 +117,7 @@ export class SettingsManager {
    * Also updates the tracer directly for immediate effect.
    */
   async updateTracingSettings(settings: { enabled?: boolean }): Promise<void> {
-    const config = vscode.workspace.getConfiguration('deepseek');
+    const config = vscode.workspace.getConfiguration('moby');
 
     if (settings.enabled !== undefined) {
       await config.update('tracing.enabled', settings.enabled, vscode.ConfigurationTarget.Global);
@@ -131,7 +131,7 @@ export class SettingsManager {
    * Update reasoner-specific settings (allowAllShellCommands).
    */
   async updateReasonerSettings(settings: { allowAllCommands?: boolean }): Promise<void> {
-    const config = vscode.workspace.getConfiguration('deepseek');
+    const config = vscode.workspace.getConfiguration('moby');
 
     if (settings.allowAllCommands !== undefined) {
       await config.update('allowAllShellCommands', settings.allowAllCommands, vscode.ConfigurationTarget.Global);
@@ -152,7 +152,7 @@ export class SettingsManager {
    * Also syncs tracer.enabled to match config.
    */
   getCurrentSettings(): SettingsSnapshot {
-    const config = vscode.workspace.getConfiguration('deepseek');
+    const config = vscode.workspace.getConfiguration('moby');
     const tracingEnabled = config.get<boolean>('tracing.enabled') ?? true;
 
     // Sync tracer enabled state
@@ -186,7 +186,7 @@ export class SettingsManager {
    */
   async resetToDefaults(): Promise<void> {
     try {
-      const config = vscode.workspace.getConfiguration('deepseek');
+      const config = vscode.workspace.getConfiguration('moby');
 
       // Reset all settings to defaults
       await config.update('logLevel', undefined, vscode.ConfigurationTarget.Global);

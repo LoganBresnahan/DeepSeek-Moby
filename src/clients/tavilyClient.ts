@@ -57,7 +57,7 @@ export class TavilyClient {
   }
 
   private async getApiKey(): Promise<string> {
-    const apiKey = await this.context.secrets.get('deepseek.tavilyApiKey');
+    const apiKey = await this.context.secrets.get('moby.tavilyApiKey');
     if (!apiKey) {
       throw new Error('Tavily API key is not configured. Use the "DeepSeek Moby: Set Tavily API Key" command.');
     }
@@ -127,7 +127,7 @@ export class TavilyClient {
   }
 
   async isConfigured(): Promise<boolean> {
-    const key = await this.context.secrets.get('deepseek.tavilyApiKey');
+    const key = await this.context.secrets.get('moby.tavilyApiKey');
     return !!key && key.trim().length > 0;
   }
 

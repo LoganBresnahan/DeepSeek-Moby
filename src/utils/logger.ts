@@ -88,7 +88,7 @@ class Logger {
 
     // Listen for config changes
     vscode.workspace.onDidChangeConfiguration(e => {
-      if (e.affectsConfiguration('deepseek.logLevel')) {
+      if (e.affectsConfiguration('moby.logLevel')) {
         this.loadSettings();
       }
     });
@@ -112,7 +112,7 @@ class Logger {
   }
 
   private loadSettings(): void {
-    const config = vscode.workspace.getConfiguration('deepseek');
+    const config = vscode.workspace.getConfiguration('moby');
     this._minLevel = config.get<LogLevel>('logLevel') || 'INFO';
     // VS Code Output channels don't support ANSI colors, so we always disable them
     // The setting is kept in package.json for potential future terminal/debug console output

@@ -1,9 +1,9 @@
 {
   "name": "deepseek-moby",
   "displayName": "DeepSeek Moby",
-  "description": "Official DeepSeek AI assistant for VS Code with perfect formatting and chat history",
-  "version": "1.0.0",
-  "publisher": "deepseek",
+  "description": "AI coding assistant for VS Code, powered by DeepSeek",
+  "version": "0.1.0",
+  "publisher": "LoganBresnahan",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -43,7 +43,7 @@
     "configuration": {
       "title": "DeepSeek Moby",
       "properties": {
-        "deepseek.model": {
+        "moby.model": {
           "type": "string",
           "default": "deepseek-chat",
           "enum": [
@@ -56,52 +56,52 @@
           ],
           "description": "Which DeepSeek model to use"
         },
-        "deepseek.temperature": {
+        "moby.temperature": {
           "type": "number",
           "default": 0.7,
           "minimum": 0,
           "maximum": 2,
           "description": "[Chat model only] Creativity level (0=deterministic, 2=creative). Reasoner does not support temperature."
         },
-        "deepseek.maxToolCalls": {
+        "moby.maxToolCalls": {
           "type": "number",
           "default": 100,
           "minimum": 5,
           "maximum": 100,
           "description": "[Chat model only] Maximum tool calling iterations per request. Each iteration can have multiple tool calls. (100 = no limit)"
         },
-        "deepseek.maxShellIterations": {
+        "moby.maxShellIterations": {
           "type": "number",
           "default": 100,
           "minimum": 1,
           "maximum": 100,
           "description": "[Reasoner model only] Maximum shell command iterations per request. (100 = no limit)"
         },
-        "deepseek.maxTokensChatModel": {
+        "moby.maxTokensChatModel": {
           "type": "number",
           "default": 8192,
           "minimum": 256,
           "maximum": 8192,
           "description": "[Chat model only] Maximum output tokens per response. Max: 8,192"
         },
-        "deepseek.maxTokensReasonerModel": {
+        "moby.maxTokensReasonerModel": {
           "type": "number",
           "default": 65536,
           "minimum": 256,
           "maximum": 65536,
           "description": "[Reasoner model only] Maximum output tokens per response. Max: 65,536"
         },
-        "deepseek.showStatusBar": {
+        "moby.showStatusBar": {
           "type": "boolean",
           "default": true,
           "description": "Show status bar with token usage"
         },
-        "deepseek.autoSaveHistory": {
+        "moby.autoSaveHistory": {
           "type": "boolean",
           "default": true,
           "description": "Automatically save chat history"
         },
-        "deepseek.logLevel": {
+        "moby.logLevel": {
           "type": "string",
           "default": "WARN",
           "enum": [
@@ -120,7 +120,7 @@
           ],
           "description": "Extension Output: Minimum log level to display in Output channel"
         },
-        "deepseek.webviewLogLevel": {
+        "moby.webviewLogLevel": {
           "type": "string",
           "default": "WARN",
           "enum": [
@@ -137,19 +137,19 @@
           ],
           "description": "Webview Console: Minimum log level for browser console logging"
         },
-        "deepseek.tracing.enabled": {
+        "moby.tracing.enabled": {
           "type": "boolean",
           "default": true,
           "description": "Enable trace collection for debugging and AI-agent observability"
         },
-        "deepseek.tavilySearchesPerPrompt": {
+        "moby.tavilySearchesPerPrompt": {
           "type": "number",
           "default": 1,
           "minimum": 1,
           "maximum": 20,
           "description": "Number of web searches allowed per prompt request"
         },
-        "deepseek.tavilySearchDepth": {
+        "moby.tavilySearchDepth": {
           "type": "string",
           "default": "basic",
           "enum": [
@@ -162,7 +162,7 @@
           ],
           "description": "Tavily search depth mode"
         },
-        "deepseek.webSearchMode": {
+        "moby.webSearchMode": {
           "type": "string",
           "default": "auto",
           "enum": [
@@ -177,7 +177,7 @@
           ],
           "description": "Controls how web search works: off (disabled), manual (user toggle only), or auto (LLM decides)"
         },
-        "deepseek.editMode": {
+        "moby.editMode": {
           "type": "string",
           "default": "manual",
           "enum": [
@@ -192,13 +192,13 @@
           ],
           "description": "How to handle code edits from AI responses"
         },
-        "deepseek.allowAllShellCommands": {
+        "moby.allowAllShellCommands": {
           "type": "boolean",
           "default": false,
           "markdownDescription": "Allow ALL shell commands without approval prompts. Disables the safety blocklist that prevents destructive operations like `rm -rf /`. Use with caution.",
           "scope": "application"
         },
-        "deepseek.devMode": {
+        "moby.devMode": {
           "type": "boolean",
           "default": false,
           "markdownDescription": "**Developer Mode**: Enable dev tools for UI development. Shows a floating token editor panel (Ctrl+Shift+I) that allows real-time adjustment of spacing and style tokens across all shadow DOM components.",
@@ -208,107 +208,107 @@
     },
     "commands": [
       {
-        "command": "deepseek.startChat",
-        "title": "DeepSeek Moby: Open Chat",
-        "category": "DeepSeek Moby"
+        "command": "moby.startChat",
+        "title": "Open Chat",
+        "category": "Moby"
       },
       {
-        "command": "deepseek.newChat",
+        "command": "moby.newChat",
         "title": "New Chat",
-        "category": "DeepSeek Moby"
+        "category": "Moby"
       },
       {
-        "command": "deepseek.switchModel",
-        "title": "DeepSeek Moby: Switch Model",
-        "category": "DeepSeek Moby"
+        "command": "moby.switchModel",
+        "title": "Switch Model",
+        "category": "Moby"
       },
       {
-        "command": "deepseek.showChatHistory",
-        "title": "DeepSeek Moby: Show Chat History",
-        "category": "DeepSeek Moby"
+        "command": "moby.showChatHistory",
+        "title": "Show Chat History",
+        "category": "Moby"
       },
       {
-        "command": "deepseek.openCommandRules",
-        "title": "DeepSeek Moby: Command Rules",
-        "category": "DeepSeek Moby"
+        "command": "moby.openCommandRules",
+        "title": "Command Rules",
+        "category": "Moby"
       },
       {
-        "command": "deepseek.exportChatHistory",
-        "title": "DeepSeek Moby: Export All Chat History",
-        "category": "DeepSeek Moby"
+        "command": "moby.exportChatHistory",
+        "title": "Export All Chat History",
+        "category": "Moby"
       },
       {
-        "command": "deepseek.importChatHistory",
-        "title": "DeepSeek Moby: Import Chat History",
-        "category": "DeepSeek Moby"
+        "command": "moby.importChatHistory",
+        "title": "Import Chat History",
+        "category": "Moby"
       },
       {
-        "command": "deepseek.clearChatHistory",
-        "title": "DeepSeek Moby: Clear All Chat History",
-        "category": "DeepSeek Moby"
+        "command": "moby.clearChatHistory",
+        "title": "Clear All Chat History",
+        "category": "Moby"
       },
       {
-        "command": "deepseek.exportCurrentSession",
-        "title": "DeepSeek Moby: Export Current Session",
-        "category": "DeepSeek Moby"
+        "command": "moby.exportCurrentSession",
+        "title": "Export Current Session",
+        "category": "Moby"
       },
       {
-        "command": "deepseek.showStats",
+        "command": "moby.showStats",
         "title": "Statistics",
-        "category": "DeepSeek Moby"
+        "category": "Moby"
       },
       {
-        "command": "deepseek.showLogs",
+        "command": "moby.showLogs",
         "title": "Show Log",
-        "category": "DeepSeek Moby"
+        "category": "Moby"
       },
       {
-        "command": "deepseek.showDiffQuickPick",
+        "command": "moby.showDiffQuickPick",
         "title": "Show Pending Diffs",
-        "category": "DeepSeek",
+        "category": "Moby",
         "icon": "$(list-unordered)"
       },
       {
-        "command": "deepseek.exportLogs",
-        "title": "DeepSeek Moby: Export Logs",
-        "category": "DeepSeek Moby"
+        "command": "moby.exportLogs",
+        "title": "Export Logs",
+        "category": "Moby"
       },
       {
-        "command": "deepseek.startDrawingServer",
-        "title": "DeepSeek Moby: Start Drawing Server",
-        "category": "DeepSeek Moby"
+        "command": "moby.startDrawingServer",
+        "title": "Start Drawing Server",
+        "category": "Moby"
       },
       {
-        "command": "deepseek.stopDrawingServer",
-        "title": "DeepSeek Moby: Stop Drawing Server",
-        "category": "DeepSeek Moby"
+        "command": "moby.stopDrawingServer",
+        "title": "Stop Drawing Server",
+        "category": "Moby"
       },
       {
-        "command": "deepseek.setApiKey",
-        "title": "DeepSeek Moby: Set API Key",
-        "category": "DeepSeek Moby"
+        "command": "moby.setApiKey",
+        "title": "Set API Key",
+        "category": "Moby"
       },
       {
-        "command": "deepseek.setTavilyApiKey",
-        "title": "DeepSeek Moby: Set Tavily API Key",
-        "category": "DeepSeek Moby"
+        "command": "moby.setTavilyApiKey",
+        "title": "Set Tavily API Key",
+        "category": "Moby"
       },
       {
-        "command": "deepseek.manageEncryptionKey",
-        "title": "DeepSeek Moby: Manage Database Encryption Key",
-        "category": "DeepSeek Moby"
+        "command": "moby.manageEncryptionKey",
+        "title": "Manage Database Encryption Key",
+        "category": "Moby"
       }
     ],
     "menus": {
       "commandPalette": [
         {
-          "command": "deepseek.startChat",
+          "command": "moby.startChat",
           "when": "true"
         }
       ],
       "view/title": [
         {
-          "command": "deepseek.newChat",
+          "command": "moby.newChat",
           "when": "view == deepseek-chat-view",
           "group": "navigation@1"
         }
@@ -316,7 +316,7 @@
     },
     "keybindings": [
       {
-        "command": "deepseek.showDiffQuickPick",
+        "command": "moby.showDiffQuickPick",
         "key": "ctrl+shift+d",
         "mac": "cmd+shift+d",
         "when": "!editorTextFocus"

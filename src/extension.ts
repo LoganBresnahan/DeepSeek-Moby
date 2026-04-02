@@ -151,7 +151,7 @@ function registerCommands(context: vscode.ExtensionContext) {
   ];
 
   commands.forEach(({ name, handler }) => {
-    const disposable = vscode.commands.registerCommand(`deepseek.${name}`, handler);
+    const disposable = vscode.commands.registerCommand(`moby.${name}`, handler);
     context.subscriptions.push(disposable);
   });
 }
@@ -169,7 +169,7 @@ async function getOrCreateEncryptionKey(context: vscode.ExtensionContext): Promi
 }
 
 async function checkApiKey(context: vscode.ExtensionContext) {
-  const apiKey = await context.secrets.get('deepseek.apiKey');
+  const apiKey = await context.secrets.get('moby.apiKey');
 
   if (!apiKey) {
     const result = await vscode.window.showInformationMessage(
@@ -178,49 +178,59 @@ async function checkApiKey(context: vscode.ExtensionContext) {
     );
 
     if (result === 'Configure') {
-      vscode.commands.executeCommand('deepseek.setApiKey');
+      vscode.commands.executeCommand('moby.setApiKey');
     }
   }
 }
 
 async function setApiKey(context: vscode.ExtensionContext): Promise<void> {
-  const current = await context.secrets.get('deepseek.apiKey');
+  const current = await context.secrets.get('moby.apiKey');
   const input = await vscode.window.showInputBox({
-    prompt: 'Enter your DeepSeek API key (from platform.deepseek.com)',
+    prompt: current
+      ? 'Enter a new DeepSeek API key, or clear the field to remove it'
+      : 'Enter your DeepSeek API key (from platform.deepseek.com)',
     password: true,
     placeHolder: 'sk-...',
     value: current ? '••••••••' : '',
-    ignoreFocusOut: true,
-    validateInput: (value) => {
-      if (!value || !value.trim()) { return 'API key cannot be empty'; }
-      if (value === '••••••••') { return null; } // unchanged
-      return null;
-    }
+    ignoreFocusOut: true
   });
-  if (input && input !== '••••••••') {
-    await context.secrets.store('deepseek.apiKey', input.trim());
+  if (input === undefined) return; // user cancelled (Escape)
+  if (input === '••••••••') return; // unchanged
+
+  if (!input.trim()) {
+    // Empty input — remove the key
+    await context.secrets.delete('moby.apiKey');
+    vscode.window.showInformationMessage('DeepSeek API key removed.');
+  } else {
+    await context.secrets.store('moby.apiKey', input.trim());
     vscode.window.showInformationMessage('DeepSeek API key saved securely.');
   }
+  chatProvider.refreshSettings();
 }
 
 async function setTavilyApiKey(context: vscode.ExtensionContext): Promise<void> {
-  const current = await context.secrets.get('deepseek.tavilyApiKey');
+  const current = await context.secrets.get('moby.tavilyApiKey');
   const input = await vscode.window.showInputBox({
-    prompt: 'Enter your Tavily API key (from tavily.com)',
+    prompt: current
+      ? 'Enter a new Tavily API key, or clear the field to remove it'
+      : 'Enter your Tavily API key (from tavily.com)',
     password: true,
     placeHolder: 'tvly-...',
     value: current ? '••••••••' : '',
-    ignoreFocusOut: true,
-    validateInput: (value) => {
-      if (!value || !value.trim()) { return 'API key cannot be empty'; }
-      if (value === '••••••••') { return null; }
-      return null;
-    }
+    ignoreFocusOut: true
   });
-  if (input && input !== '••••••••') {
-    await context.secrets.store('deepseek.tavilyApiKey', input.trim());
+  if (input === undefined) return; // user cancelled (Escape)
+  if (input === '••••••••') return; // unchanged
+
+  if (!input.trim()) {
+    // Empty input — remove the key
+    await context.secrets.delete('moby.tavilyApiKey');
+    vscode.window.showInformationMessage('Tavily API key removed.');
+  } else {
+    await context.secrets.store('moby.tavilyApiKey', input.trim());
     vscode.window.showInformationMessage('Tavily API key saved securely.');
   }
+  chatProvider.refreshSettings();
 }
 
 async function manageEncryptionKey(context: vscode.ExtensionContext, cm: ConversationManager): Promise<void> {

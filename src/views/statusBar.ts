@@ -21,7 +21,7 @@ export class StatusBar {
     );
 
     this.statusBarItem.tooltip = 'DeepSeek Moby - Click to open chat';
-    this.statusBarItem.command = 'deepseek.startChat';
+    this.statusBarItem.command = 'moby.startChat';
   }
 
   start() {

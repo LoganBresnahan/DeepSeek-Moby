@@ -861,6 +861,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
 
     // Reset CQRS state for new turn
     this._currentIteration = 0;
+    this._thinkingStartedForIteration = -1;
     this._lastShellId = null;
     this._currentViewSegments = [];
     this._eventIdCounter = 0;
@@ -907,6 +908,14 @@ export class VirtualMessageGatewayActor extends EventStateActor {
 
     if (!this._currentTurnId) return;
 
+    // Defer thinking-start until first reasoning token arrives (avoids empty thinking bubble on failed requests)
+    if (this._thinkingStartedForIteration !== this._currentIteration) {
+      this._thinkingStartedForIteration = this._currentIteration;
+      this.emitTurnEvent(this._currentTurnId, {
+        type: 'thinking-start', iteration: this._currentIteration, ts: Date.now()
+      });
+    }
+
     // CQRS: Record event → projector produces mutations → render
     this.emitTurnEvent(this._currentTurnId, {
       type: 'thinking-content', content: msg.token as string, iteration: this._currentIteration, ts: Date.now()
@@ -914,6 +923,8 @@ export class VirtualMessageGatewayActor extends EventStateActor {
 
     streaming.handleThinkingChunk(msg.token as string);
   }
+
+  private _thinkingStartedForIteration = -1;
 
   private handleIterationStart(msg: { type: string; [key: string]: unknown }): void {
     if (!this._currentTurnId) return;
@@ -924,11 +935,8 @@ export class VirtualMessageGatewayActor extends EventStateActor {
     this.emitThinkingCompleteIfOpen(this._currentTurnId);
     this.emitTextFinalizeIfOpen(this._currentTurnId);
 
-    // Start new thinking iteration
+    // Track iteration but defer thinking-start until first reasoning token arrives
     this._currentIteration = (msg.iteration as number) - 1; // Convert 1-based to 0-based
-    this.emitTurnEvent(this._currentTurnId, {
-      type: 'thinking-start', iteration: this._currentIteration, ts: Date.now()
-    });
   }
 
   private handleEndResponse(msg: { type: string; [key: string]: unknown }): void {
@@ -1428,10 +1436,11 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       session.handleModelChanged({ model: msg.model as string });
     }
 
-    // Sync API key configured state to toolbar (disables send button when no key)
+    // Sync API key configured state to toolbar + input area
     if (msg.apiKeyConfigured !== undefined) {
-      const { toolbar } = this._actors;
+      const { toolbar, inputArea } = this._actors;
       toolbar.setApiKeyConfigured(msg.apiKeyConfigured as boolean);
+      inputArea.setSendDisabled(!(msg.apiKeyConfigured as boolean));
     }
 
     // Apply webview log level to global log level

@@ -96,12 +96,12 @@ export class DeepSeekClient {
   }
 
   async isApiKeyConfigured(): Promise<boolean> {
-    const key = await this.context.secrets.get('deepseek.apiKey');
+    const key = await this.context.secrets.get('moby.apiKey');
     return !!key;
   }
 
   private async getApiKey(): Promise<string> {
-    const apiKey = await this.context.secrets.get('deepseek.apiKey');
+    const apiKey = await this.context.secrets.get('moby.apiKey');
     if (!apiKey) {
       throw new Error('DeepSeek API key is not configured. Use the "DeepSeek Moby: Set API Key" command.');
     }

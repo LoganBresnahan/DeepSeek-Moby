@@ -154,17 +154,17 @@ describe('CommandsShadowActor', () => {
     });
 
     it('sends executeCommand message when command is clicked', () => {
-      const commandItem = element.shadowRoot?.querySelector('.command-item[data-command="deepseek.exportChatHistory"]') as HTMLElement;
+      const commandItem = element.shadowRoot?.querySelector('.command-item[data-command="moby.exportChatHistory"]') as HTMLElement;
       commandItem?.click();
 
       expect(mockVSCode.postMessage).toHaveBeenCalledWith({
         type: 'executeCommand',
-        command: 'deepseek.exportChatHistory'
+        command: 'moby.exportChatHistory'
       });
     });
 
     it('closes popup after command execution', () => {
-      const commandItem = element.shadowRoot?.querySelector('.command-item[data-command="deepseek.exportChatHistory"]') as HTMLElement;
+      const commandItem = element.shadowRoot?.querySelector('.command-item[data-command="moby.exportChatHistory"]') as HTMLElement;
       commandItem?.click();
 
       expect(actor.isVisible()).toBe(false);
@@ -174,10 +174,10 @@ describe('CommandsShadowActor', () => {
       const handler = vi.fn();
       actor.onCommand(handler);
 
-      const commandItem = element.shadowRoot?.querySelector('.command-item[data-command="deepseek.exportChatHistory"]') as HTMLElement;
+      const commandItem = element.shadowRoot?.querySelector('.command-item[data-command="moby.exportChatHistory"]') as HTMLElement;
       commandItem?.click();
 
-      expect(handler).toHaveBeenCalledWith('deepseek.exportChatHistory');
+      expect(handler).toHaveBeenCalledWith('moby.exportChatHistory');
     });
   });
 

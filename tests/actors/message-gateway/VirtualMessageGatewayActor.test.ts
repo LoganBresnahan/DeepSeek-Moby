@@ -218,11 +218,15 @@ describe('VirtualMessageGatewayActor', () => {
   });
 
   describe('thinking/reasoning flow', () => {
-    it('handles iterationStart message', () => {
+    it('defers thinking bubble until first reasoning token', () => {
       dispatchMessage({ type: 'startResponse', messageId: 'msg-1' });
       dispatchMessage({ type: 'iterationStart', iteration: 1 });
 
-      // CQRS: thinking-start event → projector renders startThinkingIteration
+      // Thinking bubble should NOT appear on iterationStart alone
+      expect(mockActors.virtualList.startThinkingIteration).not.toHaveBeenCalled();
+
+      // First reasoning token triggers the thinking bubble
+      dispatchMessage({ type: 'streamReasoning', token: 'Let me think...' });
       expect(mockActors.virtualList.startThinkingIteration).toHaveBeenCalledWith('turn-1');
     });
 

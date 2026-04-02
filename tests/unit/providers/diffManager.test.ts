@@ -196,7 +196,7 @@ describe('DiffManager', () => {
 
     it('should persist to VS Code config', () => {
       manager.setEditMode('auto');
-      expect(vscode.workspace.getConfiguration).toHaveBeenCalledWith('deepseek');
+      expect(vscode.workspace.getConfiguration).toHaveBeenCalledWith('moby');
     });
 
     it('should accept all valid modes', () => {

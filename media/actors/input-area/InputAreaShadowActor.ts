@@ -55,6 +55,7 @@ export class InputAreaShadowActor extends ShadowActor {
   private _onSend: SendHandler | null = null;
   private _onStop: StopHandler | null = null;
   private _vscode: VSCodeAPI | null = null;
+  private _sendDisabled = false;
 
   constructor(manager: EventStateManager, element: HTMLElement, vscode?: VSCodeAPI) {
     super({
@@ -185,8 +186,14 @@ export class InputAreaShadowActor extends ShadowActor {
   // Core Logic
   // ============================================
 
+  /** Disable/enable sending (e.g., when API key is not configured) */
+  setSendDisabled(disabled: boolean): void {
+    this._sendDisabled = disabled;
+  }
+
   /** Called by Toolbar's send button or Enter key */
   submit(): void {
+    if (this._sendDisabled) return;
     const content = this._value.trim();
     if (!content && this._attachments.length === 0) return;
 
