@@ -46,10 +46,10 @@ const config = {
   plugins: [
     new CopyPlugin({
       patterns: [
-        // Compressed vocabulary for WASM tokenizer
+        // Compressed vocabularies for WASM tokenizer (per-model)
         {
-          from: 'packages/moby-wasm/assets/tokenizer.json.br',
-          to: 'assets/tokenizer.json.br'
+          from: 'packages/moby-wasm/assets/vocabs/',
+          to: 'assets/vocabs/'
         },
         // WASM module (JS glue + binary) — vsce can't follow file: symlinks
         {

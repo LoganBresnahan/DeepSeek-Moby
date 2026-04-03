@@ -17,6 +17,7 @@ import { CommandApprovalManager } from './commandApprovalManager';
 import { DrawingServer } from './drawingServer';
 import { SavedPromptManager } from './savedPromptManager';
 import { PlanManager } from './planManager';
+import { TokenService } from '../services/tokenService';
 import { qrcodegen } from '../vendor/qrcodegen';
 
 export class ChatProvider implements vscode.WebviewViewProvider {
@@ -442,6 +443,10 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         case 'selectModel': {
           const currentModel = this.deepSeekClient.getModel();
           if (data.model !== currentModel) {
+            // Switch tokenizer vocab if needed for the new model
+            const tokenService = TokenService.getInstance();
+            await tokenService.selectModel(data.model as string);
+
             // If the current session has messages, start a new session
             if (this.currentSessionId && this.conversationManager.sessionHasEvents(this.currentSessionId)) {
               await this.settingsManager.updateSettings({ model: data.model });

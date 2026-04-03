@@ -1,12 +1,16 @@
 /**
  * TokenService - Exact token counting via WASM tokenizer.
  *
- * Singleton service that lazily loads DeepSeek's native BPE tokenizer
- * compiled to WebAssembly. All tokenizer data (128K vocab, 127K merge rules)
- * lives in WASM linear memory — outside V8's GC heap and 4 GB limit.
+ * Supports multiple vocabularies keyed by model family. Each DeepSeek model
+ * generation (V3, V4, etc.) may use a different tokenizer vocabulary.
+ * The WASM binary (BPE logic) is shared — only the vocab data differs.
  *
- * Memory: < 2 MB JS heap, ~20-25 MB WASM linear memory.
- * Init: ~300 ms (one-time, on first use).
+ * Vocab files are stored as Brotli-compressed JSON in assets/vocabs/:
+ *   deepseek-v3.json.br  — V3 (deepseek-chat) and R1 (deepseek-reasoner)
+ *   deepseek-v4.json.br  — V4 (when released)
+ *
+ * Memory: < 2 MB JS heap per tokenizer, ~20-25 MB WASM linear memory each.
+ * Init: ~300 ms per vocab (one-time, lazy on first use).
  * Per-count: ~0.02 ms.
  */
 
@@ -23,12 +27,33 @@ const MESSAGE_OVERHEAD_TOKENS = 4;
 /** System prompt wrapper overhead (BOS token, role tokens, etc.) */
 const SYSTEM_OVERHEAD_TOKENS = 8;
 
+/**
+ * Maps model IDs to their vocab file names.
+ * Models in the same generation share a tokenizer.
+ */
+const MODEL_VOCAB_MAP: Record<string, string> = {
+  'deepseek-chat': 'deepseek-v3',
+  'deepseek-reasoner': 'deepseek-v3',
+  // When V4 drops, add:
+  // 'deepseek-chat-v4': 'deepseek-v4',
+  // 'deepseek-reasoner-v4': 'deepseek-v4',
+};
+
+/** Default vocab to use when model isn't in the map */
+const DEFAULT_VOCAB = 'deepseek-v3';
+
 export class TokenService implements TokenCounter {
   private static instance: TokenService;
 
-  private tokenizer: DeepSeekTokenizer | null = null;
-  private initPromise: Promise<void> | null = null;
+  /** Loaded tokenizers keyed by vocab name (e.g., 'deepseek-v3') */
+  private tokenizers = new Map<string, DeepSeekTokenizer>();
+  /** In-flight init promises to avoid double-loading */
+  private initPromises = new Map<string, Promise<void>>();
+  /** The currently active vocab name (set by selectModel) */
+  private activeVocab: string = DEFAULT_VOCAB;
   private extensionPath: string;
+  /** Cached WASM module (loaded once, shared by all tokenizer instances) */
+  private wasmModule: typeof import('deepseek-moby-wasm') | null = null;
 
   readonly isExact = true;
 
@@ -47,69 +72,118 @@ export class TokenService implements TokenCounter {
   }
 
   /**
-   * Initialize the WASM tokenizer. Call during extension activation.
-   *
-   * Steps:
-   * 1. Read the Brotli-compressed tokenizer.json.br (1.4 MB)
-   * 2. Decompress with Node.js built-in zlib (~16 ms)
-   * 3. Pass JSON to WASM constructor — Rust builds internal structures (~200 ms)
+   * Initialize the tokenizer for the default vocab.
+   * Call during extension activation.
    */
   async initialize(): Promise<void> {
-    if (this.tokenizer) { return; }
-    if (!this.initPromise) {
-      this.initPromise = this._doInitialize();
-    }
-    return this.initPromise;
+    await this.loadVocab(this.activeVocab);
   }
 
-  private async _doInitialize(): Promise<void> {
+  /**
+   * Select the active tokenizer for a model.
+   * Loads the vocab lazily if not already loaded.
+   */
+  async selectModel(modelId: string): Promise<void> {
+    const vocabName = MODEL_VOCAB_MAP[modelId] || DEFAULT_VOCAB;
+    if (vocabName === this.activeVocab && this.tokenizers.has(vocabName)) {
+      return; // Already active and loaded
+    }
+    this.activeVocab = vocabName;
+    await this.loadVocab(vocabName);
+  }
+
+  /**
+   * Load a vocab file and create a tokenizer instance.
+   * No-op if already loaded.
+   */
+  private async loadVocab(vocabName: string): Promise<void> {
+    if (this.tokenizers.has(vocabName)) return;
+
+    // Prevent double-loading
+    if (this.initPromises.has(vocabName)) {
+      return this.initPromises.get(vocabName)!;
+    }
+
+    const promise = this._doLoadVocab(vocabName);
+    this.initPromises.set(vocabName, promise);
+
+    try {
+      await promise;
+    } finally {
+      this.initPromises.delete(vocabName);
+    }
+  }
+
+  private async _doLoadVocab(vocabName: string): Promise<void> {
     const start = performance.now();
 
     try {
-      // Dynamic import — the WASM module is loaded only when needed
-      const wasmModule = await import('deepseek-moby-wasm');
-      const { DeepSeekTokenizer: TokenizerClass } = wasmModule;
+      // Load WASM module once, reuse for all tokenizer instances
+      if (!this.wasmModule) {
+        this.wasmModule = await import('deepseek-moby-wasm');
+      }
+      const { DeepSeekTokenizer: TokenizerClass } = this.wasmModule;
 
-      // Read compressed vocabulary (dist/assets/ in production, packages/ in dev)
-      const distPath = path.join(this.extensionPath, 'dist', 'assets', 'tokenizer.json.br');
-      const devPath = path.join(this.extensionPath, 'packages', 'moby-wasm', 'assets', 'tokenizer.json.br');
-      const compressedPath = fs.existsSync(distPath) ? distPath : devPath;
+      // Find the vocab file
+      const fileName = `${vocabName}.json.br`;
+      const distPath = path.join(this.extensionPath, 'dist', 'assets', 'vocabs', fileName);
+      const devPath = path.join(this.extensionPath, 'packages', 'moby-wasm', 'assets', 'vocabs', fileName);
+
+      // Backward compat: check old single-file location too
+      const legacyDistPath = path.join(this.extensionPath, 'dist', 'assets', 'tokenizer.json.br');
+      const legacyDevPath = path.join(this.extensionPath, 'packages', 'moby-wasm', 'assets', 'tokenizer.json.br');
+
+      let compressedPath: string;
+      if (fs.existsSync(distPath)) {
+        compressedPath = distPath;
+      } else if (fs.existsSync(devPath)) {
+        compressedPath = devPath;
+      } else if (vocabName === DEFAULT_VOCAB && fs.existsSync(legacyDistPath)) {
+        compressedPath = legacyDistPath;
+      } else if (vocabName === DEFAULT_VOCAB && fs.existsSync(legacyDevPath)) {
+        compressedPath = legacyDevPath;
+      } else {
+        throw new Error(`Vocab file not found: ${fileName}`);
+      }
+
       const compressed = fs.readFileSync(compressedPath);
-
-      // Decompress (Brotli is built into Node.js, zero dependencies)
       const jsonBuffer = zlib.brotliDecompressSync(compressed);
       const json = jsonBuffer.toString('utf-8');
 
-      // Initialize WASM tokenizer — vocab/merges go into WASM linear memory
-      this.tokenizer = new TokenizerClass(json);
+      const tokenizer = new TokenizerClass(json);
+      this.tokenizers.set(vocabName, tokenizer);
 
       const elapsed = performance.now() - start;
       logger.info(
         `[TokenService] Initialized in ${elapsed.toFixed(0)}ms ` +
-        `(vocab: ${this.tokenizer!.vocab_size()} tokens)`
+        `(vocab: ${tokenizer.vocab_size()} tokens)`
       );
     } catch (error) {
-      this.initPromise = null; // Allow retry
       const msg = error instanceof Error ? error.message : String(error);
-      logger.error(`[TokenService] Failed to initialize: ${msg}`);
-      throw new Error(`WASM tokenizer failed to load: ${msg}`);
+      logger.error(`[TokenService] Failed to load vocab "${vocabName}": ${msg}`);
+      throw new Error(`WASM tokenizer failed to load vocab "${vocabName}": ${msg}`);
     }
   }
 
-  /** Whether the tokenizer is loaded and ready for synchronous calls. */
+  /** Get the active tokenizer. Throws if not initialized. */
+  private getTokenizer(): DeepSeekTokenizer {
+    const tokenizer = this.tokenizers.get(this.activeVocab);
+    if (!tokenizer) {
+      throw new Error(`TokenService not initialized for vocab "${this.activeVocab}". Call initialize() first.`);
+    }
+    return tokenizer;
+  }
+
+  /** Whether at least one tokenizer is loaded and ready. */
   get isReady(): boolean {
-    return this.tokenizer !== null;
+    return this.tokenizers.has(this.activeVocab);
   }
 
   /**
    * Count tokens in a text string. Synchronous — requires initialize() first.
-   * Throws if the tokenizer hasn't been initialized.
    */
   count(text: string): number {
-    if (!this.tokenizer) {
-      throw new Error('TokenService not initialized. Call initialize() first.');
-    }
-    return this.tokenizer.count_tokens(text);
+    return this.getTokenizer().count_tokens(text);
   }
 
   /**
@@ -124,39 +198,42 @@ export class TokenService implements TokenCounter {
    * Encode text to token IDs. Returns a Uint32Array.
    */
   encode(text: string): Uint32Array {
-    if (!this.tokenizer) {
-      throw new Error('TokenService not initialized. Call initialize() first.');
-    }
-    return this.tokenizer.encode(text, false);
+    return this.getTokenizer().encode(text, false);
   }
 
   /**
    * Decode token IDs back to text.
    */
   decode(ids: Uint32Array): string {
-    if (!this.tokenizer) {
-      throw new Error('TokenService not initialized. Call initialize() first.');
-    }
-    return this.tokenizer.decode(ids, true);
+    return this.getTokenizer().decode(ids, true);
   }
 
-  /** Get vocabulary size (128,000 for DeepSeek V3). */
+  /** Get vocabulary size for the active tokenizer. */
   get vocabSize(): number {
-    if (!this.tokenizer) {
-      throw new Error('TokenService not initialized. Call initialize() first.');
-    }
-    return this.tokenizer.vocab_size();
+    return this.getTokenizer().vocab_size();
+  }
+
+  /** Get the currently active vocab name. */
+  get activeVocabName(): string {
+    return this.activeVocab;
+  }
+
+  /** Get list of loaded vocab names. */
+  get loadedVocabs(): string[] {
+    return [...this.tokenizers.keys()];
   }
 
   /**
-   * Release WASM memory. Call on extension deactivation.
+   * Release all WASM memory. Call on extension deactivation.
    */
   dispose(): void {
-    if (this.tokenizer) {
-      this.tokenizer.free();
-      this.tokenizer = null;
+    for (const [name, tokenizer] of this.tokenizers) {
+      tokenizer.free();
+      logger.debug(`[TokenService] Freed tokenizer: ${name}`);
     }
-    this.initPromise = null;
+    this.tokenizers.clear();
+    this.initPromises.clear();
+    this.wasmModule = null;
   }
 
   /** Reset singleton (for testing). */

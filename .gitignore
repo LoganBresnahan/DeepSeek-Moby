@@ -38,10 +38,11 @@ coverage/
 # Anthropic
 .claude/*
 
-# WASM build output (build locally with: npm run build:wasm)
-packages/moby-wasm/pkg/
+# WASM build artifacts (rebuild with: npm run build:wasm)
 packages/moby-wasm/target/
 packages/moby-wasm/assets/tokenizer.json
+# NOTE: packages/moby-wasm/pkg/ is committed (prebuilt WASM binary for CI)
+# NOTE: packages/moby-wasm/assets/vocabs/ is committed (per-model vocab files)
 
 # Me
 PLAN.md
