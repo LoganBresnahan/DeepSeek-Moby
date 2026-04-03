@@ -907,6 +907,69 @@ describe('DiffManager', () => {
     });
   });
 
+  // ── Failed Auto-Apply Tracking ──
+
+  describe('failed auto-apply tracking', () => {
+    it('should start with zero failed count', () => {
+      expect(manager.getFailedAutoApplyCount()).toBe(0);
+    });
+
+    it('should increment on file-not-found in auto mode', async () => {
+      const { manager: autoManager } = createManager('auto');
+      (vscode.workspace.fs.stat as any).mockRejectedValue(new Error('Not found'));
+
+      await autoManager.applyCodeDirectlyForAutoMode('nonexistent.ts', 'code');
+
+      expect(autoManager.getFailedAutoApplyCount()).toBe(1);
+      autoManager.dispose();
+      (vscode.workspace.fs.stat as any).mockResolvedValue({});
+    });
+
+    it('should accumulate across multiple failed applies', async () => {
+      const { manager: autoManager } = createManager('auto');
+      (vscode.workspace.fs.stat as any).mockRejectedValue(new Error('Not found'));
+
+      await autoManager.applyCodeDirectlyForAutoMode('file1.ts', 'code');
+      await autoManager.applyCodeDirectlyForAutoMode('file2.ts', 'code');
+      await autoManager.applyCodeDirectlyForAutoMode('file3.ts', 'code');
+
+      expect(autoManager.getFailedAutoApplyCount()).toBe(3);
+      autoManager.dispose();
+      (vscode.workspace.fs.stat as any).mockResolvedValue({});
+    });
+
+    it('should reset via resetFailedAutoApplyCount', async () => {
+      const { manager: autoManager } = createManager('auto');
+      (vscode.workspace.fs.stat as any).mockRejectedValue(new Error('Not found'));
+
+      await autoManager.applyCodeDirectlyForAutoMode('nonexistent.ts', 'code');
+      expect(autoManager.getFailedAutoApplyCount()).toBe(1);
+
+      autoManager.resetFailedAutoApplyCount();
+      expect(autoManager.getFailedAutoApplyCount()).toBe(0);
+
+      autoManager.dispose();
+      (vscode.workspace.fs.stat as any).mockResolvedValue({});
+    });
+
+    it('should not increment on successful apply', async () => {
+      const { manager: autoManager } = createManager('auto');
+      (vscode.workspace.fs.stat as any).mockResolvedValue({});
+      const mockDoc = {
+        uri: { toString: () => 'file:///workspace/src/app.ts', scheme: 'file' },
+        getText: () => 'old content',
+        positionAt: (o: number) => ({ line: 0, character: o }),
+        save: vi.fn(async () => true),
+      };
+      (vscode.workspace.openTextDocument as any).mockResolvedValue(mockDoc);
+
+      await autoManager.applyCodeDirectlyForAutoMode('src/app.ts', 'new content');
+
+      expect(autoManager.getFailedAutoApplyCount()).toBe(0);
+      autoManager.dispose();
+    });
+  });
+
   // ── dispose ──
 
   describe('dispose', () => {

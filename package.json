@@ -297,6 +297,18 @@
         "command": "moby.manageEncryptionKey",
         "title": "Manage Database Encryption Key",
         "category": "Moby"
+      },
+      {
+        "command": "moby.acceptActiveDiff",
+        "title": "Accept Changes",
+        "icon": "$(check)",
+        "category": "Moby"
+      },
+      {
+        "command": "moby.rejectActiveDiff",
+        "title": "Reject Changes",
+        "icon": "$(close)",
+        "category": "Moby"
       }
     ],
     "menus": {
@@ -304,6 +316,26 @@
         {
           "command": "moby.startChat",
           "when": "true"
+        },
+        {
+          "command": "moby.acceptActiveDiff",
+          "when": "false"
+        },
+        {
+          "command": "moby.rejectActiveDiff",
+          "when": "false"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "moby.acceptActiveDiff",
+          "when": "resourceScheme == deepseek-diff",
+          "group": "navigation@1"
+        },
+        {
+          "command": "moby.rejectActiveDiff",
+          "when": "resourceScheme == deepseek-diff",
+          "group": "navigation@2"
         }
       ],
       "view/title": [

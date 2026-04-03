@@ -363,8 +363,8 @@ export class ConversationManager {
     const oldTitle = session.title;
 
     this.db.prepare(`
-      UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?
-    `).run(newTitle, Date.now(), sessionId);
+      UPDATE sessions SET title = ? WHERE id = ?
+    `).run(newTitle, sessionId);
 
     // Record rename event
     this.eventStore.append({
@@ -376,6 +376,36 @@ export class ConversationManager {
     });
 
     this.onSessionsChanged.fire();
+  }
+
+  /**
+   * Update the status of a file-modified event in the most recent assistant_message's turnEvents.
+   * Called when the user accepts/rejects a pending file change in ask mode.
+   */
+  updateFileModifiedStatus(sessionId: string, filePath: string, newStatus: 'applied' | 'rejected'): void {
+    // Find the most recent assistant_message event for this session
+    const events = this.eventStore.getEventsByType(sessionId, ['assistant_message']);
+    if (events.length === 0) return;
+
+    const lastAssistant = events[events.length - 1] as AssistantMessageEvent;
+    if (!lastAssistant.turnEvents || lastAssistant.turnEvents.length === 0) return;
+
+    // Find and update the file-modified event
+    let updated = false;
+    for (const te of lastAssistant.turnEvents) {
+      if ((te as any).type === 'file-modified' && (te as any).path === filePath) {
+        (te as any).status = newStatus;
+        updated = true;
+        break;
+      }
+    }
+
+    if (updated && lastAssistant.id) {
+      // Write back the updated data blob
+      const { sessionId: _s, sequence: _seq, id, ...data } = lastAssistant as any;
+      this.eventStore.updateEventData(id, data);
+      logger.debug(`[CM] Updated file-modified status: ${filePath} → ${newStatus} in session ${sessionId.substring(0, 8)}`);
+    }
   }
 
   /**

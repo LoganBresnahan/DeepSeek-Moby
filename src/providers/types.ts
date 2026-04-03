@@ -26,7 +26,7 @@ export interface DiffMetadata {
 export interface DiffInfo {
   filePath: string;
   timestamp: number;
-  status: 'pending' | 'applied' | 'rejected';
+  status: 'pending' | 'applied' | 'rejected' | 'deleted' | 'expired';
   iteration: number;
   diffId: string;
   superseded: boolean;

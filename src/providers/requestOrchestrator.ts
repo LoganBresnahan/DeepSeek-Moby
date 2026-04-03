@@ -182,10 +182,12 @@ export class RequestOrchestrator {
       contentIterations: [] as string[],
       currentIterationContent: '',
       shellResultsForHistory: [] as ShellResult[],
+      shellDeletedFiles: false,
     };
 
     // Clear file changes tracking for this response
     this.diffManager.clearResponseFileChanges();
+    this.diffManager.resetFailedAutoApplyCount();
 
     // Create abort controller for this request
     this.abortController = new AbortController();
@@ -659,7 +661,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
   private async executeInlineShellCommands(
     workspacePath: string,
     signal: AbortSignal,
-    state: { shellResultsForHistory: ShellResult[] }
+    state: { shellResultsForHistory: ShellResult[]; shellDeletedFiles: boolean }
   ): Promise<void> {
     while (this._pendingInlineShellCommands.length > 0) {
       if (signal.aborted) break;
@@ -751,6 +753,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
 
       // File watcher
       const modifiedFiles = new Set<string>();
+      const deletedFiles = new Set<string>();
       let shellFileWatcher: vscode.FileSystemWatcher | null = null;
       try {
         shellFileWatcher = vscode.workspace.createFileSystemWatcher(
@@ -764,6 +767,13 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
         };
         shellFileWatcher.onDidChange(trackChange);
         shellFileWatcher.onDidCreate(trackChange);
+        shellFileWatcher.onDidDelete((uri: vscode.Uri) => {
+          const relativePath = vscode.workspace.asRelativePath(uri, false);
+          if (!relativePath.startsWith('.git/')) {
+            deletedFiles.add(relativePath);
+            modifiedFiles.delete(relativePath);
+          }
+        });
       } catch {
         shellFileWatcher = null;
       }
@@ -774,13 +784,18 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
         : [];
       const allResults = [...blockedResults, ...executedResults];
 
-      // Dispose watcher and register modified files
+      // Dispose watcher and register modified/deleted files
       if (shellFileWatcher) {
         await new Promise(resolve => setTimeout(resolve, 100));
         shellFileWatcher.dispose();
         if (modifiedFiles.size > 0) {
           logger.info(`[R1-Shell] Inline: File watcher detected ${modifiedFiles.size} modified files: ${[...modifiedFiles].join(', ')}`);
           this.diffManager.registerShellModifiedFiles([...modifiedFiles]);
+        }
+        if (deletedFiles.size > 0) {
+          logger.info(`[R1-Shell] Inline: File watcher detected ${deletedFiles.size} deleted files: ${[...deletedFiles].join(', ')}`);
+          this.diffManager.registerShellDeletedFiles([...deletedFiles]);
+          state.shellDeletedFiles = true;
         }
       }
 
@@ -821,6 +836,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
       contentIterations: string[];
       currentIterationContent: string;
       shellResultsForHistory: ShellResult[];
+      shellDeletedFiles: boolean;
     }
   ): Promise<void> {
     // Reasoner shell loop - run shell commands if R1 outputs them
@@ -1126,6 +1142,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
 
             // Watch for file changes during shell execution
             const modifiedFiles = new Set<string>();
+            const deletedFiles = new Set<string>();
             let shellFileWatcher: vscode.FileSystemWatcher | null = null;
             if (workspacePath) {
               try {
@@ -1140,6 +1157,13 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
                 };
                 shellFileWatcher.onDidChange(trackChange);
                 shellFileWatcher.onDidCreate(trackChange);
+                shellFileWatcher.onDidDelete((uri: vscode.Uri) => {
+                  const relativePath = vscode.workspace.asRelativePath(uri, false);
+                  if (!relativePath.startsWith('.git/')) {
+                    deletedFiles.add(relativePath);
+                    modifiedFiles.delete(relativePath);
+                  }
+                });
               } catch {
                 // File watcher not available (e.g., in tests)
                 shellFileWatcher = null;
@@ -1153,7 +1177,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
             const shellDuration = Date.now() - shellStartTime;
             logger.info(`[Timing] Shell execution completed in ${shellDuration}ms`);
 
-            // Dispose watcher and notify DiffManager of modified files
+            // Dispose watcher and notify DiffManager of modified/deleted files
             if (shellFileWatcher) {
               // Wait for OS file system notifications to arrive
               await new Promise(resolve => setTimeout(resolve, 100));
@@ -1161,6 +1185,11 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
               if (modifiedFiles.size > 0) {
                 logger.info(`[R1-Shell] File watcher detected ${modifiedFiles.size} modified files: ${[...modifiedFiles].join(', ')}`);
                 this.diffManager.registerShellModifiedFiles([...modifiedFiles]);
+              }
+              if (deletedFiles.size > 0) {
+                logger.info(`[R1-Shell] File watcher detected ${deletedFiles.size} deleted files: ${[...deletedFiles].join(', ')}`);
+                this.diffManager.registerShellDeletedFiles([...deletedFiles]);
+                state.shellDeletedFiles = true;
               }
             }
             state.shellResultsForHistory.push(...results);
@@ -1255,12 +1284,39 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
         // No shell commands in this iteration
         if (isReasonerModel) {
           logger.info(`[R1-Shell] No shell commands in iteration, checking for auto-continuation...`);
-          logger.info(`[R1-Shell] shellIteration=${shellIteration}, autoContinuationCount=${autoContinuationCount}, lastIterationHadShellCommands=${lastIterationHadShellCommands}, shellCreatedFiles=${shellCreatedFiles}`);
+          logger.info(`[R1-Shell] shellIteration=${shellIteration}, autoContinuationCount=${autoContinuationCount}, lastIterationHadShellCommands=${lastIterationHadShellCommands}, shellCreatedFiles=${shellCreatedFiles}, shellDeletedFiles=${state.shellDeletedFiles}`);
 
           const hasCodeEdits = containsCodeEdits(state.accumulatedResponse);
-          logger.info(`[R1-Shell] Response has code edits: ${hasCodeEdits}`);
+          const failedApplies = this.diffManager.getFailedAutoApplyCount();
+          logger.info(`[R1-Shell] Response has code edits: ${hasCodeEdits}, failedApplies: ${failedApplies}`);
 
-          if (shellIteration > 0 && !hasCodeEdits && !shellCreatedFiles && autoContinuationCount < maxAutoContinuations) {
+          // Code edits were produced but files don't exist — nudge to create them
+          if (hasCodeEdits && failedApplies > 0 && autoContinuationCount < maxAutoContinuations) {
+            autoContinuationCount++;
+            this.diffManager.resetFailedAutoApplyCount();
+            logger.info(`[R1-Shell] Auto-continuing (${autoContinuationCount}/${maxAutoContinuations}): code edits failed to apply (${failedApplies} files not found)`);
+
+            this._onAutoContinuation.fire({
+              count: autoContinuationCount,
+              max: maxAutoContinuations,
+              reason: `${failedApplies} file(s) not found — requesting file creation`
+            });
+
+            currentHistoryMessages.push({
+              role: 'assistant',
+              content: iterationResponse
+            });
+
+            currentHistoryMessages.push({
+              role: 'user',
+              content: `The files you referenced don't exist yet. Please create them using shell commands.\n\nFor example:\ncat > filename.ext << 'MOBY_EOF'\n<file contents>\nMOBY_EOF\n\nCreate all ${failedApplies} file(s) now.`
+            });
+
+            lastIterationHadShellCommands = false;
+            continue;
+          }
+
+          if (shellIteration > 0 && !hasCodeEdits && !shellCreatedFiles && !state.shellDeletedFiles && autoContinuationCount < maxAutoContinuations) {
             autoContinuationCount++;
             logger.info(`[R1-Shell] Auto-continuing (${autoContinuationCount}/${maxAutoContinuations}): shell commands were executed but no code edits produced`);
 

@@ -572,9 +572,15 @@ export class ChatProvider implements vscode.WebviewViewProvider {
           break;
         case 'acceptSpecificDiff':
           await this.diffManager.acceptSpecificDiff(data.diffId);
+          if (this.currentSessionId && data.filePath) {
+            this.conversationManager.updateFileModifiedStatus(this.currentSessionId, data.filePath, 'applied');
+          }
           break;
         case 'rejectSpecificDiff':
           await this.diffManager.rejectSpecificDiff(data.diffId);
+          if (this.currentSessionId && data.filePath) {
+            this.conversationManager.updateFileModifiedStatus(this.currentSessionId, data.filePath, 'rejected');
+          }
           break;
         case 'focusDiff':
           await this.diffManager.focusSpecificDiff(data.diffId);
@@ -1145,6 +1151,22 @@ export class ChatProvider implements vscode.WebviewViewProvider {
    */
   public async showDiffQuickPick(): Promise<void> {
     return this.diffManager.showDiffQuickPick();
+  }
+
+  public async acceptActiveDiff(): Promise<void> {
+    const filePath = this.diffManager.getActiveDiffFilePath();
+    await this.diffManager.acceptActiveDiff();
+    if (this.currentSessionId && filePath) {
+      this.conversationManager.updateFileModifiedStatus(this.currentSessionId, filePath, 'applied');
+    }
+  }
+
+  public async rejectActiveDiff(): Promise<void> {
+    const filePath = this.diffManager.getActiveDiffFilePath();
+    await this.diffManager.rejectActiveDiff();
+    if (this.currentSessionId && filePath) {
+      this.conversationManager.updateFileModifiedStatus(this.currentSessionId, filePath, 'rejected');
+    }
   }
 
   private async loadCurrentSessionHistory() {

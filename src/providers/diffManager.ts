@@ -51,6 +51,7 @@ export class DiffManager {
   private pendingDiffs = new Map<string, { code: string; language: string; timer: NodeJS.Timeout }>();
   private fileEditCounts = new Map<string, number>();
   private currentResponseFileChanges: Array<{ filePath: string; status: 'applied' | 'rejected' | 'pending'; iteration: number }> = [];
+  private _failedAutoApplyCount = 0;
   private closingDiffsInProgress: number = 0;
   private pendingApprovals = new Map<string, {
     resolve: (result: DiffApprovalResult) => void;
@@ -634,6 +635,55 @@ export class DiffManager {
     }
   }
 
+  /**
+   * Find the metadata for the currently active diff editor (if any).
+   */
+  private getActiveDiffMetadata(): DiffMetadata | undefined {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.document.uri.scheme !== 'deepseek-diff') return undefined;
+
+    const uriString = editor.document.uri.toString();
+    for (const metadata of this.activeDiffs.values()) {
+      if (metadata.proposedUri.toString() === uriString || metadata.originalUri.toString() === uriString) {
+        return metadata;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Get the file path of the currently active diff (for DB status updates).
+   */
+  getActiveDiffFilePath(): string | undefined {
+    return this.getActiveDiffMetadata()?.targetFilePath;
+  }
+
+  /**
+   * Accept the currently active diff in the editor.
+   * Called from the editor/title toolbar button.
+   */
+  async acceptActiveDiff(): Promise<void> {
+    const metadata = this.getActiveDiffMetadata();
+    if (!metadata) {
+      logger.warn('[DiffManager] No active diff to accept');
+      return;
+    }
+    await this.acceptSpecificDiff(metadata.diffId);
+  }
+
+  /**
+   * Reject the currently active diff in the editor.
+   * Called from the editor/title toolbar button.
+   */
+  async rejectActiveDiff(): Promise<void> {
+    const metadata = this.getActiveDiffMetadata();
+    if (!metadata) {
+      logger.warn('[DiffManager] No active diff to reject');
+      return;
+    }
+    await this.rejectSpecificDiff(metadata.diffId);
+  }
+
   async acceptAllDiffs(): Promise<void> {
     const sorted = Array.from(this.activeDiffs.values()).sort((a, b) => a.timestamp - b.timestamp);
     logger.info(`[DiffManager] Accepting all ${sorted.length} diffs`);
@@ -694,6 +744,7 @@ export class DiffManager {
           return this.createNewFileForAutoMode(filePath, newFileContent, description, skipNotification);
         }
         logger.warn(`[DiffManager] Auto mode: File not found: ${filePath}`);
+        this._failedAutoApplyCount++;
         this._onWarning.fire({ message: `Could not find file: ${filePath}. The file may have been moved or deleted.` });
         return false;
       }
@@ -914,6 +965,12 @@ export class DiffManager {
       const filePathMatch = code.match(/^#\s*File:\s*(.+?)$/m);
       let filePath = filePathMatch ? filePathMatch[1].trim() : null;
 
+      // Skip if this file was already modified by shell commands in this response
+      if (filePath && this.currentResponseFileChanges.some(f => f.filePath === filePath && f.status === 'applied')) {
+        logger.debug(`[DiffManager] Skipping auto-show diff for ${filePath} — already shell-modified in this response`);
+        return;
+      }
+
       if (filePath) {
         logger.debug(`[FileResolver] ✓ Strategy 0 SUCCESS: Found # File: header "${filePath}"`);
       } else {
@@ -1067,6 +1124,13 @@ export class DiffManager {
 
         logger.debug(`[DiffManager] Processing unfenced edit for: ${filePath}`);
 
+        // Skip if this file was already modified by shell commands in this response
+        // (shell created/modified the file, redundant SEARCH/REPLACE would duplicate the dropdown)
+        if (this.currentResponseFileChanges.some(f => f.filePath === filePath && f.status === 'applied')) {
+          logger.debug(`[DiffManager] Skipping unfenced edit for ${filePath} — already shell-modified in this response`);
+          continue;
+        }
+
         const codeWithHeader = `# File: ${filePath}\n${codeBlock}`;
         const blockId = `unfenced-${filePath}-${codeBlock.length}`;
         if (this.processedCodeBlocks.has(blockId)) {
@@ -1104,6 +1168,14 @@ export class DiffManager {
 
   clearResponseFileChanges(): void {
     this.currentResponseFileChanges = [];
+  }
+
+  getFailedAutoApplyCount(): number {
+    return this._failedAutoApplyCount;
+  }
+
+  resetFailedAutoApplyCount(): void {
+    this._failedAutoApplyCount = 0;
   }
 
   // ── State Queries ──
@@ -1180,6 +1252,51 @@ which I already edited - would you like me to update it?"
     }
 
     this.notifyAutoAppliedFilesChanged();
+  }
+
+  /**
+   * Register files deleted by shell commands.
+   * Shows them in the "Modified Files" dropdown with deleted status.
+   */
+  registerShellDeletedFiles(filePaths: string[]): void {
+    if (filePaths.length === 0) return;
+
+    for (const filePath of filePaths) {
+      const currentCount = this.fileEditCounts.get(filePath) || 0;
+      const iteration = currentCount + 1;
+      this.fileEditCounts.set(filePath, iteration);
+      const diffId = `${filePath}-${Date.now()}-${iteration}`;
+
+      logger.info(`[DiffManager] Shell deleted file: ${filePath}`);
+
+      this.resolvedDiffs.push({ filePath, timestamp: Date.now(), status: 'applied', iteration, diffId });
+      this.currentResponseFileChanges.push({ filePath, status: 'applied', iteration });
+    }
+
+    // Advance the notification index so these entries aren't re-sent
+    // by the next notifyAutoAppliedFilesChanged call
+    this._lastNotifiedDiffIndex = this.resolvedDiffs.length;
+
+    this.notifyDeletedFilesChanged(filePaths);
+  }
+
+  private notifyDeletedFilesChanged(filePaths: string[]): void {
+    if (this.flushCallback) {
+      logger.debug(`[Buffer] FLUSH before notifyDeletedFilesChanged`);
+      this.flushCallback();
+    }
+
+    const diffsArray = filePaths.map(filePath => ({
+      filePath,
+      timestamp: Date.now(),
+      status: 'deleted' as const,
+      iteration: 1,
+      diffId: `${filePath}-deleted-${Date.now()}`,
+      superseded: false
+    }));
+
+    logger.debug(`[Frontend] Sending diffListChanged (deleted) message: ${diffsArray.length} files`);
+    this._onAutoAppliedFilesChanged.fire({ diffs: diffsArray, editMode: 'auto' });
   }
 
   // ── Quick Pick ──
@@ -1293,7 +1410,10 @@ which I already edited - would you like me to update it?"
       this.flushCallback();
     }
 
-    const pendingDiffs = Array.from(this.activeDiffs.values()).map(meta => ({
+    // Send active pending diffs + resolved diffs from the CURRENT response only.
+    // Using currentResponseFileChanges (reset per request) prevents resolved diffs
+    // from previous turns leaking into the current turn's dropdown.
+    const activeDiffsList = Array.from(this.activeDiffs.values()).map(meta => ({
       filePath: meta.targetFilePath,
       timestamp: meta.timestamp,
       status: 'pending' as const,
@@ -1303,35 +1423,18 @@ which I already edited - would you like me to update it?"
       superseded: meta.superseded || false
     }));
 
-    const resolvedDiffsList = this.resolvedDiffs.map(d => ({
+    const currentResolvedDiffs = this.resolvedDiffs.filter(d =>
+      this.currentResponseFileChanges.some(f => f.filePath === d.filePath)
+    ).map(d => ({
       filePath: d.filePath,
       timestamp: d.timestamp,
-      status: d.status,
+      status: d.status as 'applied' | 'rejected',
       iteration: d.iteration,
       diffId: d.diffId,
       superseded: false
     }));
 
-    const combinedDiffs = [...pendingDiffs, ...resolvedDiffsList];
-
-    const pendingByPath = new Map<string, typeof pendingDiffs[0]>();
-    const resolvedByPath = new Map<string, typeof resolvedDiffsList[0]>();
-
-    for (const d of combinedDiffs) {
-      if (d.status === 'pending') {
-        const existing = pendingByPath.get(d.filePath);
-        if (!existing || d.timestamp > existing.timestamp) {
-          pendingByPath.set(d.filePath, d);
-        }
-      } else {
-        const existing = resolvedByPath.get(d.filePath);
-        if (!existing || d.timestamp > existing.timestamp) {
-          resolvedByPath.set(d.filePath, d);
-        }
-      }
-    }
-
-    const allDiffs = [...pendingByPath.values(), ...resolvedByPath.values()]
+    const allDiffs = [...activeDiffsList, ...currentResolvedDiffs]
       .sort((a, b) => a.timestamp - b.timestamp);
 
     this._onDiffListChanged.fire({ diffs: allDiffs, editMode: this.editMode });
@@ -1358,7 +1461,9 @@ which I already edited - would you like me to update it?"
     }));
 
     logger.debug(`[Frontend] Sending diffListChanged (auto-applied) message: ${diffsArray.length} new files`);
-    this._onAutoAppliedFilesChanged.fire({ diffs: diffsArray, editMode: this.editMode });
+    // Always use 'auto' for shell-modified/auto-applied files — they're already applied,
+    // so the dropdown should show "Modified Files" regardless of the current edit mode.
+    this._onAutoAppliedFilesChanged.fire({ diffs: diffsArray, editMode: 'auto' });
   }
 
   private async closeDiffTabOnly(metadata: DiffMetadata): Promise<void> {

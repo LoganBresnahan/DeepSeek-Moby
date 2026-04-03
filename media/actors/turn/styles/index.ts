@@ -979,6 +979,31 @@ const pendingStyles = `
   color: var(--vscode-errorForeground);
 }
 
+.pending-status.deleted {
+  color: var(--vscode-errorForeground);
+}
+
+.pending-label.deleted {
+  color: var(--vscode-errorForeground);
+}
+
+.pending-item[data-status="deleted"] .pending-file {
+  text-decoration: line-through;
+  opacity: 0.7;
+}
+
+.pending-status.expired {
+  color: var(--vscode-disabledForeground);
+}
+
+.pending-label.expired {
+  color: var(--vscode-disabledForeground);
+}
+
+.pending-item[data-status="expired"] .pending-file {
+  opacity: 0.6;
+}
+
 .pending-item[data-superseded="true"] {
   opacity: 0.6;
 }

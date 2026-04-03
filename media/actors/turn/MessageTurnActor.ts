@@ -312,11 +312,19 @@ export class MessageTurnActor extends InterleavedShadowActor {
   endStreaming(): void {
     this._isStreaming = false;
 
-    // Mark current text segment as complete
+    // Mark current text segment as complete and re-render to remove
+    // the "Seeking/Developing..." animation (formatContent skips it
+    // when _isStreaming is false, but the old HTML is still in the DOM)
     if (this._currentTextContainerId) {
       const container = this.getContainer(this._currentTextContainerId);
       if (container) {
         container.host.classList.remove('streaming');
+        const contentEl = container.content.querySelector('.content');
+        if (contentEl && this._currentSegmentContent) {
+          const formatted = this.formatContent(this._currentSegmentContent);
+          contentEl.innerHTML = formatted;
+          this._lastFormattedHtml = formatted;
+        }
       }
     }
 
@@ -408,6 +416,11 @@ export class MessageTurnActor extends InterleavedShadowActor {
     this.renderTextSegment(segment, container);
     this.setupTextSegmentHandlers(container.id);
 
+    // Hide container if created with empty content (will show when content arrives)
+    if (!content.trim()) {
+      container.host.setAttribute('hidden', '');
+    }
+
     this.publish({ 'turn.textSegmentCount': this._textSegments.size });
 
     return segmentId;
@@ -435,6 +448,15 @@ export class MessageTurnActor extends InterleavedShadowActor {
         contentEl.innerHTML = formatted;
         this._lastFormattedHtml = formatted;
       }
+    }
+
+    // Hide container when content is empty (e.g., shell tags stripped),
+    // show it again when content arrives
+    const isEmpty = !content.trim();
+    if (isEmpty) {
+      container.host.setAttribute('hidden', '');
+    } else {
+      container.host.removeAttribute('hidden');
     }
 
     this._currentSegmentContent = content;
@@ -807,6 +829,15 @@ export class MessageTurnActor extends InterleavedShadowActor {
     this._currentPendingGroup.files.set(fileId, pendingFile);
     this.renderPendingGroup(this._currentPendingGroup);
 
+    // During streaming, move the text container to the end so the
+    // "Seeking..." animation always stays below file dropdowns.
+    if (this._isStreaming && this._currentTextContainerId) {
+      const textContainer = this.getContainer(this._currentTextContainerId);
+      if (textContainer) {
+        this.element.appendChild(textContainer.host);
+      }
+    }
+
     return fileId;
   }
 
@@ -1075,7 +1106,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
 
     // In manual mode, only show if there are resolved files (applied/rejected from history
     // or completed actions). Hide if all files are still pending (user manages via diff view).
-    const hasResolvedFiles = files.some(f => f.status === 'applied' || f.status === 'rejected');
+    const hasResolvedFiles = files.some(f => f.status === 'applied' || f.status === 'rejected' || f.status === 'deleted' || f.status === 'expired');
     if (groupMode === 'manual' && !hasResolvedFiles) {
       container.host.setAttribute('hidden', '');
       return;
@@ -1090,19 +1121,22 @@ export class MessageTurnActor extends InterleavedShadowActor {
 
     // Count label: show appropriate status based on mode
     const rejectedCount = files.filter(f => f.status === 'rejected').length;
+    const deletedCount = files.filter(f => f.status === 'deleted').length;
     let countLabel: string;
     if (isAuto) {
-      countLabel = appliedCount > 0 ? `${appliedCount} applied` : `${files.length} file${files.length > 1 ? 's' : ''}`;
+      const parts: string[] = [];
+      if (appliedCount > 0) parts.push(`${appliedCount} applied`);
+      if (deletedCount > 0) parts.push(`${deletedCount} deleted`);
+      countLabel = parts.length > 0 ? parts.join(', ') : `${files.length} file${files.length > 1 ? 's' : ''}`;
     } else if (pendingCount > 0) {
       countLabel = `${pendingCount} pending`;
-    } else if (appliedCount > 0 && rejectedCount > 0) {
-      countLabel = `${appliedCount} applied, ${rejectedCount} rejected`;
-    } else if (appliedCount > 0) {
-      countLabel = `${appliedCount} applied`;
-    } else if (rejectedCount > 0) {
-      countLabel = `${rejectedCount} rejected`;
     } else {
-      countLabel = `${files.length} file${files.length > 1 ? 's' : ''}`;
+      const expiredCount = files.filter(f => f.status === 'expired').length;
+      const parts: string[] = [];
+      if (appliedCount > 0) parts.push(`${appliedCount} applied`);
+      if (rejectedCount > 0) parts.push(`${rejectedCount} rejected`);
+      if (expiredCount > 0) parts.push(`${expiredCount} expired`);
+      countLabel = parts.length > 0 ? parts.join(', ') : `${files.length} file${files.length > 1 ? 's' : ''}`;
     }
 
     container.host.classList.toggle('auto-mode', isAuto);
@@ -1123,9 +1157,13 @@ export class MessageTurnActor extends InterleavedShadowActor {
             <button class="pending-btn reject-btn" data-file-id="${file.id}" data-diff-id="${file.diffId ?? ''}">Reject</button>
           </div>
         `;
+      } else if (file.status === 'expired') {
+        actionsHtml = `<span class="pending-label expired">Expired</span>`;
       } else if (isAuto) {
         if (file.status === 'error') {
           actionsHtml = `<span class="pending-label error">Error</span>`;
+        } else if (file.status === 'deleted') {
+          actionsHtml = `<span class="pending-label deleted">Deleted</span>`;
         } else {
           actionsHtml = `<span class="pending-label auto-applied">Auto Applied</span>`;
         }
@@ -1277,10 +1315,9 @@ export class MessageTurnActor extends InterleavedShadowActor {
       }
     });
 
-    // Accept button
+    // Accept button — no streaming guard: these buttons unblock the stream
     this.delegateInContainer(containerId, 'click', '.accept-btn', (e, btn) => {
       e.stopPropagation();
-      if (this.isGlobalStreaming()) return;
       const fileId = btn.getAttribute('data-file-id');
       const diffId = btn.getAttribute('data-diff-id');
       if (fileId && this._onPendingFileAction) {
@@ -1288,10 +1325,9 @@ export class MessageTurnActor extends InterleavedShadowActor {
       }
     });
 
-    // Reject button
+    // Reject button — no streaming guard: these buttons unblock the stream
     this.delegateInContainer(containerId, 'click', '.reject-btn', (e, btn) => {
       e.stopPropagation();
-      if (this.isGlobalStreaming()) return;
       const fileId = btn.getAttribute('data-file-id');
       const diffId = btn.getAttribute('data-diff-id');
       if (fileId && this._onPendingFileAction) {
@@ -1553,6 +1589,8 @@ export class MessageTurnActor extends InterleavedShadowActor {
       case 'applied': return '✓';
       case 'rejected': return '✗';
       case 'superseded': return '⊘';
+      case 'deleted': return '🗑️';
+      case 'expired': return '○';
       case 'error': return '✗';
       default: return '●';
     }
@@ -1597,7 +1635,8 @@ export class MessageTurnActor extends InterleavedShadowActor {
     // Italic
     result = result.replace(/\*([^*]+)\*/g, '<em>$1</em>');
 
-    // Line breaks
+    // Line breaks (collapse 3+ consecutive newlines to 2)
+    result = result.replace(/\n{3,}/g, '\n\n');
     result = result.replace(/\n/g, '<br>');
 
     return result;

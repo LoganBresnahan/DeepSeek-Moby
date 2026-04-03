@@ -80,7 +80,7 @@ export interface ShellSegment {
 // Pending Files
 // ============================================
 
-export type PendingFileStatus = 'pending' | 'applied' | 'rejected' | 'superseded' | 'error';
+export type PendingFileStatus = 'pending' | 'applied' | 'rejected' | 'superseded' | 'error' | 'deleted' | 'expired';
 
 export interface PendingFile {
   id: string;

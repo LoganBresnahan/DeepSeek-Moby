@@ -147,7 +147,11 @@ function registerCommands(context: vscode.ExtensionContext) {
     { name: 'setTavilyApiKey', handler: () => setTavilyApiKey(context) },
 
     // Database encryption key
-    { name: 'manageEncryptionKey', handler: () => manageEncryptionKey(context, conversationManager) }
+    { name: 'manageEncryptionKey', handler: () => manageEncryptionKey(context, conversationManager) },
+
+    // Diff editor toolbar actions
+    { name: 'acceptActiveDiff', handler: () => chatProvider.acceptActiveDiff() },
+    { name: 'rejectActiveDiff', handler: () => chatProvider.rejectActiveDiff() }
   ];
 
   commands.forEach(({ name, handler }) => {

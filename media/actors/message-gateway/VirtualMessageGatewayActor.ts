@@ -232,8 +232,9 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         return;
       }
       if (e.type === 'thinking-start') {
-        // Found open thinking — complete it
-        tl.append({ type: 'thinking-complete', iteration: e.iteration, ts: Date.now() });
+        // Found open thinking — complete it via emitTurnEvent so the projector
+        // produces a mutation that stops the pulse animation on the actor
+        this.emitTurnEvent(turnId, { type: 'thinking-complete', iteration: e.iteration, ts: Date.now() });
         return;
       }
     }
@@ -281,9 +282,14 @@ export class VirtualMessageGatewayActor extends EventStateActor {
     log.debug(`[${turnId}] RENDER: ${this.summarizeSegment(segment)}`);
 
     switch (segment.type) {
-      case 'text':
-        virtualList.addTextSegment(turnId, segment.content);
+      case 'text': {
+        const isReasonerMode = this._actors.session.model === 'deepseek-reasoner';
+        const displayContent = isReasonerMode
+          ? segment.content.replace(/<shell>[\s\S]*?<\/shell>/gi, '').trim()
+          : segment.content;
+        virtualList.addTextSegment(turnId, displayContent);
         break;
+      }
 
       case 'thinking': {
         virtualList.startThinkingIteration(turnId);
@@ -325,13 +331,21 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         break;
       }
 
-      case 'file-modified':
+      case 'file-modified': {
+        // During history restore (turn not streaming), pending files can't be
+        // accepted/rejected anymore — mark them as expired
+        const turn = virtualList.getTurn(turnId);
+        let fileStatus = segment.status as 'pending' | 'applied' | 'rejected' | 'deleted' | 'expired';
+        if (fileStatus === 'pending' && turn && !turn.isStreaming) {
+          fileStatus = 'expired';
+        }
         virtualList.addPendingFile(turnId, {
           filePath: segment.path,
-          status: segment.status as 'pending' | 'applied' | 'rejected',
+          status: fileStatus,
           editMode: segment.editMode as EditMode | undefined,
         });
         break;
+      }
 
       case 'tool-batch': {
         virtualList.startToolBatch(turnId, segment.tools.map(t => ({
@@ -598,7 +612,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
           virtualList.updatePendingStatus(
             this._currentTurnId,
             msg.fileId as string,
-            msg.status as 'pending' | 'applied' | 'rejected' | 'superseded'
+            msg.status as 'pending' | 'applied' | 'rejected' | 'superseded' | 'deleted' | 'expired'
           );
         }
         break;
@@ -1116,7 +1130,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
     const currentPaths = new Map(turn.pendingFiles.map(f => [f.filePath, f]));
 
     for (const diff of diffs) {
-      const status = diff.status as 'pending' | 'applied' | 'rejected' | 'superseded' | 'error';
+      const status = diff.status as 'pending' | 'applied' | 'rejected' | 'superseded' | 'error' | 'deleted' | 'expired';
 
       // Check if this diff exists in ANY turn (global search by diffId)
       if (diff.diffId) {
@@ -1156,7 +1170,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       if (tl) {
         if (source === 'diff-engine' && this._lastShellId) {
           tl.insertCausal({
-            type: 'file-modified', path: diff.filePath, status, causedBy: this._lastShellId, ts: Date.now()
+            type: 'file-modified', path: diff.filePath, status, editMode: msg.editMode as string | undefined, causedBy: this._lastShellId, ts: Date.now()
           });
         } else {
           tl.append({

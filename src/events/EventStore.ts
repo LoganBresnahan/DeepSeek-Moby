@@ -221,6 +221,13 @@ export class EventStore {
   }
 
   /**
+   * Update the data blob of an event by ID.
+   */
+  updateEventData(eventId: string, data: Record<string, unknown>): void {
+    this.db.prepare('UPDATE events SET data = ? WHERE id = ?').run(JSON.stringify(data), eventId);
+  }
+
+  /**
    * Delete all event links for a session and clean up orphaned events.
    * Used when deleting a conversation.
    *

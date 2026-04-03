@@ -160,9 +160,9 @@ function initializeActorSystem(): void {
     postMessage: (msg) => vscode.postMessage(msg),
     onPendingFileAction: (action, _fileId, diffId, filePath) => {
       if (action === 'accept' && diffId) {
-        vscode.postMessage({ type: 'acceptSpecificDiff', diffId });
+        vscode.postMessage({ type: 'acceptSpecificDiff', diffId, filePath });
       } else if (action === 'reject' && diffId) {
-        vscode.postMessage({ type: 'rejectSpecificDiff', diffId });
+        vscode.postMessage({ type: 'rejectSpecificDiff', diffId, filePath });
       } else if (action === 'focus') {
         // Focus the file - send both diffId and filePath so extension can fall back
         // to opening the file directly if the diff was already applied/closed

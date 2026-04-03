@@ -137,7 +137,7 @@ export interface PendingFileData {
   filePath: string;
   fileName: string;
   diffId?: string;
-  status: 'pending' | 'applied' | 'rejected' | 'superseded' | 'error';
+  status: 'pending' | 'applied' | 'rejected' | 'superseded' | 'error' | 'deleted' | 'expired';
   iteration: number;
   /** Edit mode at time of creation — preserved across virtual scroll re-binds */
   editMode: EditMode;

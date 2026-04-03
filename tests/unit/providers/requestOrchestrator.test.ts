@@ -184,6 +184,9 @@ function createMockDiffManager() {
     waitForPendingApprovals: vi.fn(async () => []),
     cancelPendingApprovals: vi.fn(),
     registerShellModifiedFiles: vi.fn(),
+    registerShellDeletedFiles: vi.fn(),
+    getFailedAutoApplyCount: vi.fn(() => 0),
+    resetFailedAutoApplyCount: vi.fn(),
   };
 }
 
