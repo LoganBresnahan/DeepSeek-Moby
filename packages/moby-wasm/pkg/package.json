@@ -1,0 +1,12 @@
+{
+  "name": "deepseek-moby-wasm",
+  "description": "DeepSeek V3 tokenizer compiled to WASM",
+  "version": "0.1.0",
+  "files": [
+    "deepseek_moby_wasm_bg.wasm",
+    "deepseek_moby_wasm.js",
+    "deepseek_moby_wasm.d.ts"
+  ],
+  "main": "deepseek_moby_wasm.js",
+  "types": "deepseek_moby_wasm.d.ts"
+}
