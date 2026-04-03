@@ -1,19 +1,48 @@
-.vscode/**
-.vscode-test/**
+# === Source code (compiled to dist/) ===
 src/**
 scripts/**
-.gitignore
-.yarnrc
-.vscode
-.vscode-test
+packages/**
+
+# === Media source (keep only the icon) ===
+media/**
+!media/moby.png
+
+# === Tests & config ===
+tests/**
+vitest.config.*
 tsconfig.json
 webpack.config.js
 package-lock.json
 yarn.lock
+.gitignore
+.yarnrc
+REMINDER.md
+
+# === Documentation (not needed at runtime) ===
+docs/**
+
+# === IDE, CI & misc ===
+.vscode/**
+.vscode-test/**
+.github/**
+.claude/**
+.tmp/**
+
+# === TypeScript source (keep declarations) ===
 *.ts
 !*.d.ts
-media/*.js
-media/*.css
 
-# WASM tokenizer — all needed files are copied to dist/ by webpack
-packages/**
+# === Source maps & license files in dist ===
+dist/**/*.map
+dist/**/*.LICENSE.txt
+
+# === Legacy/dev files in dist ===
+dist/media/dev/**
+dist/media/history.*
+dist/assets/tokenizer.json.br
+
+# === Node modules: exclude all except native addon ===
+# diff, uuid, deepseek-moby-wasm are bundled by webpack into dist/extension.js
+# Only @signalapp/sqlcipher needs to ship (native N-API addon with prebuilds)
+node_modules/**
+!node_modules/@signalapp/**
