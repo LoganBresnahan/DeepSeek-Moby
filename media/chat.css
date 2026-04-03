@@ -802,35 +802,31 @@ body {
   flex-direction: column;
   padding: 8px;
   background: var(--vscode-sideBar-background);
-  position: relative;
+  flex-shrink: 0;
 }
 
 .shadow-actors-row {
   display: flex;
   gap: 8px;
-  align-items: flex-start; /* Align buttons to TOP of input area */
+  align-items: flex-end; /* Buttons stay at bottom when input grows */
 }
 
 .toolbar-container {
   flex-shrink: 0;
 }
 
-/* Wrapper for input area + status panel (matches old .input-textarea-wrapper) */
+/* Wrapper for input area + status panel */
 .input-wrapper {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 1px;
   flex: 1;
   min-width: 0;
-  overflow: visible;
 }
 
 .input-area-container {
   flex: 0 0 auto;
   min-width: 0;
-  height: 68px; /* matches textarea min-height — fixed footprint */
-  position: relative;
-  overflow: visible; /* allow shadow content to grow upward */
 }
 
 .status-panel-container {

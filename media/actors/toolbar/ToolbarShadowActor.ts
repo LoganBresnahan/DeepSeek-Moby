@@ -129,7 +129,8 @@ export class ToolbarShadowActor extends ShadowActor {
       },
       subscriptions: {
         'streaming.active': (value: unknown) => this.handleStreamingChange(value as boolean),
-        'plans.activeCount': (value: unknown) => this.handlePlanCountChange(value as number)
+        'plans.activeCount': (value: unknown) => this.handlePlanCountChange(value as number),
+        'files.selectedCount': (value: unknown) => this.handleFilesSelectedChange(value as number)
       }
     });
 
@@ -284,6 +285,15 @@ export class ToolbarShadowActor extends ShadowActor {
       planBtn.title = count > 0 ? `Plans (${count} active)` : 'Plans';
     }
     this.publish({ 'toolbar.planEnabled': this._planEnabled });
+  }
+
+  private handleFilesSelectedChange(count: number): void {
+    const hasFiles = (count || 0) > 0;
+    const filesBtn = this.query<HTMLButtonElement>('.files-btn');
+    if (filesBtn) {
+      filesBtn.classList.toggle('active', hasFiles);
+      filesBtn.title = hasFiles ? `Files (${count} selected)` : 'Select files for context';
+    }
   }
 
   // ============================================

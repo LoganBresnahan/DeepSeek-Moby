@@ -64,7 +64,8 @@ export class FilesShadowActor extends ModalShadowActor {
       maxWidth: '600px',
       maxHeight: '80vh',
       publications: {
-        'files.selected': () => this._selectedFiles
+        'files.selected': () => this._selectedFiles,
+        'files.selectedCount': () => this._selectedFiles.size
       },
       subscriptions: {
         'files.openFiles': (value: unknown) => this.handleOpenFiles(value as string[]),
@@ -344,7 +345,7 @@ export class FilesShadowActor extends ModalShadowActor {
     }
 
     // Live sync — publish and notify extension immediately
-    this.publish({ 'files.selected': this._selectedFiles });
+    this.publish({ 'files.selected': this._selectedFiles, 'files.selectedCount': this._selectedFiles.size });
     const filesData = Array.from(this._selectedFiles.entries()).map(([path, content]) => ({ path, content }));
     this._vscode.postMessage({ type: 'setSelectedFiles', files: filesData });
 
@@ -383,7 +384,7 @@ export class FilesShadowActor extends ModalShadowActor {
     }
 
     // Publish state
-    this.publish({ 'files.selected': this._selectedFiles });
+    this.publish({ 'files.selected': this._selectedFiles, 'files.selectedCount': this._selectedFiles.size });
 
     this.close();
   }

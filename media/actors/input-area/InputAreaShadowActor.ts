@@ -82,10 +82,15 @@ export class InputAreaShadowActor extends ShadowActor {
   // Rendering
   // ============================================
 
+  private _collapsed = false;
+
   private renderInputArea(): void {
     this.render(`
       <div class="input-area">
-        <textarea placeholder="Seek deep..." rows="1"></textarea>
+        <div class="textarea-wrapper">
+          <textarea placeholder="Seek deep..." rows="1"></textarea>
+          <button class="collapse-toggle" title="Expand input">▴</button>
+        </div>
         <div class="attachments"></div>
         <div class="file-chips-container hidden">
           <span class="file-chips-label">Context:</span>
@@ -100,6 +105,9 @@ export class InputAreaShadowActor extends ShadowActor {
     // Textarea events
     this.delegate('input', 'textarea', () => this.handleTextareaInput());
     this.delegate('keydown', 'textarea', (e) => this.handleTextareaKeydown(e as KeyboardEvent));
+
+    // Collapse/expand toggle
+    this.delegate('click', '.collapse-toggle', () => this.toggleCollapse());
 
     // File input
     this.delegate('change', '.hidden-input', (e) => this.handleFileSelect(e));
@@ -129,6 +137,12 @@ export class InputAreaShadowActor extends ShadowActor {
     if (!textarea) return;
 
     this._value = textarea.value;
+
+    // Resume auto-resize when user types (exit manual collapse/expand)
+    if (this._collapsed || textarea.classList.contains('force-expanded')) {
+      this._collapsed = false;
+      textarea.classList.remove('force-expanded');
+    }
     this.autoResize();
 
     this.publish({ 'input.value': this._value });
@@ -261,10 +275,62 @@ export class InputAreaShadowActor extends ShadowActor {
     const textarea = this.query<HTMLTextAreaElement>('textarea');
     if (!textarea) return;
 
+    // Don't auto-resize if user manually expanded or collapsed
+    if (this._collapsed) {
+      textarea.style.height = '68px';
+      textarea.classList.remove('expanded');
+      return;
+    }
+    if (textarea.classList.contains('force-expanded')) {
+      return;
+    }
+
     textarea.style.height = 'auto';
     const newHeight = Math.min(textarea.scrollHeight, 300);
     textarea.style.height = `${newHeight}px`;
-    textarea.classList.toggle('expanded', newHeight > 68);
+
+    const isExpanded = newHeight > 68;
+    textarea.classList.toggle('expanded', isExpanded);
+
+    // Update toggle to show collapse option when content has grown
+    const toggle = this.query<HTMLButtonElement>('.collapse-toggle');
+    if (toggle) {
+      if (isExpanded) {
+        toggle.textContent = '▾';
+        toggle.title = 'Collapse input';
+        toggle.classList.add('expanded');
+      } else {
+        toggle.textContent = '▴';
+        toggle.title = 'Expand input';
+        toggle.classList.remove('expanded');
+      }
+    }
+  }
+
+  private toggleCollapse(): void {
+    const textarea = this.query<HTMLTextAreaElement>('textarea');
+    const toggle = this.query<HTMLButtonElement>('.collapse-toggle');
+    if (!textarea || !toggle) return;
+
+    const isCurrentlyExpanded = textarea.offsetHeight > 68;
+
+    if (isCurrentlyExpanded) {
+      // Collapse to min height
+      this._collapsed = true;
+      textarea.classList.remove('force-expanded', 'expanded');
+      textarea.style.height = '68px';
+      toggle.textContent = '▴';
+      toggle.title = 'Expand input';
+      toggle.classList.remove('expanded');
+    } else {
+      // Expand to max height
+      this._collapsed = false;
+      textarea.style.height = '300px';
+      textarea.classList.add('expanded', 'force-expanded');
+      toggle.textContent = '▾';
+      toggle.title = 'Collapse input';
+      toggle.classList.add('expanded');
+    }
   }
 
   /** Called by Toolbar's attach button */

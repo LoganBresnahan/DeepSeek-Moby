@@ -3,16 +3,13 @@
  * Styles for textarea and attachments (buttons are in Toolbar)
  */
 export const inputAreaShadowStyles = `
-/* Main container — anchored to bottom of host, grows upward */
+/* Main container — normal flow, grows naturally pushing chat content up */
 .input-area {
   display: flex;
   flex-direction: column;
   gap: 8px;
   min-width: 0;
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
+  position: relative;
 }
 
 /* Textarea */
@@ -34,6 +31,41 @@ textarea {
 
 textarea.expanded {
   box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.3);
+}
+
+/* Wrapper for textarea + toggle tab */
+.textarea-wrapper {
+  position: relative;
+}
+
+/* Expand/collapse tab — always visible, sits on top-right edge */
+.collapse-toggle {
+  display: flex;
+  position: absolute;
+  top: -14px;
+  right: 8px;
+  width: 24px;
+  height: 14px;
+  align-items: center;
+  justify-content: center;
+  background: var(--vscode-input-background);
+  color: var(--vscode-descriptionForeground);
+  border: 1px solid var(--vscode-input-border);
+  border-bottom: none;
+  border-radius: 3px 3px 0 0;
+  cursor: pointer;
+  font-size: 8px;
+  opacity: 0.5;
+  transition: opacity 0.15s;
+  z-index: 1;
+}
+
+.collapse-toggle:hover {
+  opacity: 1;
+}
+
+.collapse-toggle.expanded {
+  opacity: 0.7;
 }
 
 textarea:focus {
