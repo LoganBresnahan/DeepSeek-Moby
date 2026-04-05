@@ -286,12 +286,21 @@ export class TurnEventLog {
     let thinkBuf = '';
     let thinkIter = -1;
     let thinkTs = 0;
+    // file-modified events that arrived mid-text are deferred until text ends.
+    // During live streaming, these appear as dropdowns below the current text,
+    // not splitting it. Deferring in consolidation preserves this ordering.
+    let deferredFileModified: TurnEvent[] = [];
 
     const flushText = () => {
       if (textBuf) {
         result.push({ type: 'text-append', content: textBuf, iteration: textIter, ts: textTs });
         textBuf = '';
         textIter = -1;
+      }
+      // Emit any deferred file-modified events after text
+      if (deferredFileModified.length > 0) {
+        result.push(...deferredFileModified);
+        deferredFileModified = [];
       }
     };
 
@@ -337,6 +346,16 @@ export class TurnEventLog {
           flushThinking();
           flushText();
           result.push(event);
+          break;
+
+        case 'file-modified':
+          // Defer until text ends — during live streaming the dropdown appears
+          // below the current text, not splitting it mid-sentence.
+          if (textBuf) {
+            deferredFileModified.push(event);
+          } else {
+            result.push(event);
+          }
           break;
 
         default:

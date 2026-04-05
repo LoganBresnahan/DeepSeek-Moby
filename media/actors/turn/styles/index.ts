@@ -257,12 +257,6 @@ const textStyles = `
   cursor: default;
 }
 
-.code-block.applied .code-action-btn.diff-btn {
-  opacity: 0.4;
-  pointer-events: none;
-  cursor: default;
-}
-
 /* Hide diff/apply buttons when not in manual mode */
 .code-block[data-edit-mode="ask"] .diff-btn,
 .code-block[data-edit-mode="ask"] .apply-btn,
@@ -843,8 +837,19 @@ const pendingStyles = `
 }
 
 .pending-title {
-  color: var(--vscode-foreground);
   font-weight: 500;
+}
+
+:host(.pending-container.all-applied) .pending-title {
+  color: var(--vscode-terminal-ansiGreen);
+}
+
+:host(.pending-container.has-errors) .pending-title {
+  color: var(--vscode-errorForeground);
+}
+
+:host(.pending-container.has-rejected) .pending-title {
+  color: var(--vscode-errorForeground);
 }
 
 .pending-preview {

@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as cp from 'child_process';
 import * as path from 'path';
+import * as fs from 'fs';
 import { logger } from '../utils/logger';
 
 /**
@@ -10,9 +11,73 @@ import { logger } from '../utils/logger';
  * for exploring the codebase. Since R1 doesn't support native tool calling,
  * it outputs commands in <shell> tags which we parse and execute.
  *
- * Security: Commands are executed read-only within the workspace directory.
- * Dangerous operations (rm, mv, write redirects) are blocked.
+ * Shell Selection:
+ * - Linux/macOS: Uses system default shell (/bin/sh via shell: true).
+ *   POSIX-compatible and handles DeepSeek's bash-style commands correctly.
+ * - Windows: Detects and uses Git Bash (installed with Git for Windows).
+ *   Required because cmd.exe/PowerShell can't run bash syntax (heredocs,
+ *   pipes, grep, etc.). Falls back to cmd.exe if Git Bash not found.
+ *
+ * Security: Commands are validated against a blocklist before execution.
+ * The CommandApprovalManager provides an additional layer of allowed/blocked rules.
  */
+
+// ── Shell Resolution ──
+
+let _resolvedShell: string | true | null = null;
+
+/**
+ * Resolve the shell to use for command execution.
+ * On Windows, finds Git Bash. On Unix, returns true (OS default /bin/sh).
+ * Cached after first call.
+ */
+export function resolveShell(): string | true {
+  if (_resolvedShell !== null) return _resolvedShell;
+
+  if (process.platform !== 'win32') {
+    _resolvedShell = true;
+    return _resolvedShell;
+  }
+
+  // Windows: find Git Bash
+  const candidates = [
+    'C:\\Program Files\\Git\\bin\\bash.exe',
+    'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
+  ];
+
+  // Check PATH-based git to find its install directory
+  try {
+    const gitPath = cp.execSync('where git', { encoding: 'utf8', timeout: 3000 }).trim().split('\n')[0];
+    if (gitPath) {
+      // git.exe is typically at Git/cmd/git.exe — bash is at Git/bin/bash.exe
+      const gitDir = path.dirname(path.dirname(gitPath));
+      candidates.unshift(path.join(gitDir, 'bin', 'bash.exe'));
+    }
+  } catch {
+    // git not in PATH
+  }
+
+  for (const candidate of candidates) {
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      _resolvedShell = candidate;
+      logger.info(`[Shell] Using Git Bash: ${candidate}`);
+      return _resolvedShell;
+    } catch {
+      continue;
+    }
+  }
+
+  // Fallback: cmd.exe (commands may fail)
+  logger.warn('[Shell] Git Bash not found on Windows. Shell commands may fail. Install Git for Windows for full compatibility.');
+  _resolvedShell = true;
+  return _resolvedShell;
+}
+
+/** Reset cached shell (for testing) */
+export function resetResolvedShell(): void {
+  _resolvedShell = null;
+}
 
 export interface ShellCommand {
   command: string;
@@ -159,6 +224,20 @@ export function commandsCreateFiles(commands: ShellCommand[]): boolean {
 }
 
 /**
+ * Check if any shell commands delete files.
+ * Detects rm, rm -f, rm -rf, unlink patterns.
+ * Used to skip auto-continuation when R1 deletes files via shell.
+ */
+export function commandsDeleteFiles(commands: ShellCommand[]): boolean {
+  return commands.some(cmd => {
+    const c = cmd.command;
+    if (/\brm\s/.test(c)) return true;
+    if (/\bunlink\s/.test(c)) return true;
+    return false;
+  });
+}
+
+/**
  * Validate a command against security rules
  * Minimal validation - only block truly catastrophic operations
  *
@@ -233,7 +312,7 @@ export async function executeShellCommand(
 
     const child = cp.spawn(command, {
       cwd: workspacePath,
-      shell: true,
+      shell: resolveShell(),
       env: { ...process.env },
     });
 

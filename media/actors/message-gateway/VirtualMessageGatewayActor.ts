@@ -332,11 +332,22 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       }
 
       case 'file-modified': {
-        // During history restore (turn not streaming), pending files can't be
-        // accepted/rejected anymore — mark them as expired
         const turn = virtualList.getTurn(turnId);
+        const isRestore = turn && !turn.isStreaming;
+
+        // Manual mode: no dropdown during live streaming, no dropdown on restore.
+        // Just mark the code block as applied if it was.
+        if (segment.editMode === 'manual' && isRestore) {
+          if (segment.status === 'applied') {
+            virtualList.markCodeBlockApplied(segment.path);
+          }
+          break;
+        }
+
+        // During history restore, pending files can't be
+        // accepted/rejected anymore — mark them as expired
         let fileStatus = segment.status as 'pending' | 'applied' | 'rejected' | 'deleted' | 'expired';
-        if (fileStatus === 'pending' && turn && !turn.isStreaming) {
+        if (fileStatus === 'pending' && isRestore) {
           fileStatus = 'expired';
         }
         virtualList.addPendingFile(turnId, {
@@ -344,6 +355,10 @@ export class VirtualMessageGatewayActor extends EventStateActor {
           status: fileStatus,
           editMode: segment.editMode as EditMode | undefined,
         });
+        // On restore, if the file was applied, mark the matching code block
+        if (fileStatus === 'applied' && isRestore) {
+          virtualList.markCodeBlockApplied(segment.path);
+        }
         break;
       }
 
@@ -1168,15 +1183,13 @@ export class VirtualMessageGatewayActor extends EventStateActor {
 
       const tl = this._turnLogs.get(turnId);
       if (tl) {
-        if (source === 'diff-engine' && this._lastShellId) {
-          tl.insertCausal({
-            type: 'file-modified', path: diff.filePath, status, editMode: msg.editMode as string | undefined, causedBy: this._lastShellId, ts: Date.now()
-          });
-        } else {
-          tl.append({
-            type: 'file-modified', path: diff.filePath, status, editMode: msg.editMode as string | undefined, ts: Date.now()
-          });
-        }
+        // Always append (not insertCausal) — file-modified events should appear
+        // at the current stream position, matching where the dropdown renders live.
+        // insertCausal would backdate the event to after its causing shell command,
+        // splitting text that was streamed between the shell and the file notification.
+        tl.append({
+          type: 'file-modified', path: diff.filePath, status, editMode: msg.editMode as string | undefined, ts: Date.now()
+        });
       }
 
       // In manual mode, diffs are managed entirely via VS Code diff tabs — no webview dropdown needed.
@@ -1189,7 +1202,8 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       virtualList.addPendingFile(turnId, {
         filePath: diff.filePath,
         diffId: diff.diffId,
-        status
+        status,
+        editMode: msg.editMode as EditMode | undefined
       });
     }
 
@@ -1201,15 +1215,18 @@ export class VirtualMessageGatewayActor extends EventStateActor {
   }
 
   /**
-   * Handle codeApplied message - update file status to 'error' if apply failed.
+   * Handle codeApplied message - update code block visual state on success,
+   * or update file status to 'error' on failure.
    */
   private handleCodeApplied(msg: { type: string; [key: string]: unknown }): void {
     const { virtualList } = this._actors;
     const success = msg.success as boolean;
     const filePath = msg.filePath as string | undefined;
 
-    // Only handle failures - success is already handled by diffListChanged
-    if (!success && filePath) {
+    if (success && filePath) {
+      // Mark the code block as applied (grey out Diff, show checkmark on Apply)
+      virtualList.markCodeBlockApplied(filePath);
+    } else if (!success && filePath) {
       log.debug(`codeApplied failed for: ${filePath}`);
       virtualList.updatePendingFileStatusByPath(filePath, 'error');
     }

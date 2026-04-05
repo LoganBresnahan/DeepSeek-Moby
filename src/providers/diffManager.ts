@@ -435,7 +435,8 @@ export class DiffManager {
         const edit = new vscode.WorkspaceEdit();
         edit.replace(fileUri, fullRange, result.content);
         await vscode.workspace.applyEdit(edit);
-        this.sendCodeAppliedStatus(result.success, result.success ? undefined : 'Patch applied with fallback');
+        await document.save();
+        this.sendCodeAppliedStatus(result.success, result.success ? undefined : 'Patch applied with fallback', targetFilePath);
 
         // Close the diff tab and focus the target file
         if (targetMetadata) {
@@ -592,7 +593,10 @@ export class DiffManager {
       this.updateFileChangeStatus(metadata.targetFilePath, metadata.iteration, 'applied');
       await this.closeSingleDiff(metadata);
       await this.focusTargetFile(metadata.targetFilePath);
-      this.sendCodeAppliedStatus(true);
+      this.sendCodeAppliedStatus(true, undefined, metadata.targetFilePath);
+
+      // Notify webview of the resolved status so the dropdown updates
+      this.notifyDiffResolved(metadata.targetFilePath, metadata.diffId, 'applied', metadata.iteration);
 
       // Resolve pending approval if one exists (blocking ask mode)
       const pendingApproval = this.pendingApprovals.get(diffId);
@@ -626,6 +630,9 @@ export class DiffManager {
 
     this.updateFileChangeStatus(metadata.targetFilePath, metadata.iteration, 'rejected');
     await this.closeSingleDiff(metadata);
+
+    // Notify webview of the resolved status so the dropdown updates
+    this.notifyDiffResolved(metadata.targetFilePath, metadata.diffId, 'rejected', metadata.iteration);
 
     // Resolve pending approval if one exists (blocking ask mode)
     const pendingApproval = this.pendingApprovals.get(diffId);
@@ -941,6 +948,8 @@ export class DiffManager {
           logger.debug(`[DiffManager] Skipping auto-diff for code block without # File: header (likely explanatory code)`);
           continue;
         }
+
+        logger.info(`[DiffManager] handleCodeBlockDetection: detected code block for ${fileHeaderMatch[1].trim()}, editMode=${this.editMode}, blockId=${blockId}`);
 
         if (this.editMode === 'ask') {
           await this.handleAskModeDiff(block.content, block.language);
@@ -1410,9 +1419,9 @@ which I already edited - would you like me to update it?"
       this.flushCallback();
     }
 
-    // Send active pending diffs + resolved diffs from the CURRENT response only.
-    // Using currentResponseFileChanges (reset per request) prevents resolved diffs
-    // from previous turns leaking into the current turn's dropdown.
+    // Only send active pending diffs — status updates for accepted/rejected
+    // diffs are handled by the webview's accept/reject button handlers directly.
+    // Resolved diffs are sent incrementally via notifyAutoAppliedFilesChanged.
     const activeDiffsList = Array.from(this.activeDiffs.values()).map(meta => ({
       filePath: meta.targetFilePath,
       timestamp: meta.timestamp,
@@ -1423,21 +1432,22 @@ which I already edited - would you like me to update it?"
       superseded: meta.superseded || false
     }));
 
-    const currentResolvedDiffs = this.resolvedDiffs.filter(d =>
-      this.currentResponseFileChanges.some(f => f.filePath === d.filePath)
-    ).map(d => ({
-      filePath: d.filePath,
-      timestamp: d.timestamp,
-      status: d.status as 'applied' | 'rejected',
-      iteration: d.iteration,
-      diffId: d.diffId,
-      superseded: false
-    }));
+    this._onDiffListChanged.fire({ diffs: activeDiffsList, editMode: this.editMode });
+  }
 
-    const allDiffs = [...activeDiffsList, ...currentResolvedDiffs]
-      .sort((a, b) => a.timestamp - b.timestamp);
-
-    this._onDiffListChanged.fire({ diffs: allDiffs, editMode: this.editMode });
+  private notifyDiffResolved(filePath: string, diffId: string, status: 'applied' | 'rejected', iteration: number): void {
+    logger.info(`[DiffManager] notifyDiffResolved: ${filePath} → ${status} (diffId=${diffId}, editMode=${this.editMode})`);
+    this._onAutoAppliedFilesChanged.fire({
+      diffs: [{
+        filePath,
+        timestamp: Date.now(),
+        status,
+        iteration,
+        diffId,
+        superseded: false
+      }],
+      editMode: this.editMode
+    });
   }
 
   private notifyAutoAppliedFilesChanged(): void {

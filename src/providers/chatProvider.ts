@@ -419,9 +419,18 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         case 'clearChat':
           this.clearConversation();
           break;
-        case 'applyCode':
+        case 'applyCode': {
+          const filePathMatch = (data.code as string)?.match(/^#\s*File:\s*(.+?)$/m);
+          const appliedFilePath = filePathMatch ? filePathMatch[1].trim() : null;
+          logger.info(`[ChatProvider] applyCode: filePath=${appliedFilePath}, session=${this.currentSessionId?.substring(0, 8)}, editMode=${this.diffManager.currentEditMode}`);
           await this.diffManager.applyCode(data.code, data.language);
+          if (this.currentSessionId && appliedFilePath) {
+            this.conversationManager.updateFileModifiedStatus(this.currentSessionId, appliedFilePath, 'applied', this.diffManager.currentEditMode);
+          } else {
+            logger.warn(`[ChatProvider] applyCode: skipped DB update — sessionId=${this.currentSessionId}, filePath=${appliedFilePath}`);
+          }
           break;
+        }
         case 'showDiff':
           await this.diffManager.showDiff(data.code, data.language);
           break;
@@ -571,15 +580,21 @@ export class ChatProvider implements vscode.WebviewViewProvider {
           await this.diffManager.rejectEdit(data.filePath);
           break;
         case 'acceptSpecificDiff':
+          logger.info(`[ChatProvider] acceptSpecificDiff: diffId=${data.diffId}, filePath=${data.filePath}, session=${this.currentSessionId?.substring(0, 8)}, editMode=${this.diffManager.currentEditMode}`);
           await this.diffManager.acceptSpecificDiff(data.diffId);
           if (this.currentSessionId && data.filePath) {
-            this.conversationManager.updateFileModifiedStatus(this.currentSessionId, data.filePath, 'applied');
+            this.conversationManager.updateFileModifiedStatus(this.currentSessionId, data.filePath, 'applied', this.diffManager.currentEditMode);
+          } else {
+            logger.warn(`[ChatProvider] acceptSpecificDiff: skipped DB update — sessionId=${this.currentSessionId}, filePath=${data.filePath}`);
           }
           break;
         case 'rejectSpecificDiff':
+          logger.info(`[ChatProvider] rejectSpecificDiff: diffId=${data.diffId}, filePath=${data.filePath}, session=${this.currentSessionId?.substring(0, 8)}, editMode=${this.diffManager.currentEditMode}`);
           await this.diffManager.rejectSpecificDiff(data.diffId);
           if (this.currentSessionId && data.filePath) {
-            this.conversationManager.updateFileModifiedStatus(this.currentSessionId, data.filePath, 'rejected');
+            this.conversationManager.updateFileModifiedStatus(this.currentSessionId, data.filePath, 'rejected', this.diffManager.currentEditMode);
+          } else {
+            logger.warn(`[ChatProvider] rejectSpecificDiff: skipped DB update — sessionId=${this.currentSessionId}, filePath=${data.filePath}`);
           }
           break;
         case 'focusDiff':
@@ -989,8 +1004,11 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       // Clear history using the manager
       await this.conversationManager.clearAllHistory();
 
-      // Reset current session
+      // Reset current session and clear saved ID from globalState
       this.currentSessionId = null;
+      const gs = this.conversationManager.getGlobalState();
+      await gs.update(`currentSessionId-${this.instanceId}`, undefined);
+      await gs.update('currentSessionId', undefined);
 
       logger.info('[ChatProvider] All chat history cleared');
       logger.sessionClear();
@@ -1155,17 +1173,23 @@ export class ChatProvider implements vscode.WebviewViewProvider {
 
   public async acceptActiveDiff(): Promise<void> {
     const filePath = this.diffManager.getActiveDiffFilePath();
+    const editMode = this.diffManager.currentEditMode;
+    logger.info(`[ChatProvider] acceptActiveDiff: filePath=${filePath}, session=${this.currentSessionId?.substring(0, 8)}, editMode=${editMode}`);
     await this.diffManager.acceptActiveDiff();
     if (this.currentSessionId && filePath) {
-      this.conversationManager.updateFileModifiedStatus(this.currentSessionId, filePath, 'applied');
+      this.conversationManager.updateFileModifiedStatus(this.currentSessionId, filePath, 'applied', editMode);
+    } else {
+      logger.warn(`[ChatProvider] acceptActiveDiff: skipped DB update — sessionId=${this.currentSessionId}, filePath=${filePath}`);
     }
   }
 
   public async rejectActiveDiff(): Promise<void> {
     const filePath = this.diffManager.getActiveDiffFilePath();
+    const editMode = this.diffManager.currentEditMode;
+    logger.info(`[ChatProvider] rejectActiveDiff: filePath=${filePath}, session=${this.currentSessionId?.substring(0, 8)}, editMode=${editMode}`);
     await this.diffManager.rejectActiveDiff();
     if (this.currentSessionId && filePath) {
-      this.conversationManager.updateFileModifiedStatus(this.currentSessionId, filePath, 'rejected');
+      this.conversationManager.updateFileModifiedStatus(this.currentSessionId, filePath, 'rejected', editMode);
     }
   }
 

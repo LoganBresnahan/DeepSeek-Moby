@@ -382,30 +382,63 @@ export class ConversationManager {
    * Update the status of a file-modified event in the most recent assistant_message's turnEvents.
    * Called when the user accepts/rejects a pending file change in ask mode.
    */
-  updateFileModifiedStatus(sessionId: string, filePath: string, newStatus: 'applied' | 'rejected'): void {
+  updateFileModifiedStatus(sessionId: string, filePath: string, newStatus: 'applied' | 'rejected', editMode?: string): void {
+    logger.info(`[CM.updateFileModified] Called: session=${sessionId.substring(0, 8)}, file=${filePath}, status=${newStatus}, editMode=${editMode || 'default'}`);
+
     // Find the most recent assistant_message event for this session
     const events = this.eventStore.getEventsByType(sessionId, ['assistant_message']);
-    if (events.length === 0) return;
+    if (events.length === 0) {
+      logger.warn(`[CM.updateFileModified] No assistant_message events found for session ${sessionId.substring(0, 8)}`);
+      return;
+    }
 
     const lastAssistant = events[events.length - 1] as AssistantMessageEvent;
-    if (!lastAssistant.turnEvents || lastAssistant.turnEvents.length === 0) return;
+    if (!lastAssistant.id) {
+      logger.warn(`[CM.updateFileModified] Last assistant_message has no ID`);
+      return;
+    }
 
-    // Find and update the file-modified event
-    let updated = false;
+    logger.info(`[CM.updateFileModified] Found assistant_message id=${lastAssistant.id}, turnEvents=${lastAssistant.turnEvents?.length ?? 0}`);
+
+    // Ensure turnEvents array exists
+    if (!lastAssistant.turnEvents) {
+      lastAssistant.turnEvents = [];
+      logger.info(`[CM.updateFileModified] Created empty turnEvents array`);
+    }
+
+    // Log existing file-modified events for debugging
+    const existingFileEvents = lastAssistant.turnEvents.filter((te: any) => te.type === 'file-modified');
+    if (existingFileEvents.length > 0) {
+      logger.info(`[CM.updateFileModified] Existing file-modified events: ${existingFileEvents.map((e: any) => `${e.path}:${e.status}`).join(', ')}`);
+    }
+
+    // Find and update the file-modified event, or insert one if not found (manual mode)
+    let found = false;
     for (const te of lastAssistant.turnEvents) {
       if ((te as any).type === 'file-modified' && (te as any).path === filePath) {
+        const oldStatus = (te as any).status;
         (te as any).status = newStatus;
-        updated = true;
+        found = true;
+        logger.info(`[CM.updateFileModified] Updated existing event: ${filePath} ${oldStatus} → ${newStatus}`);
         break;
       }
     }
 
-    if (updated && lastAssistant.id) {
-      // Write back the updated data blob
-      const { sessionId: _s, sequence: _seq, id, ...data } = lastAssistant as any;
-      this.eventStore.updateEventData(id, data);
-      logger.debug(`[CM] Updated file-modified status: ${filePath} → ${newStatus} in session ${sessionId.substring(0, 8)}`);
+    if (!found) {
+      lastAssistant.turnEvents.push({
+        type: 'file-modified',
+        path: filePath,
+        status: newStatus,
+        editMode: editMode || 'manual',
+        ts: Date.now()
+      } as any);
+      logger.info(`[CM.updateFileModified] Inserted new event: ${filePath} → ${newStatus} (editMode=${editMode || 'manual'})`);
     }
+
+    // Write back the updated data blob
+    const { sessionId: _s, sequence: _seq, id, ...data } = lastAssistant as any;
+    this.eventStore.updateEventData(id, data);
+    logger.info(`[CM.updateFileModified] Saved to DB: event_id=${id}, total turnEvents=${lastAssistant.turnEvents.length}`);
   }
 
   /**

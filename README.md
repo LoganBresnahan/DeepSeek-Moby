@@ -4,6 +4,7 @@
 </p>
 
 <h1 align="center">DeepSeek Moby</h1>
+<h2 align="center">v0.1.0 Pre-Release</h2>
 
 <p align="center">
   <strong>An AI coding assistant for VS Code, powered by DeepSeek.</strong>
@@ -74,7 +75,7 @@ Every shell command goes through an approval system before execution:
   - **Always Allow** — Add this command prefix to your permanent allowlist
   - **Block Once** — Reject this command, the model will adapt
   - **Always Block** — Add this command prefix to your permanent blocklist
-- **Command Rules modal** — View and edit your full allowlist/blocklist via the Commands popup or Command Palette. Ships with platform-specific defaults (Linux/macOS and Windows have separate rule sets tailored to each OS's command-line tools)
+- **Command Rules modal** — View and edit your full allowlist/blocklist via the Commands popup or Command Palette. Ships with bash defaults (all platforms use the same rules since Windows runs commands through Git Bash)
 - **Override toggle** — "Allow All Commands" setting bypasses all checks (use with caution)
 - Commands execute inline during streaming, one at a time, with results visible immediately
 
@@ -158,6 +159,13 @@ The entire chat UI is built with Shadow DOM encapsulation:
 
 ---
 
+## Requirements
+
+- **VS Code** 1.85.0 or later
+- **Node.js** 20.x or later (for building from source)
+- **Git** — Required for shell command execution on Windows. [Git for Windows](https://git-scm.com/download/win) includes Git Bash, which provides the POSIX-compatible shell needed to run AI-generated commands (heredocs, grep, pipes, etc.). On Linux/macOS, the system shell is used automatically.
+- **DeepSeek API Key** — From [platform.deepseek.com](https://platform.deepseek.com)
+
 ## Getting Started
 
 ### 1. Install
@@ -191,25 +199,25 @@ Click the Moby icon in the sidebar activity bar, type a message, and press Enter
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `deepseek.model` | `deepseek-chat` | Active model: `deepseek-chat` (V3) or `deepseek-reasoner` (R1) |
-| `deepseek.temperature` | `0.7` | Creativity (0-2). Chat model only — Reasoner uses fixed temperature |
-| `deepseek.maxTokensChatModel` | `8192` | Max output tokens for Chat (V3). Range: 256-8,192 |
-| `deepseek.maxTokensReasonerModel` | `65536` | Max output tokens for Reasoner (R1). Range: 256-65,536 |
-| `deepseek.maxToolCalls` | `100` | Tool call iteration limit (Chat model). 100 = no limit |
-| `deepseek.maxShellIterations` | `100` | Shell command iteration limit (Reasoner). 100 = no limit |
-| `deepseek.editMode` | `manual` | How code changes apply: `manual`, `ask`, or `auto` |
-| `deepseek.webSearchMode` | `auto` | Web search: `off`, `manual` (forced), or `auto` |
-| `deepseek.tavilySearchDepth` | `basic` | Search depth: `basic` (1 credit) or `advanced` (2 credits) |
-| `deepseek.allowAllShellCommands` | `false` | Bypass command approval system |
-| `deepseek.logLevel` | `WARN` | Extension log level: `DEBUG`, `INFO`, `WARN`, `ERROR`, `OFF` |
-| `deepseek.tracing.enabled` | `true` | Enable trace collection for debugging |
-| `deepseek.devMode` | `false` | Enable developer tools (inspector panel) |
+| `moby.model` | `deepseek-chat` | Active model: `deepseek-chat` (V3) or `deepseek-reasoner` (R1) |
+| `moby.temperature` | `0.7` | Creativity (0-2). Chat model only — Reasoner uses fixed temperature |
+| `moby.maxTokensChatModel` | `8192` | Max output tokens for Chat (V3). Range: 256-8,192 |
+| `moby.maxTokensReasonerModel` | `65536` | Max output tokens for Reasoner (R1). Range: 256-65,536 |
+| `moby.maxToolCalls` | `100` | Tool call iteration limit (Chat model). 100 = no limit |
+| `moby.maxShellIterations` | `100` | Shell command iteration limit (Reasoner). 100 = no limit |
+| `moby.editMode` | `manual` | How code changes apply: `manual`, `ask`, or `auto` |
+| `moby.webSearchMode` | `auto` | Web search: `off`, `manual` (forced), or `auto` |
+| `moby.tavilySearchDepth` | `basic` | Search depth: `basic` (1 credit) or `advanced` (2 credits) |
+| `moby.allowAllShellCommands` | `false` | Bypass command approval system |
+| `moby.logLevel` | `WARN` | Extension log level: `DEBUG`, `INFO`, `WARN`, `ERROR`, `OFF` |
+| `moby.tracing.enabled` | `true` | Enable trace collection for debugging |
+| `moby.devMode` | `false` | Enable developer tools (inspector panel) |
 
 ---
 
 ## Commands
 
-Open the Command Palette (`Ctrl+Shift+P`) and search "DeepSeek Moby":
+Open the Command Palette (`Ctrl+Shift+P`) and search "Moby":
 
 | Command | Description |
 |---------|-------------|
@@ -244,8 +252,8 @@ Moby is built with a layered architecture designed for reliability and extensibi
 │  ┌─────────────┐  ┌──────────────────────────┐  │
 │  │ DeepSeek API │  │ Managers                  │  │
 │  │  Client      │  │  ├─ RequestOrchestrator   │  │
-│  │  (Chat, R1,  │  │  ├─ DiffManager           │  │
-│  │   FIM)       │  │  ├─ WebSearchManager      │  │
+│  │  (Chat, R1)  │  │  ├─ DiffManager           │  │
+│  │              │  │  ├─ WebSearchManager      │  │
 │  └─────────────┘  │  ├─ FileContextManager    │  │
 │                    │  ├─ CommandApprovalMgr    │  │
 │  ┌─────────────┐  │  ├─ PlanManager           │  │

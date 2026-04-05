@@ -877,6 +877,16 @@ export class VirtualListActor extends EventStateActor {
   }
 
   /**
+   * Mark a code block as applied by file path (searches all bound actors).
+   * Called when a diff is accepted from the editor toolbar or pending files dropdown.
+   */
+  markCodeBlockApplied(filePath: string): void {
+    for (const [, bound] of this._boundActors) {
+      bound.actor.markCodeBlockApplied(filePath);
+    }
+  }
+
+  /**
    * Update pending file status by file path (searches all turns).
    * Used when we only have the file path (e.g., from codeApplied error message).
    */

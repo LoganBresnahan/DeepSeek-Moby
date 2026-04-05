@@ -200,6 +200,12 @@ export class TurnProjector {
         }
 
         case 'approval-created': {
+          // Break text flow
+          if (currentText && !currentText.complete) {
+            currentText.complete = true;
+          }
+          currentText = null;
+
           segments.push({
             type: 'approval',
             id: event.id,
@@ -221,8 +227,13 @@ export class TurnProjector {
         }
 
         case 'file-modified': {
-          // Causal insertion already handled by TurnEventLog.insertCausal —
-          // by the time we see it here, it's in the correct position.
+          // Break text flow so subsequent text appears below the file dropdown,
+          // matching the visual ordering seen during live streaming.
+          if (currentText && !currentText.complete) {
+            currentText.complete = true;
+          }
+          currentText = null;
+
           segments.push({
             type: 'file-modified',
             path: event.path,
@@ -233,6 +244,12 @@ export class TurnProjector {
         }
 
         case 'tool-batch-start': {
+          // Break text flow
+          if (currentText && !currentText.complete) {
+            currentText.complete = true;
+          }
+          currentText = null;
+
           segments.push({
             type: 'tool-batch',
             tools: event.tools.map(t => ({ ...t })),

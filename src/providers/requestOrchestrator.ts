@@ -14,6 +14,7 @@ import {
   containsShellCommands,
   containsCodeEdits,
   commandsCreateFiles,
+  commandsDeleteFiles,
   executeShellCommands,
   formatShellResultsForContext,
   getReasonerShellPrompt,
@@ -182,6 +183,7 @@ export class RequestOrchestrator {
       contentIterations: [] as string[],
       currentIterationContent: '',
       shellResultsForHistory: [] as ShellResult[],
+      shellCreatedFiles: false,
       shellDeletedFiles: false,
     };
 
@@ -661,7 +663,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
   private async executeInlineShellCommands(
     workspacePath: string,
     signal: AbortSignal,
-    state: { shellResultsForHistory: ShellResult[]; shellDeletedFiles: boolean }
+    state: { shellResultsForHistory: ShellResult[]; shellCreatedFiles: boolean; shellDeletedFiles: boolean }
   ): Promise<void> {
     while (this._pendingInlineShellCommands.length > 0) {
       if (signal.aborted) break;
@@ -674,6 +676,14 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
 
       // Track the raw content for dedup against batch path
       this._inlineExecutedCommands.add(rawCmd.command);
+
+      // Detect file creation/deletion from command patterns (more reliable than file watcher on WSL2)
+      if (commandsCreateFiles(parsedCommands)) {
+        state.shellCreatedFiles = true;
+      }
+      if (commandsDeleteFiles(parsedCommands)) {
+        state.shellDeletedFiles = true;
+      }
 
       // Flush buffer before sending shell notification
       if (this.contentBuffer) {
@@ -791,6 +801,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
         if (modifiedFiles.size > 0) {
           logger.info(`[R1-Shell] Inline: File watcher detected ${modifiedFiles.size} modified files: ${[...modifiedFiles].join(', ')}`);
           this.diffManager.registerShellModifiedFiles([...modifiedFiles]);
+          state.shellCreatedFiles = true;
         }
         if (deletedFiles.size > 0) {
           logger.info(`[R1-Shell] Inline: File watcher detected ${deletedFiles.size} deleted files: ${[...deletedFiles].join(', ')}`);
@@ -836,6 +847,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
       contentIterations: string[];
       currentIterationContent: string;
       shellResultsForHistory: ShellResult[];
+      shellCreatedFiles: boolean;
       shellDeletedFiles: boolean;
     }
   ): Promise<void> {
@@ -851,7 +863,6 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
     const maxAutoContinuations = 2;
     let autoContinuationCount = 0;
     let lastIterationHadShellCommands = false;
-    let shellCreatedFiles = false;
 
     // Token budget tracking for injected shell/web search results
     let accumulatedIterationTokens = 0;
@@ -1046,8 +1057,12 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
             logger.info(`[R1-Shell] Skipping ${allCommands.length - commands.length} commands already executed inline`);
           }
           if (commandsCreateFiles(commands)) {
-            shellCreatedFiles = true;
+            state.shellCreatedFiles = true;
             logger.info(`[R1-Shell] Shell commands include file creation (heredoc/redirect)`);
+          }
+          if (commandsDeleteFiles(commands)) {
+            state.shellDeletedFiles = true;
+            logger.info(`[R1-Shell] Shell commands include file deletion (rm/unlink)`);
           }
           const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
@@ -1185,6 +1200,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
               if (modifiedFiles.size > 0) {
                 logger.info(`[R1-Shell] File watcher detected ${modifiedFiles.size} modified files: ${[...modifiedFiles].join(', ')}`);
                 this.diffManager.registerShellModifiedFiles([...modifiedFiles]);
+                state.shellCreatedFiles = true;
               }
               if (deletedFiles.size > 0) {
                 logger.info(`[R1-Shell] File watcher detected ${deletedFiles.size} deleted files: ${[...deletedFiles].join(', ')}`);
@@ -1284,7 +1300,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
         // No shell commands in this iteration
         if (isReasonerModel) {
           logger.info(`[R1-Shell] No shell commands in iteration, checking for auto-continuation...`);
-          logger.info(`[R1-Shell] shellIteration=${shellIteration}, autoContinuationCount=${autoContinuationCount}, lastIterationHadShellCommands=${lastIterationHadShellCommands}, shellCreatedFiles=${shellCreatedFiles}, shellDeletedFiles=${state.shellDeletedFiles}`);
+          logger.info(`[R1-Shell] shellIteration=${shellIteration}, autoContinuationCount=${autoContinuationCount}, lastIterationHadShellCommands=${lastIterationHadShellCommands}, shellCreatedFiles=${state.shellCreatedFiles}, shellDeletedFiles=${state.shellDeletedFiles}`);
 
           const hasCodeEdits = containsCodeEdits(state.accumulatedResponse);
           const failedApplies = this.diffManager.getFailedAutoApplyCount();
@@ -1316,7 +1332,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
             continue;
           }
 
-          if (shellIteration > 0 && !hasCodeEdits && !shellCreatedFiles && !state.shellDeletedFiles && autoContinuationCount < maxAutoContinuations) {
+          if (shellIteration > 0 && !hasCodeEdits && !state.shellCreatedFiles && !state.shellDeletedFiles && autoContinuationCount < maxAutoContinuations) {
             autoContinuationCount++;
             logger.info(`[R1-Shell] Auto-continuing (${autoContinuationCount}/${maxAutoContinuations}): shell commands were executed but no code edits produced`);
 
@@ -1461,6 +1477,28 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
         const turnEvents = this._turnEventsPromise ? await this._turnEventsPromise : [];
         this._turnEventsPromise = null;
         logger.info(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} Received ${turnEvents.length} consolidated turn events from webview`);
+
+        // 5b. Update file-modified events with resolved statuses from DiffManager.
+        // 5b. Patch file-modified events with resolved statuses.
+        // During ask mode, files are accepted/rejected DURING the response (before save).
+        // The turnEvents still have status='pending' — patch them with the actual outcomes.
+        const fileChanges = this.diffManager.getFileChanges();
+        const fileModifiedEvents = turnEvents.filter((te: any) => te.type === 'file-modified');
+        logger.info(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} Step 5b: ${fileModifiedEvents.length} file-modified events in turnEvents, ${fileChanges.length} fileChanges from DiffManager`);
+        if (fileChanges.length > 0) {
+          logger.info(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} DiffManager fileChanges: ${fileChanges.map(f => `${f.filePath}:${f.status}`).join(', ')}`);
+        }
+        for (const te of turnEvents) {
+          if ((te as any).type === 'file-modified' && (te as any).status === 'pending') {
+            const resolved = fileChanges.find(f => f.filePath === (te as any).path);
+            if (resolved && (resolved.status === 'applied' || resolved.status === 'rejected')) {
+              logger.info(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} Step 5b: patching ${(te as any).path} pending → ${resolved.status}`);
+              (te as any).status = resolved.status;
+            } else {
+              logger.warn(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} Step 5b: ${(te as any).path} still pending — no matching fileChange found`);
+            }
+          }
+        }
 
         // 6. Record the assistant message with turn events
         await this.conversationManager.recordAssistantMessage(sessionId, cleanResponse, model, 'stop', undefined, undefined, turnEvents);

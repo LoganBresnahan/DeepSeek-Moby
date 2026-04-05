@@ -766,6 +766,32 @@ export class HistoryShadowActor extends ShadowActor {
       const dropdown = this.query<HTMLElement>(`[data-entry-dropdown="${sessionId}"]`);
       if (dropdown) {
         dropdown.classList.add('open');
+
+        // Position dropdown: prefer below, flip above if clipped at bottom,
+        // but stay below if flipping would clip at top
+        requestAnimationFrame(() => {
+          const list = this.query<HTMLElement>('.history-list');
+          if (!list) return;
+          const listRect = list.getBoundingClientRect();
+
+          // Try below first
+          dropdown.style.top = '100%';
+          dropdown.style.bottom = 'auto';
+          const belowRect = dropdown.getBoundingClientRect();
+
+          if (belowRect.bottom > listRect.bottom) {
+            // Clipped at bottom — try above
+            dropdown.style.top = 'auto';
+            dropdown.style.bottom = '100%';
+            const aboveRect = dropdown.getBoundingClientRect();
+
+            if (aboveRect.top < listRect.top) {
+              // Clipped at top too — stay below (lesser evil, list can scroll)
+              dropdown.style.top = '100%';
+              dropdown.style.bottom = 'auto';
+            }
+          }
+        });
       }
     }
   }

@@ -90,6 +90,7 @@ function createMockVirtualListActor() {
     }),
     updatePendingStatus: vi.fn(),
     updatePendingFileStatusByPath: vi.fn(),
+    markCodeBlockApplied: vi.fn(),
     addDrawingSegment: vi.fn(),
     setEditMode: vi.fn(),
     clear: vi.fn(() => turns.clear()),

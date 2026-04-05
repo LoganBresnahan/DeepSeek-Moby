@@ -56,38 +56,16 @@ describe('CommandApprovalManager', () => {
       expect(countAfter).toBe(countBefore);
     });
 
-    it('should seed Unix defaults on linux', () => {
-      const defaults = getDefaultRules('linux');
+    it('should seed bash defaults', () => {
+      const defaults = getDefaultRules();
       const rules = manager.getAllRules();
       const prefixes = rules.map(r => r.prefix);
 
-      // Check a few Unix-specific defaults
+      // All platforms use bash rules (Git Bash on Windows)
       expect(prefixes).toContain('ls');
       expect(prefixes).toContain('grep');
       expect(prefixes).toContain('sudo ');
-
-      // Should NOT contain Windows defaults
-      expect(prefixes).not.toContain('dir');
-      expect(prefixes).not.toContain('findstr');
       expect(defaults.allowed).toContain('ls');
-    });
-
-    it('should seed Windows defaults on win32', () => {
-      const winDb = new Database(':memory:');
-      runMigrations(winDb);
-      const winManager = new CommandApprovalManager(winDb, undefined, 'win32');
-
-      const rules = winManager.getAllRules();
-      const prefixes = rules.map(r => r.prefix);
-
-      // Windows-specific defaults
-      expect(prefixes).toContain('dir');
-      expect(prefixes).toContain('findstr');
-
-      // Should NOT contain Unix-only defaults
-      expect(prefixes).not.toContain('grep');
-
-      winDb.close();
     });
   });
 
@@ -485,29 +463,13 @@ describe('CommandApprovalManager', () => {
 // ── getDefaultRules ──
 
 describe('getDefaultRules', () => {
-  it('should return Unix rules for linux', () => {
-    const rules = getDefaultRules('linux');
+  it('should return Unix/bash rules for all platforms', () => {
+    const rules = getDefaultRules();
     expect(rules.allowed).toContain('ls');
     expect(rules.allowed).toContain('grep');
+    expect(rules.allowed).toContain('cat');
     expect(rules.blocked).toContain('sudo ');
-  });
-
-  it('should return Unix rules for darwin', () => {
-    const rules = getDefaultRules('darwin');
-    expect(rules.allowed).toContain('ls');
-    expect(rules.blocked).toContain('sudo ');
-  });
-
-  it('should return Windows rules for win32', () => {
-    const rules = getDefaultRules('win32');
-    expect(rules.allowed).toContain('dir');
-    expect(rules.allowed).toContain('findstr');
-    expect(rules.blocked).toContain('shutdown');
-  });
-
-  it('should default to Unix rules for unknown platform', () => {
-    const rules = getDefaultRules('freebsd');
-    expect(rules.allowed).toContain('ls');
+    expect(rules.blocked).toContain('rm -rf /');
   });
 });
 

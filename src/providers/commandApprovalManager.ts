@@ -41,8 +41,9 @@ export interface CommandApprovalResult {
 }
 
 // ── Default Rules ──
+// All platforms use Unix/bash rules since Windows uses Git Bash for execution.
 
-const DEFAULT_ALLOWED_UNIX: string[] = [
+const DEFAULT_ALLOWED: string[] = [
   // Safe read-only commands
   'ls', 'cat', 'grep', 'echo', 'pwd', 'find', 'wc', 'head', 'tail', 'tree',
   'which', 'whereis', 'file', 'stat', 'du', 'df', 'env', 'printenv',
@@ -58,7 +59,7 @@ const DEFAULT_ALLOWED_UNIX: string[] = [
   'rg ', 'fd ',
 ];
 
-const DEFAULT_BLOCKED_UNIX: string[] = [
+const DEFAULT_BLOCKED: string[] = [
   // Catastrophic file operations
   'rm -rf /', 'rm -rf ~', 'rm -rf *',
   // Privilege escalation
@@ -75,41 +76,15 @@ const DEFAULT_BLOCKED_UNIX: string[] = [
   'curl -X POST', 'wget --post',
 ];
 
-const DEFAULT_ALLOWED_WINDOWS: string[] = [
-  // Safe read-only commands
-  'dir', 'type', 'findstr', 'echo', 'cd', 'where', 'hostname', 'date',
-  'whoami', 'set', 'tree',
-
-  // Dev tools
-  'node ', 'npm test', 'npm run', 'npm ls', 'npm list', 'npm info',
-  'npx vitest', 'npx tsc', 'npx jest', 'npx eslint', 'npx prettier',
-  'git status', 'git log', 'git diff', 'git branch', 'git show', 'git remote',
-  'tsc', 'python -c', 'python3 -c',
-  'cargo check', 'cargo test', 'cargo clippy',
-  'go test', 'go vet', 'go build',
-];
-
-const DEFAULT_BLOCKED_WINDOWS: string[] = [
-  // Catastrophic file operations
-  'del /f /s /q', 'rd /s /q', 'rmdir /s /q',
-  // System control
-  'shutdown', 'restart-computer',
-  // Nested shells
-  'cmd /c', 'powershell -c', 'pwsh -c',
-  // Publishing / deployment
-  'npm publish', 'cargo publish',
-];
-
 export interface DefaultRules {
   allowed: string[];
   blocked: string[];
 }
 
-export function getDefaultRules(platform?: string): DefaultRules {
-  const isWindows = (platform ?? process.platform) === 'win32';
+export function getDefaultRules(): DefaultRules {
   return {
-    allowed: isWindows ? DEFAULT_ALLOWED_WINDOWS : DEFAULT_ALLOWED_UNIX,
-    blocked: isWindows ? DEFAULT_BLOCKED_WINDOWS : DEFAULT_BLOCKED_UNIX,
+    allowed: DEFAULT_ALLOWED,
+    blocked: DEFAULT_BLOCKED,
   };
 }
 
@@ -134,7 +109,6 @@ export class CommandApprovalManager {
   constructor(
     private readonly db: Database,
     private readonly globalState?: vscode.Memento,
-    private readonly platform?: string
   ) {
     this.seedDefaultsIfEmpty();
     this.refreshCache();
@@ -388,7 +362,7 @@ export class CommandApprovalManager {
     const count = (this.db.prepare('SELECT COUNT(*) as c FROM command_rules').get() as any).c;
     if (count > 0) { return; }
 
-    const defaults = getDefaultRules(this.platform);
+    const defaults = getDefaultRules();
     const stmt = this.db.prepare(
       'INSERT INTO command_rules (prefix, type, source, created_at) VALUES (?, ?, ?, ?)'
     );

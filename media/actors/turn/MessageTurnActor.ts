@@ -373,6 +373,32 @@ export class MessageTurnActor extends InterleavedShadowActor {
     });
   }
 
+  /**
+   * Mark a code block as applied by matching its # File: header against the file path.
+   * Called when a diff is accepted from the editor toolbar or pending files dropdown.
+   */
+  markCodeBlockApplied(filePath: string): void {
+    const fileName = filePath.split('/').pop() ?? filePath;
+    this.containers.forEach(container => {
+      const codeBlocks = container.content.querySelectorAll('.code-block');
+      codeBlocks.forEach(block => {
+        if (block.classList.contains('applied')) return;
+        const codeEl = block.querySelector('code');
+        if (!codeEl) return;
+        const text = codeEl.textContent || '';
+        // Match if the code contains a # File: header matching the file path
+        if (text.includes(`# File: ${filePath}`) || text.includes(`# File: ${fileName}`)) {
+          block.classList.add('applied');
+          block.classList.remove('diffed');
+          const applyBtn = block.querySelector('.apply-btn') as HTMLElement | null;
+          if (applyBtn) applyBtn.textContent = 'Applied';
+          const diffBtn = block.querySelector('.diff-btn') as HTMLElement | null;
+          if (diffBtn) diffBtn.classList.remove('active');
+        }
+      });
+    });
+  }
+
   // ============================================
   // Text Segment Methods
   // ============================================
@@ -1141,6 +1167,13 @@ export class MessageTurnActor extends InterleavedShadowActor {
 
     container.host.classList.toggle('auto-mode', isAuto);
 
+    // Status classes for header title coloring
+    const errorCount = files.filter(f => f.status === 'error').length;
+    const allApplied = files.length > 0 && pendingCount === 0 && errorCount === 0 && rejectedCount === 0;
+    container.host.classList.toggle('all-applied', allApplied);
+    container.host.classList.toggle('has-errors', errorCount > 0);
+    container.host.classList.toggle('has-rejected', rejectedCount > 0);
+
     let itemsHtml = '';
     files.forEach((file, i) => {
       const tree = i === files.length - 1 ? '└─' : '├─';
@@ -1259,7 +1292,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
         // Permanent applied state
         codeBlock?.classList.add('applied');
         codeBlock?.classList.remove('diffed');
-        btn.textContent = '\u2713 Applied';
+        btn.textContent = 'Applied';
         const diffBtn = codeBlock?.querySelector('.diff-btn') as HTMLElement | null;
         if (diffBtn) {
           diffBtn.classList.remove('active');
