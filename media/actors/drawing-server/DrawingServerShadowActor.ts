@@ -49,7 +49,7 @@ export class DrawingServerShadowActor extends PopupShadowActor {
       position: 'bottom-left',
       width: '260px',
       maxHeight: '500px',
-      publications: {},
+      publications: { 'drawingServer.running': false },
       subscriptions: {
         'drawingServer.state': (value: unknown) => this.handleStateUpdate(value as DrawingServerState)
       },

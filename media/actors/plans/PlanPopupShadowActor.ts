@@ -267,7 +267,7 @@ export class PlanPopupShadowActor extends PopupShadowActor {
 
   /** Delegate an event with a different event type (e.g., keydown) */
   private delegateEvent(eventType: string, selector: string, handler: (e: Event) => void): void {
-    this.shadowRoot?.addEventListener(eventType, (e) => {
+    this.shadow?.addEventListener(eventType, (e) => {
       const target = (e.target as Element)?.closest(selector);
       if (target) handler(e);
     });

@@ -30,6 +30,13 @@ npm-debug.log*
 # Test coverage
 coverage/
 
+# VS Code test binaries (downloaded by @vscode/test-electron)
+.vscode-test/
+
+# Playwright
+test-results/
+playwright-report/
+
 # Temporary files
 *.tmp
 *.temp
