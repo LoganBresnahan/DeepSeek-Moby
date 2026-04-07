@@ -187,9 +187,21 @@ npm run package
 
 ### 2. Set Your API Key
 
+**Option A: Command Palette (recommended)**
+
 Open the Command Palette (`Ctrl+Shift+P`) and run:
 - **DeepSeek Moby: Set API Key** — Enter your key from [platform.deepseek.com](https://platform.deepseek.com)
 - **DeepSeek Moby: Set Tavily API Key** — (Optional) For web search, get a key from [tavily.com](https://tavily.com)
+
+**Option B: Environment Variables**
+
+For CI, containers, or headless environments, set environment variables instead:
+```bash
+export DEEPSEEK_API_KEY="sk-..."        # Required
+export TAVILY_API_KEY="tvly-..."        # Optional, for web search
+```
+
+The extension checks SecretStorage first, then falls back to environment variables.
 
 ### 3. Start Chatting
 

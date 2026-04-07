@@ -97,15 +97,19 @@ export class DeepSeekClient {
 
   async isApiKeyConfigured(): Promise<boolean> {
     const key = await this.context.secrets.get('moby.apiKey');
-    return !!key;
+    return !!key || !!process.env.DEEPSEEK_API_KEY;
   }
 
   private async getApiKey(): Promise<string> {
+    // Try VS Code SecretStorage first
     const apiKey = await this.context.secrets.get('moby.apiKey');
-    if (!apiKey) {
-      throw new Error('DeepSeek API key is not configured. Use the "DeepSeek Moby: Set API Key" command.');
-    }
-    return apiKey;
+    if (apiKey) return apiKey;
+
+    // Fall back to environment variable (useful for CI, containers, testing)
+    const envKey = process.env.DEEPSEEK_API_KEY;
+    if (envKey) return envKey;
+
+    throw new Error('DeepSeek API key is not configured. Use the "DeepSeek Moby: Set API Key" command.');
   }
 
   getModel(): string {

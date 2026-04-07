@@ -58,10 +58,13 @@ export class TavilyClient {
 
   private async getApiKey(): Promise<string> {
     const apiKey = await this.context.secrets.get('moby.tavilyApiKey');
-    if (!apiKey) {
-      throw new Error('Tavily API key is not configured. Use the "DeepSeek Moby: Set Tavily API Key" command.');
-    }
-    return apiKey;
+    if (apiKey) return apiKey;
+
+    // Fall back to environment variable (useful for CI, containers, testing)
+    const envKey = process.env.TAVILY_API_KEY;
+    if (envKey) return envKey;
+
+    throw new Error('Tavily API key is not configured. Use the "DeepSeek Moby: Set Tavily API Key" command.');
   }
 
   async search(query: string, options?: { searchDepth?: 'basic' | 'advanced'; maxResults?: number }): Promise<TavilySearchResponse> {
@@ -128,7 +131,7 @@ export class TavilyClient {
 
   async isConfigured(): Promise<boolean> {
     const key = await this.context.secrets.get('moby.tavilyApiKey');
-    return !!key && key.trim().length > 0;
+    return (!!key && key.trim().length > 0) || !!process.env.TAVILY_API_KEY;
   }
 
   async getApiUsage(): Promise<TavilyApiUsage> {
