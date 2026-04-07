@@ -43,15 +43,12 @@ test('VS Code API mock is injected and captures messages', async () => {
   });
   expect(hasApi).toBe(true);
 
-  // Verify postMessage captures work
-  await page.evaluate(() => {
-    const api = (window as any).acquireVsCodeApi();
-    api.postMessage({ type: 'test', data: 'hello' });
-  });
-
+  // chat.js sends init messages (webviewReady, getSettings) — verify they're captured
   const messages = await page.evaluate(() => (window as any).__vscodeMessages);
-  expect(messages).toHaveLength(1);
-  expect(messages[0]).toEqual({ type: 'test', data: 'hello' });
+  expect(messages.length).toBeGreaterThanOrEqual(1);
+  // The actor system sends webviewReady and getSettings on init
+  const types = messages.map((m: any) => m.type);
+  expect(types).toContain('getSettings');
 });
 
 test('webview harness loads chat.js without crashing', async () => {

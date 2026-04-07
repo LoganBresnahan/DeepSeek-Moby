@@ -142,7 +142,9 @@ Automatic context budgeting so conversations can run indefinitely:
 All conversation data stored in an encrypted SQLite database:
 
 - **SQLCipher** (AES-256-CBC) — the same encryption library used by Signal
-- Encryption key auto-generated and stored in your OS keychain via VS Code's SecretStorage API
+- Encryption key auto-generated on first launch and stored securely:
+  - **Primary:** OS keychain via VS Code's SecretStorage API (macOS Keychain, Windows Credential Manager, Linux SecretService/kwallet)
+  - **Fallback:** File-based storage in VS Code's global storage directory (for environments without a keyring: WSL, containers, headless Linux, SSH sessions)
 - Key management UI for viewing, changing, or regenerating the encryption key
 - WAL mode for crash safety and concurrent access
 - Stored data: conversations, session metadata, command rules, saved prompts, context snapshots
@@ -289,11 +291,12 @@ For contributors, see the full architecture documentation in `docs/architecture/
 
 ## Privacy & Security
 
-- **API keys** stored in VS Code's encrypted SecretStorage (OS keychain)
+- **API keys** stored in VS Code's encrypted SecretStorage (OS keychain when available, file-based fallback otherwise)
 - **Conversations** stored locally in an AES-256 encrypted SQLite database
 - **No telemetry** — no data sent anywhere except the DeepSeek API (and Tavily if web search is enabled)
 - **Shell commands** gated by an approval system with user-configurable rules
 - **Shadow DOM isolation** prevents other extensions from accessing chat content
+- **Works without a workspace** — the extension activates and is fully functional even when VS Code is opened without a folder
 
 ---
 

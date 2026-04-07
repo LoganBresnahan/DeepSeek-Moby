@@ -77,7 +77,6 @@ export async function launchVSCode(workspacePath?: string): Promise<VSCodeResult
 
   const args = [
     `--extensionDevelopmentPath=${extensionPath}`,
-    '--disable-extensions',
     '--skip-welcome',
     '--disable-workspace-trust',
     '--no-sandbox',
@@ -88,8 +87,13 @@ export async function launchVSCode(workspacePath?: string): Promise<VSCodeResult
     `--user-data-dir=/tmp/vscode-e2e-${Date.now()}`,
   ];
 
+  // Open a workspace folder — extension activation may block without one
   if (workspacePath) {
     args.push(workspacePath);
+  } else {
+    const tmpWorkspace = `/tmp/vscode-e2e-workspace-${Date.now()}`;
+    require('fs').mkdirSync(tmpWorkspace, { recursive: true });
+    args.push(tmpWorkspace);
   }
 
   // Clean the environment: when running inside VS Code's integrated terminal,

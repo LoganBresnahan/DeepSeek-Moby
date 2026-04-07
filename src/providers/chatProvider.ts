@@ -1236,8 +1236,11 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       logger.info(`[ChatProvider] switchSession: ${oldSessionId?.substring(0, 8) ?? 'null'} → ${session.id.substring(0, 8)}`);
       logger.sessionSwitch(session.id);
 
-      // Don't switch to session's model - keep user's current model selection
-      // The model dropdown reflects user preference, not per-session setting
+      // Restore the session's model so the dropdown matches what was used
+      if (session.model && session.model !== this.deepSeekClient.getModel()) {
+        this.deepSeekClient.setModel(session.model);
+        this._view.webview.postMessage({ type: 'modelChanged', model: session.model });
+      }
 
       // Send edit mode BEFORE history so webview has correct mode when rendering pending files
       const config = vscode.workspace.getConfiguration('moby');
@@ -1249,7 +1252,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         type: 'sessionLoaded',
         sessionId: session.id,
         title: session.title,
-        model: this.deepSeekClient.getModel() // Use current model, not session's
+        model: session.model
       });
 
       // Load session messages via loadHistory (clears and loads)

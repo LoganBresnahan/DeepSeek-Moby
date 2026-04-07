@@ -877,10 +877,18 @@ export class VirtualListActor extends EventStateActor {
   }
 
   /**
-   * Mark a code block as applied by file path (searches all bound actors).
-   * Called when a diff is accepted from the editor toolbar or pending files dropdown.
+   * Mark a code block as applied by file path.
+   * If turnId is provided, only marks code blocks in that specific turn.
+   * Otherwise searches all bound actors (fallback).
    */
-  markCodeBlockApplied(filePath: string): void {
+  markCodeBlockApplied(filePath: string, turnId?: string): void {
+    if (turnId) {
+      const bound = this._boundActors.get(turnId);
+      if (bound) {
+        bound.actor.markCodeBlockApplied(filePath);
+      }
+      return;
+    }
     for (const [, bound] of this._boundActors) {
       bound.actor.markCodeBlockApplied(filePath);
     }

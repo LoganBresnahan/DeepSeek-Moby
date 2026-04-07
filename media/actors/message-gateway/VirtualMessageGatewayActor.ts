@@ -339,7 +339,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         // Just mark the code block as applied if it was.
         if (segment.editMode === 'manual' && isRestore) {
           if (segment.status === 'applied') {
-            virtualList.markCodeBlockApplied(segment.path);
+            virtualList.markCodeBlockApplied(segment.path, turnId);
           }
           break;
         }
@@ -357,7 +357,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         });
         // On restore, if the file was applied, mark the matching code block
         if (fileStatus === 'applied' && isRestore) {
-          virtualList.markCodeBlockApplied(segment.path);
+          virtualList.markCodeBlockApplied(segment.path, turnId);
         }
         break;
       }
@@ -1225,7 +1225,14 @@ export class VirtualMessageGatewayActor extends EventStateActor {
 
     if (success && filePath) {
       // Mark the code block as applied (grey out Diff, show checkmark on Apply)
-      virtualList.markCodeBlockApplied(filePath);
+      // Scope to the current/last streaming turn to avoid marking code blocks
+      // in other turns that edit the same file (e.g., animals.txt edited in turn-2 and turn-3)
+      const turnId = this._currentTurnId || this._lastStreamingTurnId;
+      if (turnId) {
+        virtualList.markCodeBlockApplied(filePath, turnId);
+      } else {
+        virtualList.markCodeBlockApplied(filePath);
+      }
     } else if (!success && filePath) {
       log.debug(`codeApplied failed for: ${filePath}`);
       virtualList.updatePendingFileStatusByPath(filePath, 'error');

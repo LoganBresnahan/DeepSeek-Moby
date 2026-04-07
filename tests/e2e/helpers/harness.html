@@ -5,11 +5,55 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>DeepSeek Moby — Test Harness</title>
   <link href="../../../dist/media/chat.css" rel="stylesheet">
+  <style>
+    /* Stub VS Code theme variables so styles render visibly */
+    :root {
+      --vscode-editor-background: #1e1e1e;
+      --vscode-editor-foreground: #d4d4d4;
+      --vscode-input-background: #3c3c3c;
+      --vscode-input-foreground: #cccccc;
+      --vscode-input-border: #3c3c3c;
+      --vscode-input-placeholderForeground: #a0a0a0;
+      --vscode-button-background: #0e639c;
+      --vscode-button-foreground: #ffffff;
+      --vscode-button-hoverBackground: #1177bb;
+      --vscode-button-secondaryBackground: #3a3d41;
+      --vscode-button-secondaryForeground: #cccccc;
+      --vscode-focusBorder: #007fd4;
+      --vscode-foreground: #cccccc;
+      --vscode-descriptionForeground: #a0a0a0;
+      --vscode-errorForeground: #f48771;
+      --vscode-sideBar-background: #252526;
+      --vscode-sideBar-foreground: #cccccc;
+      --vscode-panel-border: #414141;
+      --vscode-badge-background: #4d4d4d;
+      --vscode-badge-foreground: #cccccc;
+      --vscode-list-hoverBackground: #2a2d2e;
+      --vscode-list-activeSelectionBackground: #094771;
+      --vscode-list-activeSelectionForeground: #ffffff;
+      --vscode-textLink-foreground: #3794ff;
+      --vscode-scrollbarSlider-background: rgba(121, 121, 121, 0.4);
+      --vscode-scrollbarSlider-hoverBackground: rgba(100, 100, 100, 0.7);
+      --vscode-font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      --vscode-font-size: 13px;
+      --vscode-editor-font-family: 'Consolas', 'Courier New', monospace;
+      --vscode-editor-font-size: 14px;
+    }
+    body {
+      background: var(--vscode-editor-background);
+      color: var(--vscode-editor-foreground);
+      margin: 0;
+      padding: 0;
+      font-family: var(--vscode-font-family);
+      font-size: var(--vscode-font-size);
+    }
+  </style>
 </head>
 <body data-moby-icon="../../../dist/media/moby.png" data-dev-mode="false">
   <div class="chat-container">
     <div class="header">
       <img src="../../../dist/media/moby.png" alt="DeepSeek Moby" class="header-icon">
+      <span id="currentModelName" class="model-name">deepseek-chat</span>
       <div id="toastContainer" class="toast-container"></div>
       <div class="header-actions">
         <div class="drawing-server-selector">
@@ -19,29 +63,20 @@
             </svg>
           </button>
         </div>
-        <div id="webSearchHost"></div>
-        <div id="fileContextHost"></div>
-        <div id="modelSelectorHost"></div>
-        <div id="commandsHost"></div>
-        <div id="historyHost"></div>
-        <div id="settingsHost"></div>
+        <button id="historyBtn" class="header-btn" title="History">H</button>
+        <button id="commandsBtn" class="header-btn" title="Commands">C</button>
+        <button id="modelBtn" class="header-btn" title="Model">M</button>
+        <button id="settingsBtn" class="header-btn" title="Settings">S</button>
       </div>
     </div>
-    <div id="virtualListHost"></div>
-    <div class="input-area">
-      <div id="attachmentsHost"></div>
-      <div class="input-wrapper">
-        <textarea id="messageInput" placeholder="Ask DeepSeek..." rows="1"></textarea>
-        <div class="input-controls">
-          <button id="stopBtn" class="stop-btn" title="Stop" style="display: none;">
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor"><rect x="2" y="2" width="10" height="10" rx="1"/></svg>
-          </button>
-          <button id="sendBtn" class="send-btn" title="Send message">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M1 1.91L7.37 8 1 14.09 1.91 15 9 8 1.91 1 1 1.91z"/></svg>
-          </button>
-        </div>
-      </div>
-    </div>
+    <!-- chatMessages: required by VirtualListActor -->
+    <div id="chatMessages" class="messages-container"></div>
+    <!-- inputAreaContainer: required by InputAreaShadowActor -->
+    <div id="inputAreaContainer"></div>
+    <!-- toolbarContainer: required by ToolbarShadowActor -->
+    <div id="toolbarContainer"></div>
+    <!-- statusPanelContainer: required by StatusPanelShadowActor -->
+    <div id="statusPanelContainer"></div>
   </div>
   <script src="../../../dist/media/chat.js"></script>
 </body>

@@ -11,6 +11,8 @@ import { UnifiedLogExporter } from './logging/UnifiedLogExporter';
 import { TokenService } from './services/tokenService';
 import { DrawingServer } from './providers/drawingServer';
 import * as crypto from 'crypto';
+import * as fs from 'fs';
+import * as path from 'path';
 
 let chatProvider: ChatProvider;
 let commandProvider: CommandProvider;
@@ -110,8 +112,8 @@ export async function activate(context: vscode.ExtensionContext) {
   // Start status bar
   statusBar.start();
 
-  // Check API key
-  await checkApiKey(context);
+  // Check API key (fire-and-forget — don't block activation)
+  checkApiKey(context);
 }
 
 function registerCommands(context: vscode.ExtensionContext) {
@@ -161,15 +163,74 @@ function registerCommands(context: vscode.ExtensionContext) {
 }
 
 const DB_KEY_SECRET = 'deepseek-moby.db-encryption-key';
+const DB_KEY_FALLBACK_FILE = 'db-key.txt';
 
+/**
+ * Get or create the database encryption key.
+ *
+ * Strategy:
+ * 1. Try the OS keyring via VS Code's SecretStorage API (most secure).
+ *    On Linux without a keyring daemon, VS Code falls back to in-memory
+ *    or basic storage automatically. The secrets API should not hang.
+ * 2. If the secrets API throws (broken keyring, permissions, etc.),
+ *    fall back to a file in globalStorage with restrictive permissions.
+ */
 async function getOrCreateEncryptionKey(context: vscode.ExtensionContext): Promise<string> {
-  let key = await context.secrets.get(DB_KEY_SECRET);
-  if (!key) {
-    key = crypto.randomBytes(32).toString('hex');
-    await context.secrets.store(DB_KEY_SECRET, key);
-    logger.info('Generated new database encryption key');
+  try {
+    // Try reading from VS Code's SecretStorage (OS keyring or VS Code's fallback)
+    const key = await context.secrets.get(DB_KEY_SECRET);
+    if (key) return key;
+
+    // No key stored yet — generate and store
+    const newKey = crypto.randomBytes(32).toString('hex');
+    await context.secrets.store(DB_KEY_SECRET, newKey);
+    logger.info('[EncryptionKey] Generated new key (stored via SecretStorage)');
+    return newKey;
+  } catch (err) {
+    // SecretStorage failed — fall back to file-based storage
+    logger.warn(`[EncryptionKey] SecretStorage unavailable: ${err instanceof Error ? err.message : err}`);
+    logger.info('[EncryptionKey] Using file-based key storage as fallback');
+    return getOrCreateFileKey(context);
   }
+}
+
+/** Read key from fallback file, or generate + save a new one. */
+async function getOrCreateFileKey(context: vscode.ExtensionContext): Promise<string> {
+  const keyPath = path.join(context.globalStorageUri.fsPath, DB_KEY_FALLBACK_FILE);
+
+  try {
+    if (fs.existsSync(keyPath)) {
+      const key = fs.readFileSync(keyPath, 'utf-8').trim();
+      if (key.length >= 16) {
+        logger.info('[EncryptionKey] Loaded key from file-based storage');
+        return key;
+      }
+    }
+  } catch {
+    // File doesn't exist or is unreadable — generate new key
+  }
+
+  const newKey = crypto.randomBytes(32).toString('hex');
+  return saveKeyToFile(context, newKey);
+}
+
+/** Write key to file in globalStorage with restrictive permissions. */
+function saveKeyToFile(context: vscode.ExtensionContext, key: string): string {
+  const dir = context.globalStorageUri.fsPath;
+  fs.mkdirSync(dir, { recursive: true });
+  const keyPath = path.join(dir, DB_KEY_FALLBACK_FILE);
+  fs.writeFileSync(keyPath, key, { mode: 0o600 }); // Owner read/write only
+  logger.info('[EncryptionKey] Saved key to file-based storage');
   return key;
+}
+
+/** Store encryption key — try SecretStorage first, fall back to file. */
+async function storeEncryptionKey(context: vscode.ExtensionContext, key: string): Promise<void> {
+  try {
+    await context.secrets.store(DB_KEY_SECRET, key);
+  } catch {
+    saveKeyToFile(context, key);
+  }
 }
 
 async function checkApiKey(context: vscode.ExtensionContext) {
@@ -238,7 +299,17 @@ async function setTavilyApiKey(context: vscode.ExtensionContext): Promise<void> 
 }
 
 async function manageEncryptionKey(context: vscode.ExtensionContext, cm: ConversationManager): Promise<void> {
-  const current = await context.secrets.get(DB_KEY_SECRET);
+  // Try SecretStorage first, fall back to file
+  let current: string | undefined;
+  try {
+    current = await context.secrets.get(DB_KEY_SECRET);
+  } catch {
+    // SecretStorage unavailable — check file
+    const keyPath = path.join(context.globalStorageUri.fsPath, DB_KEY_FALLBACK_FILE);
+    try {
+      current = fs.existsSync(keyPath) ? fs.readFileSync(keyPath, 'utf-8').trim() : undefined;
+    } catch { /* no key found */ }
+  }
 
   const action = await vscode.window.showQuickPick([
     { label: '$(copy) Copy Current Key', description: 'Copy the encryption key to clipboard', id: 'copy' },
@@ -277,7 +348,7 @@ async function manageEncryptionKey(context: vscode.ExtensionContext, cm: Convers
         try {
           const db = cm.getDatabase();
           db.pragma(`rekey='${newKey}'`);
-          await context.secrets.store(DB_KEY_SECRET, newKey);
+          await storeEncryptionKey(context, newKey);
           vscode.window.showInformationMessage('Database re-encrypted with new key.');
           logger.info('Database encryption key changed by user');
         } catch (err: any) {
@@ -298,7 +369,7 @@ async function manageEncryptionKey(context: vscode.ExtensionContext, cm: Convers
         try {
           const db = cm.getDatabase();
           db.pragma(`rekey='${newKey}'`);
-          await context.secrets.store(DB_KEY_SECRET, newKey);
+          await storeEncryptionKey(context, newKey);
           await vscode.env.clipboard.writeText(newKey);
           vscode.window.showInformationMessage('New encryption key generated and copied to clipboard.');
           logger.info('Database encryption key regenerated by user');
