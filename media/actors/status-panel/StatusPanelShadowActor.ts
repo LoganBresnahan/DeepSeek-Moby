@@ -6,8 +6,8 @@
  *
  * Features:
  * - Moby water spurt animation with colors (blue/yellow/red)
- * - Left side: informational messages (auto-clear after 5s)
- * - Right side: warnings/errors (auto-clear after 8-10s)
+ * - Left side: informational messages (auto-clear after 30s)
+ * - Right side: warnings/errors (auto-clear after 30s)
  * - Resizable separator between left/right
  * - Logs button
  *
@@ -276,10 +276,10 @@ export class StatusPanelShadowActor extends ShadowActor {
 
     this.publish({ 'status.hasMessage': true });
 
-    // Auto-clear after 5 seconds
+    // Auto-clear after 30 seconds
     this._messageTimeout = setTimeout(() => {
       this.clearMessage();
-    }, 5000);
+    }, 30_000);
   }
 
   /**
@@ -312,10 +312,10 @@ export class StatusPanelShadowActor extends ShadowActor {
       'status.hasError': false
     });
 
-    // Auto-clear after 8 seconds
+    // Auto-clear after 30 seconds
     this._warningTimeout = setTimeout(() => {
       this.clearWarning();
-    }, 8000);
+    }, 30_000);
   }
 
   /**
@@ -348,10 +348,10 @@ export class StatusPanelShadowActor extends ShadowActor {
       'status.hasWarning': false
     });
 
-    // Auto-clear after 10 seconds
+    // Auto-clear after 30 seconds
     this._warningTimeout = setTimeout(() => {
       this.clearError();
-    }, 10000);
+    }, 30_000);
   }
 
   /**

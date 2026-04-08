@@ -381,6 +381,10 @@ export class RequestOrchestrator {
         this.contentBuffer.reset();
       }
 
+      // Final code block detection — catches blocks released by the buffer's
+      // final flush that were missed during streaming (debounce/holdback timing)
+      await this.diffManager.handleCodeBlockDetection(streamState.accumulatedResponse);
+
       // Strip any DSML markup, shell tags, and web search tags from the final response
       let cleanResponse = stripDSML(streamState.accumulatedResponse);
       cleanResponse = stripShellTags(cleanResponse);
@@ -1306,16 +1310,16 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
           const failedApplies = this.diffManager.getFailedAutoApplyCount();
           logger.info(`[R1-Shell] Response has code edits: ${hasCodeEdits}, failedApplies: ${failedApplies}`);
 
-          // Code edits were produced but files don't exist — nudge to create them
+          // Code edits were produced but failed to apply — nudge to re-read or create
           if (hasCodeEdits && failedApplies > 0 && autoContinuationCount < maxAutoContinuations) {
             autoContinuationCount++;
             this.diffManager.resetFailedAutoApplyCount();
-            logger.info(`[R1-Shell] Auto-continuing (${autoContinuationCount}/${maxAutoContinuations}): code edits failed to apply (${failedApplies} files not found)`);
+            logger.info(`[R1-Shell] Auto-continuing (${autoContinuationCount}/${maxAutoContinuations}): code edits failed to apply (${failedApplies} failed)`);
 
             this._onAutoContinuation.fire({
               count: autoContinuationCount,
               max: maxAutoContinuations,
-              reason: `${failedApplies} file(s) not found — requesting file creation`
+              reason: `${failedApplies} file edit(s) failed — re-reading file`
             });
 
             currentHistoryMessages.push({
@@ -1325,7 +1329,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
 
             currentHistoryMessages.push({
               role: 'user',
-              content: `The files you referenced don't exist yet. Please create them using shell commands.\n\nFor example:\ncat > filename.ext << 'MOBY_EOF'\n<file contents>\nMOBY_EOF\n\nCreate all ${failedApplies} file(s) now.`
+              content: `Your code edit failed to apply because the file content has changed since you last read it. Please re-read the file using a shell command (e.g., cat filename) to see its current content, then try the edit again with the correct SEARCH block.`
             });
 
             lastIterationHadShellCommands = false;
@@ -1746,6 +1750,10 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
                   const applied = await this.diffManager.applyCodeDirectlyForAutoMode(args.file, args.code, args.description, true);
                   if (applied) {
                     fileModifiedInBatch = true;
+                  } else {
+                    // If auto-apply failed (stale content), update the tool result
+                    // so the LLM knows to re-read the file
+                    result = `Code edit failed for ${args.file}: the file content has changed since you last read it. Please read the file again before making edits.`;
                   }
                 } else if (this.diffManager.currentEditMode === 'manual') {
                   logger.info(`[RequestOrchestrator] Opening diff for manual review: ${args.file}`);

@@ -225,7 +225,11 @@ export class ChatProvider implements vscode.WebviewViewProvider {
           }
         });
         const config = vscode.workspace.getConfiguration('moby');
-        const editMode = (config.get<string>('editMode') || 'manual') as 'manual' | 'ask' | 'auto';
+        let editMode = (config.get<string>('editMode') || 'manual') as 'manual' | 'ask' | 'auto';
+        // Chat model doesn't support Manual mode
+        if (this.deepSeekClient.getModel() === 'deepseek-chat' && editMode === 'manual') {
+          editMode = 'ask';
+        }
         if (editMode !== this.diffManager.currentEditMode) {
           this.diffManager.setEditMode(editMode);
           this._view.webview.postMessage({ type: 'editModeSettings', mode: editMode });
@@ -957,11 +961,9 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     const snapshot = this.settingsManager.getCurrentSettings();
     const wsState = await this.webSearchManager.getSettings();
     const apiKeyConfigured = await this.deepSeekClient.isApiKeyConfigured();
-    const config = vscode.workspace.getConfiguration('moby');
-    const editMode = config.get<string>('editMode') || 'manual';
-
-    // Sync edit mode with config
-    this.diffManager.setEditMode(editMode as 'manual' | 'ask' | 'auto');
+    // Use diffManager's live state as source of truth — config may be stale
+    // due to async config.update() not completing before this read
+    const editMode = this.diffManager.currentEditMode;
 
     if (this._view) {
       this._view.webview.postMessage({
@@ -1198,21 +1200,29 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     const currentSession = await this.conversationManager.getSession(this.currentSessionId);
     if (!currentSession) return;
 
+    // Always send session info so webview knows the model (affects edit mode availability)
+    let editMode = this.diffManager.currentEditMode;
+    if (currentSession.model === 'deepseek-chat' && editMode === 'manual') {
+      editMode = 'ask';
+      this.diffManager.setEditMode(editMode);
+    }
+    this._view.webview.postMessage({ type: 'editModeSettings', mode: editMode });
+
+    // Restore the session's model so the dropdown matches what was used
+    if (currentSession.model && currentSession.model !== this.deepSeekClient.getModel()) {
+      this.deepSeekClient.setModel(currentSession.model);
+      this._view.webview.postMessage({ type: 'modelChanged', model: currentSession.model });
+    }
+
+    this._view.webview.postMessage({
+      type: 'sessionLoaded',
+      sessionId: currentSession.id,
+      title: currentSession.title,
+      model: currentSession.model
+    });
+
     const history = await this.conversationManager.getSessionRichHistory(currentSession.id);
     if (history.length > 0) {
-      // Send edit mode BEFORE history so webview has correct mode when rendering pending files
-      const config = vscode.workspace.getConfiguration('moby');
-      const editMode = config.get<string>('editMode') || 'manual';
-      this._view.webview.postMessage({ type: 'editModeSettings', mode: editMode });
-
-      // Notify webview of loaded session (for SessionActor)
-      this._view.webview.postMessage({
-        type: 'sessionLoaded',
-        sessionId: currentSession.id,
-        title: currentSession.title,
-        model: this.deepSeekClient.getModel()
-      });
-
       this._view.webview.postMessage({
         type: 'loadHistory',
         history
@@ -1243,8 +1253,13 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       }
 
       // Send edit mode BEFORE history so webview has correct mode when rendering pending files
-      const config = vscode.workspace.getConfiguration('moby');
-      const editMode = config.get<string>('editMode') || 'manual';
+      // Use diffManager's live state — config may be stale from async writes
+      let editMode = this.diffManager.currentEditMode;
+      // Chat model doesn't support Manual mode — auto-switch to Ask
+      if (session.model === 'deepseek-chat' && editMode === 'manual') {
+        editMode = 'ask';
+        this.diffManager.setEditMode(editMode);
+      }
       this._view.webview.postMessage({ type: 'editModeSettings', mode: editMode });
 
       // Notify webview of loaded session (for SessionActor)

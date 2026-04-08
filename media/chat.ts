@@ -338,9 +338,19 @@ function initializeActorSystem(): void {
   });
 
   // Set up ToolbarActor handlers
+  let editModeHintShown = false;
   toolbar.onEditModeChange((mode) => {
     editModeActor.setMode(mode);
     virtualList.setEditMode(mode);
+
+    // Show hint once per session when switching to Manual or Ask
+    if (!editModeHintShown && (mode === 'manual' || mode === 'ask')) {
+      editModeHintShown = true;
+      manager.publishDirect('status.message', {
+        type: 'info',
+        message: `Tip: Adding files to context helps the AI make more accurate edits in ${mode === 'manual' ? 'Manual' : 'Question'} mode.`
+      });
+    }
   });
 
   toolbar.onFilesOpen(() => {

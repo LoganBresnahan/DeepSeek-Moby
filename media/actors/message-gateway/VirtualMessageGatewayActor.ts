@@ -679,6 +679,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       case 'modelChanged':
         session.handleModelChanged({ model: msg.model as string });
         this._manager.publishDirect('model.current', msg.model);
+        this._actors.toolbar.setModel(msg.model as string);
         break;
 
       case 'editModeSettings':
@@ -1468,10 +1469,11 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       });
     }
 
-    // Sync session model so HeaderActor updates the button text
+    // Sync session model so HeaderActor and ToolbarActor update
     if (msg.model) {
-      const { session } = this._actors;
+      const { session, toolbar } = this._actors;
       session.handleModelChanged({ model: msg.model as string });
+      toolbar.setModel(msg.model as string);
     }
 
     // Sync API key configured state to toolbar + input area

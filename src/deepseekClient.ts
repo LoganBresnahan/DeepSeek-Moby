@@ -114,7 +114,7 @@ export class DeepSeekClient {
 
   getModel(): string {
     // Use override if set (for immediate model changes before config propagates)
-    return this.modelOverride ?? this.config.get<string>('model') ?? 'deepseek-chat';
+    return this.modelOverride ?? this.config.get<string>('model') ?? 'deepseek-reasoner';
   }
 
   setModel(model: string): void {

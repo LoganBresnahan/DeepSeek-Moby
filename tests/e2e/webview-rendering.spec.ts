@@ -619,3 +619,258 @@ test.describe('2D. Input Area', () => {
     expect(newHeight).toBeGreaterThan(initialHeight);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2H. Dropdown Design Tests
+//
+// Tests the visual design of shell, tool, and pending file dropdowns.
+// Verifies icons, status colors, and count labels render correctly.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test.describe('2H. Dropdown Design', () => {
+  // ── Modified Files (Auto mode) ──
+
+  test('H1: auto mode icon is 📂 not ✓', async () => {
+    const page = await freshPage();
+    await replayHistory(page, [
+      { role: 'assistant', content: '', model: 'deepseek-chat', turnEvents: [
+        { type: 'text-append', content: 'Done.', iteration: 0, ts: 1 },
+        { type: 'text-finalize', iteration: 0, ts: 2 },
+        { type: 'file-modified', path: 'app.ts', status: 'applied', editMode: 'auto', ts: 3 },
+      ]},
+    ]);
+
+    const iconText = await page.evaluate(() => {
+      const turn = document.querySelector('[data-turn-id="turn-1"]');
+      if (!turn) return '';
+      const pc = turn.querySelector('.pending-container');
+      const sr = (pc as HTMLElement)?.shadowRoot;
+      return sr?.querySelector('.pending-icon')?.textContent?.trim() || '';
+    });
+    expect(iconText).toBe('📂');
+  });
+
+  test('H2: ask mode icon is 📝', async () => {
+    const page = await freshPage();
+    await replayHistory(page, [
+      { role: 'assistant', content: '', model: 'deepseek-chat', turnEvents: [
+        { type: 'text-append', content: 'Done.', iteration: 0, ts: 1 },
+        { type: 'text-finalize', iteration: 0, ts: 2 },
+        { type: 'file-modified', path: 'app.ts', status: 'applied', editMode: 'ask', ts: 3 },
+      ]},
+    ]);
+
+    const iconText = await page.evaluate(() => {
+      const turn = document.querySelector('[data-turn-id="turn-1"]');
+      if (!turn) return '';
+      const pc = turn.querySelector('.pending-container');
+      const sr = (pc as HTMLElement)?.shadowRoot;
+      return sr?.querySelector('.pending-icon')?.textContent?.trim() || '';
+    });
+    expect(iconText).toBe('📝');
+  });
+
+  test('H3: applied count shows green class', async () => {
+    const page = await freshPage();
+    await replayHistory(page, [
+      { role: 'assistant', content: '', model: 'deepseek-chat', turnEvents: [
+        { type: 'text-append', content: 'Done.', iteration: 0, ts: 1 },
+        { type: 'text-finalize', iteration: 0, ts: 2 },
+        { type: 'file-modified', path: 'a.ts', status: 'applied', editMode: 'auto', ts: 3 },
+        { type: 'file-modified', path: 'b.ts', status: 'applied', editMode: 'auto', ts: 4 },
+      ]},
+    ]);
+
+    const hasGreenCount = await page.evaluate(() => {
+      const turn = document.querySelector('[data-turn-id="turn-1"]');
+      if (!turn) return false;
+      const pc = turn.querySelector('.pending-container');
+      const sr = (pc as HTMLElement)?.shadowRoot;
+      return !!sr?.querySelector('.count-applied');
+    });
+    expect(hasGreenCount).toBe(true);
+  });
+
+  test('H4: rejected count shows red class', async () => {
+    const page = await freshPage();
+    await replayHistory(page, [
+      { role: 'assistant', content: '', model: 'deepseek-chat', turnEvents: [
+        { type: 'text-append', content: 'Done.', iteration: 0, ts: 1 },
+        { type: 'text-finalize', iteration: 0, ts: 2 },
+        { type: 'file-modified', path: 'a.ts', status: 'rejected', editMode: 'ask', ts: 3 },
+      ]},
+    ]);
+
+    const hasRedCount = await page.evaluate(() => {
+      const turn = document.querySelector('[data-turn-id="turn-1"]');
+      if (!turn) return false;
+      const pc = turn.querySelector('.pending-container');
+      const sr = (pc as HTMLElement)?.shadowRoot;
+      return !!sr?.querySelector('.count-error');
+    });
+    expect(hasRedCount).toBe(true);
+  });
+
+  test('H5: mixed statuses show both green and red counts', async () => {
+    const page = await freshPage();
+    await replayHistory(page, [
+      { role: 'assistant', content: '', model: 'deepseek-chat', turnEvents: [
+        { type: 'text-append', content: 'Done.', iteration: 0, ts: 1 },
+        { type: 'text-finalize', iteration: 0, ts: 2 },
+        { type: 'file-modified', path: 'good.ts', status: 'applied', editMode: 'ask', ts: 3 },
+        { type: 'file-modified', path: 'bad.ts', status: 'rejected', editMode: 'ask', ts: 4 },
+      ]},
+    ]);
+
+    const counts = await page.evaluate(() => {
+      const turn = document.querySelector('[data-turn-id="turn-1"]');
+      if (!turn) return { green: false, red: false };
+      const pc = turn.querySelector('.pending-container');
+      const sr = (pc as HTMLElement)?.shadowRoot;
+      return {
+        green: !!sr?.querySelector('.count-applied'),
+        red: !!sr?.querySelector('.count-error'),
+      };
+    });
+    expect(counts.green).toBe(true);
+    expect(counts.red).toBe(true);
+  });
+
+  test('H6: pending title stays neutral color (not green or red)', async () => {
+    const page = await freshPage();
+    await replayHistory(page, [
+      { role: 'assistant', content: '', model: 'deepseek-chat', turnEvents: [
+        { type: 'text-append', content: 'Done.', iteration: 0, ts: 1 },
+        { type: 'text-finalize', iteration: 0, ts: 2 },
+        { type: 'file-modified', path: 'app.ts', status: 'applied', editMode: 'auto', ts: 3 },
+      ]},
+    ]);
+
+    const titleHasNoStatusClass = await page.evaluate(() => {
+      const turn = document.querySelector('[data-turn-id="turn-1"]');
+      if (!turn) return false;
+      const pc = turn.querySelector('.pending-container');
+      const sr = (pc as HTMLElement)?.shadowRoot;
+      const title = sr?.querySelector('.pending-title');
+      if (!title) return false;
+      // Title should NOT have any status color class
+      return !title.classList.contains('status-success') &&
+             !title.classList.contains('status-error') &&
+             !title.classList.contains('status-mixed');
+    });
+    expect(titleHasNoStatusClass).toBe(true);
+  });
+
+  // ── Shell Dropdown (R1) ──
+
+  test('H7: shell success shows green status square', async () => {
+    const page = await freshPage();
+    await replayHistory(page, [
+      { role: 'assistant', content: '', model: 'deepseek-reasoner', turnEvents: [
+        { type: 'text-append', content: 'Running.', iteration: 0, ts: 1 },
+        { type: 'text-finalize', iteration: 0, ts: 2 },
+        { type: 'shell-start', id: 'sh-1', commands: [{ command: 'cat file.txt' }], iteration: 0, ts: 3 },
+        { type: 'shell-complete', id: 'sh-1', results: [{ output: 'hello', success: true }], ts: 4 },
+      ]},
+    ]);
+
+    const hasGreenSquare = await page.evaluate(() => {
+      const turn = document.querySelector('[data-turn-id="turn-1"]');
+      if (!turn) return false;
+      const sc = turn.querySelector('.shell-container');
+      const sr = (sc as HTMLElement)?.shadowRoot;
+      return !!sr?.querySelector('.status-square.status-success');
+    });
+    expect(hasGreenSquare).toBe(true);
+  });
+
+  test('H8: shell failure shows red status square', async () => {
+    const page = await freshPage();
+    await replayHistory(page, [
+      { role: 'assistant', content: '', model: 'deepseek-reasoner', turnEvents: [
+        { type: 'text-append', content: 'Running.', iteration: 0, ts: 1 },
+        { type: 'text-finalize', iteration: 0, ts: 2 },
+        { type: 'shell-start', id: 'sh-1', commands: [{ command: 'bad-cmd' }], iteration: 0, ts: 3 },
+        { type: 'shell-complete', id: 'sh-1', results: [{ output: 'not found', success: false }], ts: 4 },
+      ]},
+    ]);
+
+    const hasRedSquare = await page.evaluate(() => {
+      const turn = document.querySelector('[data-turn-id="turn-1"]');
+      if (!turn) return false;
+      const sc = turn.querySelector('.shell-container');
+      const sr = (sc as HTMLElement)?.shadowRoot;
+      return !!sr?.querySelector('.status-square.status-error');
+    });
+    expect(hasRedSquare).toBe(true);
+  });
+
+  // ── Tool Dropdown (Chat) ──
+
+  test('H9: tool batch success shows green status square', async () => {
+    const page = await freshPage();
+    await replayHistory(page, [
+      { role: 'assistant', content: '', model: 'deepseek-chat', turnEvents: [
+        { type: 'tool-batch-start', tools: [{ name: 'read_file', detail: 'Reading' }], ts: 1 },
+        { type: 'tool-update', index: 0, status: 'done', ts: 2 },
+        { type: 'tool-batch-complete', ts: 3 },
+        { type: 'text-append', content: 'Done.', iteration: 0, ts: 4 },
+        { type: 'text-finalize', iteration: 0, ts: 5 },
+      ]},
+    ]);
+
+    const hasGreenSquare = await page.evaluate(() => {
+      const turn = document.querySelector('[data-turn-id="turn-1"]');
+      if (!turn) return false;
+      const tc = turn.querySelector('.tools-container');
+      const sr = (tc as HTMLElement)?.shadowRoot;
+      return !!sr?.querySelector('.status-square.status-success');
+    });
+    expect(hasGreenSquare).toBe(true);
+  });
+
+  test('H10: tool batch with error shows red status square', async () => {
+    const page = await freshPage();
+    await replayHistory(page, [
+      { role: 'assistant', content: '', model: 'deepseek-chat', turnEvents: [
+        { type: 'tool-batch-start', tools: [{ name: 'apply_code_edit', detail: 'Editing' }], ts: 1 },
+        { type: 'tool-update', index: 0, status: 'error', ts: 2 },
+        { type: 'tool-batch-complete', ts: 3 },
+        { type: 'text-append', content: 'Failed.', iteration: 0, ts: 4 },
+        { type: 'text-finalize', iteration: 0, ts: 5 },
+      ]},
+    ]);
+
+    const hasRedSquare = await page.evaluate(() => {
+      const turn = document.querySelector('[data-turn-id="turn-1"]');
+      if (!turn) return false;
+      const tc = turn.querySelector('.tools-container');
+      const sr = (tc as HTMLElement)?.shadowRoot;
+      return !!sr?.querySelector('.status-square.status-error');
+    });
+    expect(hasRedSquare).toBe(true);
+  });
+
+  test('H11: no status square emoji (wrench) in shell or tool headers', async () => {
+    const page = await freshPage();
+    await replayHistory(page, [
+      { role: 'assistant', content: '', model: 'deepseek-reasoner', turnEvents: [
+        { type: 'text-append', content: 'Running.', iteration: 0, ts: 1 },
+        { type: 'text-finalize', iteration: 0, ts: 2 },
+        { type: 'shell-start', id: 'sh-1', commands: [{ command: 'ls' }], iteration: 0, ts: 3 },
+        { type: 'shell-complete', id: 'sh-1', results: [{ output: 'files', success: true }], ts: 4 },
+      ]},
+    ]);
+
+    const noWrenchEmoji = await page.evaluate(() => {
+      const turn = document.querySelector('[data-turn-id="turn-1"]');
+      if (!turn) return false;
+      const sc = turn.querySelector('.shell-container');
+      const sr = (sc as HTMLElement)?.shadowRoot;
+      const iconEl = sr?.querySelector('.shell-icon');
+      // Should be a status-square div, not contain 🔧
+      return iconEl?.textContent?.trim() === '' && iconEl?.classList.contains('status-square');
+    });
+    expect(noWrenchEmoji).toBe(true);
+  });
+});

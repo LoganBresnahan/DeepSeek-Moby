@@ -55,10 +55,18 @@ const DEFAULT_COMMANDS: CommandItem[] = [
 // ============================================
 
 export class CommandsShadowActor extends PopupShadowActor {
-  private _commands: CommandItem[] = DEFAULT_COMMANDS;
+  private _commands: CommandItem[];
   private _onCommand: CommandHandler | null = null;
 
   constructor(manager: EventStateManager, element: HTMLElement, vscode: VSCodeAPI) {
+    // Build command list — include dev commands when devMode is enabled
+    const isDevMode = document.body.getAttribute('data-dev-mode') === 'true';
+    const commands = [...DEFAULT_COMMANDS];
+    if (isDevMode) {
+      commands.push(
+        { id: 'moby.exportTestFixture', name: 'Export Test Fixture', description: 'Export session for testing', icon: '🧪', section: 'Dev' }
+      );
+    }
     const config: PopupConfig = {
       manager,
       element,
@@ -74,6 +82,7 @@ export class CommandsShadowActor extends PopupShadowActor {
     };
 
     super(config);
+    this._commands = commands;
 
     // Re-render now that instance properties are initialized
     // (base class renders during construction when properties are undefined)

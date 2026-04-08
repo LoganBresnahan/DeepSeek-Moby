@@ -1006,14 +1006,22 @@ export class MessageTurnActor extends InterleavedShadowActor {
     if (!container) return;
 
     const toggle = batch.expanded ? '−' : '+';
-    const icon = '🔧';
     const doneCount = batch.calls.filter(c => c.status === 'done').length;
     const errorCount = batch.calls.filter(c => c.status === 'error').length;
 
     let title: string;
+    let iconClass = 'status-running';
     if (batch.complete) {
       title = `Used ${batch.calls.length} tool${batch.calls.length > 1 ? 's' : ''}`;
-      if (errorCount > 0) title += ` (${errorCount} failed)`;
+      if (errorCount > 0 && doneCount > 0) {
+        title += ` (${errorCount} failed)`;
+        iconClass = 'status-mixed';
+      } else if (errorCount > 0) {
+        title += ` (${errorCount} failed)`;
+        iconClass = 'status-error';
+      } else {
+        iconClass = 'status-success';
+      }
     } else {
       title = `Using ${batch.calls.length} tool${batch.calls.length > 1 ? 's' : ''}...`;
       if (doneCount > 0) title += ` (${doneCount}/${batch.calls.length} done)`;
@@ -1044,7 +1052,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
     container.content.innerHTML = `
       <div class="tools-header">
         <span class="tools-toggle">${toggle}</span>
-        <span class="tools-icon">${icon}</span>
+        <span class="tools-icon status-square ${iconClass}"></span>
         <span class="tools-title">${title}</span>
         <span class="tools-preview">${this.escapeHtml(previewText)}</span>
       </div>
@@ -1060,12 +1068,22 @@ export class MessageTurnActor extends InterleavedShadowActor {
     if (!container) return;
 
     const toggle = segment.expanded ? '−' : '+';
-    const icon = '🔧';
     const hasErrors = segment.commands.some(c => c.status === 'error');
 
+    const successCount = segment.commands.filter(c => c.success === true).length;
+    const failCount = segment.commands.filter(c => c.success === false && c.status !== 'running').length;
+
     let title: string;
+    let iconClass = 'status-running';
     if (segment.complete) {
       title = `Ran ${segment.commands.length} command${segment.commands.length > 1 ? 's' : ''}`;
+      if (failCount > 0 && successCount > 0) {
+        iconClass = 'status-mixed';
+      } else if (failCount > 0) {
+        iconClass = 'status-error';
+      } else {
+        iconClass = 'status-success';
+      }
     } else {
       const running = segment.commands.filter(c => c.status === 'running').length;
       title = running > 0 ? `Running ${running} command${running > 1 ? 's' : ''}...` : 'Shell commands';
@@ -1104,7 +1122,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
     container.content.innerHTML = `
       <div class="shell-header">
         <span class="shell-toggle">${toggle}</span>
-        <span class="shell-icon">${icon}</span>
+        <span class="shell-icon status-square ${iconClass}"></span>
         <span class="shell-title">${title}</span>
         <span class="shell-preview">${this.escapeHtml(previewText)}</span>
       </div>
@@ -1141,35 +1159,38 @@ export class MessageTurnActor extends InterleavedShadowActor {
 
     const isAuto = groupMode === 'auto' || (groupMode === 'manual' && hasResolvedFiles);
     const title = isAuto ? 'Modified Files' : 'Pending Changes';
-    const icon = isAuto ? '✓' : '📝';
+    const icon = isAuto ? '📂' : '📝';
     const isExpanded = container.host.classList.contains('expanded');
     const toggle = isExpanded ? '−' : '+';
 
-    // Count label: show appropriate status based on mode
+    // Count label with status-specific coloring
     const rejectedCount = files.filter(f => f.status === 'rejected').length;
     const deletedCount = files.filter(f => f.status === 'deleted').length;
+    const errorCount = files.filter(f => f.status === 'error').length;
+    const failureCount = errorCount + rejectedCount;
+
     let countLabel: string;
     if (isAuto) {
       const parts: string[] = [];
-      if (appliedCount > 0) parts.push(`${appliedCount} applied`);
-      if (deletedCount > 0) parts.push(`${deletedCount} deleted`);
+      if (appliedCount > 0) parts.push(`<span class="count-applied">${appliedCount} applied</span>`);
+      if (deletedCount > 0) parts.push(`<span class="count-deleted">${deletedCount} deleted</span>`);
+      if (errorCount > 0) parts.push(`<span class="count-error">${errorCount} failed</span>`);
       countLabel = parts.length > 0 ? parts.join(', ') : `${files.length} file${files.length > 1 ? 's' : ''}`;
     } else if (pendingCount > 0) {
       countLabel = `${pendingCount} pending`;
     } else {
       const expiredCount = files.filter(f => f.status === 'expired').length;
       const parts: string[] = [];
-      if (appliedCount > 0) parts.push(`${appliedCount} applied`);
-      if (rejectedCount > 0) parts.push(`${rejectedCount} rejected`);
-      if (expiredCount > 0) parts.push(`${expiredCount} expired`);
+      if (appliedCount > 0) parts.push(`<span class="count-applied">${appliedCount} applied</span>`);
+      if (rejectedCount > 0) parts.push(`<span class="count-error">${rejectedCount} rejected</span>`);
+      if (expiredCount > 0) parts.push(`<span class="count-expired">${expiredCount} expired</span>`);
       countLabel = parts.length > 0 ? parts.join(', ') : `${files.length} file${files.length > 1 ? 's' : ''}`;
     }
 
     container.host.classList.toggle('auto-mode', isAuto);
 
-    // Status classes for header title coloring
-    const errorCount = files.filter(f => f.status === 'error').length;
-    const allApplied = files.length > 0 && pendingCount === 0 && errorCount === 0 && rejectedCount === 0;
+    // Status classes for container styling (used by tests and CSS)
+    const allApplied = files.length > 0 && pendingCount === 0 && failureCount === 0;
     container.host.classList.toggle('all-applied', allApplied);
     container.host.classList.toggle('has-errors', errorCount > 0);
     container.host.classList.toggle('has-rejected', rejectedCount > 0);
@@ -1353,8 +1374,11 @@ export class MessageTurnActor extends InterleavedShadowActor {
       e.stopPropagation();
       const fileId = btn.getAttribute('data-file-id');
       const diffId = btn.getAttribute('data-diff-id');
+      // Get filePath from the sibling .pending-file element
+      const fileEntry = btn.closest('.pending-item');
+      const filePath = fileEntry?.querySelector('.pending-file')?.getAttribute('data-file-path');
       if (fileId && this._onPendingFileAction) {
-        this._onPendingFileAction('accept', fileId, diffId || undefined);
+        this._onPendingFileAction('accept', fileId, diffId || undefined, filePath || undefined);
       }
     });
 
@@ -1363,8 +1387,10 @@ export class MessageTurnActor extends InterleavedShadowActor {
       e.stopPropagation();
       const fileId = btn.getAttribute('data-file-id');
       const diffId = btn.getAttribute('data-diff-id');
+      const fileEntry = btn.closest('.pending-item');
+      const filePath = fileEntry?.querySelector('.pending-file')?.getAttribute('data-file-path');
       if (fileId && this._onPendingFileAction) {
-        this._onPendingFileAction('reject', fileId, diffId || undefined);
+        this._onPendingFileAction('reject', fileId, diffId || undefined, filePath || undefined);
       }
     });
   }

@@ -21,8 +21,9 @@ const API_KEY = process.env.DEEPSEEK_API_KEY;
 let result: VSCodeResult;
 
 test.beforeAll(async () => {
+  test.setTimeout(60_000);
   result = await launchVSCode();
-}, 60_000);
+});
 
 test.afterAll(async () => {
   if (result) {

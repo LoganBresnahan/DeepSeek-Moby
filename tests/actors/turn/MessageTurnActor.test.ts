@@ -1113,4 +1113,64 @@ describe('MessageTurnActor', () => {
       expect(countAfterDrawing).toBe(countAfterText + 1);
     });
   });
+
+  // ============================================
+  // Pending File Action Tests
+  // ============================================
+
+  describe('Pending file accept/reject passes filePath', () => {
+    it('accept button passes filePath to onPendingFileAction', () => {
+      const actionCb = vi.fn();
+      actor = new MessageTurnActor({ manager, element, onPendingFileAction: actionCb });
+      actor.bind({ turnId: 'turn-1', role: 'assistant', timestamp: Date.now() });
+      actor.setEditMode('ask');
+
+      actor.addPendingFile({
+        filePath: '/workspace/src/app.ts',
+        status: 'pending',
+        diffId: 'diff-123',
+      });
+
+      // Find the accept button in the pending container's shadow DOM
+      const containers = findContainers('pending');
+      expect(containers.length).toBe(1);
+      const acceptBtn = queryInShadow(containers[0], '.accept-btn') as HTMLElement;
+      expect(acceptBtn).toBeTruthy();
+
+      // Click accept
+      acceptBtn.click();
+
+      // Verify callback was called with filePath
+      expect(actionCb).toHaveBeenCalledOnce();
+      const [action, fileId, diffId, filePath] = actionCb.mock.calls[0];
+      expect(action).toBe('accept');
+      expect(diffId).toBe('diff-123');
+      expect(filePath).toBe('/workspace/src/app.ts');
+    });
+
+    it('reject button passes filePath to onPendingFileAction', () => {
+      const actionCb = vi.fn();
+      actor = new MessageTurnActor({ manager, element, onPendingFileAction: actionCb });
+      actor.bind({ turnId: 'turn-1', role: 'assistant', timestamp: Date.now() });
+      actor.setEditMode('ask');
+
+      actor.addPendingFile({
+        filePath: '/workspace/src/config.ts',
+        status: 'pending',
+        diffId: 'diff-456',
+      });
+
+      const containers = findContainers('pending');
+      const rejectBtn = queryInShadow(containers[0], '.reject-btn') as HTMLElement;
+      expect(rejectBtn).toBeTruthy();
+
+      rejectBtn.click();
+
+      expect(actionCb).toHaveBeenCalledOnce();
+      const [action, fileId, diffId, filePath] = actionCb.mock.calls[0];
+      expect(action).toBe('reject');
+      expect(diffId).toBe('diff-456');
+      expect(filePath).toBe('/workspace/src/config.ts');
+    });
+  });
 });

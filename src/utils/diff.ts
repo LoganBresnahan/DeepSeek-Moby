@@ -7,6 +7,8 @@ export interface DiffResult {
   patchResults?: boolean[];
   operation: 'replace' | 'patch' | 'insert' | 'search-replace';
   message?: string;
+  /** True if the edit was rejected because the file content is stale (changed since LLM last read it) */
+  stale?: boolean;
 }
 
 /**
@@ -108,6 +110,7 @@ export class DiffEngine {
   applySearchReplace(original: string, blocks: SearchReplaceBlock[]): DiffResult {
     let content = original;
     let appliedCount = 0;
+    const failedBlocks: Array<{ search: string; replace: string; reason: string }> = [];
 
     for (const block of blocks) {
       // Handle empty SEARCH - means "prepend to file" or "create new content"
@@ -147,6 +150,18 @@ export class DiffEngine {
         continue;
       }
 
+      // Staleness check: before trying aggressive matching strategies,
+      // verify the SEARCH content is reasonably similar to the file.
+      // If the file has changed significantly (lines deleted/added since
+      // the LLM last read it), reject the edit instead of force-applying
+      // with stale content that could reintroduce deleted lines.
+      const staleSimilarity = this.computeSimilarity(block.search, content);
+      if (staleSimilarity < 0.75) {
+        logger.warn(`[DiffEngine] Stale content detected: SEARCH similarity to file is ${staleSimilarity.toFixed(2)} (threshold: 0.75). The file may have changed since the LLM last read it.`);
+        failedBlocks.push({ search: block.search, replace: block.replace, reason: 'stale' });
+        continue;
+      }
+
       // Strategy 3: Patch-based matching using jsdiff
       // Create a unified diff patch and apply with fuzzFactor
       logger.info(`[DiffEngine] Trying patch-based match...`);
@@ -171,13 +186,17 @@ export class DiffEngine {
       logger.info(`[DiffEngine] All match strategies failed for block`);
     }
 
+    const hasStale = failedBlocks.some(f => f.reason === 'stale');
     return {
       content,
       success: appliedCount > 0,
+      stale: hasStale,
       operation: 'search-replace',
-      message: appliedCount > 0
-        ? `Applied ${appliedCount}/${blocks.length} search/replace blocks`
-        : 'No matching code found for search/replace blocks'
+      message: hasStale
+        ? `File content has changed since it was last read. Please re-read the file before editing.`
+        : appliedCount > 0
+          ? `Applied ${appliedCount}/${blocks.length} search/replace blocks`
+          : 'No matching code found for search/replace blocks'
     };
   }
 

@@ -160,6 +160,17 @@ function registerCommands(context: vscode.ExtensionContext) {
     const disposable = vscode.commands.registerCommand(`moby.${name}`, handler);
     context.subscriptions.push(disposable);
   });
+
+  // Dev-only commands — registered when devMode is enabled at activation.
+  // The command also appears in the webview Commands popup (gated by devMode).
+  const config = vscode.workspace.getConfiguration('moby');
+  if (config.get<boolean>('devMode', false)) {
+    context.subscriptions.push(
+      vscode.commands.registerCommand('moby.exportTestFixture', () =>
+        exportTestFixture(context)
+      )
+    );
+  }
 }
 
 const DB_KEY_SECRET = 'deepseek-moby.db-encryption-key';
@@ -431,6 +442,56 @@ async function stopDrawingServerCommand(): Promise<void> {
   }
   await drawingServer.stop();
   vscode.window.showInformationMessage('Drawing server stopped.');
+}
+
+/**
+ * Export the current session as a test fixture (dev mode only).
+ *
+ * Saves the RichHistoryTurn[] data as JSON — the exact payload that
+ * loadHistory sends to the webview. Used for deterministic Layer 2 tests.
+ */
+async function exportTestFixture(context: vscode.ExtensionContext): Promise<void> {
+  const sessionId = chatProvider.getCurrentSessionId();
+  if (!sessionId) {
+    vscode.window.showWarningMessage('No active session to export.');
+    return;
+  }
+
+  try {
+    const history = await conversationManager.getSessionRichHistory(sessionId);
+    if (history.length === 0) {
+      vscode.window.showWarningMessage('Session has no messages to export.');
+      return;
+    }
+
+    const json = JSON.stringify(history, null, 2);
+
+    // Show save dialog
+    const session = await conversationManager.getSession(sessionId);
+    const defaultName = (session?.title || 'fixture')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '')
+      + '.fixture.json';
+
+    const uri = await vscode.window.showSaveDialog({
+      defaultUri: vscode.Uri.joinPath(
+        vscode.workspace.workspaceFolders?.[0]?.uri ?? context.globalStorageUri,
+        'tests', 'e2e', 'fixtures', defaultName
+      ),
+      filters: { 'JSON Fixture': ['json'] },
+      title: 'Save Test Fixture'
+    });
+
+    if (uri) {
+      await vscode.workspace.fs.writeFile(uri, Buffer.from(json, 'utf-8'));
+      vscode.window.showInformationMessage(`Test fixture saved: ${uri.fsPath}`);
+      logger.info(`[DevMode] Exported test fixture: ${history.length} turns → ${uri.fsPath}`);
+    }
+  } catch (err: any) {
+    vscode.window.showErrorMessage(`Failed to export fixture: ${err.message}`);
+    logger.error(`[DevMode] Export fixture failed: ${err.message}`);
+  }
 }
 
 export function deactivate() {

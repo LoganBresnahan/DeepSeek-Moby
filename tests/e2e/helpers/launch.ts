@@ -62,6 +62,7 @@ export interface VSCodeResult {
   browser: Browser;
   page: Page;
   vscodeProcess: ChildProcess;
+  workspacePath: string;
 }
 
 /**
@@ -70,10 +71,11 @@ export interface VSCodeResult {
  * Requires a display server (WSLg, X11, or xvfb).
  * Downloads a cached VS Code binary on first run.
  */
-export async function launchVSCode(workspacePath?: string): Promise<VSCodeResult> {
+export async function launchVSCode(workspacePath?: string, options?: { userDataDir?: string }): Promise<VSCodeResult> {
   const extensionPath = resolve(__dirname, '..', '..', '..');
   const vscodePath = process.env.VSCODE_PATH ?? await downloadAndUnzipVSCode('1.92.2');
   const debugPort = 9222 + Math.floor(Math.random() * 1000);
+  const userDataDir = options?.userDataDir ?? `/tmp/vscode-e2e-${Date.now()}`;
 
   const args = [
     `--extensionDevelopmentPath=${extensionPath}`,
@@ -84,17 +86,18 @@ export async function launchVSCode(workspacePath?: string): Promise<VSCodeResult
     '--disable-gpu-sandbox',
     '--password-store=basic',
     `--remote-debugging-port=${debugPort}`,
-    `--user-data-dir=/tmp/vscode-e2e-${Date.now()}`,
+    `--user-data-dir=${userDataDir}`,
   ];
 
   // Open a workspace folder — extension activation may block without one
+  let actualWorkspace: string;
   if (workspacePath) {
-    args.push(workspacePath);
+    actualWorkspace = workspacePath;
   } else {
-    const tmpWorkspace = `/tmp/vscode-e2e-workspace-${Date.now()}`;
-    require('fs').mkdirSync(tmpWorkspace, { recursive: true });
-    args.push(tmpWorkspace);
+    actualWorkspace = `/tmp/vscode-e2e-workspace-${Date.now()}`;
+    require('fs').mkdirSync(actualWorkspace, { recursive: true });
   }
+  args.push(actualWorkspace);
 
   // Clean the environment: when running inside VS Code's integrated terminal,
   // ELECTRON_RUN_AS_NODE=1 is inherited, which causes the code binary to act
@@ -121,7 +124,7 @@ export async function launchVSCode(workspacePath?: string): Promise<VSCodeResult
     throw new Error('No VS Code window found after launch');
   }
 
-  return { browser, page, vscodeProcess };
+  return { browser, page, vscodeProcess, workspacePath: actualWorkspace };
 }
 
 function waitForDebugPort(proc: ChildProcess, port: number): Promise<void> {

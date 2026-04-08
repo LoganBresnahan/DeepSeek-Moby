@@ -45,7 +45,7 @@
       "properties": {
         "moby.model": {
           "type": "string",
-          "default": "deepseek-chat",
+          "default": "deepseek-reasoner",
           "enum": [
             "deepseek-chat",
             "deepseek-reasoner"
@@ -309,6 +309,11 @@
         "title": "Reject Changes",
         "icon": "$(close)",
         "category": "Moby"
+      },
+      {
+        "command": "moby.exportTestFixture",
+        "title": "Export Session (Test Fixture)",
+        "category": "Moby"
       }
     ],
     "menus": {
@@ -324,6 +329,10 @@
         {
           "command": "moby.rejectActiveDiff",
           "when": "false"
+        },
+        {
+          "command": "moby.exportTestFixture",
+          "when": "config.moby.devMode"
         }
       ],
       "editor/title": [

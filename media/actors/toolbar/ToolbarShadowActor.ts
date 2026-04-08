@@ -103,6 +103,7 @@ export class ToolbarShadowActor extends ShadowActor {
   private _filesModalOpen = false;
   private _planEnabled = false;
   private _streaming = false;
+  private _currentModel = 'deepseek-reasoner';
 
   // Handlers
   private _onEditModeChange: EditModeHandler | null = null;
@@ -130,7 +131,8 @@ export class ToolbarShadowActor extends ShadowActor {
       subscriptions: {
         'streaming.active': (value: unknown) => this.handleStreamingChange(value as boolean),
         'plans.activeCount': (value: unknown) => this.handlePlanCountChange(value as number),
-        'files.selectedCount': (value: unknown) => this.handleFilesSelectedChange(value as number)
+        'files.selectedCount': (value: unknown) => this.handleFilesSelectedChange(value as number),
+        'session.model': (value: unknown) => this.handleModelChange(value as string)
       }
     });
 
@@ -207,9 +209,15 @@ export class ToolbarShadowActor extends ShadowActor {
   }
 
   private handleEditModeClick(): void {
-    const currentIndex = EDIT_MODES.indexOf(this._editMode);
-    const nextIndex = (currentIndex + 1) % EDIT_MODES.length;
-    const newMode = EDIT_MODES[nextIndex];
+    const isChat = this._currentModel === 'deepseek-chat';
+    // Chat model skips Manual — only Ask and Auto are meaningful
+    const availableModes = isChat
+      ? EDIT_MODES.filter(m => m !== 'manual')
+      : EDIT_MODES;
+
+    const currentIndex = availableModes.indexOf(this._editMode);
+    const nextIndex = (currentIndex + 1) % availableModes.length;
+    const newMode = availableModes[nextIndex];
 
     this._editMode = newMode;
     this.updateEditModeDisplay();
@@ -217,6 +225,18 @@ export class ToolbarShadowActor extends ShadowActor {
     this._onEditModeChange?.(newMode);
     this._vscode?.postMessage({ type: 'setEditMode', mode: newMode });
     this.publish({ 'toolbar.editMode': newMode });
+  }
+
+  private handleModelChange(model: string): void {
+    this._currentModel = model;
+    // If switching to Chat while in Manual mode, auto-switch to Ask
+    if (model === 'deepseek-chat' && this._editMode === 'manual') {
+      this._editMode = 'ask';
+      this.updateEditModeDisplay();
+      this._onEditModeChange?.('ask');
+      this._vscode?.postMessage({ type: 'setEditMode', mode: 'ask' });
+      this.publish({ 'toolbar.editMode': 'ask' });
+    }
   }
 
   private handlePlanClick(): void {
@@ -391,6 +411,19 @@ export class ToolbarShadowActor extends ShadowActor {
     this._editMode = mode;
     this.updateEditModeDisplay();
     this.publish({ 'toolbar.editMode': mode });
+  }
+
+  /** Set the current model — used to determine available edit modes. */
+  setModel(model: string): void {
+    this._currentModel = model;
+    // If now Chat and currently Manual, auto-switch to Ask
+    if (model === 'deepseek-chat' && this._editMode === 'manual') {
+      this._editMode = 'ask';
+      this.updateEditModeDisplay();
+      this._onEditModeChange?.('ask');
+      this._vscode?.postMessage({ type: 'setEditMode', mode: 'ask' });
+      this.publish({ 'toolbar.editMode': 'ask' });
+    }
   }
 
   setWebSearchEnabled(enabled: boolean): void {

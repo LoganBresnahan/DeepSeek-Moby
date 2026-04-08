@@ -629,8 +629,30 @@ const toolsStyles = `
   opacity: 1;
 }
 
-:host(.tools-container.has-errors) .tools-title {
-  color: var(--vscode-errorForeground);
+.status-square {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex-shrink: 0;
+  background: var(--vscode-descriptionForeground);
+}
+
+.status-square.status-success {
+  background: var(--vscode-terminal-ansiGreen);
+}
+
+.status-square.status-error {
+  background: var(--vscode-errorForeground);
+}
+
+.status-square.status-mixed {
+  background: var(--vscode-terminal-ansiYellow);
+}
+
+.status-square.status-running {
+  background: var(--vscode-descriptionForeground);
+  opacity: 0.5;
 }
 `;
 
@@ -793,9 +815,7 @@ const shellStyles = `
   opacity: 1;
 }
 
-:host(.shell-container.has-errors) .shell-title {
-  color: var(--vscode-errorForeground);
-}
+/* Shell status colors use .status-square (shared with tools) */
 `;
 
 // ============================================
@@ -840,18 +860,6 @@ const pendingStyles = `
   font-weight: 500;
 }
 
-:host(.pending-container.all-applied) .pending-title {
-  color: var(--vscode-terminal-ansiGreen);
-}
-
-:host(.pending-container.has-errors) .pending-title {
-  color: var(--vscode-errorForeground);
-}
-
-:host(.pending-container.has-rejected) .pending-title {
-  color: var(--vscode-errorForeground);
-}
-
 .pending-preview {
   color: var(--vscode-descriptionForeground);
   overflow: hidden;
@@ -865,6 +873,23 @@ const pendingStyles = `
   color: var(--vscode-descriptionForeground);
   font-size: 12px;
   flex-shrink: 0;
+}
+
+.pending-count .count-applied {
+  color: var(--vscode-terminal-ansiGreen);
+}
+
+.pending-count .count-error {
+  color: var(--vscode-errorForeground);
+}
+
+.pending-count .count-deleted {
+  color: var(--vscode-descriptionForeground);
+}
+
+.pending-count .count-expired {
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.6;
 }
 
 .pending-body {

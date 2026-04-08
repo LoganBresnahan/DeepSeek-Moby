@@ -760,6 +760,14 @@ export class DiffManager {
       const currentContent = document.getText();
       const result = this.diffEngine.applyChanges(currentContent, code);
 
+      // Stale content detection: the file has changed since the LLM last read it.
+      // Don't apply — the caller should inject a re-read prompt for the next iteration.
+      if (result.stale) {
+        logger.warn(`[DiffManager] Auto mode: Stale content for ${filePath} — ${result.message}`);
+        this._failedAutoApplyCount++;
+        return false;
+      }
+
       if (!result.success) {
         logger.warn(`[DiffManager] Auto mode: Diff application had issues for ${filePath}: ${result.message}`);
         this._onWarning.fire({ message: `Code edit may not have been applied correctly to ${filePath}: ${result.message || 'No matching code found'}` });
