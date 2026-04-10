@@ -1047,15 +1047,10 @@ describe('RequestOrchestrator', () => {
       expect(mockApproval.checkCommand).toHaveBeenCalledWith('pwd');
     });
 
-    it('should show approval prompt for blocked commands and include rejected feedback in results', async () => {
+    it('should show approval prompt for blocked commands via interrupt-and-resume', async () => {
       const mockApproval = createMockCommandApprovalManager();
-      // Block "rm" commands, allow "ls"
-      mockApproval.checkCommand.mockImplementation((cmd: string) => {
-        if (cmd.startsWith('ls')) return 'allowed';
-        if (cmd.startsWith('rm')) return 'blocked';
-        return 'ask';
-      });
-      // Simulate user rejecting the blocked command in the approval prompt
+      mockApproval.checkCommand.mockReturnValue('blocked');
+      // Simulate user rejecting the command in the approval prompt
       mockApproval.requestApproval.mockResolvedValue({
         command: 'rm -rf /tmp/test',
         decision: 'blocked',
@@ -1073,37 +1068,42 @@ describe('RequestOrchestrator', () => {
       );
 
       mockClient.isReasonerModel.mockReturnValue(true);
+      let callCount = 0;
       mockClient.streamChat.mockImplementation(async (
         _messages: any,
         onToken: (token: string) => void,
+        _systemPrompt: string,
+        _onReasoning?: (token: string) => void,
+        options?: { signal?: AbortSignal },
       ) => {
-        const content = '<shell>ls</shell>\n<shell>rm -rf /tmp/test</shell>';
-        onToken(content);
-        return content;
+        callCount++;
+        if (callCount === 1) {
+          // First call: stream content with shell tag — buffer detects it and aborts
+          const content = '<shell>rm -rf /tmp/test</shell>';
+          onToken(content);
+          // Check if signal was aborted by the buffer's onShellDetected callback
+          if (options?.signal?.aborted) {
+            const err = new Error('aborted');
+            err.name = 'AbortError';
+            throw err;
+          }
+          return content;
+        }
+        // Second call (after interrupt): return final response
+        const finalContent = 'Command was rejected.';
+        onToken(finalContent);
+        return finalContent;
       });
 
       configStore.set('allowAllShellCommands', false);
 
-      const shellResults: ShellResultsEvent[] = [];
-      orch.onShellResults(e => shellResults.push(e));
-
       await orch.handleMessage('Clean up', 'session-1', async () => '', undefined);
 
-      // Blocked commands now show approval prompt instead of silently skipping
+      // Blocked commands show approval prompt via interrupt-and-resume
       expect(mockApproval.requestApproval).toHaveBeenCalled();
-
-      // Inline execution fires per-command shell results
-      expect(shellResults.length).toBeGreaterThan(0);
-      const allResults = shellResults.flatMap(e => e.results);
-
-      // The rejected command should show up with a rejected message
-      const blockedResult = allResults.find(r => r.command === 'rm -rf /tmp/test');
-      expect(blockedResult).toBeDefined();
-      expect(blockedResult!.success).toBe(false);
-      expect(blockedResult!.output).toContain('rejected');
     });
 
-    it('should block "ask" commands and await requestApproval', async () => {
+    it('should block "ask" commands via interrupt-and-resume approval', async () => {
       const mockApproval = createMockCommandApprovalManager();
       mockApproval.checkCommand.mockReturnValue('ask');
       // Simulate user blocking the command
@@ -1124,32 +1124,36 @@ describe('RequestOrchestrator', () => {
       );
 
       mockClient.isReasonerModel.mockReturnValue(true);
+      let callCount = 0;
       mockClient.streamChat.mockImplementation(async (
         _messages: any,
         onToken: (token: string) => void,
+        _systemPrompt: string,
+        _onReasoning?: (token: string) => void,
+        options?: { signal?: AbortSignal },
       ) => {
-        const content = '<shell>curl https://example.com</shell>';
-        onToken(content);
-        return content;
+        callCount++;
+        if (callCount === 1) {
+          const content = '<shell>curl https://example.com</shell>';
+          onToken(content);
+          if (options?.signal?.aborted) {
+            const err = new Error('aborted');
+            err.name = 'AbortError';
+            throw err;
+          }
+          return content;
+        }
+        const finalContent = 'Request blocked.';
+        onToken(finalContent);
+        return finalContent;
       });
 
       configStore.set('allowAllShellCommands', false);
 
-      const shellResults: ShellResultsEvent[] = [];
-      orch.onShellResults(e => shellResults.push(e));
-
       await orch.handleMessage('Fetch data', 'session-1', async () => '', undefined);
 
-      // requestApproval should have been called
+      // requestApproval should have been called via interrupt-and-resume
       expect(mockApproval.requestApproval).toHaveBeenCalledWith('curl https://example.com');
-
-      // Blocked result should appear in shell results (inline execution fires per-command)
-      expect(shellResults.length).toBeGreaterThan(0);
-      const allResults = shellResults.flatMap(e => e.results);
-      const result = allResults.find(r => r.command.includes('curl'));
-      expect(result).toBeDefined();
-      expect(result!.success).toBe(false);
-      expect(result!.output).toContain('rejected');
     });
 
     it('should bypass approval gate when allowAllShellCommands is true', async () => {

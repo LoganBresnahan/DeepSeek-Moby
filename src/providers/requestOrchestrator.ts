@@ -177,7 +177,7 @@ export class RequestOrchestrator {
   // ── State ──
   private abortController: AbortController | null = null;
   private contentBuffer: ContentTransformBuffer | null = null;
-  // Queue for shell commands detected inline during streaming
+  // Queue for shell commands detected inline during streaming (legacy — being replaced by interrupt-and-resume)
   private _pendingInlineShellCommands: Array<{ command: string }> = [];
   // Track commands already executed inline (to avoid re-execution in batch)
   private _inlineExecutedCommands: Set<string> = new Set();
@@ -186,6 +186,12 @@ export class RequestOrchestrator {
   private _heldSegments: Array<{ type: string; content: unknown; complete?: boolean }> = [];
   // Promise that resolves when inline shell execution (including any approval) completes
   private _inlineExecutionPromise: Promise<void> | null = null;
+  // ── Interrupt-and-Resume Shell Execution ──
+  // When ContentTransformBuffer detects a complete <shell> tag, it sets this command
+  // and aborts the stream. The iteration loop detects the interrupt and executes the
+  // command before starting a new API call.
+  private _shellInterruptCommand: string | null = null;
+  private _shellInterruptAborted = false;
   // CQRS: Deferred turn events from webview (set before endResponse, resolved when webview sends back)
   private _turnEventsResolve: ((events: Array<Record<string, unknown>>) => void) | null = null;
   private _turnEventsPromise: Promise<Array<Record<string, unknown>>> | null = null;
@@ -272,9 +278,9 @@ export class RequestOrchestrator {
     this.diffManager.clearResponseFileChanges();
     this.diffManager.resetFailedAutoApplyCount();
 
-    // Create abort controller for this request
+    // Create abort controller for this request (mutable — shell interrupt replaces it)
     this.abortController = new AbortController();
-    const signal = this.abortController.signal;
+    let signal = this.abortController.signal;
 
     // Get the current correlation ID for cross-boundary tracing
     const correlationId = logger.getCurrentCorrelationId();
@@ -284,11 +290,25 @@ export class RequestOrchestrator {
       correlationId: correlationId || undefined
     });
 
+    // Reset interrupt state
+    this._shellInterruptCommand = null;
+    this._shellInterruptAborted = false;
+
     // Initialize content transform buffer for debounced streaming
     this.contentBuffer = new ContentTransformBuffer({
       debounceMs: 150,
       debug: false,
       log: (msg) => logger.debug(msg),
+      // Interrupt-and-resume: when a complete <shell> tag is detected, abort the stream
+      onShellDetected: isReasonerModel ? (command: string, _textBefore: string) => {
+        logger.info(`[R1-Shell] Interrupt: detected shell command "${command.substring(0, 60)}..." — aborting stream`);
+        this._shellInterruptCommand = command;
+        this._shellInterruptAborted = true;
+        // Abort the HTTP stream — streamChat will throw AbortError
+        if (this.abortController) {
+          this.abortController.abort();
+        }
+      } : undefined,
       onFlush: (segments) => {
         // SYNCHRONOUS pre-scan: if this batch contains a shell command that needs approval,
         // set _approvalPending BEFORE processing any segments (including text before the shell tag).
@@ -343,12 +363,10 @@ export class RequestOrchestrator {
               break;
             }
             case 'shell':
-              if (segment.complete && Array.isArray(segment.content)) {
-                // Queue for inline execution during streaming
-                for (const cmd of segment.content as Array<{ command: string }>) {
-                  this._pendingInlineShellCommands.push(cmd);
-                }
-                logger.debug(`[ContentBuffer] Queued ${(segment.content as Array<{ command: string }>).length} shell command(s) for inline execution`);
+              // With interrupt-and-resume, shell segments are handled by onShellDetected
+              // and never reach onFlush. This is a safety fallback only.
+              if (!isReasonerModel && segment.complete && Array.isArray(segment.content)) {
+                logger.warn(`[ContentBuffer] Shell segment in onFlush (unexpected with interrupt-and-resume)`);
               }
               break;
             case 'thinking':
@@ -978,80 +996,188 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
         logger.setIteration(1);
       }
 
-      const _response = await this.deepSeekClient.streamChat(
-        currentHistoryMessages,
-        async (token) => {
-          // Track timing for first content token
-          if (!firstContentTokenTime) {
-            firstContentTokenTime = Date.now();
-            const waitTime = firstContentTokenTime - iterationStartTime;
-            const afterReasoning = firstReasoningTokenTime
-              ? firstContentTokenTime - firstReasoningTokenTime
-              : 0;
-            logger.info(`[Timing] First content token after ${waitTime}ms (${afterReasoning}ms after reasoning started)`);
-            if (!isReasonerModel) {
+      // ── Stream with interrupt-and-resume support ──
+      // The ContentTransformBuffer may abort the stream when it detects a <shell> tag.
+      // If that happens, we catch the AbortError, execute the command, inject results,
+      // and `continue` back to the do/while loop for a new API call.
+      try {
+        const _response = await this.deepSeekClient.streamChat(
+          currentHistoryMessages,
+          async (token) => {
+            // Track timing for first content token
+            if (!firstContentTokenTime) {
+              firstContentTokenTime = Date.now();
+              const waitTime = firstContentTokenTime - iterationStartTime;
+              const afterReasoning = firstReasoningTokenTime
+                ? firstContentTokenTime - firstReasoningTokenTime
+                : 0;
+              logger.info(`[Timing] First content token after ${waitTime}ms (${afterReasoning}ms after reasoning started)`);
+              if (!isReasonerModel) {
+                logger.apiStreamProgress('first-token');
+              } else if (firstReasoningTokenTime) {
+                logger.apiStreamProgress('thinking-end');
+              }
+              logger.apiStreamProgress('content-start');
+            }
+
+            logger.apiStreamChunk(token.length, 'text');
+
+            iterationResponse += token;
+            state.accumulatedResponse += token;
+            state.currentIterationContent += token;
+
+            // Use content buffer for debounced streaming (filters shell tags).
+            // For Reasoner: the buffer's onShellDetected callback will abort the stream
+            // when a <shell> tag is found (interrupt-and-resume flow).
+            if (this.contentBuffer) {
+              this.contentBuffer.append(token);
+            } else {
+              this._onStreamToken.fire({ token });
+            }
+
+            // Detect complete code blocks and auto-handle in "ask" or "auto" mode
+            if (!this._shellInterruptAborted) {
+              await this.diffManager.handleCodeBlockDetection(state.accumulatedResponse);
+            }
+          },
+          currentSystemPrompt,
+          // Reasoning callback for deepseek-reasoner
+          isReasonerModel ? (reasoningToken) => {
+            if (!firstReasoningTokenTime) {
+              firstReasoningTokenTime = Date.now();
+              const waitTime = firstReasoningTokenTime - iterationStartTime;
+              logger.info(`[Timing] First reasoning token after ${waitTime}ms`);
               logger.apiStreamProgress('first-token');
-            } else if (firstReasoningTokenTime) {
-              logger.apiStreamProgress('thinking-end');
+              logger.apiStreamProgress('thinking-start');
             }
-            logger.apiStreamProgress('content-start');
-          }
 
-          logger.apiStreamChunk(token.length, 'text');
+            logger.apiStreamChunk(reasoningToken.length, 'thinking');
 
-          iterationResponse += token;
-          state.accumulatedResponse += token;
-          state.currentIterationContent += token;
+            state.fullReasoning += reasoningToken;
+            state.currentIterationReasoning += reasoningToken;
+            this._onStreamReasoning.fire({ token: reasoningToken });
+          } : undefined,
+          { signal }
+        );
+      } catch (streamError: any) {
+        // ── Shell Interrupt: ContentTransformBuffer detected a <shell> tag and aborted ──
+        if (this._shellInterruptAborted && this._shellInterruptCommand) {
+          const shellCommand = this._shellInterruptCommand;
+          this._shellInterruptCommand = null;
+          this._shellInterruptAborted = false;
 
-          // Use content buffer for debounced streaming (filters shell tags)
+          logger.info(`[R1-Shell] Interrupt caught — executing: "${shellCommand.substring(0, 80)}..."`);
+
+          // Flush any buffered text to the UI
           if (this.contentBuffer) {
-            this.contentBuffer.append(token);
-          } else {
-            this._onStreamToken.fire({ token });
+            this.contentBuffer.flush();
+            this.contentBuffer.reset();
           }
 
-          // Execute any shell commands detected inline by ContentTransformBuffer
-          if (isReasonerModel && this._pendingInlineShellCommands.length > 0) {
-            const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-            if (workspacePath) {
-              // Store the promise so the iteration loop can await it after streaming completes
-              this._inlineExecutionPromise = this.executeInlineShellCommands(workspacePath, signal, state);
-              await this._inlineExecutionPromise;
-              this._inlineExecutionPromise = null;
+          // Create a new abort controller (the old one is aborted)
+          this.abortController = new AbortController();
+          signal = this.abortController.signal;
+
+          // Parse the command (heredoc-aware)
+          const commands = parseShellCommands(`<shell>${shellCommand}</shell>`);
+          const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
+          if (commands.length > 0 && workspacePath) {
+            // Notify frontend
+            const shellPayload = commands.map(c => ({
+              command: c.command,
+              description: c.command.length > 50 ? c.command.substring(0, 50) + '...' : c.command
+            }));
+            this._onShellExecuting.fire({ commands: shellPayload });
+
+            // Command approval
+            const allowAllCommands = vscode.workspace.getConfiguration('moby')
+              .get<boolean>('allowAllShellCommands') ?? false;
+
+            let approved = true;
+            if (!allowAllCommands && this.commandApprovalManager) {
+              const decision = this.commandApprovalManager.checkCommand(commands[0].command);
+              if (decision !== 'allowed') {
+                const userApproval = await this.commandApprovalManager.requestApproval(commands[0].command);
+                approved = userApproval.decision === 'allowed';
+              }
             }
+
+            let resultsContext = '';
+            if (approved) {
+              // File watcher
+              const modifiedFiles = new Set<string>();
+              let shellFileWatcher: vscode.FileSystemWatcher | undefined;
+              try {
+                shellFileWatcher = vscode.workspace.createFileSystemWatcher(
+                  new vscode.RelativePattern(workspacePath, '**/*')
+                );
+                const trackChange = (uri: vscode.Uri) => {
+                  const relativePath = vscode.workspace.asRelativePath(uri, false);
+                  if (!shouldIgnoreWatcherPath(relativePath)) {
+                    modifiedFiles.add(relativePath);
+                  }
+                };
+                shellFileWatcher.onDidChange(trackChange);
+                shellFileWatcher.onDidCreate(trackChange);
+              } catch { /* watcher optional */ }
+
+              // Execute
+              const results = await executeShellCommands(commands, workspacePath, { allowAllCommands, signal });
+              state.shellResultsForHistory.push(...results);
+
+              // Wait for file watcher
+              await new Promise(resolve => setTimeout(resolve, 100));
+              if (shellFileWatcher) {
+                shellFileWatcher.dispose();
+                if (modifiedFiles.size > 0) {
+                  logger.info(`[R1-Shell] Interrupt: File watcher detected ${modifiedFiles.size} modified files: ${[...modifiedFiles].join(', ')}`);
+                  this.diffManager.registerShellModifiedFiles([...modifiedFiles]);
+                }
+              }
+
+              // Send results to frontend
+              this._onShellResults.fire({
+                results: results.map(r => ({
+                  command: r.command,
+                  output: r.output.substring(0, 500) + (r.output.length > 500 ? '...' : ''),
+                  success: r.success
+                }))
+              });
+
+              resultsContext = formatShellResultsForContext(results);
+              if (commandsCreateFiles(commands)) state.shellCreatedFiles = true;
+              if (commandsDeleteFiles(commands)) state.shellDeletedFiles = true;
+            } else {
+              resultsContext = `Shell command rejected by user: ${commands[0].command}\n`;
+            }
+
+            // Inject partial response + result into context for resume
+            const partialResponse = stripShellTags(state.currentIterationContent || '');
+            if (partialResponse.trim()) {
+              currentHistoryMessages.push({ role: 'assistant', content: partialResponse.trim() });
+            }
+            currentHistoryMessages.push({ role: 'user', content: resultsContext });
+
+            const injectedTokens = this.deepSeekClient.estimateTokens(resultsContext);
+            logger.info(`[R1-Shell] Interrupt: injected ${injectedTokens} tokens, resuming with new API call`);
+
+            // Reset iteration state
+            state.currentIterationContent = '';
+            state.currentIterationReasoning = '';
+            iterationResponse = '';
+            firstContentTokenTime = null;
+            firstReasoningTokenTime = null;
+
+            shellIteration++;
+            lastIterationHadShellCommands = true;
+            continue; // ← New API call
           }
+          continue;
+        }
 
-          // Detect complete code blocks and auto-handle in "ask" or "auto" mode
-          await this.diffManager.handleCodeBlockDetection(state.accumulatedResponse);
-        },
-        currentSystemPrompt,
-        // Reasoning callback for deepseek-reasoner
-        isReasonerModel ? (reasoningToken) => {
-          if (!firstReasoningTokenTime) {
-            firstReasoningTokenTime = Date.now();
-            const waitTime = firstReasoningTokenTime - iterationStartTime;
-            logger.info(`[Timing] First reasoning token after ${waitTime}ms`);
-            logger.apiStreamProgress('first-token');
-            logger.apiStreamProgress('thinking-start');
-          }
-
-          logger.apiStreamChunk(reasoningToken.length, 'thinking');
-
-          state.fullReasoning += reasoningToken;
-          state.currentIterationReasoning += reasoningToken;
-          this._onStreamReasoning.fire({ token: reasoningToken });
-        } : undefined,
-        { signal }
-      );
-
-      // BLOCKING: Wait for any pending inline shell execution (including command approval)
-      // The onToken callback may have started executeInlineShellCommands which awaits
-      // user approval, but streamChat doesn't await the onToken callback — so the
-      // inline execution may still be pending when streamChat returns.
-      if (this._inlineExecutionPromise) {
-        logger.info('[R1-Shell] Waiting for pending inline shell execution to complete before continuing...');
-        await this._inlineExecutionPromise;
-        this._inlineExecutionPromise = null;
+        // Not a shell interrupt — re-throw for the outer catch
+        throw streamError;
       }
 
       // Log iteration completion for debugging R1 continuation

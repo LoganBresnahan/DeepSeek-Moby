@@ -52,6 +52,15 @@ export interface ContentTransformBufferOptions {
   onFlush: (segments: BufferedSegment[]) => void;
   /** Optional: Custom patterns to add */
   additionalPatterns?: TransformPattern[];
+  /**
+   * Callback when a complete shell command is detected during streaming.
+   * Used by interrupt-and-resume: the orchestrator aborts the stream,
+   * executes the command, and resumes with a new API call.
+   *
+   * @param command - The raw command string (content between <shell> tags)
+   * @param textBefore - The text content that appeared before the shell tag (already flushed)
+   */
+  onShellDetected?: (command: string, textBefore: string) => void;
 }
 
 /**
@@ -108,12 +117,19 @@ export class ContentTransformBuffer {
   private appendCount = 0;
   private flushCount = 0;
 
+  /** Callback for interrupt-and-resume shell execution */
+  private onShellDetected: ((command: string, textBefore: string) => void) | null = null;
+
+  /** Tracks whether a shell interrupt has been signaled (stops further processing) */
+  private _shellInterrupted = false;
+
   constructor(options: ContentTransformBufferOptions & { debug?: boolean; log?: (message: string) => void }) {
     this.debounceMs = options.debounceMs ?? 150;
     this.onFlush = options.onFlush;
     this.patterns = [...DEFAULT_PATTERNS, ...(options.additionalPatterns || [])];
     this.debug = options.debug ?? false;
     this.log = options.log ?? console.log;
+    this.onShellDetected = options.onShellDetected ?? null;
   }
 
   private debugLog(message: string): void {
@@ -127,6 +143,9 @@ export class ContentTransformBuffer {
    * Uses progressive flush: emit safe content immediately, only hold back potential pattern starts.
    */
   append(token: string): void {
+    // After a shell interrupt, ignore further tokens — the stream is being aborted
+    if (this._shellInterrupted) return;
+
     this.appendCount++;
     const tokenPreview = token.length > 30 ? token.slice(0, 30) + '...' : token;
     this.debugLog(`append #${this.appendCount}: "${tokenPreview.replace(/\n/g, '\\n')}" (${token.length} chars, buffer now ${this.buffer.length + token.length} chars, pending from pos ${this.lastEmittedPosition})`);
@@ -174,6 +193,7 @@ export class ContentTransformBuffer {
     this.lastEmittedPosition = 0;
     this.appendCount = 0;
     this.flushCount = 0;
+    this._shellInterrupted = false;
     if (this.debounceTimer) {
       this.debugLog(`reset: cancelled pending debounce timer`);
       clearTimeout(this.debounceTimer);
@@ -196,6 +216,27 @@ export class ContentTransformBuffer {
     return this.buffer.length > this.lastEmittedPosition;
   }
 
+  /**
+   * Check if the pending content contains a pattern start tag (e.g., <shell>)
+   * without a matching end tag. If so, the debounce should NOT release this content.
+   */
+  private isInsideOpenTag(): boolean {
+    const pending = this.buffer.slice(this.lastEmittedPosition);
+    for (const pattern of this.patterns) {
+      const startMatch = pattern.startPattern.exec(pending);
+      if (startMatch) {
+        // Found a start tag — check if there's a matching end tag
+        const afterStart = pending.slice(startMatch.index + startMatch[0].length);
+        const endMatch = pattern.endPattern.exec(afterStart);
+        if (!endMatch) {
+          // Start tag found but no end tag — we're inside an open tag
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
   private scheduleFlush(): void {
     if (this.debounceTimer) {
       this.debugLog(`scheduleFlush: resetting fallback timer (${this.debounceMs}ms)`);
@@ -206,6 +247,21 @@ export class ContentTransformBuffer {
     }
     this.debounceTimer = setTimeout(() => {
       const heldBack = this.buffer.length - this.lastEmittedPosition;
+
+      // DON'T release content if we're inside an open tag (e.g., <shell> without </shell>).
+      // The stream is still sending content that belongs inside the tag (heredoc blocks, etc.).
+      // Only release when the held content is ambiguous partial starts (like "<" that might
+      // or might not become "<shell>").
+      if (this.isInsideOpenTag()) {
+        this.debugLog(`scheduleFlush: inside open tag, NOT releasing ${heldBack} held chars — rescheduling`);
+        // Reschedule — keep checking until the tag closes or the stream truly ends
+        this.debounceTimer = setTimeout(() => {
+          this.debounceTimer = null;
+          this.scheduleFlush();
+        }, this.debounceMs);
+        return;
+      }
+
       this.debugLog(`scheduleFlush: fallback timer fired, releasing ${heldBack} held chars`);
       // Use isFinal=true to release held content - stream has paused long enough
       // that we should assume any partial pattern start (like "<") is just text
@@ -302,6 +358,37 @@ export class ContentTransformBuffer {
         // Complete block found!
         const blockEnd = afterStartIndex + endMatch.index + endMatch[0].length;
         const rawBlock = this.buffer.slice(earliestMatch.startIndex, blockEnd);
+
+        // Interrupt-and-resume: if this is a shell tag and onShellDetected is set,
+        // flush text segments accumulated so far, then fire the callback instead of
+        // emitting the shell segment. The orchestrator will abort the stream.
+        if (earliestMatch.pattern.type === 'shell' && this.onShellDetected && !isFinal) {
+          // Flush any text segments we've accumulated before the shell tag
+          if (segments.length > 0) {
+            this.lastEmittedPosition = earliestMatch.startIndex;
+            this.debugLog(`processBuffer: flushing ${segments.length} text segment(s) before shell interrupt`);
+            this.onFlush(segments);
+          }
+
+          // Update cursor past the shell tag
+          this.lastEmittedPosition = blockEnd;
+
+          // Extract the command
+          const command = rawBlock.replace(/<\/?shell>/g, '').trim();
+
+          // Collect text that was emitted before this shell tag in this stream
+          const textBefore = segments
+            .filter(s => s.type === 'text' && typeof s.content === 'string')
+            .map(s => s.content as string)
+            .join('');
+
+          this.debugLog(`processBuffer: shell interrupt — command="${command.substring(0, 50)}...", textBefore=${textBefore.length} chars`);
+          this._shellInterrupted = true;
+          this.onShellDetected(command, textBefore);
+
+          // Return true — we emitted segments. The stream will be aborted by the callback.
+          return true;
+        }
 
         segments.push({
           type: earliestMatch.pattern.type,
