@@ -13,7 +13,7 @@ describe('StreamingActor Snapshots', () => {
   let actor: StreamingActor;
 
   beforeEach(() => {
-    manager = new EventStateManager();
+    manager = new EventStateManager({ batchBroadcasts: false });
     element = document.createElement('div');
     element.id = 'streaming-root';
     element.className = 'streaming-container';
@@ -98,7 +98,7 @@ describe('StreamingActor State Snapshots', () => {
   let actor: StreamingActor;
 
   beforeEach(() => {
-    manager = new EventStateManager();
+    manager = new EventStateManager({ batchBroadcasts: false });
     element = document.createElement('div');
     element.id = 'streaming-root';
     document.body.appendChild(element);

@@ -267,7 +267,7 @@ const textStyles = `
 
 .code-body {
   position: relative;
-  max-height: 50px;
+  max-height: 100px;
   overflow: hidden;
   transition: max-height 0.3s ease;
 }

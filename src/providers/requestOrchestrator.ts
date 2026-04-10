@@ -38,6 +38,76 @@ import type { CommandApprovalManager } from './commandApprovalManager';
 import type { SavedPromptManager } from './savedPromptManager';
 import type { PlanManager } from './planManager';
 
+// ── File Watcher Ignore Patterns ──
+// Directories to always ignore at any depth in the file tree.
+// Covers dependency, cache, and tooling directories across all major languages.
+const WATCHER_IGNORE_SEGMENTS = new Set([
+  // VCS
+  '.git', '.svn', '.hg', 'CVS',
+  // JavaScript/TypeScript
+  'node_modules', '.next', '.nuxt', '.svelte-kit', '.turbo',
+  '.parcel-cache', '.cache', '.vite', '.npm', 'bower_components',
+  'jspm_packages', 'web_modules', '.yarn', '.pnpm-store',
+  'coverage', '.nyc_output', '.eslintcache', 'storybook-static',
+  // Python
+  '__pycache__', '.venv', 'venv', '.tox', '.nox',
+  '.mypy_cache', '.pytest_cache', '.ruff_cache', '.hypothesis',
+  '.pybuilder', '.eggs', 'htmlcov', '.ipynb_checkpoints',
+  // Java/Kotlin
+  '.gradle', '.idea', '.kotlin', '.konan',
+  // C/C++
+  'CMakeFiles', '.ccache', 'vcpkg_installed', '_deps',
+  // C#/.NET
+  '.vs', 'TestResults', 'packages',
+  // Go (module cache is global, not in-project)
+  // Rust
+  // (target/ is root-only below)
+  // PHP
+  '.phpunit.cache',
+  // Ruby
+  '.bundle', '.yardoc', '_yardoc',
+  // Swift/Objective-C
+  'Pods', 'Carthage', 'DerivedData', '.swiftpm', 'xcuserdata',
+  // Dart/Flutter
+  '.dart_tool',
+  // Elixir/Erlang
+  'deps', '_build', '.elixir_ls', '.fetch', 'ebin',
+  '_checkouts', '.rebar', '.rebar3', '.eunit',
+  // Haskell
+  '.stack-work', '.cabal-sandbox', '.hpc',
+  // Scala
+  '.bloop', '.metals', '.bsp',
+  // Perl
+  'blib', 'cover_db',
+  // Lua
+  'lua_modules', '.luarocks',
+  // R
+  'renv', 'packrat', '.Rproj.user', 'rsconnect',
+  // Lisp/Scheme
+  'compiled',
+  // OS
+  '.DS_Store',
+]);
+
+// Directories to ignore only at workspace root (could be legitimate subdirectories deeper)
+const WATCHER_IGNORE_ROOT_DIRS = new Set([
+  'dist', 'build', 'Build', 'out', 'output',
+  'target', 'vendor', 'bin', 'obj',
+  'Debug', 'Release', 'artifacts',
+  'tmp', 'pkg', 'doc', 'docs',
+  'local', 'inc',
+]);
+
+/** Check if a relative path should be ignored by the file watcher. */
+function shouldIgnoreWatcherPath(relativePath: string): boolean {
+  const segments = relativePath.split(/[\\/]/);
+  for (const seg of segments) {
+    if (WATCHER_IGNORE_SEGMENTS.has(seg)) return true;
+  }
+  if (segments.length > 0 && WATCHER_IGNORE_ROOT_DIRS.has(segments[0])) return true;
+  return false;
+}
+
 export class RequestOrchestrator {
   // ── Events (streaming) ──
   private readonly _onStartResponse = new vscode.EventEmitter<StartResponseEvent>();
@@ -92,6 +162,17 @@ export class RequestOrchestrator {
   readonly onTurnSequenceUpdate = this._onTurnSequenceUpdate.event;
   readonly onError = this._onError.event;
   readonly onWarning = this._onWarning.event;
+
+  /**
+   * Check if it's safe for chatProvider to flush batched tokens to the webview.
+   * Returns false when the pipeline is in a state where flushing would leak
+   * partial tags, show tokens during approval, or display content prematurely.
+   */
+  canFlushTokens(): boolean {
+    return !this._approvalPending &&
+           this._pendingInlineShellCommands.length === 0 &&
+           !(this.contentBuffer?.isHoldingBack());
+  }
 
   // ── State ──
   private abortController: AbortController | null = null;
@@ -775,7 +856,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
         );
         const trackChange = (uri: vscode.Uri) => {
           const relativePath = vscode.workspace.asRelativePath(uri, false);
-          if (!relativePath.startsWith('.git/')) {
+          if (!shouldIgnoreWatcherPath(relativePath)) {
             modifiedFiles.add(relativePath);
           }
         };
@@ -783,7 +864,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
         shellFileWatcher.onDidCreate(trackChange);
         shellFileWatcher.onDidDelete((uri: vscode.Uri) => {
           const relativePath = vscode.workspace.asRelativePath(uri, false);
-          if (!relativePath.startsWith('.git/')) {
+          if (!shouldIgnoreWatcherPath(relativePath)) {
             deletedFiles.add(relativePath);
             modifiedFiles.delete(relativePath);
           }
@@ -1028,10 +1109,41 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
         }
       }
 
-      // Check for shell commands AND web search tags in THIS iteration's response AND reasoning
-      const combinedForShellCheck = iterationResponse + (state.currentIterationReasoning || '');
+      // Check for shell commands AND web search tags in THIS iteration's content response ONLY.
+      // Reasoning content is excluded — R1's thinking often contains <shell> tags as part of
+      // planning ("Let me check... <shell>pwd</shell>") which are NOT commands to execute.
+      const combinedForShellCheck = iterationResponse;
       const hasShell = isReasonerModel && containsShellCommands(combinedForShellCheck);
       const hasWebSearch = isReasonerModel && this.webSearchManager.getMode() === 'auto' && containsWebSearchCommands(combinedForShellCheck);
+
+      // Zero-content recovery: R1 sometimes reasons about shell commands but produces
+      // no content output. Instead of guessing from reasoning, auto-continue so the model
+      // can produce a proper response with commands in the content stream.
+      if (isReasonerModel && !iterationResponse.trim() && state.currentIterationReasoning &&
+          containsShellCommands(state.currentIterationReasoning) && autoContinuationCount < maxAutoContinuations) {
+        autoContinuationCount++;
+        logger.info(`[R1-Shell] Zero-content response with shell commands in reasoning — auto-continuing (${autoContinuationCount}/${maxAutoContinuations})`);
+
+        this._onAutoContinuation.fire({
+          count: autoContinuationCount,
+          max: maxAutoContinuations,
+          reason: 'Zero-content response — reasoning contained shell commands'
+        });
+
+        currentHistoryMessages.push({
+          role: 'assistant',
+          content: state.currentIterationReasoning
+        });
+
+        currentHistoryMessages.push({
+          role: 'user',
+          content: 'Your reasoning included shell commands but you didn\'t produce any output. Please provide your response — include any shell commands you want to run using <shell> tags in your response, not just in your thinking.'
+        });
+
+        lastIterationHadShellCommands = false;
+        shellIteration++;
+        continue;
+      }
 
       if (hasShell || hasWebSearch) {
         shellIteration++;

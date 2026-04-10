@@ -20,7 +20,7 @@ describe('HeaderActor', () => {
   let titleEl: HTMLElement;
 
   beforeEach(() => {
-    manager = new EventStateManager();
+    manager = new EventStateManager({ batchBroadcasts: false });
     element = document.createElement('div');
     element.id = 'header-root';
     document.body.appendChild(element);

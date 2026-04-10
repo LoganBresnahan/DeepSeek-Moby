@@ -248,25 +248,72 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     this.requestOrchestrator.onStartResponse(d => {
       this._view?.webview.postMessage({ type: 'startResponse', ...d });
     });
+    // Batch tokens before sending to webview (reduces ~20,000 postMessages to ~200-400).
+    // Tokens accumulate for up to 50ms, then flush as a single concatenated message.
+    // This dramatically reduces: gateway calls, CQRS events, EventStateManager publishes,
+    // DOM updates, and layout reflows — all of which previously ran per-token.
+    let pendingContentTokens = '';
+    let contentFlushTimer: ReturnType<typeof setTimeout> | null = null;
+    let pendingReasoningTokens = '';
+    let reasoningFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const flushContentTokens = () => {
+      // Don't flush if the pipeline is holding back content (partial tags,
+      // approval pending, or shell execution in progress)
+      if (pendingContentTokens && !this.requestOrchestrator.canFlushTokens()) {
+        // Re-schedule — tokens stay buffered, try again next tick
+        contentFlushTimer = setTimeout(flushContentTokens, 50);
+        return;
+      }
+      if (pendingContentTokens) {
+        this._view?.webview.postMessage({ type: 'streamToken', token: pendingContentTokens });
+        pendingContentTokens = '';
+      }
+      contentFlushTimer = null;
+    };
+
+    const flushReasoningTokens = () => {
+      if (pendingReasoningTokens) {
+        this._view?.webview.postMessage({ type: 'streamReasoning', token: pendingReasoningTokens });
+        pendingReasoningTokens = '';
+      }
+      reasoningFlushTimer = null;
+    };
+
     this.requestOrchestrator.onStreamToken(d => {
-      this._view?.webview.postMessage({ type: 'streamToken', token: d.token });
+      pendingContentTokens += d.token;
+      if (!contentFlushTimer) {
+        contentFlushTimer = setTimeout(flushContentTokens, 50);
+      }
     });
     this.requestOrchestrator.onStreamReasoning(d => {
-      this._view?.webview.postMessage({ type: 'streamReasoning', token: d.token });
+      pendingReasoningTokens += d.token;
+      if (!reasoningFlushTimer) {
+        reasoningFlushTimer = setTimeout(flushReasoningTokens, 50);
+      }
     });
     this.requestOrchestrator.onEndResponse(d => {
+      // Flush any pending batched tokens before signaling end
+      flushContentTokens();
+      flushReasoningTokens();
       this._view?.webview.postMessage({ type: 'endResponse', message: d });
     });
     this.requestOrchestrator.onGenerationStopped(() => {
+      flushContentTokens();
+      flushReasoningTokens();
       this._view?.webview.postMessage({ type: 'generationStopped' });
     });
     this.requestOrchestrator.onIterationStart(d => {
+      // Flush tokens before iteration boundary (ensures text renders before shell/tool segments)
+      flushContentTokens();
+      flushReasoningTokens();
       this._view?.webview.postMessage({ type: 'iterationStart', iteration: d.iteration });
     });
     this.requestOrchestrator.onAutoContinuation(d => {
       this._view?.webview.postMessage({ type: 'autoContinuation', ...d });
     });
     this.requestOrchestrator.onToolCallsStart(d => {
+      flushContentTokens();
       this._view?.webview.postMessage({ type: 'toolCallsStart', tools: d.tools });
     });
     this.requestOrchestrator.onToolCallsUpdate(d => {
@@ -279,6 +326,8 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       this._view?.webview.postMessage({ type: 'toolCallsEnd' });
     });
     this.requestOrchestrator.onShellExecuting(d => {
+      // Flush tokens so text before shell command renders first
+      flushContentTokens();
       this._view?.webview.postMessage({ type: 'shellExecuting', commands: d.commands });
     });
     this.requestOrchestrator.onShellResults(d => {

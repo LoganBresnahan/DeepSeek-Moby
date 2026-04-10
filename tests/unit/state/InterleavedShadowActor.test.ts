@@ -115,7 +115,7 @@ describe('InterleavedShadowActor', () => {
 
   beforeEach(() => {
     vi.useFakeTimers();
-    manager = new EventStateManager();
+    manager = new EventStateManager({ batchBroadcasts: false });
     parentElement = document.createElement('div');
     parentElement.id = 'chat-messages';
     document.body.appendChild(parentElement);

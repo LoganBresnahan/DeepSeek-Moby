@@ -63,7 +63,7 @@ describe('HistoryShadowActor Snapshots', () => {
   let mockVSCode: ReturnType<typeof createMockVSCode>;
 
   beforeEach(() => {
-    manager = new EventStateManager();
+    manager = new EventStateManager({ batchBroadcasts: false });
     element = document.createElement('div');
     element.id = 'history-container';
     document.body.appendChild(element);

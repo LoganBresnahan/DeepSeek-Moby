@@ -10,7 +10,7 @@ describe('EventStateManager', () => {
   let manager: EventStateManager;
 
   beforeEach(() => {
-    manager = new EventStateManager();
+    manager = new EventStateManager({ batchBroadcasts: false });
   });
 
   describe('actor registration', () => {

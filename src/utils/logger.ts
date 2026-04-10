@@ -14,7 +14,7 @@ export interface LogBufferEntry {
 }
 
 /** Maximum number of log entries kept in the ring buffer */
-const LOG_BUFFER_MAX_SIZE = 5_000;
+const LOG_BUFFER_MAX_SIZE = 50_000;
 
 // Log level priority (lower = more verbose)
 const LOG_LEVEL_PRIORITY: Record<LogLevel, number> = {

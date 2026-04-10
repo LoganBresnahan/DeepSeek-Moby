@@ -85,7 +85,7 @@ describe('ShadowActor', () => {
   let actor: TestShadowActor;
 
   beforeEach(() => {
-    manager = new EventStateManager();
+    manager = new EventStateManager({ batchBroadcasts: false });
     element = document.createElement('div');
     element.id = 'test-shadow-actor';
     document.body.appendChild(element);

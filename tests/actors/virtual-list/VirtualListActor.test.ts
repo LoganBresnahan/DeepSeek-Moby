@@ -55,7 +55,7 @@ describe('VirtualListActor', () => {
   }
 
   beforeEach(() => {
-    manager = new EventStateManager();
+    manager = new EventStateManager({ batchBroadcasts: false });
 
     // Create scroll container with dimensions
     scrollContainer = document.createElement('div');

@@ -17,7 +17,7 @@ describe('ToolbarShadowActor', () => {
   let mockVscode: { postMessage: ReturnType<typeof vi.fn> };
 
   beforeEach(() => {
-    manager = new EventStateManager();
+    manager = new EventStateManager({ batchBroadcasts: false });
     element = document.createElement('div');
     element.id = 'toolbar-container';
     document.body.appendChild(element);

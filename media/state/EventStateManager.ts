@@ -44,9 +44,18 @@ export class EventStateManager {
   /** Optional tracer for unified observability */
   private tracer: WebviewTracer | null = null;
 
-  constructor() {
+  /** rAF batching: pending broadcasts accumulated between frames */
+  private _pendingBroadcasts: Array<{ source: string; changedKeys: string[]; chain: string[] }> = [];
+  private _rafScheduled = false;
+  /** Enable rAF batching (disabled in tests for synchronous behavior) */
+  private _batchBroadcasts = true;
+
+  constructor(options?: { batchBroadcasts?: boolean }) {
     this.logger = new EventStateLogger();
     this.logger.managerInit();
+    if (options?.batchBroadcasts === false) {
+      this._batchBroadcasts = false;
+    }
   }
 
   /**
@@ -307,7 +316,7 @@ export class EventStateManager {
       return;
     }
 
-    // Update global state
+    // Update global state immediately (reads always return current values)
     const changedKeys = this.updateGlobalState(state);
 
     if (changedKeys.length > 0) {
@@ -316,7 +325,22 @@ export class EventStateManager {
       // Trace publication
       this.tracer?.tracePublish(source, changedKeys, publicationChain.length);
 
-      this.broadcast(source, changedKeys, publicationChain);
+      if (this._batchBroadcasts) {
+        // Defer broadcast to next animation frame (batches multiple state changes into one cycle).
+        // This collapses N per-token broadcasts into 1 per-frame broadcast, reducing DOM updates
+        // and layout reflows from ~20,000 to ~60/second.
+        this._pendingBroadcasts.push({ source, changedKeys, chain: publicationChain });
+        if (!this._rafScheduled) {
+          this._rafScheduled = true;
+          requestAnimationFrame(() => {
+            this._rafScheduled = false;
+            this.flushPendingBroadcasts();
+          });
+        }
+      } else {
+        // Synchronous broadcast (tests)
+        this.broadcast(source, changedKeys, publicationChain);
+      }
     }
   }
 
@@ -353,6 +377,34 @@ export class EventStateManager {
       publicationChain: [],
       timestamp: Date.now()
     });
+  }
+
+  /**
+   * Flush all pending broadcasts in a single pass.
+   * Merges changed keys across multiple state changes so each subscriber
+   * is called at most once per frame with all their relevant key changes.
+   */
+  private flushPendingBroadcasts(): void {
+    const pending = this._pendingBroadcasts;
+    this._pendingBroadcasts = [];
+
+    if (pending.length === 0) return;
+
+    // Merge all changed keys, using the last source's chain for each key
+    const mergedKeys = new Set<string>();
+    let lastSource = pending[0].source;
+    let lastChain = pending[0].chain;
+
+    for (const entry of pending) {
+      for (const key of entry.changedKeys) {
+        mergedKeys.add(key);
+      }
+      lastSource = entry.source;
+      lastChain = entry.chain;
+    }
+
+    // Single broadcast with all merged keys
+    this.broadcast(lastSource, Array.from(mergedKeys), lastChain);
   }
 
   /**

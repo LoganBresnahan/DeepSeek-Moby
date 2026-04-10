@@ -16,7 +16,7 @@ describe('SessionActor', () => {
   beforeEach(() => {
     SessionActor.resetStylesInjected();
 
-    manager = new EventStateManager();
+    manager = new EventStateManager({ batchBroadcasts: false });
     element = document.createElement('div');
     element.id = 'session-root';
     document.body.appendChild(element);

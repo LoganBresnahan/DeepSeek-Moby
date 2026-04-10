@@ -22,7 +22,7 @@ export interface WebviewLogEntry {
 }
 
 /** Maximum buffer size */
-const MAX_BUFFER_SIZE = 5_000;
+const MAX_BUFFER_SIZE = 50_000;
 
 /** Sync interval in milliseconds */
 const SYNC_INTERVAL_MS = 5_000;

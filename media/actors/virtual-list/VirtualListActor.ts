@@ -1051,6 +1051,9 @@ export class VirtualListActor extends EventStateActor {
       'virtualList.visibleCount': this._boundActors.size,
       'virtualList.poolStats': this.getPoolStats()
     });
+
+    // Log pool stats after visibility changes
+    this.logPoolStats();
   }
 
   private bindActorToTurn(turn: TurnData): void {

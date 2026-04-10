@@ -13,7 +13,7 @@ describe('ScrollActor Snapshots', () => {
   let actor: ScrollActor;
 
   beforeEach(() => {
-    manager = new EventStateManager();
+    manager = new EventStateManager({ batchBroadcasts: false });
     element = document.createElement('div');
     element.id = 'scroll-container';
     element.style.height = '200px';
@@ -46,7 +46,7 @@ describe('ScrollActor State Snapshots', () => {
   let actor: ScrollActor;
 
   beforeEach(() => {
-    manager = new EventStateManager();
+    manager = new EventStateManager({ batchBroadcasts: false });
     element = document.createElement('div');
     element.id = 'scroll-container';
     element.style.height = '200px';

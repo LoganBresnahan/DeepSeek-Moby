@@ -30,7 +30,7 @@ describe('MessageTurnActor', () => {
   }
 
   beforeEach(() => {
-    manager = new EventStateManager();
+    manager = new EventStateManager({ batchBroadcasts: false });
     element = document.createElement('div');
     element.id = 'chat-turn';
     document.body.appendChild(element);

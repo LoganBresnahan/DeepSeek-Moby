@@ -135,7 +135,7 @@ describe('VirtualMessageGatewayActor', () => {
   let mockActors: VirtualActorRefs;
 
   beforeEach(() => {
-    manager = new EventStateManager();
+    manager = new EventStateManager({ batchBroadcasts: false });
     element = document.createElement('div');
     element.id = 'gateway-root';
     document.body.appendChild(element);

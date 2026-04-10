@@ -55,7 +55,7 @@ async function createTestSystem(): Promise<TestSystem> {
 
   const vscode = createMockVSCodeAPI();
   const elements = createTestDOM();
-  const manager = new EventStateManager();
+  const manager = new EventStateManager({ batchBroadcasts: false });
 
   const streaming = new StreamingActor(manager, elements.streamingRoot);
   const virtualList = new VirtualListActor(manager, elements.chatMessages, {

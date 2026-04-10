@@ -29,7 +29,7 @@ describe('FilesShadowActor', () => {
   let mockVSCode: ReturnType<typeof createMockVSCode>;
 
   beforeEach(() => {
-    manager = new EventStateManager();
+    manager = new EventStateManager({ batchBroadcasts: false });
     element = document.createElement('div');
     element.id = 'files-container';
     document.body.appendChild(element);

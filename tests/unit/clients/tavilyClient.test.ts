@@ -79,12 +79,23 @@ function createHttpError(status: number, message: string) {
 
 describe('TavilyClient', () => {
   let client: TavilyClient;
+  let savedTavilyKey: string | undefined;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // Clear env var so isConfigured() tests aren't affected by real config
+    savedTavilyKey = process.env.TAVILY_API_KEY;
+    delete process.env.TAVILY_API_KEY;
     mockSecrets.get.mockResolvedValue('tvly-test-key-123');
     mockConfigValues.set('tavilySearchDepth', 'basic');
     client = new TavilyClient(createContext());
+  });
+
+  afterEach(() => {
+    // Restore env var
+    if (savedTavilyKey !== undefined) {
+      process.env.TAVILY_API_KEY = savedTavilyKey;
+    }
   });
 
   // ── isConfigured ─────────────────────────────────────────────────

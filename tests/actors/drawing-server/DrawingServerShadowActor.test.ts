@@ -35,7 +35,7 @@ describe('DrawingServerShadowActor', () => {
   let mockVSCode: ReturnType<typeof createMockVSCode>;
 
   beforeEach(() => {
-    manager = new EventStateManager();
+    manager = new EventStateManager({ batchBroadcasts: false });
     element = document.createElement('div');
     element.id = 'drawing-server-container';
     document.body.appendChild(element);

@@ -14,7 +14,7 @@ describe('InspectorShadowActor Snapshots', () => {
   let actor: InspectorShadowActor;
 
   beforeEach(() => {
-    manager = new EventStateManager();
+    manager = new EventStateManager({ batchBroadcasts: false });
     hostElement = document.createElement('div');
     hostElement.id = 'inspector-host';
     document.body.appendChild(hostElement);

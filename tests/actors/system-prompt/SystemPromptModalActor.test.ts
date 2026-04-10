@@ -34,7 +34,7 @@ describe('SystemPromptModalActor', () => {
   let mockVSCode: ReturnType<typeof createMockVSCode>;
 
   beforeEach(() => {
-    manager = new EventStateManager();
+    manager = new EventStateManager({ batchBroadcasts: false });
     element = document.createElement('div');
     element.id = 'system-prompt-container';
     document.body.appendChild(element);

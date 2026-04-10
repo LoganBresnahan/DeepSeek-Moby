@@ -1667,8 +1667,26 @@ export class MessageTurnActor extends InterleavedShadowActor {
     // Replace from last to first to preserve string indices
     for (let bi = blocks.length - 1; bi >= 0; bi--) {
       const block = blocks[bi];
-      const language = block.language || 'text';
+      let language = block.language || 'text';
       const code = block.content;
+
+      // Infer language from # File: header when fence language is generic (bash, text, plaintext)
+      if (['bash', 'text', 'plaintext', 'sh'].includes(language.toLowerCase())) {
+        const fileMatch = code.match(/^#\s*File:\s*(\S+)/m);
+        if (fileMatch) {
+          const ext = fileMatch[1].split('.').pop()?.toLowerCase();
+          const extMap: Record<string, string> = {
+            ts: 'typescript', tsx: 'typescript', js: 'javascript', jsx: 'javascript',
+            json: 'json', md: 'markdown', py: 'python', rs: 'rust', go: 'go',
+            java: 'java', rb: 'ruby', css: 'css', html: 'html', yml: 'yaml', yaml: 'yaml',
+            sh: 'bash', xml: 'xml', sql: 'sql', c: 'c', cpp: 'cpp', cs: 'csharp',
+            swift: 'swift', kt: 'kotlin', php: 'php', r: 'r', toml: 'toml'
+          };
+          if (ext && extMap[ext]) {
+            language = extMap[ext];
+          }
+        }
+      }
       const highlightedCode = highlightCode(code.trimEnd(), language);
       const expandedClass = startExpanded ? ' expanded' : '';
 
@@ -1697,6 +1715,11 @@ export class MessageTurnActor extends InterleavedShadowActor {
     // Line breaks (collapse 3+ consecutive newlines to 2)
     result = result.replace(/\n{3,}/g, '\n\n');
     result = result.replace(/\n/g, '<br>');
+
+    // Remove <br> tags after code blocks (prevents extra whitespace between code and text)
+    result = result.replace(/<\/div>(<br>)+/g, '</div>');
+    // Remove trailing <br> tags
+    result = result.replace(/(<br>)+$/, '');
 
     return result;
   }

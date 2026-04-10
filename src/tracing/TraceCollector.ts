@@ -55,7 +55,7 @@ export class TraceCollector {
   private startWallClock: number;  // Wall-clock time at tracer start for importing webview events
 
   private config: TraceCollectorConfig = {
-    maxBufferSize: 10000,
+    maxBufferSize: 50_000,
     logToOutput: false,
     minLevel: 'info',
     enabled: true,

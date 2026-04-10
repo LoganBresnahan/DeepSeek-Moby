@@ -13,7 +13,7 @@ describe('ScrollActor', () => {
   let actor: ScrollActor;
 
   beforeEach(() => {
-    manager = new EventStateManager();
+    manager = new EventStateManager({ batchBroadcasts: false });
     element = document.createElement('div');
     element.id = 'scroll-container';
     document.body.appendChild(element);

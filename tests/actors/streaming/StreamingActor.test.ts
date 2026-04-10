@@ -17,7 +17,7 @@ describe('StreamingActor', () => {
     // Reset styles injection
     StreamingActor.resetStylesInjected();
 
-    manager = new EventStateManager();
+    manager = new EventStateManager({ batchBroadcasts: false });
     element = document.createElement('div');
     element.id = 'streaming-root';
     document.body.appendChild(element);

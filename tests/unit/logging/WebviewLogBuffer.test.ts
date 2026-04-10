@@ -30,8 +30,8 @@ describe('WebviewLogBuffer', () => {
     });
 
     it('evicts oldest entries when buffer is full', () => {
-      // Push more than MAX_BUFFER_SIZE (5000) entries
-      for (let i = 0; i < 5005; i++) {
+      // Push more than MAX_BUFFER_SIZE (50000) entries
+      for (let i = 0; i < 50005; i++) {
         buffer.push({
           timestamp: '2026-01-01T00:00:00.000Z',
           level: 'info',
@@ -40,11 +40,11 @@ describe('WebviewLogBuffer', () => {
         });
       }
 
-      expect(buffer.size).toBe(5000);
+      expect(buffer.size).toBe(50000);
       const entries = buffer.getAll();
       // First entry should be msg-5 (oldest 5 were evicted)
       expect(entries[0].message).toBe('msg-5');
-      expect(entries[entries.length - 1].message).toBe('msg-5004');
+      expect(entries[entries.length - 1].message).toBe('msg-50004');
     });
   });
 

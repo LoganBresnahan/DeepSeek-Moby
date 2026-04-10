@@ -188,6 +188,14 @@ export class ContentTransformBuffer {
     return this.buffer;
   }
 
+  /**
+   * Check if the buffer is holding back content (potential partial tag).
+   * Used by chatProvider to avoid flushing tokens while tags are being accumulated.
+   */
+  isHoldingBack(): boolean {
+    return this.buffer.length > this.lastEmittedPosition;
+  }
+
   private scheduleFlush(): void {
     if (this.debounceTimer) {
       this.debugLog(`scheduleFlush: resetting fallback timer (${this.debounceMs}ms)`);

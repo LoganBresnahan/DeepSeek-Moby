@@ -279,6 +279,12 @@ export class TurnEventLog {
    * all information needed by the projector to reconstruct the turn.
    */
   consolidateForSave(): TurnEvent[] {
+    // Sort events by timestamp before consolidation. During R1 streaming,
+    // events can arrive at the webview out of order (thinking-content after
+    // text-append due to message queue timing). Sorting ensures consolidation
+    // processes events in the correct semantic order.
+    const sorted = [...this._events].sort((a, b) => a.ts - b.ts);
+
     const result: TurnEvent[] = [];
     let textBuf = '';
     let textIter = -1;
@@ -312,7 +318,7 @@ export class TurnEventLog {
       }
     };
 
-    for (const event of this._events) {
+    for (const event of sorted) {
       switch (event.type) {
         case 'text-append':
           if (event.iteration !== textIter && textBuf) {

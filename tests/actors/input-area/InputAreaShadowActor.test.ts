@@ -18,7 +18,7 @@ describe('InputAreaShadowActor', () => {
   let mockVscode: { postMessage: ReturnType<typeof vi.fn> };
 
   beforeEach(() => {
-    manager = new EventStateManager();
+    manager = new EventStateManager({ batchBroadcasts: false });
     element = document.createElement('div');
     element.id = 'input-area-container';
     document.body.appendChild(element);
