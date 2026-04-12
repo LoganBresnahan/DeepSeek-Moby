@@ -47,7 +47,9 @@ const DEFAULT_COMMANDS: CommandItem[] = [
   { id: 'moby.exportLogs', name: 'Export Logs', description: 'Export all logs and traces', icon: '📝', section: 'Logs' },
   // Settings section
   { id: 'moby.editSystemPrompt', name: 'System Prompt', description: 'Edit system prompt', icon: '✏️', section: 'Settings' },
-  { id: 'moby.openCommandRules', name: 'System Rules', description: 'Manage command approval rules', icon: '🛡️', section: 'Settings' }
+  { id: 'moby.openCommandRules', name: 'System Rules', description: 'Manage command approval rules', icon: '🛡️', section: 'Settings' },
+  // Info section
+  { id: 'moby.showStats', name: 'Account Stats', description: 'DeepSeek & Tavily usage', icon: '📊', section: 'Info' }
 ];
 
 // ============================================
@@ -170,6 +172,14 @@ export class CommandsShadowActor extends PopupShadowActor {
       log.debug('routing to rules modal');
       this._vscode.postMessage({ type: 'getCommandRules' });
       this.manager.publishDirect('rules.modal.open', true, this.actorId);
+      return;
+    }
+
+    // Special handling for stats - fetch data and open modal
+    if (commandId === 'moby.showStats') {
+      log.debug('routing to stats modal');
+      this._vscode.postMessage({ type: 'getStats' });
+      this.manager.publishDirect('stats.modal.open', true, this.actorId);
       return;
     }
 

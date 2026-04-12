@@ -90,5 +90,8 @@ export type { PlanFile } from './plans/PlanPopupShadowActor';
 export { WebSearchPopupShadowActor } from './web-search/WebSearchPopupShadowActor';
 export type { WebSearchMode, WebSearchSettings as WebSearchPopupSettings } from './web-search/WebSearchPopupShadowActor';
 
+// Stats (modal for account usage stats)
+export { StatsModalActor } from './stats/StatsModalActor';
+
 // Inspector - Dev-only tool, not exported from production actors
 // Access via: import { InspectorShadowActor } from './dev/inspector'

@@ -806,8 +806,10 @@ export class MessageTurnActor extends InterleavedShadowActor {
       const cmd = segment.commands[i];
       if (cmd) {
         cmd.output = result.output;
-        cmd.success = result.success;
-        cmd.status = result.success ? 'done' : 'error';
+        // Detect timeout — command ran but was killed after timeout (not a real failure)
+        const isTimeout = !result.success && result.output.includes('timed out after');
+        cmd.success = result.success || isTimeout;
+        cmd.status = result.success ? 'done' : isTimeout ? 'done' : 'error';
       }
     });
 
@@ -823,7 +825,13 @@ export class MessageTurnActor extends InterleavedShadowActor {
    * Add a pending file.
    */
   addPendingFile(file: { filePath: string; diffId?: string; status?: PendingFileStatus; editMode?: EditMode }): string {
-    const fileName = file.filePath.split('/').pop() ?? file.filePath;
+    // Show workspace-relative path (e.g., "src/game.ts" not just "game.ts")
+    // For directories (no extension, no dots in last segment), append trailing slash
+    let fileName = file.filePath;
+    const lastSegment = fileName.split('/').pop() ?? '';
+    if (lastSegment && !lastSegment.includes('.')) {
+      fileName = fileName.endsWith('/') ? fileName : fileName + '/';
+    }
     const fileId = `pending-${Date.now()}-${this._pendingIteration}`;
 
     this._pendingIteration++;
@@ -1103,7 +1111,9 @@ export class MessageTurnActor extends InterleavedShadowActor {
       const statusIcon = this.getStatusIcon(cmd.status);
       let outputHtml = '';
       if (cmd.output) {
-        const outputClass = cmd.success ? 'success' : 'error';
+        // Detect timeout — command ran but was killed after timeout (not a real failure)
+        const isTimeout = !cmd.success && cmd.output.includes('timed out after');
+        const outputClass = cmd.success ? 'success' : isTimeout ? 'success' : 'error';
         outputHtml = `<div class="shell-output scrollable"><span class="${outputClass}">${this.escapeHtml(cmd.output)}</span></div>`;
       }
 
@@ -1700,7 +1710,22 @@ export class MessageTurnActor extends InterleavedShadowActor {
 
     // During streaming, hide incomplete code blocks and show animated placeholder
     if (this._isStreaming) {
-      result = result.replace(/```\w*(?:\n[\s\S]*)?$/, this._codeGeneratingHtml);
+      result = result.replace(/```\w*(?:\n[\s\S]*)?$/, (match) => {
+        // Try to extract filename from # File: header (SEARCH/REPLACE edits)
+        const fileMatch = match.match(/^```\w*\n#\s*File:\s*(\S+)/);
+        if (fileMatch) {
+          return this.buildCodeGeneratingHtml(`Writing ${fileMatch[1]}...`);
+        }
+        // Try to extract filename from heredoc pattern (cat > file << 'EOF')
+        const heredocMatch = match.match(/cat\s+>+\s+(\S+)\s+<</);
+        if (heredocMatch) {
+          // Extract just the filename from the full path
+          const fullPath = heredocMatch[1];
+          const fileName = fullPath.split('/').pop() || fullPath;
+          return this.buildCodeGeneratingHtml(`Creating ${fileName}...`);
+        }
+        return this._codeGeneratingHtml;
+      });
     }
 
     // Inline code
@@ -1799,11 +1824,20 @@ export class MessageTurnActor extends InterleavedShadowActor {
     }, 0);
   }
 
-  private readonly _codeGeneratingHtml = (() => {
+  /** Build the code-generating placeholder HTML, optionally with a specific filename */
+  private buildCodeGeneratingHtml(text?: string): string {
     const mobyIconUrl = document.body.dataset.mobyIcon || '';
     const mobyHtml = mobyIconUrl
       ? `<div class="code-gen-moby"><img src="${mobyIconUrl}" alt="Moby"><div class="code-gen-spurt">${'<span class="drop"></span>'.repeat(5)}</div></div>`
       : '';
+    if (text) {
+      // Single phrase with wave animation
+      const chars = text.split('').map((ch, ci) =>
+        `<span class="gc" style="--d:${ci}">${ch === ' ' ? '&nbsp;' : this.escapeHtml(ch)}</span>`
+      ).join('');
+      return `<div class="code-generating">${mobyHtml}<div class="code-gen-phrases"><span class="gen-phrase gp-1" style="opacity:1">${chars}</span></div></div>`;
+    }
+    // Default cycling phrases
     const phrases = ['Developing...', 'Diving...', 'Seeking...'];
     const phraseHtml = phrases.map((phrase, i) => {
       const chars = phrase.split('').map((ch, ci) =>
@@ -1812,7 +1846,10 @@ export class MessageTurnActor extends InterleavedShadowActor {
       return `<span class="gen-phrase gp-${i + 1}">${chars}</span>`;
     }).join('');
     return `<div class="code-generating">${mobyHtml}<div class="code-gen-phrases">${phraseHtml}</div></div>`;
-  })();
+  }
+
+  /** Pre-built default placeholder (cached for performance) */
+  private readonly _codeGeneratingHtml = this.buildCodeGeneratingHtml();
 
   private escapeHtml(text: string): string {
     const div = document.createElement('div');

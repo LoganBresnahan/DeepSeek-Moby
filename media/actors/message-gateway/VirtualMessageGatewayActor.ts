@@ -776,7 +776,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         break;
 
       case 'generationStopped':
-        this.handleGenerationStopped();
+        this.handleGenerationStopped(msg.userStopped === true);
         break;
 
       // ---- History Modal Messages ----
@@ -806,6 +806,16 @@ export class VirtualMessageGatewayActor extends EventStateActor {
 
       case 'openRulesModal':
         this._manager.publishDirect('rules.modal.open', true);
+        break;
+
+      // ---- Stats Modal Messages ----
+      case 'statsLoaded':
+        this._manager.publishDirect('stats.data', {
+          stats: msg.stats,
+          balance: msg.balance,
+          tavilyStats: msg.tavilyStats,
+          tavilyApiUsage: msg.tavilyApiUsage
+        });
         break;
 
       case 'codeApplied':
@@ -1530,8 +1540,21 @@ export class VirtualMessageGatewayActor extends EventStateActor {
     });
   }
 
-  private handleGenerationStopped(): void {
+  private handleGenerationStopped(userStopped: boolean): void {
     const { streaming, virtualList } = this._actors;
+
+    // Only show "User interrupted" when the user actually clicked the stop button
+    if (userStopped && this._currentTurnId) {
+      this.emitTurnEvent(this._currentTurnId, {
+        type: 'text-append', content: '\n\n*[User interrupted]*', iteration: this._currentIteration, ts: Date.now()
+      });
+      this.emitTurnEvent(this._currentTurnId, {
+        type: 'text-finalize', iteration: this._currentIteration, ts: Date.now()
+      });
+
+      // Render the interrupted message as a new text segment
+      virtualList.addTextSegment(this._currentTurnId, '*[User interrupted]*');
+    }
 
     streaming.endStream();
 

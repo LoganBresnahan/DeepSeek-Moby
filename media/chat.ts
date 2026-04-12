@@ -29,7 +29,8 @@ import {
   SettingsShadowActor,
   DrawingServerShadowActor,
   PlanPopupShadowActor,
-  WebSearchPopupShadowActor
+  WebSearchPopupShadowActor,
+  StatsModalActor
 } from './actors';
 import { AnimationHelper } from './utils';
 import { webviewTracer } from './tracing';
@@ -233,6 +234,13 @@ function initializeActorSystem(): void {
   rulesHost.style.cssText = 'position: fixed; top: 0; left: 0; width: 0; height: 0;';
   document.body.appendChild(rulesHost);
   const commandRules = new CommandRulesModalActor(manager, rulesHost, vscode);
+
+  // StatsModalActor - Account usage stats modal
+  const statsHost = document.createElement('div');
+  statsHost.id = 'statsHost';
+  statsHost.style.cssText = 'position: fixed; top: 0; left: 0; width: 0; height: 0;';
+  document.body.appendChild(statsHost);
+  const statsModal = new StatsModalActor(manager, statsHost, vscode);
 
   // SystemPromptModalActor - System prompt editor modal
   const systemPromptHost = document.createElement('div');

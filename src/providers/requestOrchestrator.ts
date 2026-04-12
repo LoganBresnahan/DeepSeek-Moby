@@ -20,6 +20,7 @@ import {
   getReasonerShellPrompt,
   stripShellTags,
   parseWebSearchCommands,
+  isLongRunningCommand,
   containsWebSearchCommands,
   stripWebSearchTags,
   ShellResult
@@ -602,11 +603,17 @@ export class RequestOrchestrator {
 
       this._onError.fire({ error: errorMessage });
     } finally {
+      const wasAborted = this.abortController === null || signal.aborted;
       this.abortController = null;
-      // Clean up content buffer
+      // Clean up content buffer — only flush if NOT aborted (user stop or shell interrupt).
+      // Flushing during abort would dump partial tags/content into the UI.
       if (this.contentBuffer) {
-        logger.info(`[Buffer] FLUSH in finally block (cleanup)`);
-        this.contentBuffer.flush();
+        if (!wasAborted) {
+          logger.info(`[Buffer] FLUSH in finally block (cleanup)`);
+          this.contentBuffer.flush();
+        } else {
+          logger.info(`[Buffer] SKIP flush in finally block (aborted)`);
+        }
         logger.info(`[Buffer] RESET in finally block (cleanup)`);
         this.contentBuffer.reset();
       }
@@ -1083,6 +1090,43 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
           const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
           if (commands.length > 0 && workspacePath) {
+            // Check for long-running commands (servers, watch modes, etc.)
+            // These are never executed — they would spawn processes that never exit.
+            if (isLongRunningCommand(commands[0].command)) {
+              logger.info(`[R1-Shell] Skipping long-running command: "${commands[0].command.substring(0, 60)}..."`);
+
+              // Notify frontend with a "skipped" shell segment
+              const shellPayload = commands.map(c => ({
+                command: c.command,
+                description: c.command.length > 50 ? c.command.substring(0, 50) + '...' : c.command
+              }));
+              this._onShellExecuting.fire({ commands: shellPayload });
+
+              const skipMessage = `Skipped: "${commands[0].command}" is a long-running server/watch command that would run indefinitely. The user can start it manually in their terminal.`;
+
+              // Send result to frontend
+              this._onShellResults.fire({
+                results: [{ command: commands[0].command, output: skipMessage, success: true }]
+              });
+
+              // Inject into context so R1 knows it was skipped
+              const partialResponse = stripShellTags(state.currentIterationContent || '');
+              if (partialResponse.trim()) {
+                currentHistoryMessages.push({ role: 'assistant', content: partialResponse.trim() });
+              }
+              currentHistoryMessages.push({ role: 'user', content: skipMessage });
+
+              state.currentIterationContent = '';
+              state.currentIterationReasoning = '';
+              iterationResponse = '';
+              firstContentTokenTime = null;
+              firstReasoningTokenTime = null;
+
+              shellIteration++;
+              lastIterationHadShellCommands = true;
+              continue;
+            }
+
             // Notify frontend
             const shellPayload = commands.map(c => ({
               command: c.command,
@@ -1239,7 +1283,9 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
       // Reasoning content is excluded — R1's thinking often contains <shell> tags as part of
       // planning ("Let me check... <shell>pwd</shell>") which are NOT commands to execute.
       const combinedForShellCheck = iterationResponse;
-      const hasShell = isReasonerModel && containsShellCommands(combinedForShellCheck);
+      // Shell commands are handled by interrupt-and-resume (onShellDetected) during streaming.
+      // The batch path is only needed for non-reasoner models (which don't use interrupt-and-resume).
+      const hasShell = false; // Disabled: interrupt-and-resume catches shell tags during streaming
       const hasWebSearch = isReasonerModel && this.webSearchManager.getMode() === 'auto' && containsWebSearchCommands(combinedForShellCheck);
 
       // Zero-content recovery: R1 sometimes reasons about shell commands but produces

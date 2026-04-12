@@ -139,8 +139,12 @@ export class TavilyClient {
 
     try {
       const response = await this.httpClient.get<{
-        key?: { limit?: number; usage?: number };
-        account?: { current_plan?: string };
+        key?: { limit?: number | null; usage?: number };
+        account?: {
+          current_plan?: string;
+          plan_usage?: number;
+          plan_limit?: number;
+        };
       }>('/usage', {
         headers: {
           Authorization: `Bearer ${apiKey}`
@@ -150,11 +154,15 @@ export class TavilyClient {
       const keyData = response.data.key || {};
       const accountData = response.data.account || {};
 
+      // Prefer account-level plan data (always has limit), fall back to key-level
+      const used = accountData.plan_usage ?? keyData.usage ?? 0;
+      const limit = accountData.plan_limit ?? keyData.limit ?? null;
+
       return {
-        remaining: keyData.limit ? keyData.limit - keyData.usage! : null,
-        limit: keyData.limit || null,
+        remaining: limit != null ? limit - used : null,
+        limit,
         plan: accountData.current_plan || 'Unknown',
-        used: keyData.usage || 0
+        used
       };
     } catch (error: unknown) {
       const httpError = error as HttpError;

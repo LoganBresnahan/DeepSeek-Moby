@@ -116,6 +116,88 @@ const BLOCKED_PATTERNS: RegExp[] = [
 ];
 
 /**
+ * Long-running command patterns — commands that start servers, watch modes,
+ * REPLs, or other processes that never exit on their own.
+ *
+ * These are NOT executed. Instead, a descriptive result is returned
+ * telling the LLM the command was skipped and the user can run it manually.
+ *
+ * Users can also block commands via the Command Rules system for custom patterns.
+ */
+const LONG_RUNNING_PATTERNS: RegExp[] = [
+  // ── JavaScript/TypeScript ──
+  /\bnpm\s+run\s+(dev|start|serve|watch)\b/i,
+  /\bnpm\s+start\b/i,
+  /\bnpx\s+(vite|next|nuxt|live-server|serve|http-server|ts-node-dev|nodemon)\b/i,
+  /\byarn\s+(dev|start|serve)\b/i,
+  /\bpnpm\s+(dev|start|serve)\b/i,
+  /\bbun\s+run\s+(dev|start|serve)\b/i,
+  /\bnext\s+dev\b/i,
+  /\bnodemon\b/i,
+  /\blive-server\b/i,
+
+  // ── Python ──
+  /\bpython3?\s+-m\s+http\.server\b/i,
+  /\bpython3?\s+manage\.py\s+runserver\b/i,
+  /\bflask\s+run\b/i,
+  /\buvicorn\b/i,
+  /\bgunicorn\b/i,
+  /\bfastapi\s+run\b/i,
+  /\bjupyter\s+(lab|notebook)\b/i,
+  /\bstreamlit\s+run\b/i,
+
+  // ── Ruby ──
+  /\brails\s+server\b/i,
+  /\brails\s+s\b/i,
+  /\bbundle\s+exec\s+(puma|unicorn|thin)\b/i,
+  /\brackup\b/i,
+  /\bguard\b/i,
+
+  // ── Go ──
+  /\bair\b/i,  // Go hot reload
+
+  // ── Rust ──
+  /\bcargo\s+watch\b/i,
+
+  // ── Java ──
+  /\bmvn\s+spring-boot:run\b/i,
+  /\bgradlew?\s+bootRun\b/i,
+  /\bmvn\s+jetty:run\b/i,
+
+  // ── PHP ──
+  /\bphp\s+-S\b/i,  // PHP built-in server
+  /\bphp\s+artisan\s+serve\b/i,
+  /\bphp\s+bin\/console\s+server:(start|run)\b/i,
+
+  // ── C#/.NET ──
+  /\bdotnet\s+watch\b/i,
+  /\bdotnet\s+run\b/i,
+
+  // ── Elixir ──
+  /\bmix\s+phx\.server\b/i,
+  /\biex\s+-S\s+mix\b/i,
+
+  // ── Dart/Flutter ──
+  /\bflutter\s+run\b/i,
+  /\bdart_frog\s+dev\b/i,
+
+  // ── General ──
+  /\bredis-server\b/i,
+  /\bmongod\b/i,
+  /\bpostgres\b/i,
+  /\bnginx\b/i,
+];
+
+/**
+ * Check if a command is a known long-running process (server, watch mode, etc.)
+ * that should not be executed because it would never exit.
+ */
+export function isLongRunningCommand(command: string): boolean {
+  const trimmed = command.trim();
+  return LONG_RUNNING_PATTERNS.some(pattern => pattern.test(trimmed));
+}
+
+/**
  * Parse <shell> tags from R1's response content
  */
 export function parseShellCommands(content: string): ShellCommand[] {

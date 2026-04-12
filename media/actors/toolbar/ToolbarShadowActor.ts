@@ -257,6 +257,11 @@ export class ToolbarShadowActor extends ShadowActor {
   }
 
   private handleStopClick(): void {
+    // Add visual feedback — pulse animation while abort processes
+    const stopBtn = this.query<HTMLButtonElement>('.stop-btn');
+    if (stopBtn) {
+      stopBtn.classList.add('stopping');
+    }
     this._onStop?.();
     this._vscode?.postMessage({ type: 'stopGeneration' });
   }
@@ -273,12 +278,22 @@ export class ToolbarShadowActor extends ShadowActor {
     const stopBtn = this.query<HTMLButtonElement>('.stop-btn');
 
     if (sendBtn && stopBtn) {
-      sendBtn.style.display = streaming ? 'none' : 'flex';
-      stopBtn.style.display = streaming ? 'flex' : 'none';
+      if (streaming) {
+        sendBtn.style.display = 'none';
+        stopBtn.style.display = 'flex';
+        stopBtn.classList.remove('stopping');
+      } else {
+        // If the stop button has the stopping animation, delay the switch
+        // so the user sees visual feedback before the button changes
+        const wasStopping = stopBtn.classList.contains('stopping');
+        const switchDelay = wasStopping ? 400 : 0;
 
-      // Re-apply API key disabled state when send button becomes visible again
-      if (!streaming) {
-        this.updateSendButtonDisplay();
+        setTimeout(() => {
+          stopBtn.classList.remove('stopping');
+          stopBtn.style.display = 'none';
+          sendBtn.style.display = 'flex';
+          this.updateSendButtonDisplay();
+        }, switchDelay);
       }
     }
 

@@ -299,9 +299,19 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       this._view?.webview.postMessage({ type: 'endResponse', message: d });
     });
     this.requestOrchestrator.onGenerationStopped(() => {
-      flushContentTokens();
-      flushReasoningTokens();
-      this._view?.webview.postMessage({ type: 'generationStopped' });
+      // Discard any pending tokens — don't flush partial content when user stops.
+      // This prevents raw text/tags from dumping into the UI on abort.
+      pendingContentTokens = '';
+      pendingReasoningTokens = '';
+      if (contentFlushTimer) {
+        clearTimeout(contentFlushTimer);
+        contentFlushTimer = null;
+      }
+      if (reasoningFlushTimer) {
+        clearTimeout(reasoningFlushTimer);
+        reasoningFlushTimer = null;
+      }
+      this._view?.webview.postMessage({ type: 'generationStopped', userStopped: true });
     });
     this.requestOrchestrator.onIterationStart(d => {
       // Flush tokens before iteration boundary (ensures text renders before shell/tool segments)
@@ -763,6 +773,10 @@ export class ChatProvider implements vscode.WebviewViewProvider {
           });
           break;
         }
+        // Stats modal
+        case 'getStats':
+          await this.sendStats();
+          break;
         // Command rules management (rules modal)
         case 'getCommandRules':
           this.sendCommandRules();
@@ -900,6 +914,37 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     const rules = this.commandApprovalManager.getAllRules();
     const allowAll = vscode.workspace.getConfiguration('moby').get<boolean>('allowAllShellCommands') ?? false;
     this._view?.webview.postMessage({ type: 'commandRulesList', rules, allowAll });
+  }
+
+  /**
+   * Send stats data to the webview (called from getStats message handler).
+   */
+  private async sendStats(): Promise<void> {
+    if (!this._view) return;
+
+    const stats = await this.conversationManager.getSessionStats();
+
+    let balance = null;
+    try {
+      balance = await this.deepSeekClient.getBalance();
+    } catch (e) { /* silent */ }
+
+    const tavilyStats = this.tavilyClient.getUsageStats();
+
+    let tavilyApiUsage = null;
+    if (await this.tavilyClient.isConfigured()) {
+      try {
+        tavilyApiUsage = await this.tavilyClient.getApiUsage();
+      } catch (e) { /* silent */ }
+    }
+
+    this._view.webview.postMessage({
+      type: 'statsLoaded',
+      stats,
+      balance,
+      tavilyStats,
+      tavilyApiUsage
+    });
   }
 
   /**

@@ -163,9 +163,25 @@ export const toolbarShadowStyles = `
   color: var(--vscode-editor-background);
   border: none;
   opacity: 1;
+  transition: transform 0.1s ease;
 }
 
 .btn.stop-btn:hover {
   filter: brightness(1.1);
+}
+
+.btn.stop-btn:active {
+  transform: scale(0.9);
+}
+
+/* Pulse animation when stop is clicked — visual feedback that abort is processing */
+.btn.stop-btn.stopping {
+  animation: stopPulse 0.6s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes stopPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.95); }
 }
 `;
