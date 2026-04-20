@@ -64,8 +64,20 @@ export interface AssistantMessageEvent extends BaseEvent {
   };
   contentIterations?: string[];
   /** CQRS turn events — full ordered event log for this turn's content.
-   *  When present, history restore uses these instead of reconstructing from fragments. */
+   *  When present, history restore uses these instead of reconstructing from fragments.
+   *  ADR 0003 Phase 3 retires this field in favor of structural_turn_event rows. */
   turnEvents?: Array<Record<string, unknown>>;
+  /** ADR 0003 Phase 2: lifecycle status. Absence is treated as 'complete' for
+   *  events written before this field existed. An 'in_progress' row is a
+   *  placeholder written at turn start; on clean completion a new row with
+   *  status='complete' supersedes it. 'interrupted' marks a turn whose process
+   *  died between placeholder and completion. */
+  status?: 'in_progress' | 'complete' | 'interrupted';
+  /** ADR 0003 Phase 2: correlation id shared by all events belonging to the
+   *  same turn (placeholder, structural_turn_event rows, final complete row).
+   *  Hydration groups rows by this id to resolve which assistant_message is
+   *  authoritative for a given turn. */
+  turnId?: string;
 }
 
 /**
@@ -245,6 +257,28 @@ export interface ForkCreatedEvent extends BaseEvent {
 }
 
 // ============================================================================
+// Structural Turn Event (ADR 0003 Phase 2)
+// ============================================================================
+
+/**
+ * A single structural event within an assistant turn (text-append, shell-start,
+ * iteration-end, etc.). Written incrementally during streaming so a crash mid-
+ * turn still leaves the completed portion on disk. Correlated to the turn via
+ * `turnId`. The event payload is the TurnEvent union from
+ * shared/events/TurnEvent.ts.
+ */
+export interface StructuralTurnEvent extends BaseEvent {
+  type: 'structural_turn_event';
+  turnId: string;
+  /** Monotonic index within the turn (0-based) for stable ordering during
+   *  hydration. Protects against timestamp ties when events fire in the same ms. */
+  indexInTurn: number;
+  /** The TurnEvent payload. Kept as an opaque record here to avoid coupling
+   *  events table schemas to the shared/events/TurnEvent union shape. */
+  payload: Record<string, unknown>;
+}
+
+// ============================================================================
 // Union Type
 // ============================================================================
 
@@ -267,7 +301,8 @@ export type ConversationEvent =
   | SessionRenamedEvent
   | ContextImportedEvent
   | ErrorEvent
-  | ForkCreatedEvent;
+  | ForkCreatedEvent
+  | StructuralTurnEvent;
 
 /**
  * All possible event type strings.

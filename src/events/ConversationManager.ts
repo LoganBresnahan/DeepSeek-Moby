@@ -24,12 +24,7 @@ import {
   ConversationEvent,
   Attachment,
   UserMessageEvent,
-  AssistantMessageEvent,
-  AssistantReasoningEvent,
-  ToolCallEvent,
-  ToolResultEvent,
-  isUserMessageEvent,
-  isAssistantMessageEvent
+  AssistantMessageEvent
 } from './EventTypes';
 
 /**
@@ -502,7 +497,11 @@ export class ConversationManager {
     finishReason: 'stop' | 'tool_calls' | 'length' | 'error',
     usage?: { promptTokens: number; completionTokens: number },
     contentIterations?: string[],
-    turnEvents?: Array<Record<string, unknown>>
+    // ADR 0003 Phase 3: the turnEvents blob is retired. Positional slot kept
+    // as `undefined` so existing callers don't need reshaping in one PR.
+    // TODO follow-up: delete this parameter slot entirely.
+    _unused?: undefined,
+    extras?: { status?: 'in_progress' | 'complete' | 'interrupted'; turnId?: string }
   ): Promise<ConversationEvent> {
     const event = this.eventStore.append({
       sessionId,
@@ -513,14 +512,56 @@ export class ConversationManager {
       finishReason,
       usage,
       contentIterations: contentIterations && contentIterations.length > 0 ? contentIterations : undefined,
-      turnEvents: turnEvents && turnEvents.length > 0 ? turnEvents : undefined
+      status: extras?.status,
+      turnId: extras?.turnId
     });
 
-    // Update session metadata
-    this.updateSessionMetadata(sessionId, event);
-
-    this.onSessionsChanged.fire();
+    // ADR 0003 Phase 2: the in_progress placeholder is an internal crash anchor,
+    // not a user-visible session update. Skip metadata updates and the sidebar
+    // refresh so history doesn't flicker at turn start with empty preview text.
+    if (extras?.status !== 'in_progress') {
+      this.updateSessionMetadata(sessionId, event);
+      this.onSessionsChanged.fire();
+    }
     return event;
+  }
+
+  /**
+   * ADR 0003 Phase 3: fetch all structural_turn_event rows for a turn, ordered
+   * by indexInTurn. Used by Phase 3 hydration.
+   */
+  getStructuralEventsForTurn(sessionId: string, turnId: string): ConversationEvent[] {
+    return this.eventStore.getStructuralEventsForTurn(sessionId, turnId);
+  }
+
+  /**
+   * ADR 0003 Phase 3: fetch all assistant_message rows sharing a turnId.
+   * Phase 3 hydration picks the authoritative row (complete > interrupted >
+   * in_progress).
+   */
+  getAssistantMessagesForTurn(sessionId: string, turnId: string): ConversationEvent[] {
+    return this.eventStore.getAssistantMessagesForTurn(sessionId, turnId);
+  }
+
+  /**
+   * ADR 0003 Phase 2: write a single structural turn event to the events table.
+   * Called as events fire during streaming so a crash mid-turn still leaves the
+   * completed portion on disk. Grouped by `turnId` for hydration.
+   */
+  recordStructuralEvent(
+    sessionId: string,
+    turnId: string,
+    indexInTurn: number,
+    payload: Record<string, unknown>
+  ): ConversationEvent {
+    return this.eventStore.append({
+      sessionId,
+      timestamp: Date.now(),
+      type: 'structural_turn_event',
+      turnId,
+      indexInTurn,
+      payload
+    });
   }
 
   /**
@@ -663,12 +704,18 @@ export class ConversationManager {
       ['user_message', 'assistant_message']
     );
 
-    return events.map(e => ({
-      role: e.type === 'user_message' ? 'user' as const : 'assistant' as const,
-      content: (e as any).content,
-      timestamp: new Date(e.timestamp),
-      eventId: e.id
-    }));
+    // ADR 0003 Phase 2: filter out in_progress placeholder rows. They're
+    // written at turn start to anchor structural events for crash recovery,
+    // but they carry empty content and must never leak into API context —
+    // DeepSeek rejects consecutive assistant messages and empty assistant turns.
+    return events
+      .filter(e => e.type !== 'assistant_message' || (e as any).status !== 'in_progress')
+      .map(e => ({
+        role: e.type === 'user_message' ? 'user' as const : 'assistant' as const,
+        content: (e as any).content,
+        timestamp: new Date(e.timestamp),
+        eventId: e.id
+      }));
   }
 
   /**
@@ -698,181 +745,115 @@ export class ConversationManager {
    * field if there were none) to keep the payload lean.
    */
   async getSessionRichHistory(sessionId: string): Promise<RichHistoryTurn[]> {
+    // ADR 0003 Phase 3: hydration reads turn boundaries from user_message +
+    // assistant_message rows, and loads per-turn structural events from the
+    // structural_turn_event rows (keyed by turnId). The webview consumes the
+    // ordered TurnEvent[] directly — no fragment reconstruction needed.
+    //
+    // Invariants for assistant turns written in Phase 2+:
+    //   - A turn writes one placeholder assistant_message (status='in_progress')
+    //     followed by N structural_turn_event rows, then one final
+    //     assistant_message (status='complete' | 'interrupted') with the same turnId.
+    //   - A crashed turn leaves only the placeholder + partial structural rows;
+    //     we synthesize a shutdown-interrupted TurnEvent at hydration time so
+    //     the renderer can show a distinct marker.
     const events = this.eventStore.getEventsByType(
       sessionId,
-      ['user_message', 'assistant_message', 'assistant_reasoning', 'tool_call', 'tool_result']
+      ['user_message', 'assistant_message']
     );
 
-    // Diagnostic logging for history restore debugging
-    const typeCounts: Record<string, number> = {};
-    for (const e of events) {
-      typeCounts[e.type] = (typeCounts[e.type] || 0) + 1;
+    // Group assistant_message rows by turnId so we can resolve the authoritative
+    // row per turn. Rows without turnId (shouldn't exist post-wipe, but defensive)
+    // are keyed by their own event id so they form singleton groups.
+    const groupsByTurn = new Map<string, AssistantMessageEvent[]>();
+    for (const event of events) {
+      if (event.type !== 'assistant_message') continue;
+      const msg = event as AssistantMessageEvent;
+      const key = msg.turnId ?? msg.id;
+      const bucket = groupsByTurn.get(key) ?? [];
+      bucket.push(msg);
+      groupsByTurn.set(key, bucket);
     }
-    logger.debug(`[RichHistory] Session ${sessionId}: ${events.length} events ${JSON.stringify(typeCounts)}`);
+
+    const pickAuthoritative = (group: AssistantMessageEvent[]): AssistantMessageEvent => {
+      // Prefer 'complete' (shipping the real content), fall back to 'interrupted'
+      // (ADR 0001 abort markers), then 'in_progress' (crash recovery — only the
+      // placeholder exists). If the group has none of those (legacy rows), take
+      // the last by sequence as a best-effort default.
+      const byStatus = (s?: string) => [...group].reverse().find(m => m.status === s);
+      return (
+        byStatus('complete') ||
+        byStatus('interrupted') ||
+        byStatus('in_progress') ||
+        group[group.length - 1]
+      );
+    };
 
     const turns: RichHistoryTurn[] = [];
-    let currentAssistantTurn: RichHistoryTurn | null = null;
-    // Map toolCallId → index in current turn's toolCalls/shellResults for pairing with results
-    let toolCallMap = new Map<string, { name: string; index: number }>();
+    const emittedTurnIds = new Set<string>();
 
     for (const event of events) {
-      switch (event.type) {
-        case 'user_message': {
-          // Finalize any pending assistant turn
-          if (currentAssistantTurn) {
-            turns.push(currentAssistantTurn);
-            currentAssistantTurn = null;
-            toolCallMap = new Map();
-          }
-          const userEvent = event as UserMessageEvent;
-          turns.push({
-            role: 'user',
-            content: userEvent.content,
-            files: userEvent.attachments?.map(a => a.name),
-            timestamp: userEvent.timestamp,
-            sequence: event.sequence
+      if (event.type === 'user_message') {
+        const userEvent = event as UserMessageEvent;
+        turns.push({
+          role: 'user',
+          content: userEvent.content,
+          files: userEvent.attachments?.map(a => a.name),
+          timestamp: userEvent.timestamp,
+          sequence: event.sequence
+        });
+        continue;
+      }
+
+      if (event.type !== 'assistant_message') continue;
+      const msg = event as AssistantMessageEvent;
+      const key = msg.turnId ?? msg.id;
+      // Emit each turn exactly once, at the position of its first row so
+      // sequence ordering against user_messages is preserved.
+      if (emittedTurnIds.has(key)) continue;
+      emittedTurnIds.add(key);
+
+      const group = groupsByTurn.get(key) ?? [msg];
+      const authoritative = pickAuthoritative(group);
+
+      let turnEvents: Array<Record<string, unknown>> = [];
+      if (msg.turnId) {
+        const structural = this.eventStore.getStructuralEventsForTurn(sessionId, msg.turnId);
+        turnEvents = structural.map(r => (r as any).payload as Record<string, unknown>);
+
+        // If the turn never finalized (crash recovery: only in_progress rows),
+        // synthesize a shutdown-interrupted TurnEvent so the renderer can show
+        // a distinct marker. Idempotent — not persisted, always derived from state.
+        const onlyInProgress = group.every(m => m.status === 'in_progress');
+        if (onlyInProgress && turnEvents.length > 0) {
+          const last = turnEvents[turnEvents.length - 1] as any;
+          turnEvents.push({
+            type: 'shutdown-interrupted',
+            iteration: typeof last.iteration === 'number' ? last.iteration : 0,
+            ts: Date.now(),
           });
-          break;
-        }
-
-        case 'assistant_reasoning': {
-          // Start assistant turn if not already started
-          if (!currentAssistantTurn) {
-            currentAssistantTurn = {
-              role: 'assistant',
-              content: '',
-              reasoning_iterations: [],
-              toolCalls: [],
-              shellResults: [],
-              timestamp: event.timestamp
-            };
-          }
-          const reasoningEvent = event as AssistantReasoningEvent;
-          currentAssistantTurn.reasoning_iterations!.push(reasoningEvent.content);
-          break;
-        }
-
-        case 'tool_call': {
-          // Start assistant turn if not already started
-          if (!currentAssistantTurn) {
-            currentAssistantTurn = {
-              role: 'assistant',
-              content: '',
-              reasoning_iterations: [],
-              toolCalls: [],
-              shellResults: [],
-              timestamp: event.timestamp
-            };
-          }
-          const toolEvent = event as ToolCallEvent;
-          if (toolEvent.toolName === 'shell') {
-            const command = (toolEvent.arguments as any)?.command || '';
-            const idx = currentAssistantTurn.shellResults!.length;
-            currentAssistantTurn.shellResults!.push({
-              command,
-              output: '',
-              success: true
-            });
-            toolCallMap.set(toolEvent.toolCallId, { name: 'shell', index: idx });
-          } else if (toolEvent.toolName === '_file_modified') {
-            // File modification marker — extract file path and editMode
-            const args = toolEvent.arguments as any;
-            const filePath = args?.filePath || '';
-            if (filePath) {
-              if (!currentAssistantTurn.filesModified) {
-                currentAssistantTurn.filesModified = [];
-              }
-              currentAssistantTurn.filesModified.push(filePath);
-              // Capture editMode from the first file modification event
-              if (!currentAssistantTurn.editMode && args?.editMode) {
-                currentAssistantTurn.editMode = args.editMode;
-              }
-            }
-            toolCallMap.set(toolEvent.toolCallId, { name: '_file_modified', index: -1 });
-          } else {
-            const detail = (toolEvent.arguments as any)?.detail || toolEvent.toolName;
-            const idx = currentAssistantTurn.toolCalls!.length;
-            currentAssistantTurn.toolCalls!.push({
-              name: toolEvent.toolName,
-              detail,
-              status: 'done'
-            });
-            toolCallMap.set(toolEvent.toolCallId, { name: toolEvent.toolName, index: idx });
-          }
-          break;
-        }
-
-        case 'tool_result': {
-          const resultEvent = event as ToolResultEvent;
-          const mapping = toolCallMap.get(resultEvent.toolCallId);
-          if (mapping && currentAssistantTurn) {
-            if (mapping.name === 'shell') {
-              const shell = currentAssistantTurn.shellResults![mapping.index];
-              shell.output = resultEvent.result;
-              shell.success = resultEvent.success;
-            } else if (mapping.name !== '_file_modified') {
-              const tool = currentAssistantTurn.toolCalls![mapping.index];
-              tool.status = resultEvent.success ? 'done' : 'error';
-            }
-          }
-          break;
-        }
-
-        case 'assistant_message': {
-          // Start assistant turn if not already started
-          if (!currentAssistantTurn) {
-            currentAssistantTurn = {
-              role: 'assistant',
-              content: '',
-              reasoning_iterations: [],
-              toolCalls: [],
-              shellResults: [],
-              timestamp: event.timestamp
-            };
-          }
-          const assistantEvent = event as AssistantMessageEvent;
-          currentAssistantTurn.content = assistantEvent.content;
-          currentAssistantTurn.model = assistantEvent.model;
-          currentAssistantTurn.sequence = event.sequence;
-          // Extract per-iteration content text (for correct interleaving during restore)
-          if (assistantEvent.contentIterations && assistantEvent.contentIterations.length > 0) {
-            currentAssistantTurn.contentIterations = assistantEvent.contentIterations;
-          }
-          // Extract CQRS turn events (when present, takes priority over fragment-based restore)
-          if (assistantEvent.turnEvents && assistantEvent.turnEvents.length > 0) {
-            currentAssistantTurn.turnEvents = assistantEvent.turnEvents;
-          }
-          // Finalize this assistant turn
-          turns.push(currentAssistantTurn);
-          currentAssistantTurn = null;
-          toolCallMap = new Map();
-          break;
         }
       }
+
+      const turn: RichHistoryTurn = {
+        role: 'assistant',
+        content: authoritative.content,
+        model: authoritative.model,
+        timestamp: event.timestamp,
+        sequence: event.sequence,
+      };
+      if (authoritative.contentIterations && authoritative.contentIterations.length > 0) {
+        turn.contentIterations = authoritative.contentIterations;
+      }
+      if (turnEvents.length > 0) {
+        turn.turnEvents = turnEvents;
+      }
+      turns.push(turn);
     }
 
-    // Finalize any trailing assistant turn (e.g., partial/interrupted)
-    if (currentAssistantTurn) {
-      turns.push(currentAssistantTurn);
-    }
-
-    // Clean up empty arrays for cleaner output
-    for (const turn of turns) {
-      if (turn.reasoning_iterations?.length === 0) delete turn.reasoning_iterations;
-      if (turn.contentIterations?.length === 0) delete turn.contentIterations;
-      if (turn.toolCalls?.length === 0) delete turn.toolCalls;
-      if (turn.shellResults?.length === 0) delete turn.shellResults;
-      if (turn.filesModified?.length === 0) delete turn.filesModified;
-      if (turn.files?.length === 0) delete turn.files;
-    }
-
-    // Diagnostic logging for history restore
-    const turnSummary = turns.map((t, i) => {
-      if (t.role === 'user') return `turn[${i}]: user (${t.content.length} chars)`;
-      return `turn[${i}]: assistant (${t.content.length} chars, reasoning=${t.reasoning_iterations?.length || 0}, tools=${t.toolCalls?.length || 0}, shells=${t.shellResults?.length || 0}, files=${t.filesModified?.length || 0}, model=${t.model})`;
-    });
-    logger.debug(`[RichHistory] Returning ${turns.length} turns: ${JSON.stringify(turnSummary)}`);
-
+    logger.debug(
+      `[RichHistory] Session ${sessionId}: ${turns.length} turns (${events.length} boundary rows, ${groupsByTurn.size} assistant turns)`
+    );
     return turns;
   }
 

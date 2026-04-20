@@ -95,6 +95,13 @@ export function runMigrations(db: Database): void {
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
+
+      -- ADR 0003: functional index on turnId (JSON-embedded in events.data) so
+      -- Phase 3 hydration can group structural_turn_event and assistant_message
+      -- rows by turn without a full table scan. Partial index keeps it small.
+      CREATE INDEX IF NOT EXISTS idx_events_turn_id
+        ON events (json_extract(data, '$.turnId'))
+        WHERE type IN ('assistant_message', 'structural_turn_event');
     `);
   }
 

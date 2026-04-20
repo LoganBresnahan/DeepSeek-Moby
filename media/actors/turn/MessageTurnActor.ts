@@ -1830,22 +1830,8 @@ export class MessageTurnActor extends InterleavedShadowActor {
     const mobyHtml = mobyIconUrl
       ? `<div class="code-gen-moby"><img src="${mobyIconUrl}" alt="Moby"><div class="code-gen-spurt">${'<span class="drop"></span>'.repeat(5)}</div></div>`
       : '';
-    if (text) {
-      // Single phrase with wave animation
-      const chars = text.split('').map((ch, ci) =>
-        `<span class="gc" style="--d:${ci}">${ch === ' ' ? '&nbsp;' : this.escapeHtml(ch)}</span>`
-      ).join('');
-      return `<div class="code-generating">${mobyHtml}<div class="code-gen-phrases"><span class="gen-phrase gp-1" style="opacity:1">${chars}</span></div></div>`;
-    }
-    // Default cycling phrases
-    const phrases = ['Developing...', 'Diving...', 'Seeking...'];
-    const phraseHtml = phrases.map((phrase, i) => {
-      const chars = phrase.split('').map((ch, ci) =>
-        `<span class="gc" style="--d:${ci}">${ch}</span>`
-      ).join('');
-      return `<span class="gen-phrase gp-${i + 1}">${chars}</span>`;
-    }).join('');
-    return `<div class="code-generating">${mobyHtml}<div class="code-gen-phrases">${phraseHtml}</div></div>`;
+    const label = text || 'Developing...';
+    return `<div class="code-generating">${mobyHtml}<div class="code-gen-phrases"><span class="gen-phrase-static">${this.escapeHtml(label)}</span></div></div>`;
   }
 
   /** Pre-built default placeholder (cached for performance) */

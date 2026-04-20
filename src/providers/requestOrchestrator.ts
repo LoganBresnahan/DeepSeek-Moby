@@ -19,6 +19,7 @@ import {
   formatShellResultsForContext,
   getReasonerShellPrompt,
   stripShellTags,
+  stripUnfencedSearchReplace,
   parseWebSearchCommands,
   isLongRunningCommand,
   containsWebSearchCommands,
@@ -26,6 +27,8 @@ import {
   ShellResult
 } from '../tools/reasonerShellExecutor';
 import { ContentTransformBuffer } from '../utils/ContentTransformBuffer';
+import { StructuralEventRecorder } from '../events/StructuralEventRecorder';
+import { extractCodeBlocks, hasIncompleteFence } from '../utils/codeBlocks';
 import type {
   StartResponseEvent,
   EndResponseEvent,
@@ -178,6 +181,9 @@ export class RequestOrchestrator {
   // ── State ──
   private abortController: AbortController | null = null;
   private contentBuffer: ContentTransformBuffer | null = null;
+  // Tracks whether the current abort was user-initiated (vs backend error).
+  // Determines which marker is shown: *[User interrupted]* vs *[Generation stopped]*.
+  private _userInitiatedStop = false;
   // Queue for shell commands detected inline during streaming (legacy — being replaced by interrupt-and-resume)
   private _pendingInlineShellCommands: Array<{ command: string }> = [];
   // Track commands already executed inline (to avoid re-execution in batch)
@@ -193,9 +199,14 @@ export class RequestOrchestrator {
   // command before starting a new API call.
   private _shellInterruptCommand: string | null = null;
   private _shellInterruptAborted = false;
-  // CQRS: Deferred turn events from webview (set before endResponse, resolved when webview sends back)
-  private _turnEventsResolve: ((events: Array<Record<string, unknown>>) => void) | null = null;
-  private _turnEventsPromise: Promise<Array<Record<string, unknown>>> | null = null;
+  // ADR 0003: structural event recorder (extension-authored turn events).
+  // Phase 1 populates it at existing emission sites for the Export Turn debug
+  // command and fidelity tests; Phases 2 and 3 persist and hydrate from it.
+  public readonly structuralEvents = new StructuralEventRecorder();
+  // Disposables for subscriptions created by wireStructuralRecorder(). Tracked
+  // so dispose() can cleanly tear them down — tests that construct multiple
+  // orchestrators would otherwise leak subscribers. See ADR 0003 Phase 2.
+  private _recorderDisposables: vscode.Disposable[] = [];
 
   constructor(
     private deepSeekClient: DeepSeekClient,
@@ -214,7 +225,301 @@ export class RequestOrchestrator {
         this.contentBuffer.flush();
       }
     });
+
+    this.wireStructuralRecorder();
   }
+
+  /**
+   * ADR 0003: subscribe the StructuralEventRecorder to existing event emitters
+   * so every structural event fires once from a single place. Done as a central
+   * subscription rather than scattered append() calls at each fire() site, so
+   * future emission sites are captured automatically.
+   *
+   * Phase 1 wiring covers events the extension already fires. Later phases
+   * (code-block, drawing, approval-created/resolved, thinking-*) will emit new
+   * events that land through the same pipe.
+   */
+  private wireStructuralRecorder(): void {
+    // Shell IDs are allocated here so start and complete can be paired on restore.
+    // Execution is serial within a turn, so a FIFO queue is sufficient.
+    const pendingShellIds: string[] = [];
+    let shellCounter = 0;
+    let approvalCounter = 0;
+    let thinkingActive = false;
+
+    const track = <T>(disposable: T): T => {
+      this._recorderDisposables.push(disposable as unknown as vscode.Disposable);
+      return disposable;
+    };
+
+    track(this.onShellExecuting(e => {
+      const id = `sh-${++shellCounter}`;
+      pendingShellIds.push(id);
+      this._currentShellIdForRecorder = id;
+      this._appendStructuralEvent({
+        type: 'shell-start',
+        id,
+        commands: e.commands.map(c => ({ command: c.command, description: c.description })),
+        iteration: this._currentIterationForRecorder,
+        ts: Date.now(),
+      });
+    }));
+
+    track(this.onShellResults(e => {
+      const id = pendingShellIds.shift() ?? `sh-unmatched-${++shellCounter}`;
+      this._currentShellIdForRecorder = null;
+      this._appendStructuralEvent({
+        type: 'shell-complete',
+        id,
+        results: e.results.map(r => ({
+          output: r.output,
+          success: r.success,
+        })),
+        ts: Date.now(),
+      });
+    }));
+
+    track(this.onIterationStart(e => {
+      // Only emit iteration-end when we're transitioning OUT of a real
+      // iteration. The very first onIterationStart fires with iteration=1 to
+      // signal "starting iteration 1" — there's no prior iteration to end.
+      // _currentIterationForRecorder starts at 0 (virtual "before anything"),
+      // so the condition guards against phantom iteration-end(0) events.
+      if (this._currentIterationForRecorder > 0) {
+        this._flushCodeBlocksForIteration(this._currentIterationForRecorder);
+        this._appendStructuralEvent({
+          type: 'iteration-end',
+          iteration: this._currentIterationForRecorder,
+          ts: Date.now(),
+        });
+      }
+      this._currentIterationForRecorder = e.iteration;
+      // Phase 2.5 fix #4: if the prior iteration ended with an unclosed fence
+      // (e.g. R1 opened ``` but didn't close before an interrupt), carry the
+      // substring from the open-fence onward into the next iteration so the
+      // closing fence in iteration N+1 still pairs with its opener.
+      const carry = this._carryForwardIfIncompleteFence();
+      this._iterationContentAccum = carry;
+      this._iterationCodeBlocksEmitted = 0;
+    }));
+
+    // Phase 2.5 fix #8: ordering matters. A content token must emit
+    // thinking-complete BEFORE text-append so hydration renders the thinking
+    // block as closed when the first visible text appears. Likewise, a
+    // reasoning token following content must emit thinking-start BEFORE
+    // thinking-content. Both cases are handled inline inside the single
+    // subscription instead of layered separate handlers (which fired in
+    // registration order and reversed the desired event sequence).
+    const closeThinking = () => {
+      if (thinkingActive) {
+        thinkingActive = false;
+        this._appendStructuralEvent({
+          type: 'thinking-complete',
+          iteration: this._currentIterationForRecorder,
+          ts: Date.now(),
+        });
+      }
+    };
+
+    track(this.onStreamToken(e => {
+      closeThinking();
+      this._appendStructuralEvent({
+        type: 'text-append',
+        content: e.token,
+        iteration: this._currentIterationForRecorder,
+        ts: Date.now(),
+      });
+      this._iterationContentAccum += e.token;
+    }));
+
+    track(this.onStreamReasoning(e => {
+      if (!thinkingActive) {
+        thinkingActive = true;
+        this._appendStructuralEvent({
+          type: 'thinking-start',
+          iteration: this._currentIterationForRecorder,
+          ts: Date.now(),
+        });
+      }
+      this._appendStructuralEvent({
+        type: 'thinking-content',
+        content: e.token,
+        iteration: this._currentIterationForRecorder,
+        ts: Date.now(),
+      });
+    }));
+
+    track(this.onIterationStart(() => closeThinking()));
+    track(this.onEndResponse(() => closeThinking()));
+
+    // Phase 2.5 fix #6: emit file-modified events live as DiffManager applies
+    // or rejects edits. Previously these only landed during the end-of-turn
+    // save backfill; Phase 3 hydration needs them in-stream.
+    track(this.diffManager.onCodeApplied(e => {
+      if (!e.filePath) return;
+      this._appendStructuralEvent({
+        type: 'file-modified',
+        path: e.filePath,
+        status: e.success ? 'applied' : 'failed',
+        editMode: this.diffManager.currentEditMode,
+        ts: Date.now(),
+      });
+    }));
+    track(this.diffManager.onEditRejected(e => {
+      this._appendStructuralEvent({
+        type: 'file-modified',
+        path: e.filePath,
+        status: 'rejected',
+        editMode: this.diffManager.currentEditMode,
+        ts: Date.now(),
+      });
+    }));
+
+    // Phase 2.5 fix #5: mirror Chat-model tool call events into the recorder.
+    // Without this, hydration of Chat turns loses all tool call rendering.
+    track(this.onToolCallsStart(e => {
+      this._appendStructuralEvent({
+        type: 'tool-batch-start',
+        tools: e.tools.map(t => ({ name: t.name, detail: t.detail })),
+        ts: Date.now(),
+      });
+    }));
+    track(this.onToolCallsUpdate(e => {
+      this._appendStructuralEvent({
+        type: 'tool-batch-update',
+        tools: e.tools.map(t => ({ name: t.name, detail: t.detail, status: t.status })),
+        ts: Date.now(),
+      });
+    }));
+    track(this.onToolCallUpdate(e => {
+      this._appendStructuralEvent({
+        type: 'tool-update',
+        index: e.index,
+        status: e.status,
+        ts: Date.now(),
+      });
+    }));
+    track(this.onToolCallsEnd(() => {
+      this._appendStructuralEvent({
+        type: 'tool-batch-complete',
+        ts: Date.now(),
+      });
+    }));
+
+    if (this.commandApprovalManager) {
+      track(this.commandApprovalManager.onApprovalRequired(e => {
+        const id = `ap-${++approvalCounter}`;
+        this._currentApprovalIdForRecorder = id;
+        this._appendStructuralEvent({
+          type: 'approval-created',
+          id,
+          command: e.command,
+          prefix: e.prefix,
+          shellId: this._currentShellIdForRecorder ?? 'unknown',
+          ts: Date.now(),
+        });
+      }));
+      track(this.commandApprovalManager.onApprovalResolved(e => {
+        const id = this._currentApprovalIdForRecorder ?? `ap-unmatched-${++approvalCounter}`;
+        this._currentApprovalIdForRecorder = null;
+        this._appendStructuralEvent({
+          type: 'approval-resolved',
+          id,
+          decision: e.decision,
+          persistent: e.persistent,
+          ts: Date.now(),
+        });
+      }));
+    }
+  }
+
+  /**
+   * Phase 2.5 fix #7: external hook for drawing events. DrawingServer is owned
+   * by ChatProvider, so ChatProvider forwards each received image into the
+   * structural event stream via this method. No-op if no turn is active.
+   */
+  recordDrawing(imageDataUrl: string): void {
+    this._appendStructuralEvent({
+      type: 'drawing',
+      imageDataUrl,
+      ts: Date.now(),
+    });
+  }
+
+  /**
+   * ADR 0003 Phase 2: single emit point that appends to the in-memory recorder
+   * and also writes the event to the events table (if a turn is active with a
+   * session). Keeps emission sites small and ensures live and persisted streams
+   * stay byte-for-byte identical.
+   */
+  private _appendStructuralEvent(event: import('../../shared/events/TurnEvent').TurnEvent): void {
+    this.structuralEvents.append(event);
+    const turnId = this._currentTurnId;
+    const sessionId = this._currentSessionIdForRecorder;
+    if (turnId && sessionId) {
+      try {
+        this.conversationManager.recordStructuralEvent(
+          sessionId, turnId, this._structuralEventIndex++, event as unknown as Record<string, unknown>
+        );
+      } catch (err: any) {
+        // Persist errors should never break the turn — just log and continue.
+        logger.warn(`[StructuralEvent] failed to persist: ${err?.message ?? err}`);
+      }
+    }
+  }
+
+  /**
+   * Emit code-block events for any new fenced blocks that appeared in the
+   * iteration's accumulated content. Called at iteration boundaries and
+   * end-of-turn. Uses shared/parsing/codeBlocks so the webview and extension
+   * agree on what counts as a code block (ADR 0003).
+   */
+  private _flushCodeBlocksForIteration(iteration: number): void {
+    const blocks = extractCodeBlocks(this._iterationContentAccum);
+    for (let i = this._iterationCodeBlocksEmitted; i < blocks.length; i++) {
+      const b = blocks[i];
+      this._appendStructuralEvent({
+        type: 'code-block',
+        language: b.language,
+        content: b.content,
+        iteration,
+        ts: Date.now(),
+      });
+    }
+    this._iterationCodeBlocksEmitted = blocks.length;
+  }
+
+  /**
+   * Phase 2.5 fix #4: return the open-fence remainder of the current iteration's
+   * accumulated content if a fence opened but never closed, else empty string.
+   * The remainder seeds the next iteration's accumulator so a block spanning
+   * two iterations parses as one on the N+1 flush.
+   */
+  private _carryForwardIfIncompleteFence(): string {
+    const { incomplete, lastOpenIndex } = hasIncompleteFence(this._iterationContentAccum);
+    if (!incomplete || lastOpenIndex < 0) return '';
+    return this._iterationContentAccum.slice(lastOpenIndex);
+  }
+
+  // Tracks the iteration number the recorder should stamp on shell-start events.
+  // Updated by the onIterationStart subscription in wireStructuralRecorder().
+  private _currentIterationForRecorder = 0;
+  // Current in-flight shell id, used to correlate approval-created events with
+  // the shell that triggered them.
+  private _currentShellIdForRecorder: string | null = null;
+  // Current in-flight approval id, used to pair approval-created with approval-resolved.
+  private _currentApprovalIdForRecorder: string | null = null;
+  // Per-iteration accumulated content text, for code-block extraction on boundaries.
+  private _iterationContentAccum = '';
+  // How many code blocks have already been emitted from the current iteration's
+  // accumulated content (so we don't re-emit earlier blocks each flush).
+  private _iterationCodeBlocksEmitted = 0;
+  // ADR 0003 Phase 2: turn-scoped correlation id for incremental persistence.
+  private _currentTurnId: string | null = null;
+  // Monotonic index of the next structural event row to write for this turn.
+  private _structuralEventIndex = 0;
+  // Session id copy for the recorder subscription (avoids threading through every emit).
+  private _currentSessionIdForRecorder: string | null = null;
 
   /**
    * Main entry point — replaces ChatProvider.handleUserMessage().
@@ -256,6 +561,33 @@ export class RequestOrchestrator {
       await this.conversationManager.recordUserMessage(sessionId, message);
     }
 
+    // ADR 0003: begin structural event recording for this turn. turnId is
+    // derived from sessionId + timestamp since we don't yet have a persisted
+    // turn row. Reset ALL per-turn recorder state — not just iteration — to
+    // prevent stale shell/approval IDs or buffered content from a prior turn
+    // leaking into this one (Phase 2.5 gap #8).
+    this._currentIterationForRecorder = 0;
+    this._currentShellIdForRecorder = null;
+    this._currentApprovalIdForRecorder = null;
+    this._iterationContentAccum = '';
+    this._iterationCodeBlocksEmitted = 0;
+    const turnId = `${sessionId ?? 'no-session'}-${Date.now()}`;
+    this._currentTurnId = turnId;
+    this._currentSessionIdForRecorder = sessionId;
+    this._structuralEventIndex = 0;
+    this.structuralEvents.startTurn(turnId, sessionId);
+
+    // Phase 2: write a placeholder assistant_message with status='in_progress'
+    // so a crash mid-turn leaves a recoverable record on disk (the structural
+    // event rows complete the picture).
+    if (sessionId && !options?.skipRecord) {
+      await this.conversationManager.recordAssistantMessage(
+        sessionId, '', this.deepSeekClient.getModel(), 'stop',
+        undefined, undefined, undefined,
+        { status: 'in_progress', turnId }
+      );
+    }
+
     // Build system prompt
     const systemPrompt = await this.buildSystemPrompt(message, editorContextProvider);
     const isReasonerModel = this.deepSeekClient.isReasonerModel();
@@ -282,6 +614,7 @@ export class RequestOrchestrator {
     // Create abort controller for this request (mutable — shell interrupt replaces it)
     this.abortController = new AbortController();
     let signal = this.abortController.signal;
+    this._userInitiatedStop = false;
 
     // Get the current correlation ID for cross-boundary tracing
     const correlationId = logger.getCurrentCorrelationId();
@@ -470,7 +803,7 @@ export class RequestOrchestrator {
       // Run streaming + shell iteration loop (mutates streamState in-place)
       await this.streamAndIterate(
         contextMessages, streamingSystemPrompt, signal, message, isReasonerModel,
-        streamState
+        streamState, contextResult.budget
       );
 
       // Flush and reset the content buffer before finalizing
@@ -491,9 +824,12 @@ export class RequestOrchestrator {
       cleanResponse = stripWebSearchTags(cleanResponse);
 
       // Unfenced SEARCH/REPLACE Detection (Fallback)
+      // Process the edits first, then strip the markers from displayed content
+      // so raw <<<SEARCH...>>>REPLACE blocks don't leak into the chat UI.
       if (this.diffManager.currentEditMode !== 'manual') {
         await this.diffManager.detectAndProcessUnfencedEdits(cleanResponse);
       }
+      cleanResponse = stripUnfencedSearchReplace(cleanResponse);
 
       // End-of-response blocking: wait for any remaining pending approvals in ask mode
       if (this.diffManager.currentEditMode === 'ask') {
@@ -506,8 +842,8 @@ export class RequestOrchestrator {
         }
       }
 
-      // Prepare to receive turn events from webview (must be before endResponse.fire)
-      this.prepareTurnEventsReceiver();
+      // ADR 0003 Phase 3: webview no longer returns a consolidated event log —
+      // the extension is the sole author of structural events. No receiver to prepare.
 
       // Finalize response
       this._onEndResponse.fire({
@@ -520,6 +856,20 @@ export class RequestOrchestrator {
           : undefined,
         editMode: this.diffManager.currentEditMode
       });
+
+      // ADR 0003: flush any remaining code blocks for the last iteration, emit
+      // a final iteration-end (only if a real iteration ran — Chat-model turns
+      // never fire onIterationStart, so skip the boundary marker for them),
+      // then drain the turn.
+      if (this._currentIterationForRecorder > 0) {
+        this._flushCodeBlocksForIteration(this._currentIterationForRecorder);
+        this._appendStructuralEvent({
+          type: 'iteration-end',
+          iteration: this._currentIterationForRecorder,
+          ts: Date.now(),
+        });
+      }
+      this.structuralEvents.drainTurn();
 
       // History Save Pipeline
       await this.saveToHistory(
@@ -567,24 +917,60 @@ export class RequestOrchestrator {
     } catch (error: any) {
       // Check if this was an abort (user stopped generation)
       if (error.name === 'CanceledError' || error.name === 'AbortError' || signal.aborted) {
-        // Save partial response to history if there's content
-        const partialContent = streamState.accumulatedResponse || streamState.fullResponse;
-        if (sessionId && (partialContent || streamState.fullReasoning)) {
-          const cleanPartialResponse = stripWebSearchTags(stripShellTags(stripDSML(partialContent)));
+        const userInitiated = this._userInitiatedStop;
+        const marker = userInitiated ? '*[User interrupted]*' : '*[Generation stopped]*';
+        this._userInitiatedStop = false;
 
-          // Record reasoning iterations that completed
+        const partialContent = streamState.accumulatedResponse || streamState.fullResponse;
+
+        // Option A: For user-initiated stops, save ONLY the marker (drop the partial content).
+        // The partial text was already streamed live but the user explicitly stopped — they
+        // don't want it persisted. Reasoning iterations and file modifications are still saved
+        // via their own paths. Backend aborts keep partial content for forensics.
+        // See: docs/architecture/decisions/0001-stop-button-discards-partial.md
+        const savedText = userInitiated
+          ? marker
+          : (partialContent
+              ? `${stripUnfencedSearchReplace(stripWebSearchTags(stripShellTags(stripDSML(partialContent))))}\n\n${marker}`
+              : marker);
+
+        if (sessionId && (partialContent || streamState.fullReasoning)) {
           for (let i = 0; i < streamState.reasoningIterations.length; i++) {
             this.conversationManager.recordAssistantReasoning(sessionId!, streamState.reasoningIterations[i], i);
           }
-
-          // Record the partial assistant message
-          const partialText = cleanPartialResponse
-            ? `${cleanPartialResponse}\n\n*[Generation stopped]*`
-            : '*[Generation stopped]*';
-          await this.conversationManager.recordAssistantMessage(sessionId!, partialText, model, 'stop');
-          logger.info(`[RequestOrchestrator] Saved partial response to history`);
+          await this.conversationManager.recordAssistantMessage(
+            sessionId!, savedText, model, 'stop', undefined, undefined, undefined,
+            // Phase 2: mark interrupted so hydration can show the partial with
+            // an "[Interrupted]" affordance distinct from a clean completion.
+            { status: 'interrupted', turnId: this._currentTurnId ?? undefined }
+          );
+          logger.info(`[RequestOrchestrator] Saved ${userInitiated ? 'marker-only' : 'partial response'} to history`);
         }
-        // Don't show error for user-initiated stops
+
+        // Fire marker as a stream token so the live UI sees it via the normal token flow,
+        // then fire endResponse so the streaming turn ends cleanly with the marker included.
+        this._onStreamToken.fire({ token: `\n\n${marker}` });
+        this._onEndResponse.fire({
+          role: 'assistant',
+          content: savedText,
+          reasoning_content: streamState.fullReasoning || undefined,
+          finish_reason: 'stop'
+        } as any);
+
+        // ADR 0003 Phase 2.5: flush trailing code blocks and emit a final
+        // iteration-end before draining, matching the success path. Skip the
+        // boundary marker for turns that never entered a real iteration
+        // (Chat model, or early aborts before any iteration-start fires).
+        if (this._currentIterationForRecorder > 0) {
+          this._flushCodeBlocksForIteration(this._currentIterationForRecorder);
+          this._appendStructuralEvent({
+            type: 'iteration-end',
+            iteration: this._currentIterationForRecorder,
+            ts: Date.now(),
+          });
+        }
+        this.structuralEvents.drainTurn();
+
         return { sessionId };
       }
       // Log the error
@@ -602,6 +988,12 @@ export class RequestOrchestrator {
       }
 
       this._onError.fire({ error: errorMessage });
+
+      // ADR 0003 Phase 3 follow-up: drain the structural recorder on non-abort
+      // error paths too, so a crashed/failed turn leaves a lastCompletedTurn
+      // inspectable via `Moby: Export Turn as JSON`. Without this, the recorder
+      // stays mid-turn until the next handleMessage discards it silently.
+      this.structuralEvents.drainTurn();
     } finally {
       const wasAborted = this.abortController === null || signal.aborted;
       this.abortController = null;
@@ -629,6 +1021,7 @@ export class RequestOrchestrator {
 
   /** Abort current request. */
   stopGeneration(): void {
+    this._userInitiatedStop = true;
     if (this.abortController) {
       this.abortController.abort();
       this.abortController = null;
@@ -640,6 +1033,8 @@ export class RequestOrchestrator {
   }
 
   dispose(): void {
+    this._recorderDisposables.forEach(d => d.dispose());
+    this._recorderDisposables = [];
     this._onStartResponse.dispose();
     this._onStreamToken.dispose();
     this._onStreamReasoning.dispose();
@@ -959,28 +1354,59 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
       shellResultsForHistory: ShellResult[];
       shellCreatedFiles: boolean;
       shellDeletedFiles: boolean;
-    }
+    },
+    contextBudgetTokens: number
   ): Promise<void> {
     // Reasoner shell loop - run shell commands if R1 outputs them
     const shellConfig = vscode.workspace.getConfiguration('moby');
     const configuredShellLimit = shellConfig.get<number>('maxShellIterations') ?? 100;
     const maxShellIterations = configuredShellLimit >= 100 ? Infinity : configuredShellLimit;
+    const configuredFileEditLoops = shellConfig.get<number>('maxFileEditLoops') ?? 100;
+    const maxFileEditLoops = configuredFileEditLoops >= 100 ? Infinity : configuredFileEditLoops;
     let shellIteration = 0;
     let currentSystemPrompt = streamingSystemPrompt;
     let currentHistoryMessages = [...contextMessages];
 
-    // Auto-continuation tracking for R1
-    const maxAutoContinuations = 2;
-    let autoContinuationCount = 0;
+    // Auto-continuation tracking for R1 — separate counters per reason
+    const maxZeroContentRetries = 2;      // C6: R1 put shell tags in reasoning but no content
+    const maxFailedEditRetries = 3;       // C9: code edits failed to apply, re-read file
+    const maxNudgeContinuations = 4;      // C10: shell ran but no edits produced, nudge to finish
+    let zeroContentRetries = 0;
+    let failedEditRetries = 0;
+    let nudgeContinuations = 0;
+    let postEditContinuations = 0;
     let lastIterationHadShellCommands = false;
 
     // Token budget tracking for injected shell/web search results
     let accumulatedIterationTokens = 0;
     const iterationBudget = 60_000;  // Safety cap: ~60k tokens of injected context
+    let budgetExceeded = false;       // Soft-stop: skip execution but let R1 finish
 
     do {
       // Check abort at the start of each iteration
       if (signal.aborted) break;
+
+      // ── Context window pressure check ──
+      // Estimate total tokens in currentHistoryMessages + system prompt.
+      // If approaching the context window limit, soft-stop to avoid API rejection.
+      if (shellIteration > 0 && contextBudgetTokens > 0 && !budgetExceeded) {
+        const systemTokens = this.deepSeekClient.estimateTokens(currentSystemPrompt);
+        let contextTokens = systemTokens;
+        for (const msg of currentHistoryMessages) {
+          const text = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content);
+          contextTokens += this.deepSeekClient.estimateTokens(text);
+        }
+        const usageRatio = contextTokens / contextBudgetTokens;
+        if (usageRatio > 0.90) {
+          logger.warn(`[R1-Budget] Context window pressure: ${contextTokens.toLocaleString()}/${contextBudgetTokens.toLocaleString()} tokens (${(usageRatio * 100).toFixed(1)}%) — soft-stop`);
+          budgetExceeded = true;
+          this._onWarning.fire({
+            message: `Context window nearly full (${(usageRatio * 100).toFixed(0)}%). Completing with available information.`
+          });
+        } else if (usageRatio > 0.70) {
+          logger.info(`[R1-Budget] Context pressure: ${(usageRatio * 100).toFixed(1)}% (${contextTokens.toLocaleString()}/${contextBudgetTokens.toLocaleString()})`);
+        }
+      }
 
       // Track iteration-specific response
       let iterationResponse = '';
@@ -1066,14 +1492,153 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
           } : undefined,
           { signal }
         );
+
+        // ── Shell Interrupt Race: stream completed before abort() threw ──
+        // If onShellDetected set the flag but the stream finished naturally (short response),
+        // the catch block is never entered. Handle it here identically.
+        if (this._shellInterruptAborted && this._shellInterruptCommand) {
+          const shellCommand = this._shellInterruptCommand;
+          this._shellInterruptCommand = null;
+          this._shellInterruptAborted = false;
+
+          logger.info(`[R1-Shell] Interrupt (post-stream): stream finished before abort — executing: "${shellCommand.substring(0, 80)}..."`);
+
+          if (this.contentBuffer) {
+            this.contentBuffer.flush();
+            this.contentBuffer.reset();
+          }
+
+          // Create a new abort controller for the next iteration
+          this.abortController = new AbortController();
+          signal = this.abortController.signal;
+
+          if (budgetExceeded) {
+            logger.info(`[R1-Shell] Post-stream interrupt skipped — budget exceeded`);
+            const partialResponse = stripShellTags(state.currentIterationContent || '');
+            if (partialResponse.trim()) {
+              currentHistoryMessages.push({ role: 'assistant', content: partialResponse.trim() });
+            }
+            currentHistoryMessages.push({
+              role: 'user',
+              content: `Context budget reached. The shell command "${shellCommand.substring(0, 60)}..." was not executed. Please complete your response with the information you already have.`
+            });
+            state.currentIterationContent = '';
+            state.currentIterationReasoning = '';
+            iterationResponse = '';
+            firstContentTokenTime = null;
+            firstReasoningTokenTime = null;
+            shellIteration++;
+            continue;
+          }
+
+          const commands = parseShellCommands(`<shell>${shellCommand}</shell>`);
+          const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
+          if (commands.length > 0 && workspacePath) {
+            if (isLongRunningCommand(commands[0].command)) {
+              logger.info(`[R1-Shell] Skipping long-running command: "${commands[0].command.substring(0, 60)}..."`);
+              const shellPayload = commands.map(c => ({ command: c.command, description: c.command.length > 50 ? c.command.substring(0, 50) + '...' : c.command }));
+              this._onShellExecuting.fire({ commands: shellPayload });
+              const skipMessage = `Skipped: "${commands[0].command}" is a long-running command. The user can start it manually.`;
+              this._onShellResults.fire({ results: [{ command: commands[0].command, output: skipMessage, success: true }] });
+              const partialResponse = stripShellTags(state.currentIterationContent || '');
+              if (partialResponse.trim()) {
+                currentHistoryMessages.push({ role: 'assistant', content: partialResponse.trim() });
+              }
+              currentHistoryMessages.push({ role: 'user', content: `${skipMessage}\n\n[Continue]\nContinue with your next step. Do not re-run commands that have already succeeded.` });
+              state.currentIterationContent = '';
+              state.currentIterationReasoning = '';
+              iterationResponse = '';
+              firstContentTokenTime = null;
+              firstReasoningTokenTime = null;
+              shellIteration++;
+              lastIterationHadShellCommands = true;
+              continue;
+            }
+
+            const shellPayload = commands.map(c => ({ command: c.command, description: c.command.length > 50 ? c.command.substring(0, 50) + '...' : c.command }));
+            this._onShellExecuting.fire({ commands: shellPayload });
+
+            const allowAllCommands = vscode.workspace.getConfiguration('moby').get<boolean>('allowAllShellCommands') ?? false;
+            let approved = true;
+            if (!allowAllCommands && this.commandApprovalManager) {
+              const decision = this.commandApprovalManager.checkCommand(commands[0].command);
+              if (decision !== 'allowed') {
+                const userApproval = await this.commandApprovalManager.requestApproval(commands[0].command);
+                approved = userApproval.decision === 'allowed';
+              }
+            }
+
+            let resultsContext = '';
+            if (approved) {
+              const modifiedFiles = new Set<string>();
+              let shellFileWatcher: vscode.FileSystemWatcher | undefined;
+              try {
+                shellFileWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(workspacePath, '**/*'));
+                const trackChange = (uri: vscode.Uri) => {
+                  const relativePath = vscode.workspace.asRelativePath(uri, false);
+                  if (!shouldIgnoreWatcherPath(relativePath)) { modifiedFiles.add(relativePath); }
+                };
+                shellFileWatcher.onDidChange(trackChange);
+                shellFileWatcher.onDidCreate(trackChange);
+              } catch { /* watcher optional */ }
+
+              const results = await executeShellCommands(commands, workspacePath, { allowAllCommands, signal });
+              state.shellResultsForHistory.push(...results);
+
+              await new Promise(resolve => setTimeout(resolve, 100));
+              if (shellFileWatcher) {
+                shellFileWatcher.dispose();
+                if (modifiedFiles.size > 0) {
+                  logger.info(`[R1-Shell] Post-stream interrupt: File watcher detected ${modifiedFiles.size} modified files`);
+                  this.diffManager.registerShellModifiedFiles([...modifiedFiles]);
+                }
+              }
+
+              this._onShellResults.fire({
+                results: results.map(r => ({ command: r.command, output: r.output.substring(0, 500) + (r.output.length > 500 ? '...' : ''), success: r.success }))
+              });
+              resultsContext = formatShellResultsForContext(results);
+              if (commandsCreateFiles(commands)) state.shellCreatedFiles = true;
+              if (commandsDeleteFiles(commands)) state.shellDeletedFiles = true;
+            } else {
+              resultsContext = `Shell command rejected by user: ${commands[0].command}\n`;
+            }
+
+            const partialResponse = stripShellTags(state.currentIterationContent || '');
+            if (partialResponse.trim()) {
+              currentHistoryMessages.push({ role: 'assistant', content: partialResponse.trim() });
+            }
+            currentHistoryMessages.push({
+              role: 'user',
+              content: `[Shell output]\n${resultsContext}\n[Continue]\nThe command above was executed as you requested. Continue with your next step. Do not re-run commands that have already succeeded.`
+            });
+
+            const injectedTokens = this.deepSeekClient.estimateTokens(resultsContext);
+            accumulatedIterationTokens += injectedTokens;
+            logger.info(`[R1-Shell] Post-stream interrupt: injected ${injectedTokens} tokens (total: ${accumulatedIterationTokens.toLocaleString()}/${iterationBudget.toLocaleString()})`);
+
+            if (accumulatedIterationTokens > iterationBudget) {
+              budgetExceeded = true;
+            }
+
+            state.currentIterationContent = '';
+            state.currentIterationReasoning = '';
+            iterationResponse = '';
+            firstContentTokenTime = null;
+            firstReasoningTokenTime = null;
+            shellIteration++;
+            lastIterationHadShellCommands = true;
+            continue;
+          }
+          continue;
+        }
       } catch (streamError: any) {
         // ── Shell Interrupt: ContentTransformBuffer detected a <shell> tag and aborted ──
         if (this._shellInterruptAborted && this._shellInterruptCommand) {
           const shellCommand = this._shellInterruptCommand;
           this._shellInterruptCommand = null;
           this._shellInterruptAborted = false;
-
-          logger.info(`[R1-Shell] Interrupt caught — executing: "${shellCommand.substring(0, 80)}..."`);
 
           // Flush any buffered text to the UI
           if (this.contentBuffer) {
@@ -1084,6 +1649,28 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
           // Create a new abort controller (the old one is aborted)
           this.abortController = new AbortController();
           signal = this.abortController.signal;
+
+          // Budget exceeded — skip execution, let R1 finish with what it has
+          if (budgetExceeded) {
+            logger.info(`[R1-Shell] Interrupt caught but budget exceeded — skipping execution, letting R1 finish`);
+            const partialResponse = stripShellTags(state.currentIterationContent || '');
+            if (partialResponse.trim()) {
+              currentHistoryMessages.push({ role: 'assistant', content: partialResponse.trim() });
+            }
+            currentHistoryMessages.push({
+              role: 'user',
+              content: `Context budget reached. The shell command "${shellCommand.substring(0, 60)}..." was not executed. Please complete your response with the information you already have. Do not run more commands.`
+            });
+            state.currentIterationContent = '';
+            state.currentIterationReasoning = '';
+            iterationResponse = '';
+            firstContentTokenTime = null;
+            firstReasoningTokenTime = null;
+            shellIteration++;
+            continue;
+          }
+
+          logger.info(`[R1-Shell] Interrupt caught — executing: "${shellCommand.substring(0, 80)}..."`);
 
           // Parse the command (heredoc-aware)
           const commands = parseShellCommands(`<shell>${shellCommand}</shell>`);
@@ -1114,7 +1701,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
               if (partialResponse.trim()) {
                 currentHistoryMessages.push({ role: 'assistant', content: partialResponse.trim() });
               }
-              currentHistoryMessages.push({ role: 'user', content: skipMessage });
+              currentHistoryMessages.push({ role: 'user', content: `${skipMessage}\n\n[Continue]\nContinue with your next step. Do not re-run commands that have already succeeded.` });
 
               state.currentIterationContent = '';
               state.currentIterationReasoning = '';
@@ -1201,10 +1788,19 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
             if (partialResponse.trim()) {
               currentHistoryMessages.push({ role: 'assistant', content: partialResponse.trim() });
             }
-            currentHistoryMessages.push({ role: 'user', content: resultsContext });
+            currentHistoryMessages.push({
+              role: 'user',
+              content: `[Shell output]\n${resultsContext}\n[Continue]\nThe command above was executed as you requested. Continue with your next step. Do not re-run commands that have already succeeded.`
+            });
 
             const injectedTokens = this.deepSeekClient.estimateTokens(resultsContext);
-            logger.info(`[R1-Shell] Interrupt: injected ${injectedTokens} tokens, resuming with new API call`);
+            accumulatedIterationTokens += injectedTokens;
+            logger.info(`[R1-Shell] Interrupt: injected ${injectedTokens} tokens (total: ${accumulatedIterationTokens.toLocaleString()}/${iterationBudget.toLocaleString()}), resuming with new API call`);
+
+            if (accumulatedIterationTokens > iterationBudget) {
+              logger.warn(`[R1-Budget] Budget exceeded after interrupt — next iteration will skip execution`);
+              budgetExceeded = true;
+            }
 
             // Reset iteration state
             state.currentIterationContent = '';
@@ -1286,19 +1882,19 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
       // Shell commands are handled by interrupt-and-resume (onShellDetected) during streaming.
       // The batch path is only needed for non-reasoner models (which don't use interrupt-and-resume).
       const hasShell = false; // Disabled: interrupt-and-resume catches shell tags during streaming
-      const hasWebSearch = isReasonerModel && this.webSearchManager.getMode() === 'auto' && containsWebSearchCommands(combinedForShellCheck);
+      const hasWebSearch = !budgetExceeded && isReasonerModel && this.webSearchManager.getMode() === 'auto' && containsWebSearchCommands(combinedForShellCheck);
 
       // Zero-content recovery: R1 sometimes reasons about shell commands but produces
       // no content output. Instead of guessing from reasoning, auto-continue so the model
       // can produce a proper response with commands in the content stream.
       if (isReasonerModel && !iterationResponse.trim() && state.currentIterationReasoning &&
-          containsShellCommands(state.currentIterationReasoning) && autoContinuationCount < maxAutoContinuations) {
-        autoContinuationCount++;
-        logger.info(`[R1-Shell] Zero-content response with shell commands in reasoning — auto-continuing (${autoContinuationCount}/${maxAutoContinuations})`);
+          containsShellCommands(state.currentIterationReasoning) && zeroContentRetries < maxZeroContentRetries) {
+        zeroContentRetries++;
+        logger.info(`[R1-Shell] Zero-content response with shell commands in reasoning — auto-continuing (${zeroContentRetries}/${maxZeroContentRetries})`);
 
         this._onAutoContinuation.fire({
-          count: autoContinuationCount,
-          max: maxAutoContinuations,
+          count: zeroContentRetries,
+          max: maxZeroContentRetries,
           reason: 'Zero-content response — reasoning contained shell commands'
         });
 
@@ -1309,7 +1905,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
 
         currentHistoryMessages.push({
           role: 'user',
-          content: 'Your reasoning included shell commands but you didn\'t produce any output. Please provide your response — include any shell commands you want to run using <shell> tags in your response, not just in your thinking.'
+          content: `Your reasoning included shell commands but you didn't produce any output. Please provide your response — include any shell commands you want to run using <shell> tags in your response, not just in your thinking.`
         });
 
         lastIterationHadShellCommands = false;
@@ -1564,11 +2160,13 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
         logger.info(`[R1-Budget] Iteration ${shellIteration}: +${injectedTokens.toLocaleString()} tokens injected (total: ${accumulatedIterationTokens.toLocaleString()}/${iterationBudget.toLocaleString()})`);
 
         if (accumulatedIterationTokens > iterationBudget) {
-          logger.warn(`[R1-Budget] Iteration budget exceeded (${accumulatedIterationTokens.toLocaleString()}/${iterationBudget.toLocaleString()} tokens) — stopping iteration loop`);
+          logger.warn(`[R1-Budget] Iteration budget exceeded (${accumulatedIterationTokens.toLocaleString()}/${iterationBudget.toLocaleString()} tokens) — soft-stop, one final iteration allowed`);
           this._onWarning.fire({
-            message: `Shell/web search iteration budget exceeded (${accumulatedIterationTokens.toLocaleString()} tokens). The response may be incomplete.`
+            message: `Context budget reached (${accumulatedIterationTokens.toLocaleString()} tokens). Completing with available information.`
           });
-          break;
+          budgetExceeded = true;
+          // Don't break — fall through to inject results and let R1 do one final iteration.
+          // The budgetExceeded flag will prevent further shell/web search execution on the next pass.
         }
 
         // Add to context and continue
@@ -1579,7 +2177,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
 
         currentHistoryMessages.push({
           role: 'user',
-          content: `${hasShell ? 'Shell command' : 'Web search'} results:\n${resultsContext}\n\n---\nREMINDER - Your original task was:\n"${originalUserMessage}"\n\nYou have explored/searched. Now you MUST either:\n1. Run additional shell commands or web searches if you need more information, OR\n2. If the task requires code changes, produce them using properly formatted code blocks with # File: headers, OR\n3. If the task is a question, provide a clear answer based on your findings.\n\nDo NOT end with just shell commands or analysis — complete the task.`
+          content: `[Shell output]\n${resultsContext}\n[Continue]\nThe commands above were executed as you requested. Continue with your next step. If you have enough information, produce the code changes or answer. Do not re-run commands that have already succeeded.`
         });
 
         // Update system prompt for continuation
@@ -1588,21 +2186,21 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
         // No shell commands in this iteration
         if (isReasonerModel) {
           logger.info(`[R1-Shell] No shell commands in iteration, checking for auto-continuation...`);
-          logger.info(`[R1-Shell] shellIteration=${shellIteration}, autoContinuationCount=${autoContinuationCount}, lastIterationHadShellCommands=${lastIterationHadShellCommands}, shellCreatedFiles=${state.shellCreatedFiles}, shellDeletedFiles=${state.shellDeletedFiles}`);
+          logger.info(`[R1-Shell] shellIteration=${shellIteration}, nudges=${nudgeContinuations}, zeroContent=${zeroContentRetries}, failedEdits=${failedEditRetries}, lastIterationHadShellCommands=${lastIterationHadShellCommands}, shellCreatedFiles=${state.shellCreatedFiles}, shellDeletedFiles=${state.shellDeletedFiles}`);
 
           const hasCodeEdits = containsCodeEdits(state.accumulatedResponse);
           const failedApplies = this.diffManager.getFailedAutoApplyCount();
           logger.info(`[R1-Shell] Response has code edits: ${hasCodeEdits}, failedApplies: ${failedApplies}`);
 
           // Code edits were produced but failed to apply — nudge to re-read or create
-          if (hasCodeEdits && failedApplies > 0 && autoContinuationCount < maxAutoContinuations) {
-            autoContinuationCount++;
+          if (hasCodeEdits && failedApplies > 0 && failedEditRetries < maxFailedEditRetries) {
+            failedEditRetries++;
             this.diffManager.resetFailedAutoApplyCount();
-            logger.info(`[R1-Shell] Auto-continuing (${autoContinuationCount}/${maxAutoContinuations}): code edits failed to apply (${failedApplies} failed)`);
+            logger.info(`[R1-Shell] Auto-continuing (${failedEditRetries}/${maxFailedEditRetries}): code edits failed to apply (${failedApplies} failed)`);
 
             this._onAutoContinuation.fire({
-              count: autoContinuationCount,
-              max: maxAutoContinuations,
+              count: failedEditRetries,
+              max: maxFailedEditRetries,
               reason: `${failedApplies} file edit(s) failed — re-reading file`
             });
 
@@ -1620,13 +2218,13 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
             continue;
           }
 
-          if (shellIteration > 0 && !hasCodeEdits && !state.shellCreatedFiles && !state.shellDeletedFiles && autoContinuationCount < maxAutoContinuations) {
-            autoContinuationCount++;
-            logger.info(`[R1-Shell] Auto-continuing (${autoContinuationCount}/${maxAutoContinuations}): shell commands were executed but no code edits produced`);
+          if (shellIteration > 0 && !hasCodeEdits && nudgeContinuations < maxNudgeContinuations) {
+            nudgeContinuations++;
+            logger.info(`[R1-Shell] Auto-continuing (${nudgeContinuations}/${maxNudgeContinuations}): shell commands were executed but no code edits produced`);
 
             this._onAutoContinuation.fire({
-              count: autoContinuationCount,
-              max: maxAutoContinuations,
+              count: nudgeContinuations,
+              max: maxNudgeContinuations,
               reason: 'No code edits after shell exploration'
             });
 
@@ -1646,7 +2244,35 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
             continue;
           }
 
-          logger.info(`[R1-Shell] Loop exiting: iteration=${shellIteration}, hasCodeEdits=${hasCodeEdits}, autoContinuations=${autoContinuationCount}/${maxAutoContinuations}`);
+          // C11: File edits produced — give the model a chance to continue working
+          // (e.g., run install/build commands after writing files). Bounded by the
+          // user-configurable "File Edit Loops" budget. If the model has nothing
+          // more to do, the next iteration will exit naturally via zeroContent or nudge.
+          if (hasCodeEdits && postEditContinuations < maxFileEditLoops) {
+            postEditContinuations++;
+            logger.info(`[R1-Shell] Auto-continuing (${postEditContinuations}/${maxFileEditLoops === Infinity ? '∞' : maxFileEditLoops}): file edits produced, allowing follow-up work`);
+
+            this._onAutoContinuation.fire({
+              count: postEditContinuations,
+              max: maxFileEditLoops === Infinity ? maxNudgeContinuations : maxFileEditLoops,
+              reason: 'File edits produced, allowing follow-up work'
+            });
+
+            currentHistoryMessages.push({
+              role: 'assistant',
+              content: iterationResponse
+            });
+
+            currentHistoryMessages.push({
+              role: 'user',
+              content: `Continue if there is more work to do (e.g., running install/build commands, creating additional files, verifying the result). Otherwise, briefly confirm completion.`
+            });
+
+            lastIterationHadShellCommands = false;
+            continue;
+          }
+
+          logger.info(`[R1-Shell] Loop exiting: iteration=${shellIteration}, hasCodeEdits=${hasCodeEdits}, nudges=${nudgeContinuations}/${maxNudgeContinuations}, zeroContent=${zeroContentRetries}/${maxZeroContentRetries}, failedEdits=${failedEditRetries}/${maxFailedEditRetries}, postEdit=${postEditContinuations}/${maxFileEditLoops === Infinity ? '∞' : maxFileEditLoops}`);
           const lastChars = combinedForShellCheck.slice(-200);
           logger.info(`[R1-Shell] Last 200 chars: ${lastChars.replace(/\n/g, '\\n')}`);
         }
@@ -1664,40 +2290,6 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
       state.currentIterationContent = '';
     }
 
-  }
-
-  // ── CQRS: Turn Events from Webview ──
-
-  /**
-   * Set up a promise that will resolve when the webview sends back its
-   * consolidated turn events. Called just before firing endResponse.
-   */
-  private prepareTurnEventsReceiver(): void {
-    this._turnEventsPromise = new Promise<Array<Record<string, unknown>>>((resolve) => {
-      this._turnEventsResolve = resolve;
-      // Timeout: if webview doesn't respond within 2s, save without turn events
-      setTimeout(() => {
-        if (this._turnEventsResolve === resolve) {
-          logger.warn('[RequestOrchestrator] turnEventsForSave timeout — saving without webview events');
-          resolve([]);
-          this._turnEventsResolve = null;
-        }
-      }, 2000);
-    });
-  }
-
-  /**
-   * Called by ChatProvider when the webview sends turnEventsForSave.
-   * Resolves the pending promise so saveToHistory can proceed with the events.
-   */
-  receiveTurnEvents(events: Array<Record<string, unknown>>): void {
-    if (this._turnEventsResolve) {
-      logger.info(`[RequestOrchestrator] Received ${events.length} turn events from webview`);
-      this._turnEventsResolve(events);
-      this._turnEventsResolve = null;
-    } else {
-      logger.warn(`[RequestOrchestrator] Received turn events but no pending receiver`);
-    }
   }
 
   // ── Private: History Save Pipeline ──
@@ -1761,36 +2353,17 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
           logger.info(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} Recorded file modification: ${filePath} (editMode=${currentEditMode})`);
         }
 
-        // 5. Await turn events from webview (CQRS: webview's event log is the source of truth)
-        const turnEvents = this._turnEventsPromise ? await this._turnEventsPromise : [];
-        this._turnEventsPromise = null;
-        logger.info(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} Received ${turnEvents.length} consolidated turn events from webview`);
+        // ADR 0003 Phase 3: the webview no longer returns consolidated turn
+        // events. Structural events were written live from the extension side.
+        // file-modified status patching (previously step 5b) is also gone —
+        // Phase 2.5 live emission already carries the resolved status.
 
-        // 5b. Update file-modified events with resolved statuses from DiffManager.
-        // 5b. Patch file-modified events with resolved statuses.
-        // During ask mode, files are accepted/rejected DURING the response (before save).
-        // The turnEvents still have status='pending' — patch them with the actual outcomes.
-        const fileChanges = this.diffManager.getFileChanges();
-        const fileModifiedEvents = turnEvents.filter((te: any) => te.type === 'file-modified');
-        logger.info(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} Step 5b: ${fileModifiedEvents.length} file-modified events in turnEvents, ${fileChanges.length} fileChanges from DiffManager`);
-        if (fileChanges.length > 0) {
-          logger.info(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} DiffManager fileChanges: ${fileChanges.map(f => `${f.filePath}:${f.status}`).join(', ')}`);
-        }
-        for (const te of turnEvents) {
-          if ((te as any).type === 'file-modified' && (te as any).status === 'pending') {
-            const resolved = fileChanges.find(f => f.filePath === (te as any).path);
-            if (resolved && (resolved.status === 'applied' || resolved.status === 'rejected')) {
-              logger.info(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} Step 5b: patching ${(te as any).path} pending → ${resolved.status}`);
-              (te as any).status = resolved.status;
-            } else {
-              logger.warn(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} Step 5b: ${(te as any).path} still pending — no matching fileChange found`);
-            }
-          }
-        }
-
-        // 6. Record the assistant message with turn events
-        await this.conversationManager.recordAssistantMessage(sessionId, cleanResponse, model, 'stop', undefined, undefined, turnEvents);
-        logger.info(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} Recorded assistant message (${cleanResponse.length} chars, model=${model}, turnEvents=${turnEvents.length})`);
+        // Record the assistant message as the final authoritative row for this turn.
+        await this.conversationManager.recordAssistantMessage(
+          sessionId, cleanResponse, model, 'stop', undefined, undefined, undefined,
+          { status: 'complete', turnId: this._currentTurnId ?? undefined }
+        );
+        logger.info(`[HistorySave] sessionId=${sessionId!.substring(0, 8)} Recorded assistant message (${cleanResponse.length} chars, model=${model})`);
 
         // Fire turn sequence update so webview can show fork buttons on live turns
         const seqs = this.conversationManager.getRecentTurnSequences(sessionId);

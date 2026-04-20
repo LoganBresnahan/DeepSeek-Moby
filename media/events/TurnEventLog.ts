@@ -14,63 +14,12 @@
  */
 
 import { createLogger } from '../logging';
+// TurnEvent union moved to shared/events/TurnEvent.ts per ADR 0003.
+// Re-exported here so existing webview imports keep working.
+export type { TurnEvent, ShellCommand, ShellResultData, ToolCallData } from '../../shared/events/TurnEvent';
+import type { TurnEvent } from '../../shared/events/TurnEvent';
 
 const log = createLogger('TurnEventLog');
-
-// ── Shell Command Types ──
-
-export interface ShellCommand {
-  command: string;
-  description?: string;
-}
-
-export interface ShellResultData {
-  output: string;
-  success: boolean;
-  executionTimeMs?: number;
-}
-
-// ── Tool Call Types ──
-
-export interface ToolCallData {
-  name: string;
-  detail: string;
-}
-
-// ── Turn Event Types ──
-
-export type TurnEvent =
-  // Text content
-  | { type: 'text-append'; content: string; iteration: number; ts: number }
-  | { type: 'text-finalize'; iteration: number; ts: number }
-
-  // Thinking (R1 reasoning)
-  | { type: 'thinking-start'; iteration: number; ts: number }
-  | { type: 'thinking-content'; content: string; iteration: number; ts: number }
-  | { type: 'thinking-complete'; iteration: number; ts: number }
-
-  // Shell commands
-  | { type: 'shell-start'; id: string; commands: ShellCommand[]; iteration: number; ts: number }
-  | { type: 'shell-complete'; id: string; results: ShellResultData[]; ts: number }
-
-  // Command approval
-  | { type: 'approval-created'; id: string; command: string; prefix: string; shellId: string; ts: number }
-  | { type: 'approval-resolved'; id: string; decision: 'allowed' | 'blocked'; persistent: boolean; ts: number }
-
-  // File modifications (from shell or diff engine)
-  | { type: 'file-modified'; path: string; status: string; editMode?: string; causedBy?: string; ts: number }
-
-  // Tool calls (Chat model)
-  | { type: 'tool-batch-start'; tools: ToolCallData[]; ts: number }
-  | { type: 'tool-batch-update'; tools: Array<ToolCallData & { status?: string }>; ts: number }
-  | { type: 'tool-update'; index: number; status: string; ts: number }
-  | { type: 'tool-batch-complete'; ts: number }
-
-  // Code blocks (rendered separately from text)
-  | { type: 'code-block'; language: string; content: string; file?: string; iteration: number; ts: number }
-
-  // Drawing
-  | { type: 'drawing'; imageDataUrl: string; ts: number };
 
 // ── Listener Type ──
 

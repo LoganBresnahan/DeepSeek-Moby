@@ -31,7 +31,13 @@ export type ViewSegment =
   | FileModifiedSegment
   | ToolBatchSegment
   | CodeBlockSegment
-  | DrawingSegment;
+  | DrawingSegment
+  | ShutdownInterruptedSegment;
+
+export interface ShutdownInterruptedSegment {
+  type: 'shutdown-interrupted';
+  iteration: number;
+}
 
 export interface TextSegment {
   type: 'text';
@@ -305,6 +311,21 @@ export class TurnProjector {
           });
           break;
         }
+
+        case 'shutdown-interrupted': {
+          // ADR 0003 Phase 3: distinct segment for turns that never finalized
+          // (host died). Distinct from ADR 0001's text markers which live in
+          // the assistant_message content.
+          if (currentText && !currentText.complete) {
+            currentText.complete = true;
+          }
+          currentText = null;
+          segments.push({
+            type: 'shutdown-interrupted',
+            iteration: event.iteration,
+          });
+          break;
+        }
       }
     }
 
@@ -540,6 +561,17 @@ export class TurnProjector {
         const newSeg: DrawingSegment = {
           type: 'drawing',
           imageDataUrl: event.imageDataUrl,
+        };
+        segments.push(newSeg);
+        return [{ op: 'append', segment: newSeg }];
+      }
+
+      case 'shutdown-interrupted': {
+        // Only expected via hydration; projectIncremental still handles it
+        // defensively so a live synthesis wouldn't break the live path.
+        const newSeg: ShutdownInterruptedSegment = {
+          type: 'shutdown-interrupted',
+          iteration: event.iteration,
         };
         segments.push(newSeg);
         return [{ op: 'append', segment: newSeg }];

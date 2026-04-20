@@ -923,6 +923,19 @@ export class DiffManager {
       : path.join(workspaceFolder.uri.fsPath, filePath);
 
     const uri = vscode.Uri.file(absolutePath);
+
+    // Detect directories and reveal them in the file explorer instead of trying to open as a text document
+    try {
+      const stat = await vscode.workspace.fs.stat(uri);
+      if (stat.type === vscode.FileType.Directory) {
+        await vscode.commands.executeCommand('revealInExplorer', uri);
+        logger.debug(`[DiffManager] Revealed directory in explorer: ${filePath}`);
+        return;
+      }
+    } catch {
+      // Path doesn't exist — fall through to openTextDocument which will surface the right error
+    }
+
     try {
       const doc = await vscode.workspace.openTextDocument(uri);
       await vscode.window.showTextDocument(doc, { preview: false });

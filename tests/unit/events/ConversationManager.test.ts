@@ -96,302 +96,6 @@ describe('ConversationManager.getSessionRichHistory', () => {
     expect(turns[1].model).toBe('deepseek-chat');
   });
 
-  it('groups reasoning iterations into assistant turn', async () => {
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 1000,
-      type: 'user_message',
-      content: 'Think about this'
-    });
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 2000,
-      type: 'assistant_reasoning',
-      content: 'First I need to consider...',
-      iteration: 0
-    });
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 2100,
-      type: 'assistant_reasoning',
-      content: 'Then I should analyze...',
-      iteration: 1
-    });
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 3000,
-      type: 'assistant_message',
-      content: 'Here is my answer.',
-      model: 'deepseek-reasoner',
-      finishReason: 'stop'
-    });
-
-    const turns = await callRichHistory(SESSION_ID);
-    expect(turns).toHaveLength(2);
-
-    const assistantTurn = turns[1];
-    expect(assistantTurn.role).toBe('assistant');
-    expect(assistantTurn.content).toBe('Here is my answer.');
-    expect(assistantTurn.model).toBe('deepseek-reasoner');
-    expect(assistantTurn.reasoning_iterations).toEqual([
-      'First I need to consider...',
-      'Then I should analyze...'
-    ]);
-  });
-
-  it('groups tool calls with results into assistant turn', async () => {
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 1000,
-      type: 'user_message',
-      content: 'Search for something'
-    });
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 2000,
-      type: 'tool_call',
-      toolCallId: 'tc-1',
-      toolName: 'web_search',
-      arguments: { detail: 'searching the web' }
-    });
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 2500,
-      type: 'tool_result',
-      toolCallId: 'tc-1',
-      result: '5 results found',
-      success: true
-    });
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 3000,
-      type: 'assistant_message',
-      content: 'I found results.',
-      model: 'deepseek-chat',
-      finishReason: 'stop'
-    });
-
-    const turns = await callRichHistory(SESSION_ID);
-    expect(turns).toHaveLength(2);
-
-    const assistantTurn = turns[1];
-    expect(assistantTurn.toolCalls).toHaveLength(1);
-    expect(assistantTurn.toolCalls![0].name).toBe('web_search');
-    expect(assistantTurn.toolCalls![0].status).toBe('done');
-    // No shell results
-    expect(assistantTurn.shellResults).toBeUndefined();
-  });
-
-  it('groups shell tool calls into shellResults', async () => {
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 1000,
-      type: 'user_message',
-      content: 'Run a command'
-    });
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 2000,
-      type: 'tool_call',
-      toolCallId: 'sh-1',
-      toolName: 'shell',
-      arguments: { command: 'ls -la' }
-    });
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 2500,
-      type: 'tool_result',
-      toolCallId: 'sh-1',
-      result: 'file1.txt\nfile2.txt',
-      success: true,
-      duration: 150
-    });
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 3000,
-      type: 'assistant_message',
-      content: 'Here are the files.',
-      model: 'deepseek-chat',
-      finishReason: 'stop'
-    });
-
-    const turns = await callRichHistory(SESSION_ID);
-    expect(turns).toHaveLength(2);
-
-    const assistantTurn = turns[1];
-    expect(assistantTurn.shellResults).toHaveLength(1);
-    expect(assistantTurn.shellResults![0].command).toBe('ls -la');
-    expect(assistantTurn.shellResults![0].output).toBe('file1.txt\nfile2.txt');
-    expect(assistantTurn.shellResults![0].success).toBe(true);
-    // No non-shell tool calls
-    expect(assistantTurn.toolCalls).toBeUndefined();
-  });
-
-  it('handles failed tool results', async () => {
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 1000,
-      type: 'user_message',
-      content: 'Do something'
-    });
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 2000,
-      type: 'tool_call',
-      toolCallId: 'tc-1',
-      toolName: 'file_read',
-      arguments: { detail: 'reading file' }
-    });
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 2500,
-      type: 'tool_result',
-      toolCallId: 'tc-1',
-      result: 'File not found',
-      success: false
-    });
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 3000,
-      type: 'assistant_message',
-      content: 'File not found.',
-      model: 'deepseek-chat',
-      finishReason: 'stop'
-    });
-
-    const turns = await callRichHistory(SESSION_ID);
-    const assistantTurn = turns[1];
-    expect(assistantTurn.toolCalls![0].status).toBe('error');
-  });
-
-  it('handles multi-turn conversation with all segment types', async () => {
-    // Turn 1: user
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 1000,
-      type: 'user_message',
-      content: 'Analyze this code'
-    });
-    // Turn 2: reasoning + shell + tool + response
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 2000,
-      type: 'assistant_reasoning',
-      content: 'Let me think...',
-      iteration: 0
-    });
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 2100,
-      type: 'tool_call',
-      toolCallId: 'sh-1',
-      toolName: 'shell',
-      arguments: { command: 'cat file.ts' }
-    });
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 2200,
-      type: 'tool_result',
-      toolCallId: 'sh-1',
-      result: 'const x = 1;',
-      success: true
-    });
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 2300,
-      type: 'tool_call',
-      toolCallId: 'tc-1',
-      toolName: 'code_edit',
-      arguments: { detail: 'editing file' }
-    });
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 2400,
-      type: 'tool_result',
-      toolCallId: 'tc-1',
-      result: 'Applied',
-      success: true
-    });
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 3000,
-      type: 'assistant_message',
-      content: 'I fixed the code.',
-      model: 'deepseek-reasoner',
-      finishReason: 'stop'
-    });
-    // Turn 3: user follow-up
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 4000,
-      type: 'user_message',
-      content: 'Thanks!'
-    });
-    // Turn 4: simple response
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 5000,
-      type: 'assistant_message',
-      content: 'You are welcome.',
-      model: 'deepseek-chat',
-      finishReason: 'stop'
-    });
-
-    const turns = await callRichHistory(SESSION_ID);
-    expect(turns).toHaveLength(4);
-
-    // Turn 1: user
-    expect(turns[0].role).toBe('user');
-    expect(turns[0].content).toBe('Analyze this code');
-
-    // Turn 2: assistant with reasoning + shell + tool
-    expect(turns[1].role).toBe('assistant');
-    expect(turns[1].content).toBe('I fixed the code.');
-    expect(turns[1].model).toBe('deepseek-reasoner');
-    expect(turns[1].reasoning_iterations).toEqual(['Let me think...']);
-    expect(turns[1].shellResults).toHaveLength(1);
-    expect(turns[1].shellResults![0].command).toBe('cat file.ts');
-    expect(turns[1].toolCalls).toHaveLength(1);
-    expect(turns[1].toolCalls![0].name).toBe('code_edit');
-
-    // Turn 3: user follow-up
-    expect(turns[2].role).toBe('user');
-    expect(turns[2].content).toBe('Thanks!');
-
-    // Turn 4: simple assistant
-    expect(turns[3].role).toBe('assistant');
-    expect(turns[3].content).toBe('You are welcome.');
-    expect(turns[3].model).toBe('deepseek-chat');
-    expect(turns[3].reasoning_iterations).toBeUndefined();
-    expect(turns[3].toolCalls).toBeUndefined();
-    expect(turns[3].shellResults).toBeUndefined();
-  });
-
-  it('handles partial/interrupted assistant turn (no assistant_message event)', async () => {
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 1000,
-      type: 'user_message',
-      content: 'Hello'
-    });
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 2000,
-      type: 'assistant_reasoning',
-      content: 'Thinking about this...',
-      iteration: 0
-    });
-    // No assistant_message — generation was interrupted
-
-    const turns = await callRichHistory(SESSION_ID);
-    expect(turns).toHaveLength(2);
-
-    // The trailing assistant turn should still be included
-    expect(turns[1].role).toBe('assistant');
-    expect(turns[1].content).toBe('');
-    expect(turns[1].reasoning_iterations).toEqual(['Thinking about this...']);
-  });
-
   it('cleans up empty arrays from turns', async () => {
     eventStore.append({
       sessionId: SESSION_ID,
@@ -462,106 +166,6 @@ describe('ConversationManager.getSessionRichHistory', () => {
     expect(turnsB[0].content).toBe('Session B message');
   });
 
-  it('extracts _file_modified tool calls into filesModified', async () => {
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 1000,
-      type: 'user_message',
-      content: 'Edit the file'
-    });
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 2000,
-      type: 'tool_call',
-      toolCallId: 'tc-1',
-      toolName: 'apply_code_edit',
-      arguments: { detail: 'editing' }
-    });
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 2100,
-      type: 'tool_result',
-      toolCallId: 'tc-1',
-      result: 'Applied',
-      success: true
-    });
-    // _file_modified marker — should go into filesModified, NOT toolCalls
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 2200,
-      type: 'tool_call',
-      toolCallId: 'fm-1',
-      toolName: '_file_modified',
-      arguments: { filePath: 'src/index.ts' }
-    });
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 2300,
-      type: 'tool_result',
-      toolCallId: 'fm-1',
-      result: 'src/index.ts',
-      success: true
-    });
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 3000,
-      type: 'assistant_message',
-      content: 'Done.',
-      model: 'deepseek-chat',
-      finishReason: 'stop'
-    });
-
-    const turns = await callRichHistory(SESSION_ID);
-    const assistantTurn = turns[1];
-    expect(assistantTurn.toolCalls).toHaveLength(1);
-    expect(assistantTurn.toolCalls![0].name).toBe('apply_code_edit');
-    expect(assistantTurn.filesModified).toEqual(['src/index.ts']);
-  });
-
-  it('extracts multiple _file_modified markers', async () => {
-    eventStore.append({ sessionId: SESSION_ID, timestamp: 1000, type: 'user_message', content: 'Edit files' });
-    eventStore.append({ sessionId: SESSION_ID, timestamp: 2000, type: 'tool_call', toolCallId: 'fm-1', toolName: '_file_modified', arguments: { filePath: 'a.ts' } });
-    eventStore.append({ sessionId: SESSION_ID, timestamp: 2100, type: 'tool_result', toolCallId: 'fm-1', result: 'a.ts', success: true });
-    eventStore.append({ sessionId: SESSION_ID, timestamp: 2200, type: 'tool_call', toolCallId: 'fm-2', toolName: '_file_modified', arguments: { filePath: 'b.ts' } });
-    eventStore.append({ sessionId: SESSION_ID, timestamp: 2300, type: 'tool_result', toolCallId: 'fm-2', result: 'b.ts', success: true });
-    eventStore.append({ sessionId: SESSION_ID, timestamp: 3000, type: 'assistant_message', content: 'Done.', model: 'deepseek-chat', finishReason: 'stop' });
-
-    const turns = await callRichHistory(SESSION_ID);
-    const assistantTurn = turns[1];
-    expect(assistantTurn.filesModified).toEqual(['a.ts', 'b.ts']);
-    expect(assistantTurn.toolCalls).toBeUndefined(); // No non-file tool calls
-  });
-
-  it('preserves contentIterations from assistant_message event', async () => {
-    eventStore.append({ sessionId: SESSION_ID, timestamp: 1000, type: 'user_message', content: 'Add animals' });
-    eventStore.append({ sessionId: SESSION_ID, timestamp: 2000, type: 'assistant_reasoning', content: 'Thinking iteration 1...', iteration: 0 });
-    eventStore.append({ sessionId: SESSION_ID, timestamp: 2100, type: 'tool_call', toolCallId: 'sh-1', toolName: 'shell', arguments: { command: 'cat test.txt' } });
-    eventStore.append({ sessionId: SESSION_ID, timestamp: 2200, type: 'tool_result', toolCallId: 'sh-1', result: 'file contents', success: true });
-    eventStore.append({ sessionId: SESSION_ID, timestamp: 2300, type: 'assistant_reasoning', content: 'Thinking iteration 2...', iteration: 1 });
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 3000,
-      type: 'assistant_message',
-      content: 'Full accumulated text',
-      model: 'deepseek-reasoner',
-      finishReason: 'stop',
-      contentIterations: [
-        { text: 'Check the file first', iterationIndex: 0 },
-        { text: 'Here are the results with changes', iterationIndex: 1 }
-      ]
-    });
-
-    const turns = await callRichHistory(SESSION_ID);
-    const assistantTurn = turns[1];
-    expect(assistantTurn.contentIterations).toEqual([
-      { text: 'Check the file first', iterationIndex: 0 },
-      { text: 'Here are the results with changes', iterationIndex: 1 }
-    ]);
-    expect(assistantTurn.reasoning_iterations).toHaveLength(2);
-    expect(assistantTurn.shellResults).toHaveLength(1);
-    expect(assistantTurn.content).toBe('Full accumulated text');
-  });
-
   it('omits contentIterations when not present in event', async () => {
     eventStore.append({ sessionId: SESSION_ID, timestamp: 1000, type: 'user_message', content: 'Hello' });
     eventStore.append({
@@ -575,99 +179,6 @@ describe('ConversationManager.getSessionRichHistory', () => {
 
     const turns = await callRichHistory(SESSION_ID);
     expect(turns[1].contentIterations).toBeUndefined();
-  });
-
-  it('handles full Reasoner conversation: reasoning + shell + files + contentIterations', async () => {
-    // User
-    eventStore.append({ sessionId: SESSION_ID, timestamp: 1000, type: 'user_message', content: 'Edit animals list' });
-
-    // Iteration 1: reasoning → shell
-    eventStore.append({ sessionId: SESSION_ID, timestamp: 2000, type: 'assistant_reasoning', content: 'Let me read the file first', iteration: 0 });
-    eventStore.append({ sessionId: SESSION_ID, timestamp: 2100, type: 'tool_call', toolCallId: 'sh-1', toolName: 'shell', arguments: { command: 'cat test.txt' } });
-    eventStore.append({ sessionId: SESSION_ID, timestamp: 2200, type: 'tool_result', toolCallId: 'sh-1', result: 'lion\ntiger\nelephant', success: true });
-
-    // Iteration 2: reasoning → file modification → content with code
-    eventStore.append({ sessionId: SESSION_ID, timestamp: 3000, type: 'assistant_reasoning', content: 'Now I will add animals', iteration: 1 });
-    eventStore.append({ sessionId: SESSION_ID, timestamp: 3100, type: 'tool_call', toolCallId: 'fm-1', toolName: '_file_modified', arguments: { filePath: 'test.txt' } });
-    eventStore.append({ sessionId: SESSION_ID, timestamp: 3200, type: 'tool_result', toolCallId: 'fm-1', result: 'test.txt', success: true });
-
-    // Final assistant message
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 4000,
-      type: 'assistant_message',
-      content: 'I added 10 new animals to the list.',
-      model: 'deepseek-reasoner',
-      finishReason: 'stop',
-      contentIterations: [
-        { text: 'Let me check the file', iterationIndex: 0 },
-        { text: 'I added 10 new animals to the list.', iterationIndex: 1 }
-      ]
-    });
-
-    const turns = await callRichHistory(SESSION_ID);
-    expect(turns).toHaveLength(2);
-
-    const user = turns[0];
-    expect(user.role).toBe('user');
-    expect(user.content).toBe('Edit animals list');
-
-    const assistant = turns[1];
-    expect(assistant.role).toBe('assistant');
-    expect(assistant.model).toBe('deepseek-reasoner');
-    expect(assistant.reasoning_iterations).toEqual([
-      'Let me read the file first',
-      'Now I will add animals'
-    ]);
-    expect(assistant.shellResults).toEqual([
-      { command: 'cat test.txt', output: 'lion\ntiger\nelephant', success: true }
-    ]);
-    expect(assistant.filesModified).toEqual(['test.txt']);
-    expect(assistant.contentIterations).toEqual([
-      { text: 'Let me check the file', iterationIndex: 0 },
-      { text: 'I added 10 new animals to the list.', iterationIndex: 1 }
-    ]);
-    expect(assistant.content).toBe('I added 10 new animals to the list.');
-    expect(assistant.toolCalls).toBeUndefined(); // Only shell and _file_modified, no regular tools
-  });
-
-  it('handles full Chat conversation: tools + files + content (no reasoning)', async () => {
-    eventStore.append({ sessionId: SESSION_ID, timestamp: 1000, type: 'user_message', content: 'Fix the code' });
-
-    // Tool calls
-    eventStore.append({ sessionId: SESSION_ID, timestamp: 2000, type: 'tool_call', toolCallId: 'tc-1', toolName: 'read_file', arguments: { detail: 'src/app.ts' } });
-    eventStore.append({ sessionId: SESSION_ID, timestamp: 2100, type: 'tool_result', toolCallId: 'tc-1', result: 'const x = 1;', success: true });
-    eventStore.append({ sessionId: SESSION_ID, timestamp: 2200, type: 'tool_call', toolCallId: 'tc-2', toolName: 'apply_code_edit', arguments: { detail: 'fixing bug' } });
-    eventStore.append({ sessionId: SESSION_ID, timestamp: 2300, type: 'tool_result', toolCallId: 'tc-2', result: 'Applied', success: true });
-
-    // File modification marker
-    eventStore.append({ sessionId: SESSION_ID, timestamp: 2400, type: 'tool_call', toolCallId: 'fm-1', toolName: '_file_modified', arguments: { filePath: 'src/app.ts' } });
-    eventStore.append({ sessionId: SESSION_ID, timestamp: 2500, type: 'tool_result', toolCallId: 'fm-1', result: 'src/app.ts', success: true });
-
-    // Assistant message
-    eventStore.append({
-      sessionId: SESSION_ID,
-      timestamp: 3000,
-      type: 'assistant_message',
-      content: 'Fixed the bug in app.ts.',
-      model: 'deepseek-chat',
-      finishReason: 'stop'
-    });
-
-    const turns = await callRichHistory(SESSION_ID);
-    expect(turns).toHaveLength(2);
-
-    const assistant = turns[1];
-    expect(assistant.model).toBe('deepseek-chat');
-    expect(assistant.toolCalls).toEqual([
-      { name: 'read_file', detail: 'src/app.ts', status: 'done' },
-      { name: 'apply_code_edit', detail: 'fixing bug', status: 'done' }
-    ]);
-    expect(assistant.filesModified).toEqual(['src/app.ts']);
-    expect(assistant.content).toBe('Fixed the bug in app.ts.');
-    expect(assistant.reasoning_iterations).toBeUndefined();
-    expect(assistant.shellResults).toBeUndefined();
-    expect(assistant.contentIterations).toBeUndefined();
   });
 
   it('includes event sequence numbers in turns', async () => {
@@ -698,6 +209,234 @@ describe('ConversationManager.getSessionRichHistory', () => {
     expect(turns[1].sequence).toBeDefined();
     expect(typeof turns[1].sequence).toBe('number');
     expect(turns[1].sequence).toBe(2);
+  });
+
+  // ── Phase 3: structural event hydration ──
+  // These tests exercise the flipped hydration path — reading from
+  // structural_turn_event rows and resolving the authoritative assistant_message
+  // by status. Fidelity test #1: extension-only coverage.
+
+  function appendStructuralEvent(sessionId: string, turnId: string, indexInTurn: number, payload: Record<string, unknown>, timestamp = 2000 + indexInTurn) {
+    eventStore.append({
+      sessionId, timestamp, type: 'structural_turn_event',
+      turnId, indexInTurn, payload,
+    } as any);
+  }
+
+  it('Phase 3: populates turnEvents from structural_turn_event rows keyed by turnId', async () => {
+    const TURN_ID = 'turn-abc';
+    eventStore.append({ sessionId: SESSION_ID, timestamp: 1000, type: 'user_message', content: 'Hi' });
+    // Placeholder
+    eventStore.append({
+      sessionId: SESSION_ID, timestamp: 1001, type: 'assistant_message',
+      content: '', model: 'deepseek-reasoner', finishReason: 'stop',
+      status: 'in_progress', turnId: TURN_ID,
+    } as any);
+    // Three structural events
+    appendStructuralEvent(SESSION_ID, TURN_ID, 0, { type: 'text-append', content: 'Hello', iteration: 0, ts: 2000 });
+    appendStructuralEvent(SESSION_ID, TURN_ID, 1, { type: 'text-append', content: ' world', iteration: 0, ts: 2001 });
+    appendStructuralEvent(SESSION_ID, TURN_ID, 2, { type: 'iteration-end', iteration: 0, ts: 2002 });
+    // Final
+    eventStore.append({
+      sessionId: SESSION_ID, timestamp: 3000, type: 'assistant_message',
+      content: 'Hello world', model: 'deepseek-reasoner', finishReason: 'stop',
+      status: 'complete', turnId: TURN_ID,
+    } as any);
+
+    const turns = await callRichHistory(SESSION_ID);
+    expect(turns).toHaveLength(2);
+    expect(turns[1].content).toBe('Hello world');
+    expect(turns[1].turnEvents).toHaveLength(3);
+    expect((turns[1].turnEvents![0] as any).type).toBe('text-append');
+    expect((turns[1].turnEvents![2] as any).type).toBe('iteration-end');
+  });
+
+  it('Phase 3: picks complete row over in_progress placeholder for same turnId', async () => {
+    const TURN_ID = 'turn-xyz';
+    eventStore.append({ sessionId: SESSION_ID, timestamp: 1000, type: 'user_message', content: 'Hi' });
+    eventStore.append({
+      sessionId: SESSION_ID, timestamp: 1001, type: 'assistant_message',
+      content: '', model: 'deepseek-chat', finishReason: 'stop',
+      status: 'in_progress', turnId: TURN_ID,
+    } as any);
+    eventStore.append({
+      sessionId: SESSION_ID, timestamp: 2000, type: 'assistant_message',
+      content: 'final answer', model: 'deepseek-chat', finishReason: 'stop',
+      status: 'complete', turnId: TURN_ID,
+    } as any);
+
+    const turns = await callRichHistory(SESSION_ID);
+    // Turn is emitted once at the position of the first (placeholder) row.
+    expect(turns.filter(t => t.role === 'assistant')).toHaveLength(1);
+    expect(turns[1].content).toBe('final answer');
+  });
+
+  it('Phase 3: synthesizes shutdown-interrupted event when only in_progress row exists', async () => {
+    const TURN_ID = 'turn-crash';
+    eventStore.append({ sessionId: SESSION_ID, timestamp: 1000, type: 'user_message', content: 'Hi' });
+    eventStore.append({
+      sessionId: SESSION_ID, timestamp: 1001, type: 'assistant_message',
+      content: '', model: 'deepseek-reasoner', finishReason: 'stop',
+      status: 'in_progress', turnId: TURN_ID,
+    } as any);
+    appendStructuralEvent(SESSION_ID, TURN_ID, 0, { type: 'text-append', content: 'partial', iteration: 0, ts: 2000 });
+    // No finalization — simulates host death mid-turn
+
+    const turns = await callRichHistory(SESSION_ID);
+    const events = turns[1].turnEvents!;
+    const last = events[events.length - 1] as any;
+    expect(last.type).toBe('shutdown-interrupted');
+    expect(last.iteration).toBe(0);
+  });
+
+  it('Phase 3: does NOT synthesize shutdown-interrupted when a complete row exists', async () => {
+    const TURN_ID = 'turn-clean';
+    eventStore.append({ sessionId: SESSION_ID, timestamp: 1000, type: 'user_message', content: 'Hi' });
+    eventStore.append({
+      sessionId: SESSION_ID, timestamp: 1001, type: 'assistant_message',
+      content: '', model: 'deepseek-chat', finishReason: 'stop',
+      status: 'in_progress', turnId: TURN_ID,
+    } as any);
+    appendStructuralEvent(SESSION_ID, TURN_ID, 0, { type: 'text-append', content: 'ok', iteration: 0, ts: 2000 });
+    eventStore.append({
+      sessionId: SESSION_ID, timestamp: 3000, type: 'assistant_message',
+      content: 'ok', model: 'deepseek-chat', finishReason: 'stop',
+      status: 'complete', turnId: TURN_ID,
+    } as any);
+
+    const turns = await callRichHistory(SESSION_ID);
+    const events = turns[1].turnEvents!;
+    expect(events.every(e => (e as any).type !== 'shutdown-interrupted')).toBe(true);
+  });
+
+  it('Phase 3: interrupted status is preferred over in_progress when no complete exists', async () => {
+    const TURN_ID = 'turn-stopped';
+    eventStore.append({ sessionId: SESSION_ID, timestamp: 1000, type: 'user_message', content: 'Hi' });
+    eventStore.append({
+      sessionId: SESSION_ID, timestamp: 1001, type: 'assistant_message',
+      content: '', model: 'deepseek-chat', finishReason: 'stop',
+      status: 'in_progress', turnId: TURN_ID,
+    } as any);
+    eventStore.append({
+      sessionId: SESSION_ID, timestamp: 3000, type: 'assistant_message',
+      content: 'partial\n\n*[User interrupted]*', model: 'deepseek-chat', finishReason: 'stop',
+      status: 'interrupted', turnId: TURN_ID,
+    } as any);
+
+    const turns = await callRichHistory(SESSION_ID);
+    expect(turns[1].content).toBe('partial\n\n*[User interrupted]*');
+    // And no shutdown-interrupted synthesis because the interrupted row exists
+    const events = turns[1].turnEvents ?? [];
+    expect(events.every(e => (e as any).type !== 'shutdown-interrupted')).toBe(true);
+  });
+
+  it('Phase 3: structural events for one turn do not bleed into another', async () => {
+    const TURN_A = 'turn-A';
+    const TURN_B = 'turn-B';
+    eventStore.append({ sessionId: SESSION_ID, timestamp: 1000, type: 'user_message', content: 'First' });
+    eventStore.append({
+      sessionId: SESSION_ID, timestamp: 1001, type: 'assistant_message',
+      content: 'a', model: 'deepseek-chat', finishReason: 'stop',
+      status: 'complete', turnId: TURN_A,
+    } as any);
+    appendStructuralEvent(SESSION_ID, TURN_A, 0, { type: 'text-append', content: 'a', iteration: 0, ts: 2000 });
+    eventStore.append({ sessionId: SESSION_ID, timestamp: 3000, type: 'user_message', content: 'Second' });
+    eventStore.append({
+      sessionId: SESSION_ID, timestamp: 3001, type: 'assistant_message',
+      content: 'b', model: 'deepseek-chat', finishReason: 'stop',
+      status: 'complete', turnId: TURN_B,
+    } as any);
+    appendStructuralEvent(SESSION_ID, TURN_B, 0, { type: 'text-append', content: 'b', iteration: 0, ts: 4000 });
+
+    const turns = await callRichHistory(SESSION_ID);
+    const assistantTurns = turns.filter(t => t.role === 'assistant');
+    expect(assistantTurns).toHaveLength(2);
+    expect((assistantTurns[0].turnEvents![0] as any).content).toBe('a');
+    expect((assistantTurns[1].turnEvents![0] as any).content).toBe('b');
+    expect(assistantTurns[0].turnEvents).toHaveLength(1);
+    expect(assistantTurns[1].turnEvents).toHaveLength(1);
+  });
+});
+
+// ADR 0003 Phase 2/3: getSessionMessagesCompat feeds API context. It must
+// filter out in_progress placeholder rows — otherwise DeepSeek rejects the
+// request with "Invalid consecutive assistant message". Regression guard.
+describe('ConversationManager.getSessionMessagesCompat — placeholder filtering', () => {
+  const getCompat = ConversationManager.prototype.getSessionMessagesCompat;
+  let db: Database;
+  let eventStore: EventStore;
+  const SESSION_ID = 'compat-test';
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    runMigrations(db);
+    db.prepare('INSERT INTO sessions (id, title, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run(SESSION_ID, 'Test', 'test', 1000, 1000);
+    eventStore = new EventStore(db);
+  });
+
+  afterEach(() => { db.close(); });
+
+  it('skips assistant_message rows with status=in_progress (Phase 2 placeholders)', async () => {
+    const TURN_ID = 'turn-1';
+    eventStore.append({ sessionId: SESSION_ID, timestamp: 1000, type: 'user_message', content: 'Hello' } as any);
+    // Placeholder — MUST NOT appear in API context
+    eventStore.append({
+      sessionId: SESSION_ID, timestamp: 1001, type: 'assistant_message',
+      content: '', model: 'deepseek-chat', finishReason: 'stop',
+      status: 'in_progress', turnId: TURN_ID,
+    } as any);
+
+    const messages = await getCompat.call({ eventStore } as any, SESSION_ID);
+    expect(messages).toHaveLength(1);
+    expect(messages[0].role).toBe('user');
+    expect(messages[0].content).toBe('Hello');
+  });
+
+  it('includes assistant_message rows with status=complete', async () => {
+    const TURN_ID = 'turn-1';
+    eventStore.append({ sessionId: SESSION_ID, timestamp: 1000, type: 'user_message', content: 'Hello' } as any);
+    eventStore.append({
+      sessionId: SESSION_ID, timestamp: 1001, type: 'assistant_message',
+      content: '', model: 'deepseek-chat', finishReason: 'stop',
+      status: 'in_progress', turnId: TURN_ID,
+    } as any);
+    eventStore.append({
+      sessionId: SESSION_ID, timestamp: 2000, type: 'assistant_message',
+      content: 'Hi there', model: 'deepseek-chat', finishReason: 'stop',
+      status: 'complete', turnId: TURN_ID,
+    } as any);
+
+    const messages = await getCompat.call({ eventStore } as any, SESSION_ID);
+    expect(messages).toHaveLength(2);
+    expect(messages[0].role).toBe('user');
+    expect(messages[1].role).toBe('assistant');
+    expect(messages[1].content).toBe('Hi there');
+  });
+
+  it('includes assistant_message rows with status=interrupted', async () => {
+    const TURN_ID = 'turn-1';
+    eventStore.append({ sessionId: SESSION_ID, timestamp: 1000, type: 'user_message', content: 'Hello' } as any);
+    eventStore.append({
+      sessionId: SESSION_ID, timestamp: 2000, type: 'assistant_message',
+      content: 'partial\n\n*[User interrupted]*', model: 'deepseek-chat', finishReason: 'stop',
+      status: 'interrupted', turnId: TURN_ID,
+    } as any);
+
+    const messages = await getCompat.call({ eventStore } as any, SESSION_ID);
+    expect(messages).toHaveLength(2);
+    expect(messages[1].content).toContain('*[User interrupted]*');
+  });
+
+  it('includes pre-Phase-2 rows without status field (backward compat)', async () => {
+    eventStore.append({ sessionId: SESSION_ID, timestamp: 1000, type: 'user_message', content: 'Hi' } as any);
+    eventStore.append({
+      sessionId: SESSION_ID, timestamp: 2000, type: 'assistant_message',
+      content: 'legacy response', model: 'deepseek-chat', finishReason: 'stop',
+    } as any);
+
+    const messages = await getCompat.call({ eventStore } as any, SESSION_ID);
+    expect(messages).toHaveLength(2);
+    expect(messages[1].content).toBe('legacy response');
   });
 });
 

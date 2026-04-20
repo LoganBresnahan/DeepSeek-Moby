@@ -149,6 +149,7 @@ function createMockConversationManager() {
     recordToolCall: vi.fn(),
     recordToolResult: vi.fn(),
     recordAssistantMessage: vi.fn(async () => {}),
+    recordStructuralEvent: vi.fn(),
     getSessionRichHistory: vi.fn(async () => []),
     getAllSessions: vi.fn(async () => []),
     hasFreshSummary: vi.fn(() => false),
@@ -166,6 +167,10 @@ function createMockStatusBar() {
 }
 
 function createMockDiffManager() {
+  // Subscriptions wired by RequestOrchestrator (ADR 0003 Phase 2.5) expect
+  // disposable returns. Return a stub that records the handler for tests that
+  // want to invoke it manually.
+  const noopDisposable = () => ({ dispose: vi.fn() });
   return {
     clearProcessedBlocks: vi.fn(),
     clearPendingDiffs: vi.fn(),
@@ -187,6 +192,8 @@ function createMockDiffManager() {
     registerShellDeletedFiles: vi.fn(),
     getFailedAutoApplyCount: vi.fn(() => 0),
     resetFailedAutoApplyCount: vi.fn(),
+    onCodeApplied: vi.fn(noopDisposable),
+    onEditRejected: vi.fn(noopDisposable),
   };
 }
 
@@ -249,11 +256,8 @@ describe('RequestOrchestrator', () => {
       { getActiveContent: () => '' } as any, // savedPromptManager
     );
 
-    // CQRS: In production, the webview sends turnEventsForSave after endResponse.
-    // In tests, there's no webview — immediately resolve with empty events.
-    orchestrator.onEndResponse(() => {
-      orchestrator.receiveTurnEvents([]);
-    });
+    // ADR 0003 Phase 3: receiveTurnEvents retired. Extension authors events
+    // directly, no receiver needed from webview side. Tests no longer poke it.
   });
 
   // ── Session Management ──
@@ -532,11 +536,15 @@ describe('RequestOrchestrator', () => {
       await orchestrator.handleMessage('Hello', 'session-1', async () => '', undefined);
 
       expect(mockConversation.recordAssistantMessage).toHaveBeenCalled();
-      const callArgs = mockConversation.recordAssistantMessage.mock.calls[0];
+      // Phase 2: first call is the in_progress placeholder; the final call is
+      // the authoritative assistant message with the streamed content.
+      const allCalls = mockConversation.recordAssistantMessage.mock.calls;
+      const callArgs = allCalls[allCalls.length - 1];
       expect(callArgs[0]).toBe('session-1');
       expect(callArgs[1]).toContain('Hello world');
       expect(callArgs[2]).toBe('deepseek-chat');
       expect(callArgs[3]).toBe('stop');
+      expect(callArgs[7]).toMatchObject({ status: 'complete' });
     });
 
     it('should record file modifications in history', async () => {
@@ -605,12 +613,16 @@ describe('RequestOrchestrator', () => {
 
       await orchestrator.handleMessage('Hello', 'session-1', async () => '', undefined);
 
-      // Should record partial message with [Generation stopped]
+      // Should record partial message with [Generation stopped].
+      // Phase 2 also writes an in_progress placeholder first — use objectContaining
+      // on the calls list rather than exact-match on a single call.
       expect(mockConversation.recordAssistantMessage).toHaveBeenCalledWith(
         'session-1',
         expect.stringContaining('[Generation stopped]'),
         'deepseek-chat',
-        'stop'
+        'stop',
+        undefined, undefined, undefined,
+        expect.objectContaining({ status: 'interrupted' })
       );
     });
 
@@ -625,6 +637,97 @@ describe('RequestOrchestrator', () => {
       await orchestrator.handleMessage('Hello', null, async () => '', undefined);
 
       expect(errors).toHaveLength(0);
+    });
+
+    // ADR 0001: user-initiated stop must save only the *[User interrupted]* marker
+    // and drop the partial assistant content. Backend aborts keep partial content.
+    // See: docs/architecture/decisions/0001-stop-button-discards-partial.md
+    it('user-initiated stop saves only the marker, dropping partial content', async () => {
+      mockClient.streamChat.mockImplementation(async (
+        _messages: any,
+        onToken: (token: string) => void,
+      ) => {
+        onToken('some partial streamed content that should NOT be persisted');
+        orchestrator.stopGeneration();
+        const abortError = new Error('Request aborted');
+        abortError.name = 'AbortError';
+        throw abortError;
+      });
+
+      await orchestrator.handleMessage('Hello', 'session-1', async () => '', undefined);
+
+      // Phase 2 writes an in_progress placeholder at turn start, then the
+      // interrupted finalization at abort time. Assert against the finalization
+      // (last call) — the placeholder's empty content is expected and not
+      // the assertion target here.
+      const calls = mockConversation.recordAssistantMessage.mock.calls;
+      expect(calls.length).toBeGreaterThanOrEqual(1);
+      const savedText = calls[calls.length - 1][1];
+      expect(savedText).toBe('*[User interrupted]*');
+      expect(savedText).not.toContain('partial streamed content');
+      expect(savedText).not.toContain('Generation stopped');
+      expect(calls[calls.length - 1][7]).toMatchObject({ status: 'interrupted' });
+    });
+
+    it('backend abort (no user stop) keeps partial content alongside the marker', async () => {
+      mockClient.streamChat.mockImplementation(async (
+        _messages: any,
+        onToken: (token: string) => void,
+      ) => {
+        onToken('partial streamed content');
+        const abortError = new Error('Request aborted');
+        abortError.name = 'AbortError';
+        throw abortError;
+      });
+
+      await orchestrator.handleMessage('Hello', 'session-1', async () => '', undefined);
+
+      const calls = mockConversation.recordAssistantMessage.mock.calls;
+      const savedText = calls[calls.length - 1][1];
+      expect(savedText).toContain('partial streamed content');
+      expect(savedText).toContain('*[Generation stopped]*');
+      expect(savedText).not.toContain('*[User interrupted]*');
+      expect(calls[calls.length - 1][7]).toMatchObject({ status: 'interrupted' });
+    });
+
+    it('_userInitiatedStop flag resets after use so next abort is treated as backend', async () => {
+      // First call: user-initiated stop
+      mockClient.streamChat.mockImplementationOnce(async (
+        _messages: any,
+        onToken: (token: string) => void,
+      ) => {
+        onToken('first partial');
+        orchestrator.stopGeneration();
+        const abortError = new Error('Request aborted');
+        abortError.name = 'AbortError';
+        throw abortError;
+      });
+      await orchestrator.handleMessage('Hello', 'session-1', async () => '', undefined);
+
+      // Second call: backend abort with no stopGeneration() call
+      mockClient.streamChat.mockImplementationOnce(async (
+        _messages: any,
+        onToken: (token: string) => void,
+      ) => {
+        onToken('second partial');
+        const abortError = new Error('Request aborted');
+        abortError.name = 'AbortError';
+        throw abortError;
+      });
+      await orchestrator.handleMessage('Hello again', 'session-1', async () => '', undefined);
+
+      // Phase 2: filter out the placeholder writes — only finalization rows
+      // carry a status of 'interrupted' or 'complete'. The ADR 0001 guarantee
+      // is about what gets persisted as the authoritative turn record.
+      const finalizations = mockConversation.recordAssistantMessage.mock.calls.filter(
+        (c: any[]) => c[7] && (c[7].status === 'interrupted' || c[7].status === 'complete')
+      );
+      expect(finalizations.length).toBeGreaterThanOrEqual(2);
+      const firstSaved = finalizations[0][1];
+      const secondSaved = finalizations[1][1];
+      expect(firstSaved).toBe('*[User interrupted]*');
+      expect(secondSaved).toContain('second partial');
+      expect(secondSaved).toContain('*[Generation stopped]*');
     });
 
     it('should provide helpful message for context length errors with attachments', async () => {
@@ -967,6 +1070,9 @@ describe('RequestOrchestrator', () => {
 
   describe('command approval gate', () => {
     function createMockCommandApprovalManager() {
+      // Minimal event emitter stubs for the subscriptions wired by
+      // RequestOrchestrator's structural event recorder (ADR 0003).
+      const noopDisposable = () => ({ dispose: vi.fn() });
       return {
         checkCommand: vi.fn(() => 'allowed' as 'allowed' | 'blocked' | 'ask'),
         addRule: vi.fn(),
@@ -978,6 +1084,8 @@ describe('RequestOrchestrator', () => {
         findUnknownSubCommand: vi.fn((cmd: string) => cmd),
         requestApproval: vi.fn(async (cmd: string) => ({ command: cmd, decision: 'blocked' as const, persistent: false })),
         cancelPendingApproval: vi.fn(),
+        onApprovalRequired: vi.fn(noopDisposable),
+        onApprovalResolved: vi.fn(noopDisposable),
       };
     }
 
@@ -1204,6 +1312,419 @@ describe('RequestOrchestrator', () => {
       orchestrator.stopGeneration();
 
       expect(events).toHaveLength(0);
+    });
+  });
+
+  // ADR 0003 Phase 1: StructuralEventRecorder fidelity.
+  // The recorder subscribes to existing emitters; a turn passing through the
+  // orchestrator must leave a consistent event trail in the recorder. This
+  // test locks in the Phase 1 contract so Phases 2 and 3 can assert richer
+  // fidelity (live == saved == hydrated) against the same surface.
+  describe('structural event recorder', () => {
+    it('starts and drains a turn around handleMessage', async () => {
+      const recorder = orchestrator.structuralEvents;
+      expect(recorder.peekCurrent()).toBeNull();
+
+      await orchestrator.handleMessage('Hello', 'session-1', async () => '', undefined);
+
+      // Turn completed and drained
+      expect(recorder.peekCurrent()).toBeNull();
+      const last = recorder.peekLastCompleted();
+      expect(last).not.toBeNull();
+      expect(last?.sessionId).toBe('session-1');
+    });
+
+    it('records shell-start and shell-complete events with matching IDs when the orchestrator emits them', () => {
+      const recorder = orchestrator.structuralEvents;
+      recorder.startTurn('turn-x', 'session-1');
+
+      // Simulate the orchestrator firing shell events (as happens during a real turn).
+      (orchestrator as any)._onShellExecuting.fire({
+        commands: [{ command: 'ls', description: 'list' }],
+      });
+      (orchestrator as any)._onShellResults.fire({
+        results: [{ command: 'ls', output: 'file.txt', success: true }],
+      });
+
+      const snap = recorder.peekCurrent();
+      expect(snap?.events).toHaveLength(2);
+      const [start, complete] = snap!.events;
+      expect(start.type).toBe('shell-start');
+      expect(complete.type).toBe('shell-complete');
+      // Start and complete share the same generated id
+      expect((start as any).id).toBe((complete as any).id);
+    });
+
+    it('emits iteration-end only when transitioning out of a real iteration', () => {
+      // The very first onIterationStart (iteration=1) does NOT emit iteration-end
+      // for a phantom iteration 0 — there was nothing to end. Subsequent
+      // transitions (1→2, 2→3) emit iteration-end for the completed iteration.
+      const recorder = orchestrator.structuralEvents;
+      recorder.startTurn('turn-x', 'session-1');
+
+      (orchestrator as any)._onIterationStart.fire({ iteration: 1 });
+      (orchestrator as any)._onIterationStart.fire({ iteration: 2 });
+      (orchestrator as any)._onIterationStart.fire({ iteration: 3 });
+
+      const events = recorder.peekCurrent()!.events;
+      expect(events.filter(e => e.type === 'iteration-end')).toEqual([
+        { type: 'iteration-end', iteration: 1, ts: expect.any(Number) },
+        { type: 'iteration-end', iteration: 2, ts: expect.any(Number) },
+      ]);
+    });
+
+    it('drains the recorder on abort so partial turns are inspectable', async () => {
+      const recorder = orchestrator.structuralEvents;
+      const abortError = new Error('Request aborted');
+      abortError.name = 'AbortError';
+      mockClient.streamChat.mockImplementation(async (
+        _messages: any,
+        onToken: (token: string) => void,
+      ) => {
+        onToken('partial');
+        throw abortError;
+      });
+
+      await orchestrator.handleMessage('Hello', 'session-1', async () => '', undefined);
+
+      expect(recorder.peekCurrent()).toBeNull();
+      expect(recorder.peekLastCompleted()).not.toBeNull();
+    });
+
+    it('emits text-append events as the stream tokens arrive', async () => {
+      const recorder = orchestrator.structuralEvents;
+      await orchestrator.handleMessage('Hello', 'session-1', async () => '', undefined);
+
+      const last = recorder.peekLastCompleted()!;
+      const textEvents = last.events.filter(e => e.type === 'text-append');
+      // The default mock emits 'Hello ' and 'world!'
+      expect(textEvents.map((e: any) => e.content)).toEqual(['Hello ', 'world!']);
+    });
+
+    it('Chat-model turn does NOT emit a phantom iteration-end(0) at completion', async () => {
+      // Chat model doesn't iterate, so iteration-end must be absent at end-of-turn.
+      const recorder = orchestrator.structuralEvents;
+      await orchestrator.handleMessage('Hello', 'session-1', async () => '', undefined);
+
+      const last = recorder.peekLastCompleted()!;
+      const endEvents = last.events.filter(e => e.type === 'iteration-end');
+      expect(endEvents).toHaveLength(0);
+    });
+
+    it('Reasoner-model turn emits a final iteration-end on normal completion', async () => {
+      mockClient.isReasonerModel.mockReturnValue(true);
+      const recorder = orchestrator.structuralEvents;
+      await orchestrator.handleMessage('Hello', 'session-1', async () => '', undefined);
+
+      const last = recorder.peekLastCompleted()!;
+      const endEvents = last.events.filter(e => e.type === 'iteration-end');
+      expect(endEvents.length).toBeGreaterThanOrEqual(1);
+      expect(last.events[last.events.length - 1].type).toBe('iteration-end');
+    });
+
+    it('extracts code-block events from streamed text at end of iteration', async () => {
+      // Use Reasoner so end-of-turn flushes code blocks via iteration-end.
+      mockClient.isReasonerModel.mockReturnValue(true);
+      mockClient.streamChat.mockImplementationOnce(async (
+        _messages: any,
+        onToken: (token: string) => void,
+      ) => {
+        onToken('Here is some code:\n```typescript\nconst x = 1;\n```\nAnd more prose.');
+      });
+
+      const recorder = orchestrator.structuralEvents;
+      await orchestrator.handleMessage('Hello', 'session-1', async () => '', undefined);
+
+      const last = recorder.peekLastCompleted()!;
+      const codeBlocks = last.events.filter(e => e.type === 'code-block') as Array<{
+        type: 'code-block'; language: string; content: string;
+      }>;
+      expect(codeBlocks).toHaveLength(1);
+      expect(codeBlocks[0].language).toBe('typescript');
+      expect(codeBlocks[0].content).toBe('const x = 1;');
+    });
+
+    // ADR 0003 Phase 2: incremental persistence of structural events + status lifecycle.
+
+    it('writes an in_progress placeholder at turn start before any structural events', async () => {
+      // The placeholder must be the FIRST recordAssistantMessage call so a crash
+      // before the final save still leaves an anchor for hydration.
+      mockClient.streamChat.mockImplementationOnce(async () => {});
+
+      await orchestrator.handleMessage('Hello', 'session-1', async () => '', undefined);
+
+      const calls = mockConversation.recordAssistantMessage.mock.calls;
+      expect(calls.length).toBeGreaterThanOrEqual(1);
+      const firstCall = calls[0];
+      // Signature: (sessionId, content, model, finishReason, usage, contentIterations, turnEvents, extras)
+      expect(firstCall[0]).toBe('session-1');
+      expect(firstCall[1]).toBe('');
+      expect(firstCall[7]).toMatchObject({ status: 'in_progress' });
+      expect(firstCall[7].turnId).toMatch(/^session-1-\d+$/);
+    });
+
+    it('finalizes with status=complete on clean turn completion', async () => {
+      await orchestrator.handleMessage('Hello', 'session-1', async () => '', undefined);
+
+      const calls = mockConversation.recordAssistantMessage.mock.calls;
+      const finalCall = calls[calls.length - 1];
+      expect(finalCall[7]).toMatchObject({ status: 'complete' });
+      expect(finalCall[7].turnId).toMatch(/^session-1-\d+$/);
+      // Placeholder and final share the same turnId (correlation for hydration)
+      expect(finalCall[7].turnId).toBe(calls[0][7].turnId);
+    });
+
+    it('marks status=interrupted on abort path', async () => {
+      const abortError = new Error('Request aborted');
+      abortError.name = 'AbortError';
+      mockClient.streamChat.mockImplementation(async (
+        _messages: any,
+        onToken: (token: string) => void,
+      ) => {
+        onToken('partial');
+        throw abortError;
+      });
+
+      await orchestrator.handleMessage('Hello', 'session-1', async () => '', undefined);
+
+      const calls = mockConversation.recordAssistantMessage.mock.calls;
+      const abortCall = calls[calls.length - 1];
+      expect(abortCall[7]).toMatchObject({ status: 'interrupted' });
+    });
+
+    it('persists each structural event to the events table with monotonic indexInTurn', async () => {
+      await orchestrator.handleMessage('Hello', 'session-1', async () => '', undefined);
+
+      const calls = mockConversation.recordStructuralEvent.mock.calls;
+      expect(calls.length).toBeGreaterThan(0);
+
+      // indexInTurn is the 3rd argument; should be 0, 1, 2, ... in order.
+      const indices = calls.map((c: any[]) => c[2]);
+      for (let i = 0; i < indices.length; i++) {
+        expect(indices[i]).toBe(i);
+      }
+
+      // All calls share the same turnId (2nd argument)
+      const turnIds = new Set(calls.map((c: any[]) => c[1]));
+      expect(turnIds.size).toBe(1);
+    });
+
+    it('each recordStructuralEvent payload matches what was appended to the recorder', async () => {
+      await orchestrator.handleMessage('Hello', 'session-1', async () => '', undefined);
+
+      const persisted = mockConversation.recordStructuralEvent.mock.calls.map((c: any[]) => c[3]);
+      const live = orchestrator.structuralEvents.peekLastCompleted()!.events;
+      expect(persisted).toEqual(live);
+    });
+
+    // Phase 2.5 coverage
+
+    it('resets shell/approval IDs on turn start so stale state from a prior turn does not leak', async () => {
+      // Seed stale state (simulating a turn that aborted mid-shell).
+      (orchestrator as any)._currentShellIdForRecorder = 'sh-stale';
+      (orchestrator as any)._currentApprovalIdForRecorder = 'ap-stale';
+      (orchestrator as any)._iterationContentAccum = 'stale content';
+      (orchestrator as any)._iterationCodeBlocksEmitted = 7;
+
+      await orchestrator.handleMessage('Hello', 'session-1', async () => '', undefined);
+
+      // After turn start and drain, instance state must be clean.
+      expect((orchestrator as any)._currentShellIdForRecorder).toBeNull();
+      expect((orchestrator as any)._currentApprovalIdForRecorder).toBeNull();
+    });
+
+    it('abort path emits a final iteration-end before draining (Reasoner turn)', async () => {
+      // Only Reasoner turns have real iteration boundaries to close. Chat-model
+      // turns never enter an iteration, so iteration-end is correctly skipped
+      // for them (no phantom iteration-end(0)).
+      mockClient.isReasonerModel.mockReturnValue(true);
+      const abortError = new Error('Request aborted');
+      abortError.name = 'AbortError';
+      mockClient.streamChat.mockImplementation(async (
+        _messages: any,
+        onToken: (token: string) => void,
+      ) => {
+        onToken('partial');
+        throw abortError;
+      });
+
+      await orchestrator.handleMessage('Hello', 'session-1', async () => '', undefined);
+
+      const last = orchestrator.structuralEvents.peekLastCompleted()!;
+      const lastEvent = last.events[last.events.length - 1];
+      expect(lastEvent.type).toBe('iteration-end');
+    });
+
+    it('drains the recorder on non-abort API errors (400/500) so the turn is inspectable', async () => {
+      // Regression guard: before the error-path drain fix, a backend error
+      // (non-abort) left the recorder mid-turn forever. The Export Turn debug
+      // command would show inFlightTurn set and lastCompletedTurn null.
+      mockClient.streamChat.mockRejectedValue(new Error('HTTP 400: Bad Request'));
+
+      const recorder = orchestrator.structuralEvents;
+      await orchestrator.handleMessage('Hello', 'session-1', async () => '', undefined);
+
+      expect(recorder.peekCurrent()).toBeNull();
+      expect(recorder.peekLastCompleted()).not.toBeNull();
+    });
+
+    it('abort path on Chat-model turn drains without a phantom iteration-end(0)', async () => {
+      // Regression guard: before the iteration-end-guard fix, Chat turns
+      // emitted iteration-end(0) at end-of-turn even though no iteration ran.
+      const abortError = new Error('Request aborted');
+      abortError.name = 'AbortError';
+      mockClient.streamChat.mockImplementation(async (
+        _messages: any,
+        onToken: (token: string) => void,
+      ) => {
+        onToken('partial');
+        throw abortError;
+      });
+
+      await orchestrator.handleMessage('Hello', 'session-1', async () => '', undefined);
+
+      const last = orchestrator.structuralEvents.peekLastCompleted()!;
+      const iterEnds = last.events.filter(e => e.type === 'iteration-end');
+      expect(iterEnds).toHaveLength(0);
+    });
+
+    it('emits thinking-complete BEFORE text-append when content follows reasoning', async () => {
+      mockClient.isReasonerModel.mockReturnValue(true);
+      // The ordering matters for hydration: thinking block must close before the
+      // first visible content token is recorded.
+      mockClient.streamChat.mockImplementationOnce(async (
+        _messages: any,
+        onToken: (token: string) => void,
+        _sys: string,
+        onReasoning?: (t: string) => void,
+      ) => {
+        onReasoning?.('planning...');
+        onToken('Here is the answer');
+      });
+
+      await orchestrator.handleMessage('Hello', 'session-1', async () => '', undefined);
+
+      const events = orchestrator.structuralEvents.peekLastCompleted()!.events;
+      const completeIdx = events.findIndex(e => e.type === 'thinking-complete');
+      const firstTextIdx = events.findIndex(e => e.type === 'text-append');
+      expect(completeIdx).toBeGreaterThan(-1);
+      expect(firstTextIdx).toBeGreaterThan(completeIdx);
+    });
+
+    it('re-opens thinking if reasoning arrives after content (new thinking-start emitted)', async () => {
+      mockClient.isReasonerModel.mockReturnValue(true);
+      mockClient.streamChat.mockImplementationOnce(async (
+        _messages: any,
+        onToken: (token: string) => void,
+        _sys: string,
+        onReasoning?: (t: string) => void,
+      ) => {
+        onReasoning?.('first thought');
+        onToken('visible text');
+        onReasoning?.('second thought');
+      });
+
+      await orchestrator.handleMessage('Hello', 'session-1', async () => '', undefined);
+
+      const events = orchestrator.structuralEvents.peekLastCompleted()!.events;
+      const starts = events.filter(e => e.type === 'thinking-start');
+      const completes = events.filter(e => e.type === 'thinking-complete');
+      // Two thinking blocks: start/complete/start/complete
+      expect(starts.length).toBe(2);
+      expect(completes.length).toBe(2);
+    });
+
+    it('emits tool-batch events for Chat-model tool calls', () => {
+      const recorder = orchestrator.structuralEvents;
+      recorder.startTurn('turn-x', 'session-1');
+
+      (orchestrator as any)._onToolCallsStart.fire({
+        tools: [{ name: 'apply_code_edit', detail: '', status: 'pending' }],
+      });
+      (orchestrator as any)._onToolCallUpdate.fire({ index: 0, status: 'done', detail: '' });
+      (orchestrator as any)._onToolCallsEnd.fire();
+
+      const events = recorder.peekCurrent()!.events;
+      expect(events.map(e => e.type)).toEqual([
+        'tool-batch-start', 'tool-update', 'tool-batch-complete',
+      ]);
+    });
+
+    it('emits file-modified on DiffManager.onCodeApplied with the applied status', () => {
+      const recorder = orchestrator.structuralEvents;
+      recorder.startTurn('turn-x', 'session-1');
+
+      // DiffManager's mock has currentEditMode='manual' from createMockDiffManager
+      const diffCalls = (mockDiffManager as any).onCodeApplied.mock.calls;
+      // Retrieve the subscription handler registered by wireStructuralRecorder
+      // (handler is the first argument to onCodeApplied(...))
+      const handler = diffCalls[diffCalls.length - 1][0];
+      handler({ success: true, filePath: 'src/game.ts' });
+
+      const events = recorder.peekCurrent()!.events;
+      expect(events).toContainEqual(expect.objectContaining({
+        type: 'file-modified',
+        path: 'src/game.ts',
+        status: 'applied',
+      }));
+    });
+
+    it('recordDrawing appends a drawing event to the current turn', () => {
+      const recorder = orchestrator.structuralEvents;
+      recorder.startTurn('turn-x', 'session-1');
+
+      orchestrator.recordDrawing('data:image/png;base64,abc');
+
+      const events = recorder.peekCurrent()!.events;
+      expect(events).toContainEqual(expect.objectContaining({
+        type: 'drawing',
+        imageDataUrl: 'data:image/png;base64,abc',
+      }));
+    });
+
+    it('pairs approval-created and approval-resolved with the same id', async () => {
+      // Inject a command approval manager that fires its events synchronously.
+      const { CommandApprovalManager } = await import('../../../src/providers/commandApprovalManager');
+      const mockDb: any = {
+        prepare: () => ({ get: () => ({ rules_version: 0 }), run: () => {}, all: () => [] }),
+        transaction: (fn: any) => fn,
+      };
+      const cam = new (CommandApprovalManager as any)(mockDb, undefined);
+
+      // Rebuild orchestrator with the command approval manager wired in.
+      orchestrator.dispose();
+      orchestrator = new RequestOrchestrator(
+        mockClient as any, mockConversation as any, mockStatusBar as any,
+        mockDiffManager as any, mockWebSearch as any, mockFileContext as any,
+        cam, { getActiveContent: () => '' } as any,
+      );
+      // ADR 0003 Phase 3: no receiveTurnEvents hookup needed.
+
+      const recorder = orchestrator.structuralEvents;
+      recorder.startTurn('turn-x', 'session-1');
+
+      // Start a shell so approval has something to correlate with.
+      (orchestrator as any)._onShellExecuting.fire({
+        commands: [{ command: 'npm install', description: '' }],
+      });
+      // Fire approval lifecycle
+      (cam as any)._onApprovalRequired.fire({
+        command: 'npm install', prefix: 'npm install', unknownSubCommand: 'install',
+      });
+      (cam as any)._onApprovalResolved.fire({
+        command: 'npm install', decision: 'allowed', persistent: false,
+      });
+
+      const events = recorder.peekCurrent()!.events;
+      const created = events.find(e => e.type === 'approval-created') as any;
+      const resolved = events.find(e => e.type === 'approval-resolved') as any;
+      expect(created).toBeDefined();
+      expect(resolved).toBeDefined();
+      expect(created.id).toBe(resolved.id);
+      expect(created.shellId).toMatch(/^sh-\d+$/);
+      expect(resolved.decision).toBe('allowed');
+
+      cam.dispose();
     });
   });
 });

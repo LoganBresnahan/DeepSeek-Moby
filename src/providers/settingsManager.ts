@@ -27,6 +27,7 @@ export interface SettingsUpdateInput {
   temperature?: number;
   maxToolCalls?: number;
   maxShellIterations?: number;
+  maxFileEditLoops?: number;
   autoSaveHistory?: boolean;
 }
 
@@ -75,6 +76,11 @@ export class SettingsManager {
     if (settings.maxShellIterations !== undefined) {
       await config.update('maxShellIterations', settings.maxShellIterations, vscode.ConfigurationTarget.Global);
       logger.settingsChanged('maxShellIterations', settings.maxShellIterations);
+    }
+
+    if (settings.maxFileEditLoops !== undefined) {
+      await config.update('maxFileEditLoops', settings.maxFileEditLoops, vscode.ConfigurationTarget.Global);
+      logger.settingsChanged('maxFileEditLoops', settings.maxFileEditLoops);
     }
 
     // maxTokens is now per-model, handled directly in chatProvider setMaxTokens handler
@@ -159,10 +165,11 @@ export class SettingsManager {
     tracer.enabled = tracingEnabled;
 
     return {
-      model: config.get<string>('model') || 'deepseek-chat',
+      model: this.deepSeekClient.getModel(),
       temperature: config.get<number>('temperature') ?? 0.7,
       maxToolCalls: config.get<number>('maxToolCalls') ?? 100,
       maxShellIterations: config.get<number>('maxShellIterations') ?? 100,
+      maxFileEditLoops: config.get<number>('maxFileEditLoops') ?? 100,
       maxTokens: this.getMaxTokensForCurrentModel(config),
       logLevel: config.get<string>('logLevel') || 'WARN',
       webviewLogLevel: config.get<string>('webviewLogLevel') || 'WARN',
@@ -196,6 +203,7 @@ export class SettingsManager {
       await config.update('maxTokensReasonerModel', undefined, vscode.ConfigurationTarget.Global);
       await config.update('maxToolCalls', undefined, vscode.ConfigurationTarget.Global);
       await config.update('maxShellIterations', undefined, vscode.ConfigurationTarget.Global);
+      await config.update('maxFileEditLoops', undefined, vscode.ConfigurationTarget.Global);
       await config.update('editMode', undefined, vscode.ConfigurationTarget.Global);
       await config.update('autoSaveHistory', undefined, vscode.ConfigurationTarget.Global);
 

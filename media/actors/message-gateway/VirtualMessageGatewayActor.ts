@@ -179,6 +179,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       case 'tool-batch': return `tools(${s.tools.length}, complete=${s.complete})`;
       case 'code-block': return `code(lang=${s.language})`;
       case 'drawing': return `drawing`;
+      case 'shutdown-interrupted': return `shutdown-interrupted(iter=${s.iteration})`;
       default: return (s as any).type;
     }
   }
@@ -386,6 +387,13 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       case 'drawing':
         // Drawing segments — delegate to virtual list if method exists
         break;
+
+      case 'shutdown-interrupted':
+        // ADR 0003 Phase 3: distinct marker for turns whose host died before
+        // finalization. Rendered as a styled text segment so the user can tell
+        // it apart from ADR 0001's user/backend interruption markers.
+        virtualList.addTextSegment(turnId, '\n\n*[Interrupted by shutdown — partial response restored]*');
+        break;
     }
   }
 
@@ -449,100 +457,9 @@ export class VirtualMessageGatewayActor extends EventStateActor {
     }
   }
 
-  /**
-   * Convert a RichHistoryTurn (from ConversationManager) into TurnEvent[].
-   * This bridges the existing history format with the CQRS event log.
-   */
-  private convertHistoryToEvents(m: {
-    content: string;
-    reasoning_iterations?: string[];
-    contentIterations?: string[];
-    toolCalls?: Array<{ name: string; detail: string; status: string }>;
-    shellResults?: Array<{ command: string; output: string; success: boolean }>;
-    filesModified?: string[];
-    editMode?: string;
-  }): TurnEvent[] {
-    const events: TurnEvent[] = [];
-    const reasoning = m.reasoning_iterations || [];
-    const contentIts = m.contentIterations || [];
-    const shells = m.shellResults || [];
-    const tools = m.toolCalls || [];
-    let ts = 0;
-
-    if (reasoning.length > 0) {
-      // ── Reasoner model: interleave thinking → content → shells ──
-      // Build a shell index by iteration (shells are sequential, map to iterations)
-      let shellIdx = 0;
-
-      for (let i = 0; i < reasoning.length; i++) {
-        // Thinking
-        events.push({ type: 'thinking-start', iteration: i, ts: ++ts });
-        events.push({ type: 'thinking-content', content: reasoning[i], iteration: i, ts: ++ts });
-        events.push({ type: 'thinking-complete', iteration: i, ts: ++ts });
-
-        // Content for this iteration (if exists and there are shells for it)
-        const contentForIteration = i < contentIts.length ? contentIts[i] : null;
-        if (contentForIteration) {
-          events.push({ type: 'text-append', content: contentForIteration, iteration: i, ts: ++ts });
-          events.push({ type: 'text-finalize', iteration: i, ts: ++ts });
-        }
-
-        // Shell commands — assign remaining shells to this iteration
-        // Heuristic: distribute one shell per iteration, remaining go to last
-        if (shellIdx < shells.length && i < reasoning.length - 1) {
-          // One shell per reasoning iteration (except the last which gets remaining content)
-          const sr = shells[shellIdx];
-          const shellId = `sh-restore-${shellIdx}`;
-          events.push({ type: 'shell-start', id: shellId, commands: [{ command: sr.command }], iteration: i, ts: ++ts });
-          events.push({ type: 'shell-complete', id: shellId, results: [{ output: sr.output, success: sr.success }], ts: ++ts });
-          shellIdx++;
-        }
-      }
-
-      // Remaining shells (if more shells than reasoning iterations)
-      while (shellIdx < shells.length) {
-        const sr = shells[shellIdx];
-        const shellId = `sh-restore-${shellIdx}`;
-        const lastIter = reasoning.length - 1;
-        events.push({ type: 'shell-start', id: shellId, commands: [{ command: sr.command }], iteration: lastIter, ts: ++ts });
-        events.push({ type: 'shell-complete', id: shellId, results: [{ output: sr.output, success: sr.success }], ts: ++ts });
-        shellIdx++;
-      }
-
-      // File modifications
-      if (m.filesModified && m.filesModified.length > 0) {
-        for (const filePath of m.filesModified) {
-          events.push({ type: 'file-modified', path: filePath, status: 'applied', editMode: m.editMode, ts: ++ts });
-        }
-      }
-
-      // Remaining content that wasn't paired with iterations (fallback: full content)
-      if (contentIts.length === 0 && m.content) {
-        events.push({ type: 'text-append', content: m.content, iteration: 0, ts: ++ts });
-      }
-    } else {
-      // ── Chat model: tools → files → content ──
-      if (tools.length > 0) {
-        events.push({ type: 'tool-batch-start', tools: tools.map(t => ({ name: t.name, detail: t.detail })), ts: ++ts });
-        for (let i = 0; i < tools.length; i++) {
-          events.push({ type: 'tool-update', index: i, status: tools[i].status, ts: ++ts });
-        }
-        events.push({ type: 'tool-batch-complete', ts: ++ts });
-      }
-
-      if (m.filesModified && m.filesModified.length > 0) {
-        for (const filePath of m.filesModified) {
-          events.push({ type: 'file-modified', path: filePath, status: 'applied', editMode: m.editMode, ts: ++ts });
-        }
-      }
-
-      if (m.content) {
-        events.push({ type: 'text-append', content: m.content, iteration: 0, ts: ++ts });
-      }
-    }
-
-    return events;
-  }
+  // ADR 0003 Phase 3: convertHistoryToEvents was deleted here. Hydration now
+  // reads structural_turn_event rows directly in ConversationManager and the
+  // webview consumes them verbatim.
 
   // ============================================
   // Message Router
@@ -984,18 +901,15 @@ export class VirtualMessageGatewayActor extends EventStateActor {
 
     log.debug(`endResponse: ending stream`);
 
-    // CQRS: Finalize event log
+    // ADR 0003 Phase 3: the webview no longer ships its consolidated event log
+    // back to the extension for DB persistence. The extension authors structural
+    // events live into the events table; the webview's TurnEventLog exists only
+    // for live rendering. Finalize the log for local projection and move on.
     if (this._currentTurnId) {
       const tl = this.getTurnLog(this._currentTurnId);
       this.emitThinkingCompleteIfOpen(this._currentTurnId);
       this.emitTextFinalizeIfOpen(this._currentTurnId);
-
       log.debug(`endResponse: event log for ${this._currentTurnId} has ${tl.length} events`);
-
-      // Send consolidated events to extension for DB persistence
-      const consolidated = tl.consolidateForSave();
-      log.debug(`endResponse: consolidated ${tl.length} → ${consolidated.length} events for save`);
-      this._vscode.postMessage({ type: 'turnEventsForSave', events: consolidated });
     }
 
     streaming.endStream();
@@ -1385,16 +1299,14 @@ export class VirtualMessageGatewayActor extends EventStateActor {
               sequence: m.sequence
             });
 
-            // ── CQRS: Load events and project ──
-            // Prefer turnEvents (raw event log from DB) over fragment conversion
-            const events = m.turnEvents && m.turnEvents.length > 0
-              ? m.turnEvents as TurnEvent[]
-              : this.convertHistoryToEvents(m);
-            const source = m.turnEvents && m.turnEvents.length > 0 ? 'turnEvents' : 'converted';
+            // ADR 0003 Phase 3: hydration reads structural events directly.
+            // The previous fragment-reconstruction fallback (convertHistoryToEvents)
+            // was deleted along with the fragment fields on RichHistoryTurn.
+            const events = (m.turnEvents ?? []) as TurnEvent[];
             const tl = this.getTurnLog(turnId);
             tl.load(events);
 
-            log.debug(`[VirtualGateway] restore turn ${turnId}: ${events.length} events from ${source}`);
+            log.debug(`[VirtualGateway] restore turn ${turnId}: ${events.length} events`);
 
             const segments = this._projector.projectFull(tl);
 
@@ -1470,11 +1382,13 @@ export class VirtualMessageGatewayActor extends EventStateActor {
   }
 
   private handleSettings(msg: { type: string; [key: string]: unknown }): void {
-    if (msg.model || msg.temperature !== undefined || msg.maxToolCalls !== undefined || msg.maxTokens !== undefined) {
+    if (msg.model || msg.temperature !== undefined || msg.maxToolCalls !== undefined || msg.maxTokens !== undefined || msg.maxShellIterations !== undefined || msg.maxFileEditLoops !== undefined) {
       this._manager.publishDirect('model.settings', {
         model: msg.model,
         temperature: msg.temperature,
         toolLimit: msg.maxToolCalls,
+        shellIterations: msg.maxShellIterations,
+        fileEditLoops: msg.maxFileEditLoops,
         maxTokens: msg.maxTokens
       });
     }
@@ -1540,31 +1454,14 @@ export class VirtualMessageGatewayActor extends EventStateActor {
     });
   }
 
-  private handleGenerationStopped(userStopped: boolean): void {
-    const { streaming, virtualList } = this._actors;
+  private handleGenerationStopped(_userStopped: boolean): void {
+    const { streaming } = this._actors;
 
-    // Only show "User interrupted" when the user actually clicked the stop button
-    if (userStopped && this._currentTurnId) {
-      this.emitTurnEvent(this._currentTurnId, {
-        type: 'text-append', content: '\n\n*[User interrupted]*', iteration: this._currentIteration, ts: Date.now()
-      });
-      this.emitTurnEvent(this._currentTurnId, {
-        type: 'text-finalize', iteration: this._currentIteration, ts: Date.now()
-      });
-
-      // Render the interrupted message as a new text segment
-      virtualList.addTextSegment(this._currentTurnId, '*[User interrupted]*');
-    }
-
+    // Update streaming UI state (toggles stop button → send button) so the user
+    // immediately sees the stop took effect. The marker text and turn finalization
+    // come through the normal streamToken/endResponse flow from the extension —
+    // see RequestOrchestrator's abort handler for the single source of truth.
     streaming.endStream();
-
-    if (this._currentTurnId) {
-      virtualList.endStreamingTurn();
-    }
-
-    this._phase = 'idle';
-    this._currentTurnId = null;
-
     this.publishCoordinationState();
   }
 

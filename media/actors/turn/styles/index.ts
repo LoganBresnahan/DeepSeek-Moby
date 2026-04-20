@@ -382,39 +382,18 @@ code.inline-code {
   height: 22px;
 }
 
-.gen-phrase {
-  position: absolute;
-  left: 0;
-  top: 50%;
-  transform: translateY(-50%);
-  opacity: 0;
+.gen-phrase-static {
+  color: var(--vscode-descriptionForeground);
   font-style: italic;
   font-size: 13px;
   letter-spacing: 0.3px;
+  opacity: 0.7;
+  animation: subtlePulse 2s ease-in-out infinite;
 }
 
-.gp-1 { animation: cyclePhrase 4.5s ease-in-out infinite; }
-.gp-2 { animation: cyclePhrase 4.5s ease-in-out 1.5s infinite; }
-.gp-3 { animation: cyclePhrase 4.5s ease-in-out 3s infinite; }
-
-@keyframes cyclePhrase {
-  0% { opacity: 0; }
-  6.67% { opacity: 1; }
-  27.78% { opacity: 1; }
-  33.33% { opacity: 0; }
-  100% { opacity: 0; }
-}
-
-.gc {
-  display: inline-block;
-  color: var(--vscode-descriptionForeground);
-  animation: charWave 1.8s ease-in-out infinite;
-  animation-delay: calc(var(--d) * 0.07s);
-}
-
-@keyframes charWave {
-  0%, 100% { transform: translateY(0); opacity: 0.5; }
-  50% { transform: translateY(-2px); opacity: 1; }
+@keyframes subtlePulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 0.9; }
 }
 `;
 

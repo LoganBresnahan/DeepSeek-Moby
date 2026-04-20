@@ -1231,7 +1231,10 @@ export class VirtualListActor extends EventStateActor {
       turn.height = measuredHeight;
       turn.heightMeasured = true;
 
-      log.debug(`measureTurnHeight: ${turnId} ${oldHeight}→${measuredHeight} (Δ${heightDelta > 0 ? '+' : ''}${heightDelta})`);
+      // Only log meaningful deltas (>50px) — small streaming-text adjustments spam the logs
+      if (Math.abs(heightDelta) > 50) {
+        log.debug(`measureTurnHeight: ${turnId} ${oldHeight}→${measuredHeight} (Δ${heightDelta > 0 ? '+' : ''}${heightDelta})`);
+      }
 
       // Update offsets for all following turns
       for (let i = turn.index + 1; i < this._turns.length; i++) {

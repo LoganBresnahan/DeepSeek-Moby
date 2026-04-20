@@ -6,6 +6,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { isLongRunningCommand } from '../../../src/tools/reasonerShellExecutor';
 
 // Re-implement the pure functions for testing (same logic as reasonerShellExecutor.ts)
 // This avoids importing the module which has vscode dependencies
@@ -479,6 +480,60 @@ Some code here`;
       const strippedWeb = stripWebSearchTags(content);
       expect(strippedWeb).toContain('<shell>');
       expect(strippedWeb).not.toContain('<web_search>');
+    });
+  });
+
+  // Regression tests for ADR 0002: heredoc bodies must be stripped before
+  // long-running pattern matching so that file contents (e.g. package.json deps
+  // containing "nodemon") don't trigger false positives and get silently skipped.
+  describe('isLongRunningCommand (ADR 0002 heredoc stripping)', () => {
+    it('does not flag cat > package.json heredoc that mentions nodemon in deps', () => {
+      const command = [
+        "cat > package.json << 'EOF'",
+        '{',
+        '  "name": "tictactoe",',
+        '  "devDependencies": {',
+        '    "nodemon": "^3.0.0"',
+        '  }',
+        '}',
+        'EOF',
+      ].join('\n');
+      expect(isLongRunningCommand(command)).toBe(false);
+    });
+
+    it('does not flag heredoc mentioning live-server or vite in package body', () => {
+      const command = [
+        'cat > package.json <<EOF',
+        '{ "devDependencies": { "live-server": "^1.0.0", "vite": "^5.0.0" } }',
+        'EOF',
+      ].join('\n');
+      expect(isLongRunningCommand(command)).toBe(false);
+    });
+
+    it('handles quoted and indented heredoc delimiters', () => {
+      const singleQuoted = "cat > f.json << 'EOF'\n{ \"nodemon\": \"x\" }\nEOF";
+      const doubleQuoted = 'cat > f.json << "EOF"\n{ "nodemon": "x" }\nEOF';
+      const dashHeredoc = "cat > f.json <<- EOF\n\t{ \"nodemon\": \"x\" }\nEOF";
+      expect(isLongRunningCommand(singleQuoted)).toBe(false);
+      expect(isLongRunningCommand(doubleQuoted)).toBe(false);
+      expect(isLongRunningCommand(dashHeredoc)).toBe(false);
+    });
+
+    it('still flags genuine long-running invocations', () => {
+      expect(isLongRunningCommand('nodemon server.js')).toBe(true);
+      expect(isLongRunningCommand('npm run dev')).toBe(true);
+      expect(isLongRunningCommand('npx live-server')).toBe(true);
+    });
+
+    it('still flags long-running command outside a heredoc in the same string', () => {
+      // The heredoc body is stripped, but content outside it is still checked.
+      const command = [
+        "cat > config.json << 'EOF'",
+        '{ "safe": "content" }',
+        'EOF',
+        '&& nodemon server.js',
+      ].join('\n');
+      expect(isLongRunningCommand(command)).toBe(true);
     });
   });
 });

@@ -199,6 +199,9 @@ export class ChatProvider implements vscode.WebviewViewProvider {
           imageDataUrl: event.imageDataUrl,
           timestamp: event.timestamp
         });
+        // ADR 0003 Phase 2.5 #7: also record into the structural event stream
+        // so hydration can replay the drawing in turn order.
+        this.requestOrchestrator.recordDrawing(event.imageDataUrl);
       });
       this.drawingServer.onAsciiReceived(event => {
         this._view?.webview.postMessage({
@@ -401,6 +404,15 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     return this.currentSessionId;
   }
 
+  /**
+   * ADR 0003: expose the structural event recorder for debug commands.
+   * Phase 1's Export Turn command reads from this. Phases 2 and 3 will feed
+   * into the same data path for persistence and hydration comparison.
+   */
+  public getStructuralEventRecorder() {
+    return this.requestOrchestrator.structuralEvents;
+  }
+
   private async loadCurrentSession() {
     const gs = this.conversationManager.getGlobalState();
 
@@ -506,9 +518,8 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         case 'stopGeneration':
           this.requestOrchestrator.stopGeneration();
           break;
-        case 'turnEventsForSave':
-          this.requestOrchestrator.receiveTurnEvents(data.events || []);
-          break;
+        // ADR 0003 Phase 3: turnEventsForSave retired. Webview no longer sends
+        // a consolidated CQRS blob; extension authors events live.
         case 'updateSettings':
           await this.settingsManager.updateSettings(data.settings);
           break;
@@ -538,6 +549,9 @@ export class ChatProvider implements vscode.WebviewViewProvider {
           break;
         case 'setShellIterations':
           await this.settingsManager.updateSettings({ maxShellIterations: data.shellIterations });
+          break;
+        case 'setFileEditLoops':
+          await this.settingsManager.updateSettings({ maxFileEditLoops: data.fileEditLoops });
           break;
         case 'setMaxTokens': {
           const model = data.model as string || this.deepSeekClient.getModel();
@@ -1303,8 +1317,12 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     this._view.webview.postMessage({ type: 'editModeSettings', mode: editMode });
 
     // Restore the session's model so the dropdown matches what was used
-    if (currentSession.model && currentSession.model !== this.deepSeekClient.getModel()) {
-      this.deepSeekClient.setModel(currentSession.model);
+    if (currentSession.model) {
+      if (currentSession.model !== this.deepSeekClient.getModel()) {
+        this.deepSeekClient.setModel(currentSession.model);
+      }
+      // Always send modelChanged — the webview HTML starts with a hardcoded default
+      // and needs an explicit message to show the correct model on load.
       this._view.webview.postMessage({ type: 'modelChanged', model: currentSession.model });
     }
 

@@ -88,6 +88,66 @@ export class EventStore {
       SELECT COUNT(*) as count
       FROM event_sessions WHERE session_id = ?
     `);
+
+    // ADR 0003 Phase 3: fetch all structural_turn_event rows for a given turn,
+    // ordered by indexInTurn (stored inside the JSON blob). Backed by the
+    // functional index idx_events_turn_id (migrations.ts).
+    this.stmtGetStructuralEventsForTurn = this.db.prepare(`
+      SELECT e.data, es.sequence
+      FROM events e
+      JOIN event_sessions es ON e.id = es.event_id
+      WHERE es.session_id = ?
+        AND e.type = 'structural_turn_event'
+        AND json_extract(e.data, '$.turnId') = ?
+      ORDER BY CAST(json_extract(e.data, '$.indexInTurn') AS INTEGER) ASC
+    `);
+
+    // ADR 0003 Phase 3: fetch all assistant_message rows for a given turn so
+    // hydration can pick the authoritative status row (complete > interrupted
+    // > in_progress for crash recovery).
+    this.stmtGetAssistantMessagesForTurn = this.db.prepare(`
+      SELECT e.data, es.sequence
+      FROM events e
+      JOIN event_sessions es ON e.id = es.event_id
+      WHERE es.session_id = ?
+        AND e.type = 'assistant_message'
+        AND json_extract(e.data, '$.turnId') = ?
+      ORDER BY es.sequence ASC
+    `);
+  }
+
+  private stmtGetStructuralEventsForTurn!: Statement;
+  private stmtGetAssistantMessagesForTurn!: Statement;
+
+  /**
+   * ADR 0003 Phase 3: fetch all structural_turn_event rows for a turn, in
+   * canonical order (indexInTurn ascending). Returns an empty array if no rows
+   * match — callers should treat that as "turn never wrote any events" rather
+   * than an error (e.g. pre-Phase-2 sessions).
+   */
+  getStructuralEventsForTurn(sessionId: string, turnId: string): ConversationEvent[] {
+    const rows = this.stmtGetStructuralEventsForTurn.all(sessionId, turnId) as { data: string; sequence: number }[];
+    return rows.map(row => {
+      const event = JSON.parse(row.data);
+      event.sessionId = sessionId;
+      event.sequence = row.sequence;
+      return event;
+    });
+  }
+
+  /**
+   * ADR 0003 Phase 3: fetch all assistant_message rows sharing a turnId.
+   * Ordered by sequence ASC so callers can pick the last row with the
+   * preferred status (complete > interrupted > in_progress).
+   */
+  getAssistantMessagesForTurn(sessionId: string, turnId: string): ConversationEvent[] {
+    const rows = this.stmtGetAssistantMessagesForTurn.all(sessionId, turnId) as { data: string; sequence: number }[];
+    return rows.map(row => {
+      const event = JSON.parse(row.data);
+      event.sessionId = sessionId;
+      event.sequence = row.sequence;
+      return event;
+    });
   }
 
   /**

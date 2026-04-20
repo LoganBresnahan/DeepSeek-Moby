@@ -40,6 +40,7 @@ export interface ModelSettings {
   temperature: number;
   toolLimit: number;
   shellIterations: number;
+  fileEditLoops: number;
   maxTokens: number;
 }
 
@@ -65,6 +66,7 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
   private _temperature = 0.7;
   private _toolLimit = 100;
   private _shellIterations = 100;
+  private _fileEditLoops = 100;
   private _maxTokens = 8192;
   private _streaming = false;
 
@@ -89,6 +91,7 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
         'model.temperature': () => this._temperature,
         'model.toolLimit': () => this._toolLimit,
         'model.shellIterations': () => this._shellIterations,
+        'model.fileEditLoops': () => this._fileEditLoops,
         'model.maxTokens': () => this._maxTokens
       },
       subscriptions: {
@@ -141,6 +144,7 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
     const temperature = this._temperature ?? 0.7;
     const toolLimit = this._toolLimit ?? 100;
     const shellIterations = this._shellIterations ?? 100;
+    const fileEditLoops = this._fileEditLoops ?? 100;
     const maxTokens = this._maxTokens ?? 8192;
     const isReasoner = (this._selectedModel || 'deepseek-chat') === 'deepseek-reasoner';
 
@@ -154,6 +158,9 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
       ${isReasoner
         ? this.renderParameterControl('shellIterations', 'Shell Iterations', this.formatIterations(shellIterations), 1, 100, 1, 'Limits R1 shell command loops')
         : this.renderParameterControl('toolLimit', 'Tool Iterations', this.formatIterations(toolLimit), 5, 100, 5, 'Limits tool calling loops')}
+      ${isReasoner
+        ? this.renderParameterControl('fileEditLoops', 'File Edit Loops', this.formatIterations(fileEditLoops), 1, 100, 1, 'Allows R1 to keep working after producing file edits (e.g., to run install/build commands)')
+        : ''}
       <div class="model-dropdown-divider"></div>
       ${this.renderParameterControl('maxTokens', 'Max Output Tokens', this.formatTokens(maxTokens), 256, modelMaxTokens, 256, this.getTokenHint())}
     `;
@@ -205,6 +212,7 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
       case 'temperature': return this._temperature ?? 0.7;
       case 'toolLimit': return this._toolLimit ?? 100;
       case 'shellIterations': return this._shellIterations ?? 100;
+      case 'fileEditLoops': return this._fileEditLoops ?? 100;
       case 'maxTokens': return this._maxTokens ?? 8192;
       default: return 0;
     }
@@ -266,6 +274,11 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
 
     if (typeof settings.shellIterations === 'number' && settings.shellIterations !== this._shellIterations) {
       this._shellIterations = settings.shellIterations;
+      changed = true;
+    }
+
+    if (typeof settings.fileEditLoops === 'number' && settings.fileEditLoops !== this._fileEditLoops) {
+      this._fileEditLoops = settings.fileEditLoops;
       changed = true;
     }
 
@@ -339,6 +352,13 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
         if (valueEl) valueEl.textContent = this.formatIterations(value);
         this._vscode.postMessage({ type: 'setShellIterations', shellIterations: value });
         this.publish({ 'model.shellIterations': value });
+        break;
+
+      case 'fileEditLoops':
+        this._fileEditLoops = value;
+        if (valueEl) valueEl.textContent = this.formatIterations(value);
+        this._vscode.postMessage({ type: 'setFileEditLoops', fileEditLoops: value });
+        this.publish({ 'model.fileEditLoops': value });
         break;
 
       case 'maxTokens':
@@ -417,6 +437,7 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
       temperature: this._temperature,
       toolLimit: this._toolLimit,
       shellIterations: this._shellIterations,
+      fileEditLoops: this._fileEditLoops,
       maxTokens: this._maxTokens
     };
   }

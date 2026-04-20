@@ -68,9 +68,10 @@ import type { ModelChangedEvent } from '../../../src/providers/settingsManager';
 
 // ── DeepSeekClient mock ──
 function createMockClient() {
+  let currentModel = 'deepseek-chat';
   return {
-    setModel: vi.fn(),
-    getModel: vi.fn(() => 'deepseek-chat'),
+    setModel: vi.fn((model: string) => { currentModel = model; }),
+    getModel: vi.fn(() => currentModel),
     chat: vi.fn(),
     chatStream: vi.fn(),
     getApiUsage: vi.fn(),

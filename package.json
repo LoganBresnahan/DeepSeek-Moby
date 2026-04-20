@@ -77,6 +77,13 @@
           "maximum": 100,
           "description": "[Reasoner model only] Maximum shell command iterations per request. (100 = no limit)"
         },
+        "moby.maxFileEditLoops": {
+          "type": "number",
+          "default": 100,
+          "minimum": 1,
+          "maximum": 100,
+          "description": "[Reasoner model only] Maximum continuations after R1 produces file edits (allows running install/build commands after writing files). (100 = no limit)"
+        },
         "moby.maxTokensChatModel": {
           "type": "number",
           "default": 8192,
@@ -314,6 +321,11 @@
         "command": "moby.exportTestFixture",
         "title": "Export Session (Test Fixture)",
         "category": "Moby"
+      },
+      {
+        "command": "moby.exportTurnAsJson",
+        "title": "Export Turn as JSON (Debug)",
+        "category": "Moby"
       }
     ],
     "menus": {
@@ -332,6 +344,10 @@
         },
         {
           "command": "moby.exportTestFixture",
+          "when": "config.moby.devMode"
+        },
+        {
+          "command": "moby.exportTurnAsJson",
           "when": "config.moby.devMode"
         }
       ],

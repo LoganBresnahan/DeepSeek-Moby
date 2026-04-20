@@ -189,11 +189,25 @@ const LONG_RUNNING_PATTERNS: RegExp[] = [
 ];
 
 /**
+ * Strip heredoc bodies from a command string. Used before pattern matching
+ * so that data inside `cat > file << 'EOF' ... EOF` doesn't trigger false
+ * positives (e.g., a package.json containing "nodemon" as a dep).
+ *
+ * Handles: << EOF, << 'EOF', << "EOF", <<- EOF (any delimiter word).
+ */
+function stripHeredocs(command: string): string {
+  return command.replace(/<<-?\s*['"]?(\w+)['"]?\s*\n[\s\S]*?^\s*\1\s*$/gm, '');
+}
+
+/**
  * Check if a command is a known long-running process (server, watch mode, etc.)
  * that should not be executed because it would never exit.
+ *
+ * Strips heredoc bodies before matching to avoid false positives where a
+ * file's contents contain pattern keywords (e.g., package.json deps).
  */
 export function isLongRunningCommand(command: string): boolean {
-  const trimmed = command.trim();
+  const trimmed = stripHeredocs(command.trim());
   return LONG_RUNNING_PATTERNS.some(pattern => pattern.test(trimmed));
 }
 
@@ -272,6 +286,24 @@ export function containsWebSearchCommands(content: string): boolean {
  */
 export function stripWebSearchTags(content: string): string {
   return content.replace(/<web_search>[\s\S]*?<\/web_search>/gi, '').trim();
+}
+
+/**
+ * Strip unfenced SEARCH/REPLACE blocks from content (for display purposes).
+ * These appear when the model emits SEARCH/REPLACE markers without wrapping them
+ * in triple backticks. The DiffManager processes them as edits, but they would
+ * leak into the rendered chat (markers visible, HTML rendering live, etc.).
+ *
+ * Matches: optional `# File: path` header followed by SEARCH/REPLACE block.
+ */
+export function stripUnfencedSearchReplace(content: string): string {
+  // Strip "# File: path\n<<<<<<< SEARCH ... >>>>>>> REPLACE" blocks
+  const withFileHeader = /^#\s*File:\s*.+?(?:\n|\r\n)[\s\S]*?>>>{3,}\s*REPLACE\s*$/gm;
+  let result = content.replace(withFileHeader, '');
+  // Strip any standalone SEARCH/REPLACE blocks (no preceding # File: header)
+  const standalone = /<<<{3,}\s*SEARCH[\s\S]*?>>>{3,}\s*REPLACE/gi;
+  result = result.replace(standalone, '');
+  return result.trim();
 }
 
 /**
@@ -585,19 +617,29 @@ You have shell access. Run commands with <shell> tags:
 
 System: ${platform}. Commands run in the workspace directory.${webSearchSection}
 
-**New files:** Use shell commands:
+**CRITICAL: Shell commands MUST be inside <shell> tags to execute.**
+- ✓ <shell>cat file.ts</shell> — EXECUTES
+- ✗ \`\`\`bash\\ncat file.ts\\n\`\`\` — NOT executed (just rendered as text)
+- ✗ \`\`\`sh\\ncat file.ts\\n\`\`\` — NOT executed
+- ✗ Any markdown code block — NOT executed
+
+If you write commands in \`\`\`bash or \`\`\`sh blocks, they will NOT run. You MUST use <shell> tags for every command you want executed.
+
+**New files:** Use shell commands inside <shell> tags:
 <shell>cat > path/to/file.ts << 'EOF'
 // contents
 EOF</shell>
 
+NEVER write \`\`\`bash\\ncat > file << EOF...\\n\`\`\` — this will NOT create the file. Always use <shell>...</shell>.
+
 **Editing existing files:** Use SEARCH/REPLACE (described in the edit format section below).
 
 **Workflow:**
-1. Explore with shell commands first
-2. New files → shell (cat > file << 'EOF')
-3. Existing files → read first, then SEARCH/REPLACE
+1. Explore with shell commands first (inside <shell> tags)
+2. New files → shell with heredoc (inside <shell> tags)
+3. Existing files → read first (inside <shell> tags), then SEARCH/REPLACE
 
 If the user asks a question, answer it directly. Do NOT create or edit files for questions.
-Complete tasks fully — don't stop after exploration.
+Complete tasks fully — don't stop after exploration. Every command you intend to run MUST be in <shell> tags.
 `;
 }

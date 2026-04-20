@@ -103,6 +103,10 @@ export class CommandApprovalManager {
   private readonly _onApprovalRequired = new vscode.EventEmitter<{ command: string; prefix: string; unknownSubCommand: string }>();
   readonly onApprovalRequired = this._onApprovalRequired.event;
 
+  // ADR 0003: structural event recorder subscribes to approval lifecycle.
+  private readonly _onApprovalResolved = new vscode.EventEmitter<{ command: string; decision: 'allowed' | 'blocked'; persistent: boolean }>();
+  readonly onApprovalResolved = this._onApprovalResolved.event;
+
   private readonly _onRulesChanged = new vscode.EventEmitter<CommandRule[]>();
   readonly onRulesChanged = this._onRulesChanged.event;
 
@@ -146,6 +150,7 @@ export class CommandApprovalManager {
     if (this._pendingResolve) {
       const resolve = this._pendingResolve;
       this._pendingResolve = null;
+      this._onApprovalResolved.fire({ command: result.command, decision: result.decision, persistent: result.persistent });
       resolve(result);
     } else {
       logger.warn('[CommandApproval] resolveApproval called with no pending approval');
@@ -158,6 +163,11 @@ export class CommandApprovalManager {
       const resolve = this._pendingResolve;
       this._pendingResolve = null;
       this._pendingPromise = null;
+      // ADR 0003 Phase 2.5: fire the resolved event so the structural recorder
+      // pairs approval-created with approval-resolved even on cancellation.
+      // Without this, a cancel leaves a dangling approval-created event and
+      // hydration shows a stuck "awaiting approval" state.
+      this._onApprovalResolved.fire({ command: '', decision: 'blocked', persistent: false });
       resolve({ command: '', decision: 'blocked', persistent: false });
       logger.info('[CommandApproval] Cancelled pending approval');
     }
@@ -375,6 +385,7 @@ export class CommandApprovalManager {
   dispose(): void {
     this.cancelPendingApproval();
     this._onApprovalRequired.dispose();
+    this._onApprovalResolved.dispose();
     this._onRulesChanged.dispose();
   }
 }

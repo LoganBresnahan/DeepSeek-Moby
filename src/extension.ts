@@ -170,7 +170,36 @@ function registerCommands(context: vscode.ExtensionContext) {
         exportTestFixture(context)
       )
     );
+    context.subscriptions.push(
+      vscode.commands.registerCommand('moby.exportTurnAsJson', () =>
+        exportTurnAsJson(chatProvider)
+      )
+    );
   }
+}
+
+/**
+ * ADR 0003 Phase 1 debug command — dumps the last completed turn's structural
+ * event stream (extension-authored) as JSON so you can inspect live vs. saved
+ * vs. hydrated event sequences side-by-side during development of phases 2-3.
+ */
+async function exportTurnAsJson(chatProvider: import('./providers/chatProvider').ChatProvider): Promise<void> {
+  const recorder = chatProvider.getStructuralEventRecorder();
+  const current = recorder.peekCurrent();
+  const last = recorder.peekLastCompleted();
+
+  const payload = {
+    capturedAt: new Date().toISOString(),
+    currentSessionId: chatProvider.getCurrentSessionId(),
+    inFlightTurn: current,
+    lastCompletedTurn: last,
+  };
+
+  const doc = await vscode.workspace.openTextDocument({
+    language: 'json',
+    content: JSON.stringify(payload, null, 2),
+  });
+  await vscode.window.showTextDocument(doc, { preview: false });
 }
 
 const DB_KEY_SECRET = 'deepseek-moby.db-encryption-key';

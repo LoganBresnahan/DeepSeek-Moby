@@ -634,29 +634,27 @@ describe('MessageTurnActor', () => {
       expect(placeholder).toBeNull();
     });
 
-    it('placeholder contains cycling phrases', () => {
+    it('placeholder contains static label', () => {
       actor.startStreaming();
       actor.createTextSegment('');
       actor.updateTextContent('```typescript\nconst x');
 
       const containers = findContainers('text');
-      const phrases = containers[0].shadowRoot?.querySelectorAll('.gen-phrase');
-      expect(phrases?.length).toBe(3);
+      const label = containers[0].shadowRoot?.querySelector('.gen-phrase-static');
+      expect(label).not.toBeNull();
+      expect(label?.textContent).toBe('Developing...');
     });
 
-    it('placeholder characters have wave animation delays', () => {
+    it('placeholder has moby icon container', () => {
       actor.startStreaming();
       actor.createTextSegment('');
       actor.updateTextContent('```js\ncode');
 
       const containers = findContainers('text');
-      const chars = containers[0].shadowRoot?.querySelectorAll('.gc');
-      expect(chars!.length).toBeGreaterThan(0);
-      // Each char should have --d CSS variable for staggered animation
-      const firstChar = chars![0] as HTMLElement;
-      expect(firstChar.style.getPropertyValue('--d')).toBe('0');
-      const secondChar = chars![1] as HTMLElement;
-      expect(secondChar.style.getPropertyValue('--d')).toBe('1');
+      const placeholder = queryInShadow(containers[0], '.code-generating');
+      expect(placeholder).not.toBeNull();
+      const phrases = containers[0].shadowRoot?.querySelector('.code-gen-phrases');
+      expect(phrases).not.toBeNull();
     });
 
     it('skips DOM update when formatted output unchanged during code streaming', () => {
