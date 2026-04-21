@@ -1598,7 +1598,10 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
               this._onShellResults.fire({
                 results: results.map(r => ({ command: r.command, output: r.output.substring(0, 500) + (r.output.length > 500 ? '...' : ''), success: r.success }))
               });
-              resultsContext = formatShellResultsForContext(results);
+              resultsContext = formatShellResultsForContext(results, {
+                modifiedFiles: [...modifiedFiles],
+                workspacePath
+              });
               if (commandsCreateFiles(commands)) state.shellCreatedFiles = true;
               if (commandsDeleteFiles(commands)) state.shellDeletedFiles = true;
             } else {
@@ -1776,7 +1779,10 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
                 }))
               });
 
-              resultsContext = formatShellResultsForContext(results);
+              resultsContext = formatShellResultsForContext(results, {
+                modifiedFiles: [...modifiedFiles],
+                workspacePath
+              });
               if (commandsCreateFiles(commands)) state.shellCreatedFiles = true;
               if (commandsDeleteFiles(commands)) state.shellDeletedFiles = true;
             } else {
@@ -2103,7 +2109,11 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
               }))
             });
 
-            resultsContext += formatShellResultsForContext(results);
+            resultsContext += formatShellResultsForContext(results, {
+              modifiedFiles: [...modifiedFiles],
+              deletedFiles: [...deletedFiles],
+              workspacePath
+            });
             logger.info(`[R1-Shell] Injected ${results.length} shell results for task: "${originalUserMessage.substring(0, 50)}...", continuing...`);
           }
         }

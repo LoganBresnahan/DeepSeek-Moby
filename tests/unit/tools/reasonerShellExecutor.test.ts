@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { isLongRunningCommand } from '../../../src/tools/reasonerShellExecutor';
+import { isLongRunningCommand, formatShellResultsForContext } from '../../../src/tools/reasonerShellExecutor';
 
 // Re-implement the pure functions for testing (same logic as reasonerShellExecutor.ts)
 // This avoids importing the module which has vscode dependencies
@@ -534,6 +534,108 @@ Some code here`;
         '&& nodemon server.js',
       ].join('\n');
       expect(isLongRunningCommand(command)).toBe(true);
+    });
+  });
+
+  // B: Ground-truth path feedback in shell results.
+  // Regression test for R1 losing track of where files landed when it mixed
+  // `cat > file << EOF` with `cd X` in separate <shell> blocks.
+  describe('formatShellResultsForContext — absolute path feedback', () => {
+    const fakeResult = (command: string, output: string, success = true) => ({
+      command,
+      output,
+      success,
+      executionTimeMs: 10,
+    });
+
+    it('returns empty string when there is nothing to report', () => {
+      expect(formatShellResultsForContext([])).toBe('');
+      expect(formatShellResultsForContext([], {})).toBe('');
+      expect(
+        formatShellResultsForContext([], { modifiedFiles: [], deletedFiles: [] })
+      ).toBe('');
+    });
+
+    it('preserves legacy format when no fileChanges are provided', () => {
+      const out = formatShellResultsForContext([
+        fakeResult('ls', 'a.ts\nb.ts'),
+      ]);
+      expect(out).toContain('--- Shell Command Results ---');
+      expect(out).toContain('$ ls');
+      expect(out).toContain('a.ts\nb.ts');
+      expect(out).toContain('--- End Shell Results ---');
+      // No "Files touched" section without fileChanges.
+      expect(out).not.toContain('Files touched');
+    });
+
+    it('appends absolute paths when modifiedFiles + workspacePath are provided', () => {
+      const out = formatShellResultsForContext(
+        [fakeResult("cat > package.json << 'EOF'\n...\nEOF", '(no output)')],
+        {
+          modifiedFiles: ['package.json', 'src/index.ts'],
+          workspacePath: '/home/user/project',
+        }
+      );
+      expect(out).toContain('--- Files touched by this command (absolute paths) ---');
+      expect(out).toContain('modified: /home/user/project/package.json');
+      expect(out).toContain('modified: /home/user/project/src/index.ts');
+      expect(out).toContain('--- End Files Touched ---');
+    });
+
+    it('flags deleted files distinctly from modified', () => {
+      const out = formatShellResultsForContext(
+        [fakeResult('rm old.ts', '')],
+        {
+          modifiedFiles: [],
+          deletedFiles: ['old.ts'],
+          workspacePath: '/work',
+        }
+      );
+      expect(out).toContain('deleted:  /work/old.ts');
+      expect(out).not.toContain('modified: /work/old.ts');
+    });
+
+    it('leaves paths workspace-relative when workspacePath is omitted', () => {
+      const out = formatShellResultsForContext(
+        [fakeResult('ls', '')],
+        { modifiedFiles: ['src/x.ts'] }
+      );
+      expect(out).toContain('modified: src/x.ts');
+      expect(out).not.toMatch(/modified: \//); // no leading slash, not absolute
+    });
+
+    it('handles Windows-style workspacePath with backslashes', () => {
+      const out = formatShellResultsForContext(
+        [fakeResult('ls', '')],
+        {
+          modifiedFiles: ['src\\index.ts'],
+          workspacePath: 'C:\\Users\\me\\project',
+        }
+      );
+      expect(out).toContain('modified: C:\\Users\\me\\project\\src\\index.ts');
+    });
+
+    it('emits files-touched section even if results array is empty', () => {
+      // Edge case: some call sites may format fileChanges alone.
+      const out = formatShellResultsForContext([], {
+        modifiedFiles: ['a.ts'],
+        workspacePath: '/p',
+      });
+      expect(out).toContain('modified: /p/a.ts');
+      expect(out).not.toContain('Shell Command Results');
+    });
+
+    it('includes a guidance line pointing R1 at absolute paths as ground truth', () => {
+      const out = formatShellResultsForContext(
+        [fakeResult("cd subdir && cat > file.ts << 'EOF'\n...\nEOF", '(no output)')],
+        {
+          modifiedFiles: ['subdir/file.ts'],
+          workspacePath: '/work',
+        }
+      );
+      // The guidance is the whole point — it teaches R1 to trust paths over
+      // its mental model of cwd.
+      expect(out).toMatch(/ground truth/i);
     });
   });
 });

@@ -568,32 +568,84 @@ export async function executeShellCommands(
 }
 
 /**
- * Format shell results for injection back into the conversation
+ * Format shell results for injection back into the conversation.
+ *
+ * If `fileChanges` is supplied, appends a ground-truth "Files touched" section
+ * with **absolute paths** so the model can correct its mental model of where
+ * files landed. This addresses the common R1 failure mode where the model
+ * assumes `cd X` persisted between shells and expects files in `X/` when they
+ * were actually written at workspace root.
+ *
+ * Model scope: currently wired only on the R1 path (this file is R1-specific
+ * because R1 lacks native tool calling — we parse <shell> tags instead). The
+ * pattern itself — "tell the model which absolute paths actually changed" —
+ * is model-agnostic. If/when Chat grows file-write tools (planned: create_file
+ * / delete_file), its `apply_code_edit` tool-result builder should emit the
+ * same absolute-path ground truth.
  */
-export function formatShellResultsForContext(results: ShellResult[]): string {
-  if (results.length === 0) {
+export function formatShellResultsForContext(
+  results: ShellResult[],
+  fileChanges?: {
+    modifiedFiles?: string[];   // workspace-relative
+    deletedFiles?: string[];    // workspace-relative
+    workspacePath?: string;     // absolute, used to resolve modified/deleted paths
+  }
+): string {
+  if (results.length === 0 && !fileChanges?.modifiedFiles?.length && !fileChanges?.deletedFiles?.length) {
     return '';
   }
 
-  let context = '\n--- Shell Command Results ---\n';
+  let context = '';
 
-  for (const result of results) {
-    context += `\n$ ${result.command}\n`;
-    context += result.output;
-    if (!result.success) {
-      context += '\n(command failed)';
+  if (results.length > 0) {
+    context += '\n--- Shell Command Results ---\n';
+    for (const result of results) {
+      context += `\n$ ${result.command}\n`;
+      context += result.output;
+      if (!result.success) {
+        context += '\n(command failed)';
+      }
+      context += '\n';
     }
-    context += '\n';
+    context += '--- End Shell Results ---\n';
   }
 
-  context += '--- End Shell Results ---\n';
+  // Ground-truth file state: absolute paths of what actually changed on disk.
+  const modified = fileChanges?.modifiedFiles ?? [];
+  const deleted = fileChanges?.deletedFiles ?? [];
+  if (modified.length > 0 || deleted.length > 0) {
+    const workspacePath = fileChanges?.workspacePath;
+    const resolve = (rel: string): string => {
+      if (!workspacePath) return rel;
+      // Avoid pulling in the `path` module for one join; manual is fine here.
+      const sep = workspacePath.includes('\\') && !workspacePath.includes('/') ? '\\' : '/';
+      const base = workspacePath.endsWith(sep) ? workspacePath.slice(0, -1) : workspacePath;
+      return `${base}${sep}${rel}`;
+    };
+
+    context += '\n--- Files touched by this command (absolute paths) ---\n';
+    for (const rel of modified) {
+      context += `modified: ${resolve(rel)}\n`;
+    }
+    for (const rel of deleted) {
+      context += `deleted:  ${resolve(rel)}\n`;
+    }
+    context += 'Use these paths as ground truth. If a file landed somewhere you did not expect, your assumption about the shell working directory was wrong.\n';
+    context += '--- End Files Touched ---\n';
+  }
 
   return context;
 }
 
 /**
- * Get system prompt additions for reasoner model
- * This tells R1 how to use shell commands
+ * Get system prompt additions for reasoner model.
+ * This tells R1 how to use shell commands.
+ *
+ * Model scope: R1-only. Gated via `isReasonerModel()` in deepseekClient.
+ * Chat/V3 uses native tool calling (see `workspaceTools` in tools/workspaceTools.ts)
+ * and doesn't receive this text. If V4 supports native tool calling, the entire
+ * `<shell>` / SEARCH-REPLACE protocol — and therefore this prompt — is dead weight.
+ * Review path rules (below) when adding or retiring supported models.
  */
 export function getReasonerShellPrompt(options?: { webSearchAvailable?: boolean }): string {
   const platform = process.platform === 'win32' ? 'Windows' : process.platform === 'darwin' ? 'macOS' : 'Linux';
@@ -625,6 +677,10 @@ System: ${platform}. Commands run in the workspace directory.${webSearchSection}
 
 If you write commands in \`\`\`bash or \`\`\`sh blocks, they will NOT run. You MUST use <shell> tags for every command you want executed.
 
+**Emit <shell> tags bare — NEVER wrap them inside \`\`\`bash or any other code fence.** Write \`<shell>...</shell>\` at the start of a line, with no surrounding backticks. Wrapping a shell tag inside a fence produces an empty code block in the UI and confuses the renderer.
+- ✓ \`<shell>cat file.ts</shell>\`
+- ✗ \`\`\`bash\\n<shell>cat file.ts</shell>\\n\`\`\` — the fence is dead weight; render breaks.
+
 **New files:** Use shell commands inside <shell> tags:
 <shell>cat > path/to/file.ts << 'EOF'
 // contents
@@ -633,6 +689,19 @@ EOF</shell>
 NEVER write \`\`\`bash\\ncat > file << EOF...\\n\`\`\` — this will NOT create the file. Always use <shell>...</shell>.
 
 **Editing existing files:** Use SEARCH/REPLACE (described in the edit format section below).
+
+**CRITICAL: Path rules — read carefully, these trip up most models:**
+
+1. **\`# File: <path>\` headers in SEARCH/REPLACE blocks are ALWAYS workspace-root-relative.** A block with \`# File: src/index.ts\` writes to \`<workspace>/src/index.ts\`, regardless of what \`cd\` you did in a previous shell. The diff engine does not have a "current directory."
+
+2. **Shell \`cd\` does NOT persist between <shell> invocations.** Each \`<shell>\` block starts fresh in the workspace root. If you \`<shell>cd subdir</shell>\` and then separately \`<shell>cat > file.ts</shell>\`, the \`cat\` writes to \`<workspace>/file.ts\`, NOT \`<workspace>/subdir/file.ts\`.
+
+3. **To write into a subdirectory, pick ONE:**
+   - Put everything in ONE shell block: \`<shell>cd subdir && cat > file.ts << 'EOF'...EOF</shell>\`
+   - Use an explicit path: \`<shell>cat > subdir/file.ts << 'EOF'...EOF</shell>\`
+   - For code edits: \`# File: subdir/file.ts\` (workspace-root-relative)
+
+4. **Ground truth is in the shell output.** The tool result after each command tells you which absolute paths were actually written. If it doesn't match where you expected, your mental model of cwd is wrong — trust the absolute paths, not your assumption.
 
 **Workflow:**
 1. Explore with shell commands first (inside <shell> tags)

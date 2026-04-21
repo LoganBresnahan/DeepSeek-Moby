@@ -66,7 +66,8 @@ export class CommandsShadowActor extends PopupShadowActor {
     const commands = [...DEFAULT_COMMANDS];
     if (isDevMode) {
       commands.push(
-        { id: 'moby.exportTestFixture', name: 'Export Test Fixture', description: 'Export session for testing', icon: '🧪', section: 'Dev' }
+        { id: 'moby.exportTestFixture', name: 'Export Test Fixture', description: 'Export session for testing', icon: '🧪', section: 'Dev' },
+        { id: 'moby.exportTurnAsJson', name: 'Export Turn as JSON', description: 'Dump live/saved/hydrated events', icon: '🔬', section: 'Dev' }
       );
     }
     const config: PopupConfig = {
