@@ -71,6 +71,11 @@ function createMockVirtualListActor() {
       if (turn) turn.textSegments.push({ content });
     }),
     updateTextContent: vi.fn(),
+    completeCurrentTextSegment: vi.fn(),
+    pushTurnActivity: vi.fn(),
+    popTurnActivity: vi.fn(),
+    setTurnTextActive: vi.fn(),
+    clearTurnActivity: vi.fn(),
     startThinkingIteration: vi.fn((turnId: string) => {
       const turn = turns.get(turnId);
       if (turn) turn.thinkingIterations.push({ content: '', complete: false });

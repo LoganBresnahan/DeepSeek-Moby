@@ -411,6 +411,11 @@ export class VirtualMessageGatewayActor extends EventStateActor {
           ? segment.content.replace(/<shell>[\s\S]*?<\/shell>/gi, '').trim()
           : segment.content;
         virtualList.updateTextContent(turnId, displayContent);
+        // text-finalize produced this update — drop the segment's streaming
+        // placeholder so it doesn't linger above content that follows it.
+        if (segment.complete) {
+          virtualList.completeCurrentTextSegment(turnId);
+        }
         break;
       }
 
@@ -526,6 +531,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       case 'toolCallsEnd':
         if (this._currentTurnId) {
           this.emitTurnEvent(this._currentTurnId, { type: 'tool-batch-complete', ts: Date.now() });
+          this._actors.virtualList.popTurnActivity(this._currentTurnId, 'tools');
         }
         break;
 
@@ -654,10 +660,19 @@ export class VirtualMessageGatewayActor extends EventStateActor {
 
       case 'webSearching':
         this._manager.publishDirect('status.message', { type: 'info', message: `Searching the web (${msg.current}/${msg.total})...` });
+        if (this._currentTurnId) {
+          this._actors.virtualList.pushTurnActivity(
+            this._currentTurnId, 'web-search',
+            `Searching the web (${msg.current}/${msg.total})...`
+          );
+        }
         break;
 
       case 'webSearchComplete':
         this._manager.publishDirect('status.message', { type: 'info', message: 'Web search complete' });
+        if (this._currentTurnId) {
+          this._actors.virtualList.popTurnActivity(this._currentTurnId, 'web-search');
+        }
         break;
 
       case 'webSearchCached':
@@ -682,6 +697,10 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       // ---- Status Messages ----
       case 'error':
         this._manager.publishDirect('status.message', { type: 'error', message: (msg.error || msg.message || 'An error occurred') as string });
+        // Extension's error path fires _onError but NOT _onEndResponse, so the
+        // streaming turn has no other signal to wind down. End it here so the
+        // animated placeholder doesn't linger after an API failure.
+        this.endCurrentStreamingTurn();
         break;
 
       case 'warning':
@@ -847,7 +866,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
   }
 
   private handleStreamToken(msg: { type: string; [key: string]: unknown }): void {
-    const { streaming } = this._actors;
+    const { streaming, virtualList } = this._actors;
     const token = msg.token as string;
 
     if (!this._currentTurnId) return;
@@ -857,11 +876,17 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       type: 'text-append', content: token, iteration: this._currentIteration, ts: Date.now()
     });
 
+    // Activity: text is streaming. If thinking was the last-visible activity
+    // the reasoner has moved into content — pop the thinking frame so the
+    // indicator falls back to "Writing response...".
+    virtualList.popTurnActivity(this._currentTurnId, 'thinking');
+    virtualList.setTurnTextActive(this._currentTurnId, true);
+
     streaming.handleContentChunk(token);
   }
 
   private handleStreamReasoning(msg: { type: string; [key: string]: unknown }): void {
-    const { streaming } = this._actors;
+    const { streaming, virtualList } = this._actors;
 
     if (!this._currentTurnId) return;
 
@@ -871,6 +896,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       this.emitTurnEvent(this._currentTurnId, {
         type: 'thinking-start', iteration: this._currentIteration, ts: Date.now()
       });
+      virtualList.pushTurnActivity(this._currentTurnId, 'thinking', 'Thinking...');
     }
 
     // CQRS: Record event → projector produces mutations → render
@@ -891,6 +917,12 @@ export class VirtualMessageGatewayActor extends EventStateActor {
     // Finalize previous thinking and text (only if open)
     this.emitThinkingCompleteIfOpen(this._currentTurnId);
     this.emitTextFinalizeIfOpen(this._currentTurnId);
+
+    // Activity: thinking/text of the prior iteration are done; stop "Writing..."
+    // fallback until the next content token arrives. Any lingering thinking frame
+    // pops here too.
+    this._actors.virtualList.popTurnActivity(this._currentTurnId, 'thinking');
+    this._actors.virtualList.setTurnTextActive(this._currentTurnId, false);
 
     // Track iteration but defer thinking-start until first reasoning token arrives
     this._currentIteration = (msg.iteration as number) - 1; // Convert 1-based to 0-based
@@ -935,6 +967,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
   // ============================================
 
   private handleShellExecuting(msg: { type: string; [key: string]: unknown }): void {
+    const { virtualList } = this._actors;
     const commands = msg.commands as Array<{ command: string; description?: string }>;
 
     if (!this._currentTurnId) {
@@ -955,10 +988,17 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       type: 'shell-start', id: shellId, commands: commands.map(c => ({ command: c.command })), iteration: this._currentIteration, ts: Date.now()
     });
 
+    // Activity: shell takes priority. Label shows a preview of the first command.
+    const first = commands[0]?.command ?? '';
+    const preview = first.length > 40 ? first.slice(0, 40) + '...' : first;
+    virtualList.setTurnTextActive(this._currentTurnId, false);
+    virtualList.pushTurnActivity(this._currentTurnId, 'shell', `Running ${preview}`);
+
     this._phase = 'waiting-for-results';
   }
 
   private handleShellResults(msg: { type: string; [key: string]: unknown }): void {
+    const { virtualList } = this._actors;
     const results = msg.results as Array<{ output?: string; success?: boolean; exitCode?: number }>;
 
     if (!this._currentTurnId || !results || !Array.isArray(results) || !this._lastShellId) return;
@@ -968,6 +1008,10 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       results: results.map(r => ({ output: r.output || '', success: r.success !== undefined ? r.success : (r.exitCode === 0) })),
       ts: Date.now()
     });
+
+    // Activity: shell finished. Fall back to whatever else is active (text
+    // may resume streaming shortly).
+    virtualList.popTurnActivity(this._currentTurnId, 'shell');
 
     this._phase = 'streaming';
   }
@@ -989,6 +1033,9 @@ export class VirtualMessageGatewayActor extends EventStateActor {
     this.emitTurnEvent(this._currentTurnId, {
       type: 'approval-created', id: approvalEventId, command, prefix, shellId: this._lastShellId || '', ts: Date.now()
     });
+
+    // Activity: approval blocks the turn until the user decides.
+    this._actors.virtualList.pushTurnActivity(this._currentTurnId, 'approval', 'Waiting for approval');
 
     log.debug(`commandApprovalRequired: created approval ${approvalEventId} for "${command.substring(0, 40)}"`);
   }
@@ -1014,6 +1061,9 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         }
       }
     }
+
+    // Activity: approval done; fall back to whatever's active.
+    this._actors.virtualList.popTurnActivity(turnId, 'approval');
   }
 
   // ============================================
@@ -1030,6 +1080,12 @@ export class VirtualMessageGatewayActor extends EventStateActor {
     this.emitTurnEvent(this._currentTurnId, {
       type: 'tool-batch-start', tools: tools.map(t => ({ name: t.name, detail: t.detail })), ts: Date.now()
     });
+
+    // Activity: tools running. Label lists up to three tool names.
+    const names = tools.slice(0, 3).map(t => t.name).join(', ');
+    const label = tools.length > 3 ? `Using tools: ${names}, +${tools.length - 3}` : `Using tools: ${names}`;
+    this._actors.virtualList.setTurnTextActive(this._currentTurnId, false);
+    this._actors.virtualList.pushTurnActivity(this._currentTurnId, 'tools', label);
   }
 
   private handleToolCallUpdate(msg: { type: string; [key: string]: unknown }): void {
@@ -1462,6 +1518,29 @@ export class VirtualMessageGatewayActor extends EventStateActor {
     // come through the normal streamToken/endResponse flow from the extension —
     // see RequestOrchestrator's abort handler for the single source of truth.
     streaming.endStream();
+    this.publishCoordinationState();
+  }
+
+  /**
+   * Tear down streaming UI for the current turn when no endResponse will arrive
+   * (e.g., API error path). Mirrors the subset of handleEndResponse that closes
+   * the turn without persisting or finalizing the event log.
+   */
+  private endCurrentStreamingTurn(): void {
+    if (!this._currentTurnId) return;
+
+    const { streaming, virtualList } = this._actors;
+
+    this.emitThinkingCompleteIfOpen(this._currentTurnId);
+    this.emitTextFinalizeIfOpen(this._currentTurnId);
+
+    streaming.endStream();
+    virtualList.endStreamingTurn();
+
+    this._lastStreamingTurnId = this._currentTurnId;
+    this._phase = 'idle';
+    this._currentTurnId = null;
+
     this.publishCoordinationState();
   }
 

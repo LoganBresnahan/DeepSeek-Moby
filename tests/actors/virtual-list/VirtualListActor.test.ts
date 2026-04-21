@@ -354,6 +354,20 @@ describe('VirtualListActor', () => {
         const turn = actor.getTurn('turn-1');
         expect(turn?.textSegments[0].content).toBe('Content');
       });
+
+      it('completeCurrentTextSegment marks last segment complete', () => {
+        actor.addTurn('turn-1', 'assistant');
+        actor.startStreamingTurn('turn-1');
+        actor.addTextSegment('turn-1', 'Done');
+        actor.completeCurrentTextSegment('turn-1');
+
+        const turn = actor.getTurn('turn-1');
+        expect(turn?.textSegments[0].complete).toBe(true);
+      });
+
+      it('completeCurrentTextSegment is a no-op for unknown turn', () => {
+        expect(() => actor.completeCurrentTextSegment('ghost-turn')).not.toThrow();
+      });
     });
 
     describe('Thinking iterations', () => {

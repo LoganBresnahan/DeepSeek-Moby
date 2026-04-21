@@ -148,7 +148,7 @@ const textStyles = `
 
 /* Code blocks */
 .code-block {
-  margin: 0 0 12px 0;
+  margin: 6px 0 12px 0;
   border: 1px solid var(--vscode-panel-border);
   border-radius: 6px;
   overflow: hidden;

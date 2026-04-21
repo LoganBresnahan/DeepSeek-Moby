@@ -2198,7 +2198,13 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
           logger.info(`[R1-Shell] No shell commands in iteration, checking for auto-continuation...`);
           logger.info(`[R1-Shell] shellIteration=${shellIteration}, nudges=${nudgeContinuations}, zeroContent=${zeroContentRetries}, failedEdits=${failedEditRetries}, lastIterationHadShellCommands=${lastIterationHadShellCommands}, shellCreatedFiles=${state.shellCreatedFiles}, shellDeletedFiles=${state.shellDeletedFiles}`);
 
-          const hasCodeEdits = containsCodeEdits(state.accumulatedResponse);
+          // Scope to the current iteration only. Using state.accumulatedResponse
+          // caused a stale-signal loop: once any earlier iteration produced
+          // SEARCH/REPLACE blocks, every subsequent iteration (even pure
+          // "Task complete" summaries) read hasCodeEdits=true and re-fired the
+          // post-edit continuation. Per-iteration measures what we actually
+          // care about: did this turn of the loop introduce new edits?
+          const hasCodeEdits = containsCodeEdits(iterationResponse);
           const failedApplies = this.diffManager.getFailedAutoApplyCount();
           logger.info(`[R1-Shell] Response has code edits: ${hasCodeEdits}, failedApplies: ${failedApplies}`);
 

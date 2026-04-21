@@ -234,6 +234,294 @@ describe('MessageTurnActor', () => {
       const containers = findContainers('text');
       expect(containers[0].classList.contains('streaming')).toBe(false);
     });
+
+    it('strips unclosed fence content from text segment (unified indicator owns the label)', () => {
+      actor.startStreaming();
+      actor.createTextSegment();
+      actor.updateTextContent('Here is the code:\n```bash\n');
+
+      const container = findContainers('text')[0];
+      // No inline placeholder anywhere
+      expect(queryInShadow(container, '.code-generating')).toBeNull();
+      // Fence content stripped from rendered text
+      const contentEl = queryInShadow(container, '.content');
+      expect(contentEl?.textContent).toContain('Here is the code:');
+      expect(contentEl?.textContent).not.toContain('```');
+      // Unified activity line carries the signal
+      expect(actor.getActivityLabel()).toBe('Generating code...');
+    });
+
+    it('completeCurrentTextSegment pops the code-block activity frame', () => {
+      actor.startStreaming();
+      actor.createTextSegment();
+      actor.updateTextContent('Here is the code:\n```bash\n');
+      expect(actor.getActivityLabel()).toBe('Generating code...');
+
+      // Segment finalizes mid-turn (e.g., right before a <shell> executes).
+      // The code-block frame pops; the text fallback re-takes the label.
+      actor.setTextActive(true);
+      actor.completeCurrentTextSegment();
+
+      expect(actor.isStreaming()).toBe(true);
+      expect(actor.getActivityLabel()).toBe('Writing response...');
+    });
+
+    it('completeCurrentTextSegment preserves text content', () => {
+      actor.startStreaming();
+      actor.createTextSegment();
+      actor.updateTextContent('Some complete prose.');
+      actor.completeCurrentTextSegment();
+
+      const container = findContainers('text')[0];
+      const contentEl = queryInShadow(container, '.content');
+      expect(contentEl?.textContent).toContain('Some complete prose.');
+    });
+
+    it('completeCurrentTextSegment removes streaming class on the completed segment', () => {
+      actor.startStreaming();
+      actor.createTextSegment();
+      actor.updateTextContent('Done segment.');
+      actor.completeCurrentTextSegment();
+
+      const container = findContainers('text')[0];
+      expect(container.classList.contains('streaming')).toBe(false);
+    });
+
+    it('new text segment with unclosed fence after finalize re-pushes code-block frame', () => {
+      actor.startStreaming();
+      actor.createTextSegment();
+      actor.updateTextContent('First segment done.');
+      actor.completeCurrentTextSegment();
+      expect(actor.getActivityLabel()).toBeNull();
+
+      // New segment created for content after a shell or tool call
+      actor.createTextSegment();
+      actor.updateTextContent('Next:\n```typescript\n');
+
+      const containers = findContainers('text');
+      expect(containers.length).toBe(2);
+      // Neither segment carries an inline placeholder (concept retired)
+      expect(queryInShadow(containers[0], '.code-generating')).toBeFalsy();
+      expect(queryInShadow(containers[1], '.code-generating')).toBeFalsy();
+      // Unified indicator reflects the new fence
+      expect(actor.getActivityLabel()).toBe('Generating code...');
+    });
+
+    it('completeCurrentTextSegment is a safe no-op with no current segment', () => {
+      actor.startStreaming();
+      expect(() => actor.completeCurrentTextSegment()).not.toThrow();
+    });
+
+    it('inline fence (prose:```css with no newline) is detected as a code block', () => {
+      // R1 sometimes emits "prose:```css\ncontent\n```" on one line — the
+      // CommonMark parser needs fences at column 0, so the normalization
+      // inserts a newline so extractCodeBlocks can find it.
+      actor.startStreaming();
+      actor.createTextSegment();
+      actor.updateTextContent('Let me create:```css\n.a { color: red; }\n```\n');
+      actor.completeCurrentTextSegment();
+
+      const container = findContainers('text')[0];
+      const codeBlock = queryInShadow(container, '.code-block');
+      expect(codeBlock).toBeTruthy();
+      // The raw fence characters should be gone from the text too
+      const contentEl = queryInShadow(container, '.content');
+      expect(contentEl?.textContent).not.toContain('```');
+    });
+
+    it('unclosed fence is stripped on finalize to prevent raw-backtick leak', () => {
+      // PR1 regression scenario: segment finalizes while a fence is still
+      // open (user aborts mid-stream, or orphan fence survives normalization).
+      // The raw `\`\`\`css\n# File: style.css\n<<<<<<< SEARCH ...` content
+      // would leak as prose without this strip.
+      actor.startStreaming();
+      actor.createTextSegment();
+      actor.updateTextContent('Leading prose.\n```css\n# File: style.css\n<<<<<<< SEARCH\n/* a */\n');
+      actor.completeCurrentTextSegment();
+
+      const container = findContainers('text')[0];
+      const contentEl = queryInShadow(container, '.content');
+      expect(contentEl?.textContent).toContain('Leading prose.');
+      // None of the raw content should survive
+      expect(contentEl?.textContent).not.toContain('```');
+      expect(contentEl?.textContent).not.toContain('<<<<<<< SEARCH');
+      expect(contentEl?.textContent).not.toContain('# File: style.css');
+    });
+
+    it('complete code block still renders as dropdown after finalize', () => {
+      // Opposite side of the same coin — when the fence IS closed, the
+      // block renders normally even though placeholder-mode is off.
+      actor.startStreaming();
+      actor.createTextSegment();
+      actor.updateTextContent('```typescript\nconst x = 1;\n```\n');
+      actor.completeCurrentTextSegment();
+
+      const container = findContainers('text')[0];
+      expect(queryInShadow(container, '.code-block')).toBeTruthy();
+    });
+  });
+
+  // ============================================
+  // Activity Indicator Tests
+  // ============================================
+
+  describe('Activity indicator', () => {
+    beforeEach(() => {
+      actor = new MessageTurnActor({ manager, element });
+      actor.bind({ turnId: 'turn-1', role: 'assistant', timestamp: Date.now() });
+    });
+
+    function getIndicator(): HTMLElement | null {
+      return element.querySelector('.activity-indicator');
+    }
+
+    it('no indicator before startStreaming', () => {
+      expect(getIndicator()).toBeNull();
+      expect(actor.getActivityLabel()).toBeNull();
+    });
+
+    it('no indicator on startStreaming before any event fires', () => {
+      actor.startStreaming();
+      expect(actor.getActivityLabel()).toBeNull();
+      expect(getIndicator()).toBeNull();
+    });
+
+    it('text-active swaps label to "Writing response..."', () => {
+      actor.startStreaming();
+      actor.setTextActive(true);
+      expect(actor.getActivityLabel()).toBe('Writing response...');
+      expect(getIndicator()?.textContent).toContain('Writing response...');
+    });
+
+    it('pushed activity overrides the text fallback', () => {
+      actor.startStreaming();
+      actor.setTextActive(true);
+      actor.pushActivity('thinking', 'Thinking...');
+      expect(actor.getActivityLabel()).toBe('Thinking...');
+    });
+
+    it('most recent push wins (shell over thinking)', () => {
+      actor.startStreaming();
+      actor.pushActivity('thinking', 'Thinking...');
+      actor.pushActivity('shell', 'Running ls');
+      expect(actor.getActivityLabel()).toBe('Running ls');
+    });
+
+    it('pop restores the underlying frame', () => {
+      actor.startStreaming();
+      actor.pushActivity('thinking', 'Thinking...');
+      actor.pushActivity('shell', 'Running ls');
+      actor.popActivity('shell');
+      expect(actor.getActivityLabel()).toBe('Thinking...');
+    });
+
+    it('pop falls back to text if stack empties and text is active', () => {
+      actor.startStreaming();
+      actor.setTextActive(true);
+      actor.pushActivity('shell', 'Running ls');
+      actor.popActivity('shell');
+      expect(actor.getActivityLabel()).toBe('Writing response...');
+    });
+
+    it('pushActivity same kind updates label in place (no duplicates)', () => {
+      actor.startStreaming();
+      actor.pushActivity('shell', 'Running ls');
+      actor.pushActivity('shell', 'Running npm test');
+      expect(actor.getActivityLabel()).toBe('Running npm test');
+      actor.popActivity('shell');
+      // Stack had only one frame; one pop clears it, indicator hides
+      expect(actor.getActivityLabel()).toBeNull();
+    });
+
+    it('popActivity for missing kind is a no-op', () => {
+      actor.startStreaming();
+      actor.pushActivity('thinking', 'Thinking...');
+      expect(() => actor.popActivity('shell')).not.toThrow();
+      expect(actor.getActivityLabel()).toBe('Thinking...');
+    });
+
+    it('clearActivity empties stack and text state', () => {
+      actor.startStreaming();
+      actor.pushActivity('thinking', 'Thinking...');
+      actor.setTextActive(true);
+      actor.clearActivity();
+      expect(actor.getActivityLabel()).toBeNull();
+    });
+
+    it('endStreaming removes indicator from DOM', () => {
+      actor.startStreaming();
+      actor.pushActivity('thinking', 'Thinking...');
+      expect(getIndicator()).not.toBeNull();
+      actor.endStreaming();
+      expect(getIndicator()).toBeNull();
+      expect(actor.getActivityLabel()).toBeNull();
+    });
+
+    it('reset clears activity state', () => {
+      actor.startStreaming();
+      actor.pushActivity('shell', 'Running ls');
+      actor.reset();
+      expect(getIndicator()).toBeNull();
+    });
+
+    it('indicator element stays as the last child of the turn root', () => {
+      actor.startStreaming();
+      actor.createTextSegment('Hello');
+      actor.pushActivity('thinking', 'Thinking...');
+      expect(element.lastElementChild).toBe(getIndicator());
+    });
+
+    it('hidden when not streaming even if frames exist', () => {
+      actor.pushActivity('shell', 'Running ls');
+      expect(getIndicator()).toBeNull();
+      expect(actor.getActivityLabel()).toBeNull();
+    });
+
+    it('unclosed fence pushes a code-block frame ("Writing X...")', () => {
+      actor.startStreaming();
+      actor.setTextActive(true);
+      expect(actor.getActivityLabel()).toBe('Writing response...');
+
+      actor.createTextSegment();
+      actor.updateTextContent('Here:\n```typescript\n# File: src/game.ts\n');
+      expect(actor.getActivityLabel()).toBe('Writing src/game.ts...');
+    });
+
+    it('fence close pops the code-block frame back to fallback', () => {
+      actor.startStreaming();
+      actor.setTextActive(true);
+      actor.createTextSegment();
+      actor.updateTextContent('Here:\n```typescript\n');
+      expect(actor.getActivityLabel()).toBe('Generating code...');
+
+      actor.updateTextContent('Here:\n```typescript\nconst x = 1;\n```\n');
+      expect(actor.getActivityLabel()).toBe('Writing response...');
+    });
+
+    it('higher-priority frames beat the code-block frame', () => {
+      actor.startStreaming();
+      actor.setTextActive(true);
+      actor.createTextSegment();
+      actor.updateTextContent('```bash\n');
+      expect(actor.getActivityLabel()).toBe('Generating code...');
+
+      actor.pushActivity('shell', 'Running ls');
+      expect(actor.getActivityLabel()).toBe('Running ls');
+
+      actor.popActivity('shell');
+      expect(actor.getActivityLabel()).toBe('Generating code...');
+    });
+
+    it('completeCurrentTextSegment pops the code-block frame', () => {
+      actor.startStreaming();
+      actor.setTextActive(true);
+      actor.createTextSegment();
+      actor.updateTextContent('Here:\n```typescript\n');
+      expect(actor.getActivityLabel()).toBe('Generating code...');
+
+      actor.completeCurrentTextSegment();
+      expect(actor.getActivityLabel()).toBe('Writing response...');
+    });
   });
 
   // ============================================
@@ -599,62 +887,51 @@ describe('MessageTurnActor', () => {
       expect(codeBlock?.classList.contains('expanded')).toBe(false);
     });
 
-    it('shows placeholder instead of incomplete code block during streaming', () => {
+    it('hides incomplete fence content and surfaces it on the activity line', () => {
       actor.startStreaming();
       actor.createTextSegment('Here is the code:');
       actor.updateTextContent('Here is the code:\n```python\ndef hello():');
 
       const containers = findContainers('text');
-      const placeholder = queryInShadow(containers[0], '.code-generating');
-      expect(placeholder).toBeTruthy();
-      // No code block dropdown should exist
-      const codeBlock = queryInShadow(containers[0], '.code-block');
-      expect(codeBlock).toBeNull();
+      // No inline placeholder — that concept is gone under the unified indicator.
+      expect(queryInShadow(containers[0], '.code-generating')).toBeNull();
+      // Fence content is stripped from rendered text (no raw ``` or fence body)
+      const contentEl = queryInShadow(containers[0], '.content');
+      expect(contentEl?.textContent).toContain('Here is the code:');
+      expect(contentEl?.textContent).not.toContain('```');
+      expect(contentEl?.textContent).not.toContain('def hello');
+      // No code block dropdown yet (fence still open)
+      expect(queryInShadow(containers[0], '.code-block')).toBeNull();
+      // The unified activity line carries the label
+      expect(actor.getActivityLabel()).toBe('Generating code...');
     });
 
     it('shows code block dropdown when complete during streaming', () => {
       actor.startStreaming();
+      actor.setTextActive(true);
       actor.createTextSegment('');
       actor.updateTextContent('```python\ndef hello():\n    pass\n```');
 
       const containers = findContainers('text');
-      const codeBlock = queryInShadow(containers[0], '.code-block');
-      expect(codeBlock).toBeTruthy();
-      // No placeholder — block is complete
-      const placeholder = queryInShadow(containers[0], '.code-generating');
-      expect(placeholder).toBeNull();
+      expect(queryInShadow(containers[0], '.code-block')).toBeTruthy();
+      // No inline placeholder ever — code-block frame was popped when fence closed
+      expect(queryInShadow(containers[0], '.code-generating')).toBeNull();
+      // Activity line falls back to the text label
+      expect(actor.getActivityLabel()).toBe('Writing response...');
     });
 
-    it('shows no placeholder for incomplete code blocks when not streaming', () => {
-      // History restore — not streaming
-      actor.createTextSegment('Truncated:\n```python\ndef hello():');
-
-      const containers = findContainers('text');
-      const placeholder = queryInShadow(containers[0], '.code-generating');
-      expect(placeholder).toBeNull();
-    });
-
-    it('placeholder contains static label', () => {
+    it('unified label reflects # File: header (Writing filename)', () => {
       actor.startStreaming();
       actor.createTextSegment('');
-      actor.updateTextContent('```typescript\nconst x');
-
-      const containers = findContainers('text');
-      const label = containers[0].shadowRoot?.querySelector('.gen-phrase-static');
-      expect(label).not.toBeNull();
-      expect(label?.textContent).toBe('Developing...');
+      actor.updateTextContent('```typescript\n# File: src/game.ts\nclass ');
+      expect(actor.getActivityLabel()).toBe('Writing src/game.ts...');
     });
 
-    it('placeholder has moby icon container', () => {
+    it('unified label reflects heredoc pattern (Creating filename)', () => {
       actor.startStreaming();
       actor.createTextSegment('');
-      actor.updateTextContent('```js\ncode');
-
-      const containers = findContainers('text');
-      const placeholder = queryInShadow(containers[0], '.code-generating');
-      expect(placeholder).not.toBeNull();
-      const phrases = containers[0].shadowRoot?.querySelector('.code-gen-phrases');
-      expect(phrases).not.toBeNull();
+      actor.updateTextContent('```bash\ncat > subdir/config.json << EOF\n{');
+      expect(actor.getActivityLabel()).toBe('Creating config.json...');
     });
 
     it('skips DOM update when formatted output unchanged during code streaming', () => {

@@ -63,7 +63,8 @@ Rejected because: the snapshot approach is more machinery than the event-sourcin
 - `convertHistoryToEvents` and adjacent fallback paths are deleted. Once gone, sessions saved before Phase 3 would need to be re-hydrated under the new rules. Since no users exist, we don't need a compatibility path — but once released, this decision is locked in.
 
 **Follow-ups:**
-- The dynamic loading indicator can be implemented by subscribing to the same event stream after Phase 1.
+- ✅ **Done.** The dynamic loading indicator now subscribes to the structural event stream (thinking / shell / approval / tools / web-search / code-block activity).
 - The inspector actor should gain a live event feed view for debuggability during the refactor.
-- A `Moby: Export Turn as JSON` command (dumps live / saved / hydrated event sequences side-by-side) becomes the primary debugging tool. Build it early in Phase 1.
-- A fidelity test — scripted turn → capture live events → save → reload → capture hydrated events → assert equal — is the single highest-ROI test for this change. Land it before Phase 3.
+- ✅ **Done.** `Moby: Export Turn as JSON` is wired up in devMode (see `package.json`, `CommandsShadowActor`, `extension.ts`).
+- ✅ **Done.** Fidelity test landed at [tests/unit/providers/fidelity.test.ts](../../../tests/unit/providers/fidelity.test.ts).
+- **Parked.** Phase 3b — per-turn lazy load. Split `loadHistory` into headers + on-demand `requestTurnEvents(turnId)`, with VirtualListActor visibility callbacks driving requests. Deferred until real-world session sizes surface the need.

@@ -47,6 +47,17 @@ import type {
 const log = createLogger('MessageTurnActor');
 
 // ============================================
+// Activity Indicator Types
+// ============================================
+
+export type ActivityKind = 'thinking' | 'shell' | 'approval' | 'tools' | 'web-search' | 'code-block';
+
+export interface ActivityFrame {
+  kind: ActivityKind;
+  label: string;
+}
+
+// ============================================
 // Configuration
 // ============================================
 
@@ -137,6 +148,27 @@ export class MessageTurnActor extends InterleavedShadowActor {
 
   private _isStreaming = false;
   private _hasInterleaved = false;
+
+  // ============================================
+  // Activity Indicator State
+  // ============================================
+
+  // Stack of activity frames (thinking, shell, approval, tools, web-search, code-block).
+  // Top of stack wins. If empty, the indicator falls back to text/response state.
+  // code-block frames are pushed from updateTextContent when an unclosed fence is
+  // detected in the current segment — so the unified indicator shows "Writing X..."
+  // instead of an inline placeholder next to the hidden fence content.
+  private _activityStack: ActivityFrame[] = [];
+  // True while text is actively streaming (a text-append has arrived without a
+  // matching text-finalize). Drives the "Writing response..." fallback label.
+  private _textActive = false;
+  // Lazily-created host element for the indicator. Appended to this.element.
+  private _activityElement: HTMLElement | null = null;
+  // The child span whose textContent is updated on label change. Kept alive
+  // across re-renders so the Moby-spurts animation doesn't reset every frame.
+  private _activityLabelEl: HTMLElement | null = null;
+  // Last label rendered to the DOM — used to short-circuit no-op renders.
+  private _lastRenderedLabel: string | null = null;
 
   // ============================================
   // Header State
@@ -243,6 +275,16 @@ export class MessageTurnActor extends InterleavedShadowActor {
     this._hasInterleaved = false;
     this._headerRendered = false;
 
+    // Reset activity indicator
+    this._activityStack = [];
+    this._textActive = false;
+    if (this._activityElement) {
+      this._activityElement.remove();
+      this._activityElement = null;
+      this._activityLabelEl = null;
+      this._lastRenderedLabel = null;
+    }
+
     // Remove data attributes
     this.element.removeAttribute('data-turn-id');
     this.element.removeAttribute('data-role');
@@ -306,11 +348,22 @@ export class MessageTurnActor extends InterleavedShadowActor {
     // before the API call, triggering startThinkingIteration → ensureRoleHeader().
     // ensureRoleHeader() is idempotent (checks _headerRendered), so subsequent calls are no-ops.
     this.ensureRoleHeader();
+
     log.debug('startStreaming:', this._turnId, `role=${this._role}`);
   }
 
   endStreaming(): void {
     this._isStreaming = false;
+
+    // Tear down the activity indicator on turn end.
+    this._activityStack = [];
+    this._textActive = false;
+    if (this._activityElement) {
+      this._activityElement.remove();
+      this._activityElement = null;
+      this._activityLabelEl = null;
+      this._lastRenderedLabel = null;
+    }
 
     // Mark current text segment as complete and re-render to remove
     // the "Seeking/Developing..." animation (formatContent skips it
@@ -346,6 +399,152 @@ export class MessageTurnActor extends InterleavedShadowActor {
 
   isStreaming(): boolean {
     return this._isStreaming;
+  }
+
+  // ============================================
+  // Activity Indicator
+  // ============================================
+
+  /**
+   * Push a higher-priority activity onto the indicator stack. The top of the
+   * stack is what gets shown. Idempotent per kind — if the same kind is
+   * already on the stack, its label is updated instead of pushing a duplicate.
+   */
+  pushActivity(kind: ActivityKind, label: string): void {
+    const existing = this._activityStack.find(f => f.kind === kind);
+    if (existing) {
+      if (existing.label === label) return; // No-op if unchanged — preserves animation state
+      existing.label = label;
+    } else {
+      this._activityStack.push({ kind, label });
+    }
+    this.renderActivity();
+  }
+
+  /**
+   * Pop the newest frame matching the given kind. No-op if the kind isn't on
+   * the stack (defensive — out-of-order complete events shouldn't crash).
+   */
+  popActivity(kind: ActivityKind): void {
+    for (let i = this._activityStack.length - 1; i >= 0; i--) {
+      if (this._activityStack[i].kind === kind) {
+        this._activityStack.splice(i, 1);
+        break;
+      }
+    }
+    this.renderActivity();
+  }
+
+  /**
+   * Toggle the "text is streaming" fallback state. When the stack is empty,
+   * this drives the label between "Writing response..." and "Waiting for
+   * response...".
+   */
+  setTextActive(on: boolean): void {
+    if (this._textActive === on) return;
+    this._textActive = on;
+    this.renderActivity();
+  }
+
+  /** Empty the stack and clear text-active. Used on turn end. */
+  clearActivity(): void {
+    this._activityStack = [];
+    this._textActive = false;
+    this.renderActivity();
+  }
+
+  /**
+   * Extract a label for an unclosed fence at the end of content, if any.
+   * Returns null when there is no open fence (content is prose-only or the
+   * fence is closed). Uses hasIncompleteFence for proper CommonMark pair-
+   * tracking — a trailing closed fence shouldn't trigger "Generating code...".
+   */
+  private extractCodeBlockActivityLabel(content: string): string | null {
+    const { incomplete, lastOpenIndex } = hasIncompleteFence(content);
+    if (!incomplete || lastOpenIndex < 0) return null;
+    const fenceBody = content.slice(lastOpenIndex);
+
+    const fileMatch = fenceBody.match(/^```\w*\n#\s*File:\s*(\S+)/);
+    if (fileMatch) return `Writing ${fileMatch[1]}...`;
+
+    const heredocMatch = fenceBody.match(/cat\s+>+\s+(\S+)\s+<</);
+    if (heredocMatch) {
+      const fullPath = heredocMatch[1];
+      const fileName = fullPath.split('/').pop() || fullPath;
+      return `Creating ${fileName}...`;
+    }
+
+    return 'Generating code...';
+  }
+
+  /** Visible-for-testing peek at the current indicator label, or null if hidden. */
+  getActivityLabel(): string | null {
+    if (!this._isStreaming) return null;
+    if (this._activityStack.length > 0) {
+      return this._activityStack[this._activityStack.length - 1].label;
+    }
+    if (this._textActive) return 'Writing response...';
+    return null;
+  }
+
+  private renderActivity(): void {
+    const label = this.getActivityLabel();
+
+    if (label === null) {
+      if (this._activityElement) {
+        this._activityElement.remove();
+        this._activityElement = null;
+        this._activityLabelEl = null;
+        this._lastRenderedLabel = null;
+      }
+      return;
+    }
+
+    // Build the skeleton DOM once — Moby icon, spurt drops, label span —
+    // and keep it alive across re-renders. innerHTML = was resetting the
+    // spurt animation to frame 0 on every streamed token, causing flicker.
+    if (!this._activityElement) {
+      this._activityElement = document.createElement('div');
+      this._activityElement.className = 'activity-indicator';
+      this._activityElement.setAttribute('data-actor', 'turn');
+
+      const mobyIconUrl = document.body.dataset.mobyIcon || '';
+      if (mobyIconUrl) {
+        const moby = document.createElement('div');
+        moby.className = 'activity-moby';
+        const img = document.createElement('img');
+        img.src = mobyIconUrl;
+        img.alt = 'Moby';
+        moby.appendChild(img);
+        const spurt = document.createElement('div');
+        spurt.className = 'activity-spurt';
+        for (let i = 0; i < 5; i++) {
+          const drop = document.createElement('span');
+          drop.className = 'drop';
+          spurt.appendChild(drop);
+        }
+        moby.appendChild(spurt);
+        this._activityElement.appendChild(moby);
+      }
+
+      this._activityLabelEl = document.createElement('span');
+      this._activityLabelEl.className = 'activity-label';
+      this._activityElement.appendChild(this._activityLabelEl);
+    }
+
+    // Keep the indicator as the last child so new content renders above it.
+    if (this._activityElement.parentElement !== this.element ||
+        this.element.lastElementChild !== this._activityElement) {
+      this.element.appendChild(this._activityElement);
+    }
+
+    // Only swap the label text when it actually changes — preserves the
+    // Moby-spurts CSS animation state across the typical token-by-token
+    // pushActivity flood.
+    if (label !== this._lastRenderedLabel && this._activityLabelEl) {
+      this._activityLabelEl.textContent = label;
+      this._lastRenderedLabel = label;
+    }
   }
 
   /** Check if ANY turn is currently streaming (global state). */
@@ -494,6 +693,17 @@ export class MessageTurnActor extends InterleavedShadowActor {
         break;
       }
     }
+
+    // Sync the unified activity indicator with the current fence state:
+    // if an unclosed fence is detected, show "Writing X..." / "Creating X..."
+    // / "Generating code..." in the activity line instead of rendering an
+    // inline placeholder inside the text segment.
+    const label = this.extractCodeBlockActivityLabel(content);
+    if (label) {
+      this.pushActivity('code-block', label);
+    } else {
+      this.popActivity('code-block');
+    }
   }
 
   /**
@@ -501,6 +711,40 @@ export class MessageTurnActor extends InterleavedShadowActor {
    */
   getCurrentSegmentContent(): string {
     return this._currentSegmentContent;
+  }
+
+  /**
+   * Finalize the current text segment mid-turn. The turn-level `_isStreaming`
+   * flag stays true; only this segment drops its streaming affordances (the
+   * animated placeholder for an unclosed code fence and the `streaming` class).
+   * Called when a text segment closes before a shell/tool run so the prior
+   * segment doesn't keep a live-looking animation above newly rendered content.
+   */
+  completeCurrentTextSegment(): void {
+    if (!this._currentTextContainerId) return;
+    const container = this.getContainer(this._currentTextContainerId);
+    if (!container) return;
+
+    for (const segment of this._textSegments.values()) {
+      if (segment.containerId === this._currentTextContainerId) {
+        segment.complete = true;
+        break;
+      }
+    }
+
+    container.host.classList.remove('streaming');
+
+    const contentEl = container.content.querySelector('.content');
+    if (contentEl) {
+      const formatted = this.formatContent(this._currentSegmentContent);
+      contentEl.innerHTML = formatted;
+      this._lastFormattedHtml = formatted;
+    }
+
+    // Segment finalized — pop the code-block activity frame (no-op if not on
+    // the stack). The unified activity line stops showing "Writing X..." for
+    // this segment even if a new segment picks up streaming immediately.
+    this.popActivity('code-block');
   }
 
   // ============================================
@@ -1670,6 +1914,13 @@ export class MessageTurnActor extends InterleavedShadowActor {
 
     const startExpanded = this._editMode === 'manual' || this._role === 'user';
 
+    // Normalize orphan fences: R1 sometimes emits "prose:```css" on one line
+    // (no newline before the fence). CommonMark fence detection in
+    // extractCodeBlocks requires fences at the start of a line, so orphan
+    // fences are invisible to the parser and their content leaks as prose.
+    // Insert a newline before any inline ``` so the parser can find them.
+    content = content.replace(/([^\n])(`{3,}(?:\w*)?)/g, '$1\n$2');
+
     // Fenced code blocks (complete only) — fence-length-aware (CommonMark spec)
     const blocks = extractCodeBlocks(content);
     let result = content;
@@ -1708,25 +1959,13 @@ export class MessageTurnActor extends InterleavedShadowActor {
       result = result.substring(0, block.startIndex) + html + result.substring(block.endIndex);
     }
 
-    // During streaming, hide incomplete code blocks and show animated placeholder
-    if (this._isStreaming) {
-      result = result.replace(/```\w*(?:\n[\s\S]*)?$/, (match) => {
-        // Try to extract filename from # File: header (SEARCH/REPLACE edits)
-        const fileMatch = match.match(/^```\w*\n#\s*File:\s*(\S+)/);
-        if (fileMatch) {
-          return this.buildCodeGeneratingHtml(`Writing ${fileMatch[1]}...`);
-        }
-        // Try to extract filename from heredoc pattern (cat > file << 'EOF')
-        const heredocMatch = match.match(/cat\s+>+\s+(\S+)\s+<</);
-        if (heredocMatch) {
-          // Extract just the filename from the full path
-          const fullPath = heredocMatch[1];
-          const fileName = fullPath.split('/').pop() || fullPath;
-          return this.buildCodeGeneratingHtml(`Creating ${fileName}...`);
-        }
-        return this._codeGeneratingHtml;
-      });
-    }
+    // Always strip any trailing unclosed fence from rendered output. The
+    // unified activity line already signals "Writing X..." / "Creating X..."
+    // / "Generating code..." at the turn level — we don't render an inline
+    // placeholder in the text segment anymore. Stripping prevents raw
+    // backticks + partial content from leaking as prose when the fence is
+    // mid-stream or when a turn aborts before the fence closes.
+    result = result.replace(/```\w*(?:\n[\s\S]*)?$/, '');
 
     // Inline code
     result = result.replace(/`([^`\n]+)`/g, '<code class="inline-code">$1</code>');
@@ -1823,19 +2062,6 @@ export class MessageTurnActor extends InterleavedShadowActor {
       document.addEventListener('keydown', onKey);
     }, 0);
   }
-
-  /** Build the code-generating placeholder HTML, optionally with a specific filename */
-  private buildCodeGeneratingHtml(text?: string): string {
-    const mobyIconUrl = document.body.dataset.mobyIcon || '';
-    const mobyHtml = mobyIconUrl
-      ? `<div class="code-gen-moby"><img src="${mobyIconUrl}" alt="Moby"><div class="code-gen-spurt">${'<span class="drop"></span>'.repeat(5)}</div></div>`
-      : '';
-    const label = text || 'Developing...';
-    return `<div class="code-generating">${mobyHtml}<div class="code-gen-phrases"><span class="gen-phrase-static">${this.escapeHtml(label)}</span></div></div>`;
-  }
-
-  /** Pre-built default placeholder (cached for performance) */
-  private readonly _codeGeneratingHtml = this.buildCodeGeneratingHtml();
 
   private escapeHtml(text: string): string {
     const div = document.createElement('div');

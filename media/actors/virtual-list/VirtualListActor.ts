@@ -486,6 +486,50 @@ export class VirtualListActor extends EventStateActor {
   }
 
   /**
+   * Finalize the last text segment for a turn mid-stream (e.g., before a
+   * <shell> block runs). Strips the streaming placeholder from that segment
+   * while leaving the turn itself in streaming state.
+   */
+  completeCurrentTextSegment(turnId: string): void {
+    const turn = this._turnMap.get(turnId);
+    if (!turn) return;
+
+    const lastSegment = turn.textSegments[turn.textSegments.length - 1];
+    if (lastSegment) {
+      lastSegment.complete = true;
+    }
+
+    const bound = this._boundActors.get(turnId);
+    if (bound) {
+      bound.actor.completeCurrentTextSegment();
+    }
+  }
+
+  // ============================================
+  // Activity Indicator Pass-throughs
+  // ============================================
+
+  pushTurnActivity(turnId: string, kind: import('../turn/MessageTurnActor').ActivityKind, label: string): void {
+    const bound = this._boundActors.get(turnId);
+    if (bound) bound.actor.pushActivity(kind, label);
+  }
+
+  popTurnActivity(turnId: string, kind: import('../turn/MessageTurnActor').ActivityKind): void {
+    const bound = this._boundActors.get(turnId);
+    if (bound) bound.actor.popActivity(kind);
+  }
+
+  setTurnTextActive(turnId: string, on: boolean): void {
+    const bound = this._boundActors.get(turnId);
+    if (bound) bound.actor.setTextActive(on);
+  }
+
+  clearTurnActivity(turnId: string): void {
+    const bound = this._boundActors.get(turnId);
+    if (bound) bound.actor.clearActivity();
+  }
+
+  /**
    * Start a thinking iteration.
    */
   startThinkingIteration(turnId: string): number {
