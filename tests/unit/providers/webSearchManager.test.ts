@@ -26,6 +26,7 @@ import type { SearchProgress } from '../../../src/providers/webSearchManager';
 // ── TavilyClient mock ──
 function createMockTavilyClient(configured = true) {
   return {
+    id: 'tavily' as const,
     isConfigured: vi.fn(async () => configured),
     search: vi.fn(async (query: string, _options?: any) => ({
       results: [
@@ -42,13 +43,24 @@ function createMockTavilyClient(configured = true) {
   };
 }
 
+// ── Registry mock ──
+// WebSearchManager now dispatches through a WebSearchProviderRegistry rather
+// than holding a direct TavilyClient reference. Tests wrap the mock Tavily
+// in a minimal registry surface that returns it from active().
+function createMockRegistry(tavily: ReturnType<typeof createMockTavilyClient>) {
+  return {
+    active: () => tavily,
+    getTavilyClient: () => tavily
+  };
+}
+
 describe('WebSearchManager', () => {
   let manager: WebSearchManager;
   let mockTavily: ReturnType<typeof createMockTavilyClient>;
 
   beforeEach(() => {
     mockTavily = createMockTavilyClient();
-    manager = new WebSearchManager(mockTavily as any);
+    manager = new WebSearchManager(createMockRegistry(mockTavily) as any);
   });
 
   // ── setMode / getMode ──

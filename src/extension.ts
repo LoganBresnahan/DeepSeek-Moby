@@ -5,7 +5,7 @@ import { CommandProvider } from './providers/commandProvider';
 import { StatusBar } from './views/statusBar';
 import { ConfigManager } from './utils/config';
 import { ConversationManager, createLLMSummarizer } from './events';
-import { TavilyClient } from './clients/tavilyClient';
+import { WebSearchProviderRegistry } from './clients/webSearchProviderRegistry';
 import { logger } from './utils/logger';
 import { UnifiedLogExporter } from './logging/UnifiedLogExporter';
 import { TokenService } from './services/tokenService';
@@ -20,7 +20,7 @@ let commandProvider: CommandProvider;
 let statusBar: StatusBar;
 let deepSeekClient: DeepSeekClient;
 let conversationManager: ConversationManager;
-let tavilyClient: TavilyClient;
+let webSearchRegistry: WebSearchProviderRegistry;
 let drawingServer: DrawingServer;
 
 export async function activate(context: vscode.ExtensionContext) {
@@ -90,8 +90,9 @@ export async function activate(context: vscode.ExtensionContext) {
   // Initialize status bar
   statusBar = new StatusBar(deepSeekClient, conversationManager);
 
-  // Initialize Tavily client for web search
-  tavilyClient = new TavilyClient(context);
+  // Initialize the web search provider registry. Phase 1: Tavily is the
+  // sole entry; the registry resolves `active()` to it unconditionally.
+  webSearchRegistry = new WebSearchProviderRegistry(context);
 
   // Initialize drawing server (starts on-demand via command)
   drawingServer = new DrawingServer();
@@ -107,7 +108,7 @@ export async function activate(context: vscode.ExtensionContext) {
     deepSeekClient,
     statusBar,
     conversationManager,
-    tavilyClient,
+    webSearchRegistry,
     drawingServer
   );
 

@@ -8,6 +8,7 @@ import { logger } from '../utils/logger';
 import { tracer, type TraceCategory } from '../tracing';
 import { webviewLogStore } from '../logging/WebviewLogStore';
 import { TavilyClient } from '../clients/tavilyClient';
+import { WebSearchProviderRegistry } from '../clients/webSearchProviderRegistry';
 import { WebSearchManager } from './webSearchManager';
 import { FileContextManager } from './fileContextManager';
 import { DiffManager } from './diffManager';
@@ -30,7 +31,11 @@ export class ChatProvider implements vscode.WebviewViewProvider {
   private currentSessionId: string | null = null;
   private readonly instanceId: string = uuidv4();
   private disposables: vscode.Disposable[] = [];
+  /** Reference to the Tavily client for Tavily-specific concerns (credit
+   *  stats, plan/usage API) that don't belong on the generic provider
+   *  interface. Resolved from the registry so there's one instance. */
   private tavilyClient: TavilyClient;
+  private webSearchRegistry: WebSearchProviderRegistry;
 
   // Message queuing during post-response summarization
   private _summarizing = false;
@@ -51,17 +56,18 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     deepSeekClient: DeepSeekClient,
     statusBar: StatusBar,
     conversationManager: ConversationManager,
-    tavilyClient: TavilyClient,
+    webSearchRegistry: WebSearchProviderRegistry,
     drawingServer?: DrawingServer
   ) {
     this.deepSeekClient = deepSeekClient;
     this.statusBar = statusBar;
     this.conversationManager = conversationManager;
-    this.tavilyClient = tavilyClient;
+    this.webSearchRegistry = webSearchRegistry;
+    this.tavilyClient = webSearchRegistry.getTavilyClient();
     this.drawingServer = drawingServer || null;
 
     // Create managers
-    this.webSearchManager = new WebSearchManager(this.tavilyClient);
+    this.webSearchManager = new WebSearchManager(this.webSearchRegistry);
     this.fileContextManager = new FileContextManager();
     const config = vscode.workspace.getConfiguration('moby');
     // Initialize web search mode from persisted setting

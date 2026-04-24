@@ -1,13 +1,18 @@
 /**
- * WebSearchManager — Owns web search state, caching, and Tavily API integration.
+ * WebSearchManager — Owns web search state, caching, and dispatch.
  *
- * Extracted from ChatProvider (Phase 1 of ChatProvider refactor).
+ * Resolves the active provider (Tavily today; SearXNG and others in future
+ * phases) via `WebSearchProviderRegistry.active()` — no direct reference
+ * to any specific provider. Provider swaps become a settings change rather
+ * than a code change.
+ *
  * Communicates via vscode.EventEmitter — ChatProvider subscribes to events
  * and forwards them to the webview via postMessage.
  */
 
 import * as vscode from 'vscode';
-import { TavilyClient, TavilySearchResponse, TavilySearchResult } from '../clients/tavilyClient';
+import { WebSearchProviderRegistry } from '../clients/webSearchProviderRegistry';
+import { WebSearchResponse, WebSearchResult } from '../clients/webSearchProvider';
 import { logger } from '../utils/logger';
 import { tracer } from '../tracing';
 import { WebSearchSettings, WebSearchResultEvent, WebSearchMode } from './types';
@@ -48,7 +53,14 @@ export class WebSearchManager {
   };
   private cache = new Map<string, { results: string; timestamp: number }>();
 
-  constructor(private tavilyClient: TavilyClient) {}
+  constructor(private readonly registry: WebSearchProviderRegistry) {}
+
+  /** The currently-active web search provider, resolved at call time so a
+   *  settings-level provider switch takes effect on the next search without
+   *  needing a manager rebuild. */
+  private get provider() {
+    return this.registry.active();
+  }
 
   // ── Public Methods ──
 
@@ -93,7 +105,7 @@ export class WebSearchManager {
 
     this.enabled = enabled;
 
-    if (enabled && !(await this.tavilyClient.isConfigured())) {
+    if (enabled && !(await this.provider.isConfigured())) {
       logger.info('[WebSearch] Toggle rejected: Tavily API key not configured');
       tracer.trace('state.publish', 'webSearch.toggle.rejected', {
         data: { reason: 'api_key_not_configured' }
@@ -152,7 +164,7 @@ export class WebSearchManager {
     return {
       enabled: this.enabled,
       settings: { ...this.settings },
-      configured: await this.tavilyClient.isConfigured(),
+      configured: await this.provider.isConfigured(),
       mode: this.mode
     };
   }
@@ -188,7 +200,7 @@ export class WebSearchManager {
    * so ChatProvider can forward status to the webview.
    */
   async searchForMessage(message: string): Promise<string> {
-    if (this.mode === 'off' || !this.enabled || !(await this.tavilyClient.isConfigured())) {
+    if (this.mode === 'off' || !this.enabled || !(await this.provider.isConfigured())) {
       return '';
     }
 
@@ -224,7 +236,7 @@ export class WebSearchManager {
 
       // Execute all API calls in parallel
       const searchPromises = Array.from({ length: callCount }, (_, i) =>
-        this.tavilyClient.search(message, {
+        this.provider.search(message, {
           searchDepth: this.settings.searchDepth,
           maxResults: this.settings.maxResultsPerSearch
         }).then(result => {
@@ -235,7 +247,7 @@ export class WebSearchManager {
 
       const settled = await Promise.allSettled(searchPromises);
       const fulfilled = settled
-        .filter((r): r is PromiseFulfilledResult<TavilySearchResponse> => r.status === 'fulfilled')
+        .filter((r): r is PromiseFulfilledResult<WebSearchResponse> => r.status === 'fulfilled')
         .map(r => r.value);
 
       if (fulfilled.length === 0) {
@@ -271,7 +283,7 @@ export class WebSearchManager {
   /**
    * Format a single Tavily API response into a readable string for the system prompt.
    */
-  formatSearchResults(response: TavilySearchResponse): string {
+  formatSearchResults(response: WebSearchResponse): string {
     let output = `Web search results for: "${response.query}"\n`;
     output += '─'.repeat(50) + '\n\n';
 
@@ -292,7 +304,7 @@ export class WebSearchManager {
    * Format multiple Tavily API responses into a single readable string.
    * Deduplicates results by URL, keeping the highest-scored version.
    */
-  formatMultiSearchResults(responses: TavilySearchResponse[]): string {
+  formatMultiSearchResults(responses: WebSearchResponse[]): string {
     if (responses.length === 0) return '';
     if (responses.length === 1) return this.formatSearchResults(responses[0]);
 
@@ -307,7 +319,7 @@ export class WebSearchManager {
     }
 
     // Deduplicate results by URL, keeping highest score
-    const seen = new Map<string, TavilySearchResult>();
+    const seen = new Map<string, WebSearchResult>();
     for (const response of responses) {
       for (const result of response.results) {
         const existing = seen.get(result.url);
@@ -344,7 +356,7 @@ export class WebSearchManager {
       return 'Error: Web search auto mode is not enabled.';
     }
 
-    if (!(await this.tavilyClient.isConfigured())) {
+    if (!(await this.provider.isConfigured())) {
       tracer.trace('state.publish', 'webSearch.toolSearch.notConfigured', {
         data: { query: query.substring(0, 80) }
       });
@@ -369,7 +381,7 @@ export class WebSearchManager {
 
     try {
       logger.info(`[WebSearch] Tool-triggered search: "${query.substring(0, 80)}"`);
-      const response = await this.tavilyClient.search(query, {
+      const response = await this.provider.search(query, {
         searchDepth: this.settings.searchDepth,
         maxResults: this.settings.maxResultsPerSearch
       });

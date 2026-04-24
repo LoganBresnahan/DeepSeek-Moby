@@ -1,20 +1,7 @@
 import * as vscode from 'vscode';
 import { HttpClient, HttpError } from '../utils/httpClient';
 import { ConfigManager } from '../utils/config';
-
-export interface TavilySearchResult {
-  title: string;
-  url: string;
-  content: string;
-  score: number;
-}
-
-export interface TavilySearchResponse {
-  results: TavilySearchResult[];
-  answer?: string;
-  query: string;
-  responseTime: number;
-}
+import { WebSearchProvider, WebSearchResponse, WebSearchResult, WebSearchOptions } from './webSearchProvider';
 
 export interface TavilyUsageStats {
   totalSearches: number;
@@ -30,7 +17,9 @@ export interface TavilyApiUsage {
   used: number;
 }
 
-export class TavilyClient {
+export class TavilyClient implements WebSearchProvider {
+  readonly id = 'tavily' as const;
+
   private httpClient: HttpClient;
   private config: ConfigManager;
   private context: vscode.ExtensionContext;
@@ -67,13 +56,13 @@ export class TavilyClient {
     throw new Error('Tavily API key is not configured. Use the "DeepSeek Moby: Set Tavily API Key" command.');
   }
 
-  async search(query: string, options?: { searchDepth?: 'basic' | 'advanced'; maxResults?: number }): Promise<TavilySearchResponse> {
+  async search(query: string, options?: WebSearchOptions): Promise<WebSearchResponse> {
     const apiKey = await this.getApiKey();
     const searchDepth = options?.searchDepth || this.config.get<string>('tavilySearchDepth') || 'basic';
 
     try {
       const response = await this.httpClient.post<{
-        results?: TavilySearchResult[];
+        results?: WebSearchResult[];
         answer?: string;
         query?: string;
         response_time?: number;
