@@ -169,6 +169,71 @@ export const settingsShadowStyles = `
     color: var(--vscode-editor-background);
   }
 
+  .settings-action-btn-danger {
+    color: var(--vscode-errorForeground, #f48771);
+  }
+
+  .settings-action-btn-danger:hover {
+    background: var(--vscode-errorForeground, #f48771);
+    color: var(--vscode-editor-background);
+  }
+
+  /* Custom model API key rows (one per moby.customModels entry). */
+  .custom-model-key-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 4px 0;
+  }
+
+  .custom-model-key-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    flex: 1;
+  }
+
+  .custom-model-key-name {
+    font-size: 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .custom-model-key-actions {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+
+  .key-status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    display: inline-block;
+  }
+
+  /* Wraps a key-status dot + its action button so the dot sits to the
+   * left of the label inside the button row. Used for the global DeepSeek
+   * and Tavily buttons, mirroring the per-custom-model row layout. */
+  .settings-keyed-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .key-status-dot.has-key {
+    background: var(--vscode-terminal-ansiGreen, #4eb14e);
+  }
+
+  .key-status-dot.no-key {
+    background: var(--vscode-descriptionForeground, #858585);
+    opacity: 0.5;
+  }
+
   /* Allow all commands label */
   .settings-wild-label {
     display: flex !important;

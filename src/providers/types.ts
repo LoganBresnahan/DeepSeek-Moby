@@ -20,6 +20,8 @@ export interface DiffMetadata {
   iteration: number;
   diffId: string;
   superseded?: boolean;
+  /** What kind of filesystem change — created, modified, or deleted. */
+  action?: 'created' | 'modified' | 'deleted';
 }
 
 /** Serializable diff info sent to webview (no Uri objects) */
@@ -30,6 +32,8 @@ export interface DiffInfo {
   iteration: number;
   diffId: string;
   superseded: boolean;
+  /** What kind of filesystem change — created, modified, or deleted. */
+  action?: 'created' | 'modified' | 'deleted';
   /** URI string for pending diffs (used by webview to identify diff tabs) */
   proposedUri?: string;
 }
@@ -164,6 +168,12 @@ export interface DiffApprovalResult {
   filePath: string;
   diffId: string;
   approved: boolean;
+}
+
+/** Ground-truth outcome of an accept/reject operation, for DB updates. */
+export interface DiffResolutionOutcome {
+  filePath: string;
+  status: 'applied' | 'rejected';
 }
 
 // ── Command Approval Types ──

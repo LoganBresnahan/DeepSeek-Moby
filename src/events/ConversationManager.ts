@@ -20,6 +20,7 @@ import { runMigrations } from './migrations';
 import { EventStore } from './EventStore';
 import { SnapshotManager, SummarizerFn } from './SnapshotManager';
 import { logger } from '../utils/logger';
+import { DEFAULT_MODEL_ID } from '../models/registry';
 import {
   ConversationEvent,
   Attachment,
@@ -179,7 +180,7 @@ export class ConversationManager {
   /**
    * Create a new conversation session.
    */
-  async createSession(title?: string, model: string = 'deepseek-chat'): Promise<Session> {
+  async createSession(title?: string, model: string = DEFAULT_MODEL_ID): Promise<Session> {
     const id = uuidv4();
     const now = Date.now();
 
@@ -999,7 +1000,7 @@ export class ConversationManager {
       const importData = JSON.parse(data);
       const session = await this.createSession(
         importData.title || 'Imported Chat',
-        importData.model || 'deepseek-chat'
+        importData.model || DEFAULT_MODEL_ID
       );
 
       // Replay messages as events

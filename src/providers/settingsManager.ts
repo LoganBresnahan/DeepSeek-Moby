@@ -15,6 +15,7 @@ import { DeepSeekClient } from '../deepseekClient';
 import { logger } from '../utils/logger';
 import { tracer } from '../tracing';
 import { SettingsSnapshot, WebSearchMode } from './types';
+import { getCapabilities } from '../models/registry';
 
 /** Payload for model change events */
 export interface ModelChangedEvent {
@@ -146,11 +147,8 @@ export class SettingsManager {
   }
 
   private getMaxTokensForCurrentModel(config: vscode.WorkspaceConfiguration): number {
-    const model = this.deepSeekClient.getModel();
-    if (model === 'deepseek-reasoner') {
-      return config.get<number>('maxTokensReasonerModel') ?? 65536;
-    }
-    return config.get<number>('maxTokensChatModel') ?? 8192;
+    const caps = getCapabilities(this.deepSeekClient.getModel());
+    return config.get<number>(caps.maxTokensConfigKey) ?? caps.maxOutputTokens;
   }
 
   /**

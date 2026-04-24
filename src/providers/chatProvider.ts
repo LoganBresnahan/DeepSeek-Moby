@@ -19,6 +19,7 @@ import { SavedPromptManager } from './savedPromptManager';
 import { PlanManager } from './planManager';
 import { TokenService } from '../services/tokenService';
 import { qrcodegen } from '../vendor/qrcodegen';
+import { getCapabilities, getAllRegisteredModels, supportsManualMode, MODEL_REGISTRY } from '../models/registry';
 
 export class ChatProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'deepseek-chat-view';
@@ -216,21 +217,31 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     this.settingsManager.onSettingsChanged(async snapshot => {
       if (this._view) {
         const wsState = await this.webSearchManager.getSettings();
+        // Re-evaluate apiKeyConfigured on every settings change because the
+        // check is per-model: switching from DeepSeek to a local Ollama
+        // entry with an `apiKey: "ollama"` placeholder flips the flag true,
+        // and the reverse flips it false. Without this, the send button
+        // stays stuck at its initial state across model switches.
+        const apiKeyConfigured = await this.deepSeekClient.isApiKeyConfigured();
         this._view.webview.postMessage({
           type: 'settings',
           ...snapshot,
+          apiKeyConfigured,
           webSearch: {
             searchDepth: wsState.settings.searchDepth,
             creditsPerPrompt: wsState.settings.creditsPerPrompt,
             maxResultsPerSearch: wsState.settings.maxResultsPerSearch,
             cacheDuration: wsState.settings.cacheDuration,
-            mode: wsState.mode
+            mode: wsState.mode,
+            configured: wsState.configured
           }
         });
         const config = vscode.workspace.getConfiguration('moby');
         let editMode = (config.get<string>('editMode') || 'manual') as 'manual' | 'ask' | 'auto';
-        // Chat model doesn't support Manual mode
-        if (this.deepSeekClient.getModel() === 'deepseek-chat' && editMode === 'manual') {
+        // Manual mode requires the model to emit SEARCH/REPLACE in text for
+        // the Apply button. Models whose primary edit channel is native-tool
+        // bypass that path entirely — auto-switch to ask.
+        if (!supportsManualMode(this.deepSeekClient.getModel()) && editMode === 'manual') {
           editMode = 'ask';
         }
         if (editMode !== this.diffManager.currentEditMode) {
@@ -496,13 +507,16 @@ export class ChatProvider implements vscode.WebviewViewProvider {
           break;
         case 'applyCode': {
           const filePathMatch = (data.code as string)?.match(/^#\s*File:\s*(.+?)$/m);
-          const appliedFilePath = filePathMatch ? filePathMatch[1].trim() : null;
-          logger.info(`[ChatProvider] applyCode: filePath=${appliedFilePath}, session=${this.currentSessionId?.substring(0, 8)}, editMode=${this.diffManager.currentEditMode}`);
-          await this.diffManager.applyCode(data.code, data.language);
-          if (this.currentSessionId && appliedFilePath) {
-            this.conversationManager.updateFileModifiedStatus(this.currentSessionId, appliedFilePath, 'applied', this.diffManager.currentEditMode);
+          const hintedFilePath = filePathMatch ? filePathMatch[1].trim() : null;
+          logger.info(`[ChatProvider] applyCode: filePath=${hintedFilePath}, session=${this.currentSessionId?.substring(0, 8)}, editMode=${this.diffManager.currentEditMode}`);
+          const outcome = await this.diffManager.applyCode(data.code, data.language);
+          // Use the real outcome — applyCode may have failed silently (file
+          // not found, no workspace) or opened an untitled doc (outcome=null).
+          const filePath = outcome?.filePath || hintedFilePath;
+          if (this.currentSessionId && filePath && outcome) {
+            this.conversationManager.updateFileModifiedStatus(this.currentSessionId, filePath, outcome.status, this.diffManager.currentEditMode);
           } else {
-            logger.warn(`[ChatProvider] applyCode: skipped DB update — sessionId=${this.currentSessionId}, filePath=${appliedFilePath}`);
+            logger.warn(`[ChatProvider] applyCode: skipped DB update — sessionId=${this.currentSessionId}, filePath=${filePath}, outcome=${outcome ? outcome.status : 'null'}`);
           }
           break;
         }
@@ -555,9 +569,26 @@ export class ChatProvider implements vscode.WebviewViewProvider {
           break;
         case 'setMaxTokens': {
           const model = data.model as string || this.deepSeekClient.getModel();
-          const configKey = model === 'deepseek-reasoner' ? 'maxTokensReasonerModel' : 'maxTokensChatModel';
           const config = vscode.workspace.getConfiguration('moby');
-          await config.update(configKey, data.maxTokens, vscode.ConfigurationTarget.Global);
+          if (MODEL_REGISTRY[model]) {
+            // Built-in model: write to its registered per-model config key.
+            const configKey = getCapabilities(model).maxTokensConfigKey;
+            await config.update(configKey, data.maxTokens, vscode.ConfigurationTarget.Global);
+          } else {
+            // Custom model: the `maxTokensConfigKey` field names an arbitrary
+            // user-invented key that VS Code rejects at write time because
+            // it isn't declared in package.json. Instead, patch the matching
+            // entry's `maxOutputTokens` inside the `moby.customModels` array
+            // and let the config-change listener reload the registry.
+            const entries = (config.get<Array<Record<string, unknown>>>('customModels') ?? []).map(e => ({ ...e }));
+            const idx = entries.findIndex(e => e.id === model);
+            if (idx === -1) {
+              logger.warn(`[ChatProvider] setMaxTokens: custom model "${model}" not found in moby.customModels — skipping write`);
+              break;
+            }
+            entries[idx].maxOutputTokens = data.maxTokens;
+            await config.update('customModels', entries, vscode.ConfigurationTarget.Global);
+          }
           break;
         }
         case 'setLogLevel':
@@ -624,7 +655,13 @@ export class ChatProvider implements vscode.WebviewViewProvider {
           this.sendCurrentSettings();
           break;
         case 'executeCommand':
-          vscode.commands.executeCommand(data.command);
+          // Forward optional args from the webview (e.g. the custom model id
+          // when the settings popup's "Set key" button is clicked).
+          if (Array.isArray(data.args)) {
+            vscode.commands.executeCommand(data.command, ...data.args);
+          } else {
+            vscode.commands.executeCommand(data.command);
+          }
           break;
         case 'toggleWebSearch':
           await this.webSearchManager.toggle(data.enabled);
@@ -656,24 +693,33 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         case 'rejectEdit':
           await this.diffManager.rejectEdit(data.filePath);
           break;
-        case 'acceptSpecificDiff':
+        case 'acceptSpecificDiff': {
           logger.info(`[ChatProvider] acceptSpecificDiff: diffId=${data.diffId}, filePath=${data.filePath}, session=${this.currentSessionId?.substring(0, 8)}, editMode=${this.diffManager.currentEditMode}`);
-          await this.diffManager.acceptSpecificDiff(data.diffId);
-          if (this.currentSessionId && data.filePath) {
-            this.conversationManager.updateFileModifiedStatus(this.currentSessionId, data.filePath, 'applied', this.diffManager.currentEditMode);
+          const outcome = await this.diffManager.acceptSpecificDiff(data.diffId);
+          // Use the actual outcome (can be 'rejected' if e.g. the delete
+          // capability fails), fall back to 'applied' + the webview-supplied
+          // filePath if DiffManager couldn't determine either.
+          const filePath = outcome?.filePath || data.filePath;
+          const status = outcome?.status ?? 'applied';
+          if (this.currentSessionId && filePath) {
+            this.conversationManager.updateFileModifiedStatus(this.currentSessionId, filePath, status, this.diffManager.currentEditMode);
           } else {
-            logger.warn(`[ChatProvider] acceptSpecificDiff: skipped DB update — sessionId=${this.currentSessionId}, filePath=${data.filePath}`);
+            logger.warn(`[ChatProvider] acceptSpecificDiff: skipped DB update — sessionId=${this.currentSessionId}, filePath=${filePath}`);
           }
           break;
-        case 'rejectSpecificDiff':
+        }
+        case 'rejectSpecificDiff': {
           logger.info(`[ChatProvider] rejectSpecificDiff: diffId=${data.diffId}, filePath=${data.filePath}, session=${this.currentSessionId?.substring(0, 8)}, editMode=${this.diffManager.currentEditMode}`);
-          await this.diffManager.rejectSpecificDiff(data.diffId);
-          if (this.currentSessionId && data.filePath) {
-            this.conversationManager.updateFileModifiedStatus(this.currentSessionId, data.filePath, 'rejected', this.diffManager.currentEditMode);
+          const outcome = await this.diffManager.rejectSpecificDiff(data.diffId);
+          const filePath = outcome?.filePath || data.filePath;
+          const status = outcome?.status ?? 'rejected';
+          if (this.currentSessionId && filePath) {
+            this.conversationManager.updateFileModifiedStatus(this.currentSessionId, filePath, status, this.diffManager.currentEditMode);
           } else {
-            logger.warn(`[ChatProvider] rejectSpecificDiff: skipped DB update — sessionId=${this.currentSessionId}, filePath=${data.filePath}`);
+            logger.warn(`[ChatProvider] rejectSpecificDiff: skipped DB update — sessionId=${this.currentSessionId}, filePath=${filePath}`);
           }
           break;
+        }
         case 'focusDiff':
           await this.diffManager.focusSpecificDiff(data.diffId);
           break;
@@ -1281,25 +1327,51 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     return this.diffManager.showDiffQuickPick();
   }
 
-  public async acceptActiveDiff(): Promise<void> {
-    const filePath = this.diffManager.getActiveDiffFilePath();
+  /**
+   * Push the current registered-model list (built-ins + custom) to the
+   * webview. Call on initial load and whenever `moby.customModels` changes
+   * or a per-model API key is set/cleared. Each custom model entry includes
+   * a `hasApiKey` flag derived from SecretStorage so the settings popup can
+   * reflect key state without exposing the key itself.
+   */
+  public async sendModelList(): Promise<void> {
+    if (!this._view) return;
+    const models = getAllRegisteredModels();
+    // Decorate custom models with key-presence for the settings popup UI.
+    const decorated = await Promise.all(models.map(async (m) => {
+      if (!m.isCustom) return m;
+      const hasApiKey = await this.deepSeekClient.hasPerModelKey(m.id);
+      return { ...m, hasApiKey };
+    }));
+    this._view.webview.postMessage({
+      type: 'modelListUpdated',
+      models: decorated
+    });
+  }
+
+  public async acceptActiveDiff(hintUri?: vscode.Uri): Promise<void> {
+    const hintedPath = this.diffManager.getActiveDiffFilePath(hintUri);
     const editMode = this.diffManager.currentEditMode;
-    logger.info(`[ChatProvider] acceptActiveDiff: filePath=${filePath}, session=${this.currentSessionId?.substring(0, 8)}, editMode=${editMode}`);
-    await this.diffManager.acceptActiveDiff();
+    logger.info(`[ChatProvider] acceptActiveDiff: filePath=${hintedPath}, session=${this.currentSessionId?.substring(0, 8)}, editMode=${editMode}`);
+    const outcome = await this.diffManager.acceptActiveDiff(hintUri);
+    const filePath = outcome?.filePath || hintedPath;
+    const status = outcome?.status ?? 'applied';
     if (this.currentSessionId && filePath) {
-      this.conversationManager.updateFileModifiedStatus(this.currentSessionId, filePath, 'applied', editMode);
+      this.conversationManager.updateFileModifiedStatus(this.currentSessionId, filePath, status, editMode);
     } else {
       logger.warn(`[ChatProvider] acceptActiveDiff: skipped DB update — sessionId=${this.currentSessionId}, filePath=${filePath}`);
     }
   }
 
-  public async rejectActiveDiff(): Promise<void> {
-    const filePath = this.diffManager.getActiveDiffFilePath();
+  public async rejectActiveDiff(hintUri?: vscode.Uri): Promise<void> {
+    const hintedPath = this.diffManager.getActiveDiffFilePath(hintUri);
     const editMode = this.diffManager.currentEditMode;
-    logger.info(`[ChatProvider] rejectActiveDiff: filePath=${filePath}, session=${this.currentSessionId?.substring(0, 8)}, editMode=${editMode}`);
-    await this.diffManager.rejectActiveDiff();
+    logger.info(`[ChatProvider] rejectActiveDiff: filePath=${hintedPath}, session=${this.currentSessionId?.substring(0, 8)}, editMode=${editMode}`);
+    const outcome = await this.diffManager.rejectActiveDiff(hintUri);
+    const filePath = outcome?.filePath || hintedPath;
+    const status = outcome?.status ?? 'rejected';
     if (this.currentSessionId && filePath) {
-      this.conversationManager.updateFileModifiedStatus(this.currentSessionId, filePath, 'rejected', editMode);
+      this.conversationManager.updateFileModifiedStatus(this.currentSessionId, filePath, status, editMode);
     }
   }
 
@@ -1310,11 +1382,15 @@ export class ChatProvider implements vscode.WebviewViewProvider {
 
     // Always send session info so webview knows the model (affects edit mode availability)
     let editMode = this.diffManager.currentEditMode;
-    if (currentSession.model === 'deepseek-chat' && editMode === 'manual') {
+    if (!supportsManualMode(currentSession.model) && editMode === 'manual') {
       editMode = 'ask';
       this.diffManager.setEditMode(editMode);
     }
     this._view.webview.postMessage({ type: 'editModeSettings', mode: editMode });
+
+    // Send the full registered model list so the selector dropdown reflects
+    // any `moby.customModels` entries alongside built-ins.
+    this.sendModelList();
 
     // Restore the session's model so the dropdown matches what was used
     if (currentSession.model) {
@@ -1367,8 +1443,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       // Send edit mode BEFORE history so webview has correct mode when rendering pending files
       // Use diffManager's live state — config may be stale from async writes
       let editMode = this.diffManager.currentEditMode;
-      // Chat model doesn't support Manual mode — auto-switch to Ask
-      if (session.model === 'deepseek-chat' && editMode === 'manual') {
+      if (!supportsManualMode(session.model) && editMode === 'manual') {
         editMode = 'ask';
         this.diffManager.setEditMode(editMode);
       }

@@ -18,7 +18,7 @@
  * - Debounce timer is a FALLBACK for releasing held-back content if stream pauses
  */
 
-export type SegmentType = 'text' | 'shell' | 'thinking' | 'codeblock' | 'web_search';
+export type SegmentType = 'text' | 'shell' | 'thinking' | 'codeblock' | 'web_search' | 'dsml';
 
 export interface BufferedSegment {
   type: SegmentType;
@@ -95,10 +95,21 @@ const DEFAULT_PATTERNS: TransformPattern[] = [
     extract: (raw: string): string => {
       return raw.replace(/<\/?web_search>/g, '').trim();
     }
+  },
+  {
+    // DeepSeek-Chat occasionally emits tool calls as DSML text instead of
+    // structured `tool_calls`. `parseDSMLToolCalls` recovers the call at
+    // end-of-response; here we hide the raw DSML from the streaming display
+    // so the user doesn't see `<｜DSML｜function_calls>...` flash by.
+    type: 'dsml',
+    startPattern: /<｜DSML｜function_calls>/,
+    endPattern: /<\/｜DSML｜function_calls>/,
+    extract: (): string => ''
   }
   // NOTE: Code blocks are NOT filtered here - they flow through as normal text
   // and are rendered by the frontend's markdown processing. Only <shell>, <think>,
-  // and <web_search> tags need special handling because they shouldn't appear raw in the UI.
+  // <web_search>, and DSML tags need special handling because they shouldn't appear
+  // raw in the UI.
 ];
 
 export class ContentTransformBuffer {
@@ -346,6 +357,10 @@ export class ContentTransformBuffer {
             content: text,
             complete: true
           });
+          // Advance cursor so the text isn't re-emitted if the pattern is
+          // incomplete and we break out below. (The shell-interrupt path
+          // handles this explicitly; the generic break case was missing it.)
+          cursor = earliestMatch.startIndex;
         }
       }
 
@@ -445,9 +460,9 @@ export class ContentTransformBuffer {
   private getHoldBackLength(text: string): number {
     if (text.length === 0) return 0;
 
-    // Check trailing characters for potential pattern starts
-    // Maximum pattern start length: "<shell>" = 7, "```" = 3, "<think>" = 7
-    const maxCheck = Math.min(7, text.length);
+    // Check trailing characters for potential pattern starts.
+    // Longest pattern start: `<｜DSML｜function_calls>` (23 chars).
+    const maxCheck = Math.min(23, text.length);
 
     for (let len = maxCheck; len >= 1; len--) {
       const suffix = text.slice(-len);
@@ -463,13 +478,23 @@ export class ContentTransformBuffer {
    * Check if a string could be the beginning of a pattern.
    */
   private couldBePatternStart(text: string): boolean {
+    if (!text.startsWith('<')) return false;
+
     // Shell tag prefixes
-    if ('<shell>'.startsWith(text) && text.startsWith('<')) return true;
-    if ('</shell>'.startsWith(text) && text.startsWith('<')) return true;
+    if ('<shell>'.startsWith(text)) return true;
+    if ('</shell>'.startsWith(text)) return true;
 
     // Think tag prefixes
-    if ('<think>'.startsWith(text) && text.startsWith('<')) return true;
-    if ('</think>'.startsWith(text) && text.startsWith('<')) return true;
+    if ('<think>'.startsWith(text)) return true;
+    if ('</think>'.startsWith(text)) return true;
+
+    // Web search tag prefixes
+    if ('<web_search>'.startsWith(text)) return true;
+    if ('</web_search>'.startsWith(text)) return true;
+
+    // DSML tool-call tag prefixes (DeepSeek-Chat text-format fallback)
+    if ('<｜DSML｜function_calls>'.startsWith(text)) return true;
+    if ('</｜DSML｜function_calls>'.startsWith(text)) return true;
 
     // NOTE: Code block prefixes (```) are NOT checked - they flow through as normal text
 
@@ -484,19 +509,21 @@ export class ContentTransformBuffer {
 export function mightContainPatternStart(text: string): boolean {
   if (text.length === 0) return false;
 
-  // Check trailing characters (up to 7 for longest pattern start)
-  const maxCheck = Math.min(7, text.length);
+  // Check trailing characters up to the longest pattern start (`<｜DSML｜function_calls>` = 23 chars)
+  const maxCheck = Math.min(23, text.length);
 
   for (let len = maxCheck; len >= 1; len--) {
     const suffix = text.slice(-len);
+    if (!suffix.startsWith('<')) continue;
 
-    // Shell tag prefixes
-    if ('<shell>'.startsWith(suffix) && suffix.startsWith('<')) return true;
-    if ('</shell>'.startsWith(suffix) && suffix.startsWith('<')) return true;
-
-    // Think tag prefixes
-    if ('<think>'.startsWith(suffix) && suffix.startsWith('<')) return true;
-    if ('</think>'.startsWith(suffix) && suffix.startsWith('<')) return true;
+    if ('<shell>'.startsWith(suffix)) return true;
+    if ('</shell>'.startsWith(suffix)) return true;
+    if ('<think>'.startsWith(suffix)) return true;
+    if ('</think>'.startsWith(suffix)) return true;
+    if ('<web_search>'.startsWith(suffix)) return true;
+    if ('</web_search>'.startsWith(suffix)) return true;
+    if ('<｜DSML｜function_calls>'.startsWith(suffix)) return true;
+    if ('</｜DSML｜function_calls>'.startsWith(suffix)) return true;
 
     // NOTE: Code block prefixes (```) are NOT checked - they flow through as normal text
   }

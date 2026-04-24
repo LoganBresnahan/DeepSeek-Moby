@@ -3,6 +3,7 @@ import { DeepSeekClient } from '../deepseekClient';
 import { StatusBar } from '../views/statusBar';
 import { ConfigManager } from '../utils/config';
 import { ConversationManager } from '../events';
+import { getRegisteredModelIds, DEFAULT_MODEL_ID } from '../models/registry';
 
 
 export class CommandProvider {
@@ -28,8 +29,10 @@ export class CommandProvider {
   // Chat History Commands
 
   async switchModel() {
-    const currentModel = this.config.get<string>('model');
-    const newModel = currentModel === 'deepseek-chat' ? 'deepseek-reasoner' : 'deepseek-chat';
+    const currentModel = this.config.get<string>('model') ?? DEFAULT_MODEL_ID;
+    const models = getRegisteredModelIds();
+    const currentIdx = models.indexOf(currentModel);
+    const newModel = models[(currentIdx + 1) % models.length];
 
     // Set model immediately on client (VS Code config has propagation delay)
     this.deepSeekClient.setModel(newModel);

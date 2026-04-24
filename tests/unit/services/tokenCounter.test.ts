@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { EstimationTokenCounter, countRequestTokens } from '../../../src/services/tokenCounter';
+import { EstimationTokenCounter, DynamicTokenCounter, countRequestTokens, TokenCounter } from '../../../src/services/tokenCounter';
 
 describe('EstimationTokenCounter', () => {
   it('should implement TokenCounter interface', () => {
@@ -254,5 +254,47 @@ describe('countRequestTokens', () => {
     const total = countRequestTokens(counter, messages);
     // Should count the text part + [image] placeholder
     expect(total).toBe(counter.countMessage('user', 'What is this?[image]'));
+  });
+});
+
+describe('DynamicTokenCounter', () => {
+  const fakeExact: TokenCounter = {
+    isExact: true,
+    count: (text) => text.length,            // "exact" pretends 1 char = 1 token
+    countMessage: (_role, content) => content.length + 100,
+  };
+  const estimation = new EstimationTokenCounter();
+
+  it('delegates to the estimation counter when wantsExact=false', () => {
+    const dyn = new DynamicTokenCounter(estimation, () => ({ exact: fakeExact, wantsExact: false }));
+    expect(dyn.isExact).toBe(false);
+    expect(dyn.count('0123456789')).toBe(estimation.count('0123456789'));
+  });
+
+  it('delegates to the exact counter when wantsExact=true and exact is available', () => {
+    const dyn = new DynamicTokenCounter(estimation, () => ({ exact: fakeExact, wantsExact: true }));
+    expect(dyn.isExact).toBe(true);
+    expect(dyn.count('0123456789')).toBe(10); // fakeExact.count returns length
+  });
+
+  it('falls back to estimation when wantsExact=true but exact is null', () => {
+    const dyn = new DynamicTokenCounter(estimation, () => ({ exact: null, wantsExact: true }));
+    expect(dyn.isExact).toBe(false);
+    expect(dyn.count('0123456789')).toBe(estimation.count('0123456789'));
+  });
+
+  it('re-resolves per call — switching models at runtime takes effect immediately', () => {
+    let wantsExact = true;
+    const dyn = new DynamicTokenCounter(estimation, () => ({ exact: fakeExact, wantsExact }));
+    expect(dyn.count('hello')).toBe(5); // fakeExact
+
+    wantsExact = false;
+    expect(dyn.count('hello')).toBe(estimation.count('hello')); // switched to estimation
+  });
+
+  it('delegates countMessage through the resolved counter', () => {
+    const dyn = new DynamicTokenCounter(estimation, () => ({ exact: fakeExact, wantsExact: true }));
+    // fakeExact.countMessage returns content.length + 100
+    expect(dyn.countMessage('user', 'abc')).toBe(103);
   });
 });

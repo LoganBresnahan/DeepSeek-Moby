@@ -59,6 +59,29 @@ export const modelSelectorShadowStyles = `
     margin: 8px 0;
   }
 
+  /* + Add custom model... link */
+  .model-add-custom-row {
+    padding: 4px 12px 0 12px;
+  }
+
+  .model-add-custom-btn {
+    width: 100%;
+    padding: 6px 8px;
+    background: transparent;
+    color: var(--vscode-textLink-foreground);
+    border: 1px dashed var(--vscode-panel-border);
+    border-radius: 4px;
+    font-size: 12px;
+    cursor: pointer;
+    text-align: left;
+    transition: background-color 0.15s, border-color 0.15s;
+  }
+
+  .model-add-custom-btn:hover {
+    background: var(--vscode-list-hoverBackground);
+    border-color: var(--vscode-textLink-foreground);
+  }
+
   /* Parameter controls */
   .parameter-control {
     padding: 8px 12px;

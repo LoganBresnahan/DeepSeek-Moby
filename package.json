@@ -25,8 +25,6 @@
   "icon": "media/moby.png",
   "activationEvents": [
     "onStartupFinished",
-    "onCommand:deepseek.startChat",
-    "onView:deepseek-chat-view",
     "onLanguage:javascript",
     "onLanguage:typescript",
     "onLanguage:python",
@@ -45,16 +43,227 @@
       "properties": {
         "moby.model": {
           "type": "string",
-          "default": "deepseek-reasoner",
-          "enum": [
+          "default": "deepseek-chat",
+          "examples": [
             "deepseek-chat",
             "deepseek-reasoner"
           ],
-          "enumDescriptions": [
-            "Standard chat model (DeepSeek-V3) - Fast, general purpose",
-            "Reasoning model (DeepSeek-R1) - Shows chain-of-thought, better for complex problems"
+          "markdownDescription": "Which model to use. Built-ins: `deepseek-chat`, `deepseek-reasoner`. Also accepts any `id` declared in `#moby.customModels#`."
+        },
+        "moby.customModels": {
+          "type": "array",
+          "default": [],
+          "markdownDescription": "Custom models to register alongside the built-ins (e.g. a local Ollama or LM Studio endpoint). Each entry declares one model and its capabilities. See `docs/guides/custom-models.md` for a walkthrough.",
+          "examples": [
+            [
+              {
+                "id": "qwen2.5-coder:7b-instruct",
+                "name": "Qwen 2.5 Coder 7B (Ollama)",
+                "toolCalling": "native",
+                "reasoningTokens": "none",
+                "editProtocol": ["native-tool"],
+                "shellProtocol": "none",
+                "supportsTemperature": true,
+                "maxOutputTokens": 8192,
+                "maxTokensConfigKey": "maxTokensCustomQwen",
+                "streaming": true,
+                "apiEndpoint": "http://localhost:11434/v1",
+                "apiKey": "ollama",
+                "requestFormat": "openai"
+              }
+            ],
+            [
+              {
+                "id": "local-model-in-lm-studio",
+                "name": "LM Studio (Local)",
+                "toolCalling": "native",
+                "reasoningTokens": "none",
+                "editProtocol": ["native-tool"],
+                "shellProtocol": "none",
+                "supportsTemperature": true,
+                "maxOutputTokens": 4096,
+                "maxTokensConfigKey": "maxTokensCustomLMStudio",
+                "streaming": true,
+                "apiEndpoint": "http://localhost:1234/v1",
+                "apiKey": "lm-studio",
+                "requestFormat": "openai"
+              }
+            ],
+            [
+              {
+                "id": "local-llama-cpp",
+                "name": "llama.cpp Server",
+                "toolCalling": "none",
+                "reasoningTokens": "none",
+                "editProtocol": ["search-replace"],
+                "shellProtocol": "xml-shell",
+                "supportsTemperature": true,
+                "maxOutputTokens": 4096,
+                "maxTokensConfigKey": "maxTokensCustomLlamaCpp",
+                "streaming": true,
+                "apiEndpoint": "http://localhost:8080/v1",
+                "apiKey": "llamacpp",
+                "requestFormat": "openai"
+              }
+            ],
+            [
+              {
+                "id": "gpt-4o-mini",
+                "name": "OpenAI GPT-4o mini",
+                "toolCalling": "native",
+                "reasoningTokens": "none",
+                "editProtocol": ["native-tool"],
+                "shellProtocol": "none",
+                "supportsTemperature": true,
+                "maxOutputTokens": 16384,
+                "maxTokensConfigKey": "maxTokensCustomOpenAI",
+                "streaming": true,
+                "apiEndpoint": "https://api.openai.com/v1",
+                "requestFormat": "openai"
+              }
+            ],
+            [
+              {
+                "id": "moonshot-v1-128k",
+                "name": "Kimi (Moonshot)",
+                "toolCalling": "native",
+                "reasoningTokens": "none",
+                "editProtocol": ["native-tool"],
+                "shellProtocol": "none",
+                "supportsTemperature": true,
+                "maxOutputTokens": 32768,
+                "maxTokensConfigKey": "maxTokensCustomKimi",
+                "streaming": true,
+                "apiEndpoint": "https://api.moonshot.ai/v1",
+                "requestFormat": "openai"
+              }
+            ],
+            [
+              {
+                "id": "llama-3.3-70b-versatile",
+                "name": "Llama 3.3 70B (Groq)",
+                "toolCalling": "native",
+                "reasoningTokens": "none",
+                "editProtocol": ["native-tool"],
+                "shellProtocol": "none",
+                "supportsTemperature": true,
+                "maxOutputTokens": 32768,
+                "maxTokensConfigKey": "maxTokensCustomGroq",
+                "streaming": true,
+                "apiEndpoint": "https://api.groq.com/openai/v1",
+                "requestFormat": "openai"
+              }
+            ]
           ],
-          "description": "Which DeepSeek model to use"
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "name",
+              "toolCalling",
+              "reasoningTokens",
+              "editProtocol",
+              "shellProtocol",
+              "supportsTemperature",
+              "maxOutputTokens",
+              "maxTokensConfigKey",
+              "streaming",
+              "apiEndpoint",
+              "requestFormat"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Model ID sent in the API request body (e.g. \"qwen2.5-coder:7b-instruct\"). Must not conflict with a built-in ID."
+              },
+              "name": {
+                "type": "string",
+                "description": "Display name shown in the model selector UI."
+              },
+              "toolCalling": {
+                "type": "string",
+                "enum": ["native", "none"],
+                "enumDescriptions": [
+                  "Model supports OpenAI-format function_calling (tool_calls / tool_use blocks returned in the API response).",
+                  "No native tool support. Model must express actions via inline text protocols (see editProtocol / shellProtocol)."
+                ],
+                "description": "Whether the model supports native tool calling via the OpenAI function-calling API."
+              },
+              "reasoningTokens": {
+                "type": "string",
+                "enum": ["inline", "none"],
+                "enumDescriptions": [
+                  "Model emits a separate reasoning_content channel in the stream (R1-style chain-of-thought).",
+                  "No separate reasoning channel. Thinking, if any, is inline in the content stream."
+                ],
+                "description": "Whether the model returns a separate reasoning / chain-of-thought channel."
+              },
+              "editProtocol": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": ["native-tool", "search-replace"],
+                  "enumDescriptions": [
+                    "Edits expressed via apply_code_edit / create_file / delete_file tool calls. Requires toolCalling: \"native\".",
+                    "Edits expressed as SEARCH/REPLACE blocks in the model's text response. Works for models without native tool calling."
+                  ]
+                },
+                "description": "Ordered preference for how file edits are expressed. Use [\"native-tool\"] for tool-calling models, [\"search-replace\"] for text-protocol models. Can combine (e.g. [\"native-tool\", \"search-replace\"]) to allow fallback."
+              },
+              "shellProtocol": {
+                "type": "string",
+                "enum": ["xml-shell", "none"],
+                "enumDescriptions": [
+                  "R1-style <shell>...</shell> tags in the model's text response. Needed for agentic work when toolCalling is \"none\".",
+                  "No inline shell protocol. Model can't run commands unless it has native tool calling."
+                ],
+                "description": "How the model expresses shell commands. Pair with editProtocol: [\"search-replace\"] for full R1-style agentic work on non-tool-calling models."
+              },
+              "supportsTemperature": {
+                "type": "boolean",
+                "description": "Whether the model accepts the temperature parameter (reasoning models often don't)."
+              },
+              "maxOutputTokens": {
+                "type": "number",
+                "minimum": 128,
+                "description": "Maximum completion tokens the model can produce per response."
+              },
+              "maxTokensConfigKey": {
+                "type": "string",
+                "description": "VS Code config key used to override maxOutputTokens per model. Invent a unique key like \"maxTokensCustomQwen\"."
+              },
+              "streaming": {
+                "type": "boolean",
+                "description": "Whether to use streaming (SSE) responses. Usually true for OpenAI-compatible endpoints."
+              },
+              "apiEndpoint": {
+                "type": "string",
+                "description": "OpenAI-compatible base URL. Examples: \"http://localhost:11434/v1\" (Ollama), \"http://localhost:1234/v1\" (LM Studio), \"https://api.openai.com/v1\"."
+              },
+              "apiKey": {
+                "type": "string",
+                "description": "API key. Some local runners accept any non-empty string (Ollama uses \"ollama\"). Omit to fall back to the global moby.apiKey secret."
+              },
+              "tokenizer": {
+                "type": "string",
+                "enum": ["deepseek-v3"],
+                "enumDescriptions": [
+                  "DeepSeek V3 / R1 tokenizer (bundled). Exact counting via WASM."
+                ],
+                "description": "Optional: bundled tokenizer for exact counting. Omit to use estimation (character-based heuristic that auto-calibrates from API usage.prompt_tokens within a few requests)."
+              },
+              "requestFormat": {
+                "type": "string",
+                "enum": ["openai"],
+                "enumDescriptions": [
+                  "Standard OpenAI chat-completions wire format. Works for Ollama, LM Studio, OpenAI, Moonshot, Groq, LiteLLM, etc."
+                ],
+                "default": "openai",
+                "description": "Wire format for the API request/response. Only \"openai\" is supported today."
+              }
+            },
+            "additionalProperties": false
+          }
         },
         "moby.temperature": {
           "type": "number",
@@ -301,6 +510,21 @@
         "category": "Moby"
       },
       {
+        "command": "moby.setCustomModelApiKey",
+        "title": "Set Custom Model API Key",
+        "category": "Moby"
+      },
+      {
+        "command": "moby.clearCustomModelApiKey",
+        "title": "Clear Custom Model API Key",
+        "category": "Moby"
+      },
+      {
+        "command": "moby.addCustomModel",
+        "title": "Add Custom Model",
+        "category": "Moby"
+      },
+      {
         "command": "moby.manageEncryptionKey",
         "title": "Manage Database Encryption Key",
         "category": "Moby"
@@ -394,7 +618,8 @@
           "type": "webview",
           "id": "deepseek-chat-view",
           "name": "Chat",
-          "contextualTitle": "DeepSeek Moby Chat"
+          "contextualTitle": "DeepSeek Moby Chat",
+          "icon": "media/moby.png"
         }
       ]
     },

@@ -146,6 +146,7 @@ export const toolbarShadowStyles = `
   color: var(--vscode-button-foreground);
   border: none;
   opacity: 1;
+  transition: background 0.18s ease, color 0.18s ease;
 }
 
 .btn.send-btn:hover {
@@ -155,6 +156,18 @@ export const toolbarShadowStyles = `
 .btn.send-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+/* Primed state: the user has typed something and the API key is set, so
+ * the button is ready to fire. Tint green so the affordance is obvious
+ * without being loud. */
+.btn.send-btn.primed {
+  background: var(--vscode-terminal-ansiGreen, #4eb14e);
+  color: var(--vscode-editor-background, #1e1e1e);
+}
+
+.btn.send-btn.primed:hover {
+  background: var(--vscode-terminal-ansiBrightGreen, #6fdf6f);
 }
 
 /* Stop button */

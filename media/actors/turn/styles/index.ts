@@ -450,20 +450,24 @@ const thinkingStyles = `
 }
 
 .thinking-body {
-  display: none;
-  padding: 8px 10px 10px 30px;
-  border-top: 1px dotted var(--vscode-panel-border);
-  max-height: 300px;
-  overflow-y: auto;
+  padding: 0 10px 0 30px;
+  border-top: 0 solid var(--vscode-panel-border);
+  max-height: 0;
+  overflow: hidden;
   white-space: pre-wrap;
   word-break: break-word;
   color: var(--vscode-descriptionForeground);
   font-size: 12px;
   line-height: 1.5;
+  transition: max-height 0.3s ease, padding 0.3s ease, border-top-width 0.3s ease;
 }
 
 :host(.thinking-container.expanded) .thinking-body {
-  display: block;
+  padding: 8px 10px 10px 30px;
+  border-top-width: 1px;
+  border-top-style: dotted;
+  max-height: 300px;
+  overflow-y: auto;
 }
 
 .thinking-body:empty {
@@ -539,13 +543,18 @@ const toolsStyles = `
 }
 
 .tools-body {
-  display: none;
-  padding: 8px 10px;
-  border-top: 1px dotted var(--vscode-panel-border);
+  padding: 0 10px;
+  border-top: 0 solid var(--vscode-panel-border);
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.3s ease, padding 0.3s ease, border-top-width 0.3s ease;
 }
 
 :host(.tools-container.expanded) .tools-body {
-  display: block;
+  padding: 8px 10px;
+  border-top-width: 1px;
+  border-top-style: dotted;
+  max-height: 2000px;
 }
 
 .tools-body:empty {
@@ -703,13 +712,18 @@ const shellStyles = `
 }
 
 .shell-body {
-  display: none;
-  padding: 8px 10px;
-  border-top: 1px dotted var(--vscode-panel-border);
+  padding: 0 10px;
+  border-top: 0 solid var(--vscode-panel-border);
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.3s ease, padding 0.3s ease, border-top-width 0.3s ease;
 }
 
 :host(.shell-container.expanded) .shell-body {
-  display: block;
+  padding: 8px 10px;
+  border-top-width: 1px;
+  border-top-style: dotted;
+  max-height: 2000px;
 }
 
 .shell-body:empty {
@@ -854,16 +868,24 @@ const pendingStyles = `
   flex-shrink: 0;
 }
 
-.pending-count .count-applied {
+.pending-count .count-created {
   color: var(--vscode-terminal-ansiGreen);
+}
+
+.pending-count .count-applied {
+  color: var(--vscode-terminal-ansiBlue);
 }
 
 .pending-count .count-error {
   color: var(--vscode-errorForeground);
 }
 
+.pending-count .count-rejected {
+  color: var(--vscode-terminal-ansiYellow);
+}
+
 .pending-count .count-deleted {
-  color: var(--vscode-descriptionForeground);
+  color: var(--vscode-terminal-ansiRed);
 }
 
 .pending-count .count-expired {
@@ -872,13 +894,18 @@ const pendingStyles = `
 }
 
 .pending-body {
-  display: none;
-  padding: 8px 10px;
-  border-top: 1px dotted var(--vscode-panel-border);
+  padding: 0 10px;
+  border-top: 0 solid var(--vscode-panel-border);
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.3s ease, padding 0.3s ease, border-top-width 0.3s ease;
 }
 
 :host(.pending-container.expanded) .pending-body {
-  display: block;
+  padding: 8px 10px;
+  border-top-width: 1px;
+  border-top-style: dotted;
+  max-height: 2000px;
 }
 
 .pending-body:empty {
@@ -909,11 +936,15 @@ const pendingStyles = `
 }
 
 .pending-status.applied {
+  color: var(--vscode-terminal-ansiBlue);
+}
+
+.pending-status.created {
   color: var(--vscode-terminal-ansiGreen);
 }
 
 .pending-status.rejected {
-  color: var(--vscode-errorForeground);
+  color: var(--vscode-terminal-ansiYellow);
 }
 
 .pending-status.superseded {
@@ -980,20 +1011,42 @@ const pendingStyles = `
   margin-left: auto;
 }
 
-.pending-label.auto-applied {
-  color: var(--vscode-charts-green, #89d185);
+.pending-label.auto-applied,
+.pending-label.applied {
+  color: var(--vscode-terminal-ansiBlue);
+}
+
+.pending-label.created {
+  color: var(--vscode-terminal-ansiGreen);
 }
 
 .pending-label.error {
   color: var(--vscode-errorForeground);
 }
 
+.pending-label.rejected {
+  color: var(--vscode-terminal-ansiYellow);
+}
+
 .pending-status.deleted {
-  color: var(--vscode-errorForeground);
+  color: var(--vscode-terminal-ansiRed);
 }
 
 .pending-label.deleted {
-  color: var(--vscode-errorForeground);
+  color: var(--vscode-terminal-ansiRed);
+}
+
+/* Pending-changes (ask mode) action word next to filename */
+.pending-label.action-created {
+  color: var(--vscode-terminal-ansiGreen);
+}
+
+.pending-label.action-modified {
+  color: var(--vscode-terminal-ansiBlue);
+}
+
+.pending-label.action-deleted {
+  color: var(--vscode-terminal-ansiRed);
 }
 
 .pending-item[data-status="deleted"] .pending-file {

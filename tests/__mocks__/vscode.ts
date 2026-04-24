@@ -57,7 +57,9 @@ export const workspace = {
     readFile: vi.fn(),
     writeFile: vi.fn(),
     delete: vi.fn(),
-    createDirectory: vi.fn()
+    createDirectory: vi.fn(),
+    stat: vi.fn(),
+    readDirectory: vi.fn()
   },
   openTextDocument: vi.fn(),
   applyEdit: vi.fn(),
@@ -79,8 +81,18 @@ export const commands = {
 export const Uri = {
   file: vi.fn((path: string) => ({ fsPath: path, scheme: 'file', path })),
   parse: vi.fn((uri: string) => ({ fsPath: uri, scheme: 'file', path: uri })),
-  joinPath: vi.fn()
+  joinPath: vi.fn((base: any, ...segments: string[]) => {
+    const joined = [base.fsPath ?? base.path ?? '', ...segments].filter(Boolean).join('/').replace(/\/+/g, '/');
+    return { fsPath: joined, scheme: 'file', path: joined };
+  })
 };
+
+export enum FileType {
+  Unknown = 0,
+  File = 1,
+  Directory = 2,
+  SymbolicLink = 64
+}
 
 export class RelativePattern {
   constructor(public base: string, public pattern: string) {}

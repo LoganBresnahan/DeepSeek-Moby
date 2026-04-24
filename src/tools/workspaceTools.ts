@@ -140,6 +140,94 @@ export const webSearchTool: Tool = {
   }
 };
 
+// Create a new file in the workspace.
+// Only dispatched as acknowledgment here — the orchestrator handles
+// approval flow + calls the `createFile` capability.
+export const createFileTool: Tool = {
+  type: 'function',
+  function: {
+    name: 'create_file',
+    description: 'Create a new file in the workspace with the given content. Fails if the file already exists — use apply_code_edit for existing files. Prefer this over apply_code_edit with empty SEARCH when you know the file is new.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'Relative path from workspace root (e.g., "src/newFile.ts", "docs/guide.md")'
+        },
+        content: {
+          type: 'string',
+          description: 'Full contents of the new file'
+        },
+        language: {
+          type: 'string',
+          description: 'Language hint for the diff preview (e.g., "typescript", "markdown")'
+        },
+        description: {
+          type: 'string',
+          description: 'Brief reason for creating this file'
+        }
+      },
+      required: ['path', 'content']
+    }
+  }
+};
+
+// Delete a file in the workspace (moves to trash).
+// Only dispatched as acknowledgment here — the orchestrator handles
+// approval flow + calls the `deleteFile` capability.
+export const deleteFileTool: Tool = {
+  type: 'function',
+  function: {
+    name: 'delete_file',
+    description: 'Delete a file in the workspace. Moves to the OS trash for recoverability. Refuses to delete directories. Requires user confirmation in ask mode. This is a TERMINAL action for the given path — once it succeeds, the file is gone. Do NOT call apply_code_edit or create_file on the same path in the same turn (e.g., to "mark" or "clear" the file); those calls will either fail or recreate the deleted file.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'Relative path from workspace root of the file to delete'
+        },
+        description: {
+          type: 'string',
+          description: 'Brief reason for deleting this file'
+        }
+      },
+      required: ['path']
+    }
+  }
+};
+
+// Delete a directory (optionally recursively) in the workspace.
+// Mirrors delete_file but targets directories. The orchestrator handles
+// approval flow + calls the `deleteDirectory` capability.
+export const deleteDirectoryTool: Tool = {
+  type: 'function',
+  function: {
+    name: 'delete_directory',
+    description: 'Delete a directory in the workspace. Moves to the OS trash for recoverability. By default only deletes empty directories; pass recursive="true" to delete a populated directory AND all its contents (everything inside is also moved to trash). Requires user confirmation in ask mode. This is a TERMINAL action for the given path — once it succeeds, the directory is gone. Do NOT call create_file, apply_code_edit, or delete_file/delete_directory on the same path in the same turn.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'Relative path from workspace root of the directory to delete'
+        },
+        recursive: {
+          type: 'string',
+          description: 'Pass "true" to delete a populated directory and all contents. Default "false" only deletes empty directories.',
+          enum: ['true', 'false']
+        },
+        description: {
+          type: 'string',
+          description: 'Brief reason for deleting this directory'
+        }
+      },
+      required: ['path']
+    }
+  }
+};
+
 // Apply code edit tool - for chat model only (reasoner can't use tools)
 // Provides structured output with guaranteed file path
 export const applyCodeEditTool: Tool = {
@@ -213,6 +301,18 @@ export async function executeToolCall(toolCall: ToolCall): Promise<string> {
         // This tool doesn't execute anything - it's for signaling edit intent with structured file path
         // The file path tracking happens in chatProvider.ts
         return `Acknowledged: Code edit for file "${args.file}" will be applied. ${args.description || ''}`;
+
+      case 'create_file':
+        // Orchestrator handles the actual creation + approval flow.
+        return `Acknowledged: Creation of "${args.path}" will be processed. ${args.description || ''}`;
+
+      case 'delete_file':
+        // Orchestrator handles the actual deletion + confirmation flow.
+        return `Acknowledged: Deletion of "${args.path}" will be processed. ${args.description || ''}`;
+
+      case 'delete_directory':
+        // Orchestrator handles the actual deletion + confirmation flow.
+        return `Acknowledged: Directory deletion of "${args.path}"${args.recursive === 'true' ? ' (recursive)' : ' (empty-only)'} will be processed. ${args.description || ''}`;
 
       default:
         return `Error: Unknown function "${functionName}"`;

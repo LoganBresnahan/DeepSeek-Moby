@@ -2,8 +2,9 @@ import * as vscode from 'vscode';
 import { HttpClient, HttpError, createStreamReader } from './utils/httpClient';
 import { ConfigManager } from './utils/config';
 import { logger } from './utils/logger';
-import { TokenCounter, EstimationTokenCounter, countRequestTokens } from './services/tokenCounter';
+import { TokenCounter, EstimationTokenCounter, DynamicTokenCounter, countRequestTokens } from './services/tokenCounter';
 import { ContextBuilder, ContextResult, SnapshotSummary } from './context/contextBuilder';
+import { getCapabilities, DEFAULT_MODEL_ID, isReasonerModel as isReasonerModelFromRegistry } from './models/registry';
 
 export type MessageContent = string | Array<{
   type: 'text';
@@ -71,50 +72,106 @@ export interface ChatOptions {
 }
 
 export class DeepSeekClient {
-  private httpClient: HttpClient;
+  // Per-endpoint HttpClient cache so we don't rebuild on every request.
+  // Populated lazily; keyed by the base URL string from the model registry.
+  private httpClients: Map<string, HttpClient> = new Map();
+  // Pinned DeepSeek base URL for provider-specific endpoints like /user/balance
+  // that don't live under the OpenAI-compat chat-completions path. F7 will
+  // gate this so non-DeepSeek models don't hit it at all.
+  private readonly deepseekProviderBase = 'https://api.deepseek.com';
   private config: ConfigManager;
   private context: vscode.ExtensionContext;
   private modelOverride: string | null = null;
+  // Shared estimation counter — keeps calibration state across model switches.
+  private estimationCounter: EstimationTokenCounter;
+  // Optional WASM counter; null if unavailable (vocab failed to load, etc.).
+  private wasmCounter: TokenCounter | null;
+  // Dispatches per-call based on the active model's declared tokenizer.
   private tokenCounter: TokenCounter;
   private contextBuilder: ContextBuilder;
 
   constructor(context: vscode.ExtensionContext, tokenCounter?: TokenCounter) {
     this.context = context;
     this.config = ConfigManager.getInstance();
-    this.tokenCounter = tokenCounter ?? new EstimationTokenCounter();
+    this.estimationCounter = new EstimationTokenCounter();
+    // Treat any "exact" counter passed in as the WASM one; estimation-only
+    // callers pass undefined and we'll never use a WASM path.
+    this.wasmCounter = tokenCounter && tokenCounter.isExact ? tokenCounter : null;
+    this.tokenCounter = new DynamicTokenCounter(
+      this.estimationCounter,
+      () => ({
+        exact: this.wasmCounter,
+        wantsExact: !!getCapabilities(this.getModel()).tokenizer,
+      })
+    );
     this.contextBuilder = new ContextBuilder(this.tokenCounter);
+  }
 
-    // Standard API endpoint
-    this.httpClient = new HttpClient({
-      baseURL: 'https://api.deepseek.com',
-      timeout: 60000,
-      headers: {
-        'Content-Type': 'application/json',
-      }
-    });
+  /** Get (or lazily create) the HttpClient for a given base URL. */
+  private getHttpClientFor(baseURL: string): HttpClient {
+    let client = this.httpClients.get(baseURL);
+    if (!client) {
+      client = new HttpClient({
+        baseURL,
+        timeout: 60000,
+        headers: { 'Content-Type': 'application/json' }
+      });
+      this.httpClients.set(baseURL, client);
+    }
+    return client;
+  }
 
+  /** Get the HttpClient for the currently active model's endpoint. */
+  private getHttpClient(): HttpClient {
+    const caps = getCapabilities(this.getModel());
+    return this.getHttpClientFor(caps.apiEndpoint);
   }
 
   async isApiKeyConfigured(): Promise<boolean> {
+    // Per-model secret takes precedence — if the user set one via the
+    // settings popup, it satisfies "configured" regardless of globals.
+    const perModelKey = await this.context.secrets.get(`moby.customModelKey.${this.getModel()}`);
+    if (perModelKey) return true;
+
+    const caps = getCapabilities(this.getModel());
+    if (caps.apiKey) return true;
+
     const key = await this.context.secrets.get('moby.apiKey');
     return !!key || !!process.env.DEEPSEEK_API_KEY;
   }
 
   private async getApiKey(): Promise<string> {
-    // Try VS Code SecretStorage first
+    // Precedence (highest to lowest):
+    //   1. Per-model secret set via `moby.setCustomModelApiKey` — the preferred
+    //      path for custom models (hosted providers with real keys).
+    //   2. Registry `apiKey` (declared in `moby.customModels` JSON) — used
+    //      mainly by local runners that accept any placeholder string.
+    //   3. Global `moby.apiKey` secret — the legacy DeepSeek path.
+    //   4. `DEEPSEEK_API_KEY` env var — CI / containers / testing.
+    const perModelKey = await this.context.secrets.get(`moby.customModelKey.${this.getModel()}`);
+    if (perModelKey) return perModelKey;
+
+    const caps = getCapabilities(this.getModel());
+    if (caps.apiKey) return caps.apiKey;
+
     const apiKey = await this.context.secrets.get('moby.apiKey');
     if (apiKey) return apiKey;
 
-    // Fall back to environment variable (useful for CI, containers, testing)
     const envKey = process.env.DEEPSEEK_API_KEY;
     if (envKey) return envKey;
 
-    throw new Error('DeepSeek API key is not configured. Use the "DeepSeek Moby: Set API Key" command.');
+    throw new Error('API key is not configured for this model. For custom models use "Moby: Set Custom Model API Key" (or the Set key button in the settings popup). For DeepSeek use "DeepSeek Moby: Set API Key".');
+  }
+
+  /** Whether a per-model secret exists for a given model id. Used by the settings UI. */
+  async hasPerModelKey(modelId: string): Promise<boolean> {
+    const key = await this.context.secrets.get(`moby.customModelKey.${modelId}`);
+    return !!key;
   }
 
   getModel(): string {
     // Use override if set (for immediate model changes before config propagates)
-    return this.modelOverride ?? this.config.get<string>('model') ?? 'deepseek-reasoner';
+    return this.modelOverride ?? this.config.get<string>('model') ?? DEFAULT_MODEL_ID;
   }
 
   setModel(model: string): void {
@@ -123,24 +180,18 @@ export class DeepSeekClient {
   }
 
   isReasonerModel(): boolean {
-    return this.getModel() === 'deepseek-reasoner';
+    return isReasonerModelFromRegistry(this.getModel());
   }
 
-  /**
-   * Get the maximum allowed output tokens for the current model.
-   * deepseek-chat: 8192
-   * deepseek-reasoner: 65536
-   */
+  /** Get the maximum allowed output tokens for the current model. */
   getModelMaxTokens(): number {
-    return this.isReasonerModel() ? 65536 : 8192;
+    return getCapabilities(this.getModel()).maxOutputTokens;
   }
 
   /** Read the per-model maxTokens from VS Code config. */
   private getConfigMaxTokens(): number {
-    if (this.isReasonerModel()) {
-      return this.config.get<number>('maxTokensReasonerModel') ?? 65536;
-    }
-    return this.config.get<number>('maxTokensChatModel') ?? 8192;
+    const caps = getCapabilities(this.getModel());
+    return this.config.get<number>(caps.maxTokensConfigKey) ?? caps.maxOutputTokens;
   }
 
   /**
@@ -182,8 +233,8 @@ export class DeepSeekClient {
         stream: false
       };
 
-      // Don't set temperature for reasoner model
-      if (!this.isReasonerModel()) {
+      const caps = getCapabilities(model);
+      if (caps.supportsTemperature) {
         requestBody.temperature = temperature;
       }
 
@@ -192,12 +243,11 @@ export class DeepSeekClient {
         requestBody.response_format = { type: 'json_object' };
       }
 
-      // Add tools if provided (not supported for reasoner)
-      if (options?.tools && options.tools.length > 0 && !this.isReasonerModel()) {
+      if (options?.tools && options.tools.length > 0 && caps.toolCalling === 'native') {
         requestBody.tools = options.tools;
       }
 
-      const response = await this.httpClient.post<{
+      const response = await this.getHttpClient().post<{
         choices: Array<{ message: { content?: string; reasoning_content?: string; tool_calls?: ToolCall[] } }>;
         usage?: ChatResponse['usage'];
       }>('/chat/completions', requestBody, {
@@ -258,8 +308,8 @@ export class DeepSeekClient {
         stream: true
       };
 
-      // Don't set temperature for reasoner model
-      if (!this.isReasonerModel()) {
+      const caps = getCapabilities(model);
+      if (caps.supportsTemperature) {
         requestBody.temperature = temperature;
       }
 
@@ -268,7 +318,7 @@ export class DeepSeekClient {
         requestBody.response_format = { type: 'json_object' };
       }
 
-      const response = await this.httpClient.post<ReadableStream<Uint8Array>>('/chat/completions', requestBody, {
+      const response = await this.getHttpClient().post<ReadableStream<Uint8Array>>('/chat/completions', requestBody, {
         headers: {
           'Authorization': `Bearer ${apiKey}`,
           'Accept': 'text/event-stream'
@@ -419,8 +469,8 @@ export class DeepSeekClient {
     tools: Tool[],
     systemPrompt?: string
   ): Promise<ChatResponse> {
-    if (this.isReasonerModel()) {
-      throw new Error('Function calling is not supported with deepseek-reasoner model');
+    if (getCapabilities(this.getModel()).toolCalling !== 'native') {
+      throw new Error(`Function calling is not supported with model "${this.getModel()}"`);
     }
     return this.chat(messages, systemPrompt, { tools });
   }
@@ -457,16 +507,16 @@ export class DeepSeekClient {
 
   /**
    * Calibrate the token estimator using actual API usage data.
-   * Only applies when using EstimationTokenCounter (no-op for exact WASM counter).
+   * Always feeds the shared EstimationTokenCounter, even when the active
+   * model is using the WASM path — so if the user switches to a custom
+   * model later, its estimation counter already has calibration samples.
    */
   calibrateTokenEstimation(inputCharCount: number, actualPromptTokens: number): void {
-    if (this.tokenCounter instanceof EstimationTokenCounter) {
-      this.tokenCounter.calibrate(inputCharCount, actualPromptTokens);
-      logger.info(
-        `[TokenCounter] Calibrated: ratio=${this.tokenCounter.ratio.toFixed(4)}, ` +
-        `samples=${this.tokenCounter.sampleCount}`
-      );
-    }
+    this.estimationCounter.calibrate(inputCharCount, actualPromptTokens);
+    logger.info(
+      `[TokenCounter] Calibrated: ratio=${this.estimationCounter.ratio.toFixed(4)}, ` +
+      `samples=${this.estimationCounter.sampleCount}`
+    );
   }
 
   /**
@@ -494,14 +544,15 @@ export class DeepSeekClient {
       `[${this.tokenCounter.isExact ? 'WASM' : 'estimation'}]`
     );
 
-    // Calibrate estimation counter with actual data
-    if (this.tokenCounter instanceof EstimationTokenCounter) {
-      const charCount = requestMessages.reduce((sum, msg) => {
-        const text = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content);
-        return sum + text.length;
-      }, 0);
-      this.calibrateTokenEstimation(charCount, apiCount);
-    }
+    // Calibrate the shared estimation counter with actual data. Do this for
+    // every response — even when the active model uses WASM — so that any
+    // future model switch to an estimation-only model starts with real
+    // samples instead of the default ratio.
+    const charCount = requestMessages.reduce((sum, msg) => {
+      const text = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content);
+      return sum + text.length;
+    }, 0);
+    this.calibrateTokenEstimation(charCount, apiCount);
   }
 
   private handleError(error: HttpError): Error {
@@ -525,11 +576,19 @@ export class DeepSeekClient {
     return new Error(error.message || 'Unknown error occurred');
   }
 
-  // Fetch account balance from DeepSeek API
+  // Fetch account balance from DeepSeek API.
+  // DeepSeek-specific endpoint — non-DeepSeek models (local Ollama, OpenAI,
+  // Anthropic, etc.) don't expose /user/balance. We bail early for those;
+  // F7 will properly gate the stats modal by capability.
   async getBalance(): Promise<{ available: boolean; balance: string; currency: string } | null> {
+    // Only DeepSeek's own API exposes /user/balance. Custom models pointed
+    // at other endpoints (Ollama, OpenAI, etc.) should not trigger this call.
+    if (getCapabilities(this.getModel()).apiEndpoint !== this.deepseekProviderBase) {
+      return null;
+    }
     try {
       const apiKey = await this.getApiKey();
-      const response = await this.httpClient.get<{
+      const response = await this.getHttpClientFor(this.deepseekProviderBase).get<{
         is_available: boolean;
         balance_infos: Array<{ currency: string; total_balance: string }>;
       }>('/user/balance', {

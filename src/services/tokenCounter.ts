@@ -88,6 +88,42 @@ export function countRequestTokens(
   return total;
 }
 
+/**
+ * Dispatches token counting to either an exact WASM counter or estimation,
+ * based on the currently active model's declared tokenizer. Custom models
+ * that don't declare a tokenizer (Qwen, Llama, LM Studio endpoints, etc.)
+ * use estimation — which auto-calibrates from `usage.prompt_tokens` over
+ * the first few API responses — so the app works without bundling every
+ * possible vocab.
+ *
+ * Calibration state lives on the shared `EstimationTokenCounter` instance
+ * so switching models doesn't reset accumulated samples.
+ */
+export class DynamicTokenCounter implements TokenCounter {
+  constructor(
+    private readonly estimation: EstimationTokenCounter,
+    private readonly getActive: () => { exact: TokenCounter | null; wantsExact: boolean }
+  ) {}
+
+  private resolve(): TokenCounter {
+    const { exact, wantsExact } = this.getActive();
+    if (wantsExact && exact) return exact;
+    return this.estimation;
+  }
+
+  get isExact(): boolean {
+    return this.resolve().isExact;
+  }
+
+  count(text: string): number {
+    return this.resolve().count(text);
+  }
+
+  countMessage(role: string, content: string): number {
+    return this.resolve().countMessage(role, content);
+  }
+}
+
 export class EstimationTokenCounter implements TokenCounter {
   private calibrationRatio = 0.3;
   private samples: number[] = [];

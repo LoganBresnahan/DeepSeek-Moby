@@ -41,6 +41,7 @@ import type {
   ShellCommandStatus,
   PendingFile,
   PendingFileStatus,
+  PendingFileAction,
   PendingGroup
 } from './types';
 
@@ -169,6 +170,15 @@ export class MessageTurnActor extends InterleavedShadowActor {
   private _activityLabelEl: HTMLElement | null = null;
   // Last label rendered to the DOM — used to short-circuit no-op renders.
   private _lastRenderedLabel: string | null = null;
+  // Observes the turn root so the activity indicator stays visually last
+  // even when other containers (Pending Changes, Modified Files) get
+  // appended to the turn after it. See ensureActivityIsLastChild().
+  private _activityPositionObserver: MutationObserver | null = null;
+  // Tracks which code blocks the user has expanded, keyed by text container id.
+  // Streaming token updates re-render the container's innerHTML (rebuilds all
+  // code-block DOM); this lets us re-apply `.expanded` so user clicks don't
+  // get silently undone on the next token.
+  private _expandedCodeBlocks = new Map<string, Set<number>>();
 
   // ============================================
   // Header State
@@ -242,6 +252,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
     this._textSegmentCounter = 0;
     this._currentSegmentContent = '';
     this._lastFormattedHtml = '';
+    this._expandedCodeBlocks.clear();
 
     // Reset thinking
     this._thinkingIterations.clear();
@@ -278,6 +289,10 @@ export class MessageTurnActor extends InterleavedShadowActor {
     // Reset activity indicator
     this._activityStack = [];
     this._textActive = false;
+    if (this._activityPositionObserver) {
+      this._activityPositionObserver.disconnect();
+      this._activityPositionObserver = null;
+    }
     if (this._activityElement) {
       this._activityElement.remove();
       this._activityElement = null;
@@ -349,6 +364,12 @@ export class MessageTurnActor extends InterleavedShadowActor {
     // ensureRoleHeader() is idempotent (checks _headerRendered), so subsequent calls are no-ops.
     this.ensureRoleHeader();
 
+    // Build the activity indicator element eagerly (hidden). Paired with the
+    // `.hidden { visibility: hidden }` CSS rule, this reserves the indicator's
+    // height from the moment streaming starts, so content doesn't jump the
+    // first time a real activity pushes onto the stack.
+    this.renderActivity();
+
     log.debug('startStreaming:', this._turnId, `role=${this._role}`);
   }
 
@@ -358,6 +379,10 @@ export class MessageTurnActor extends InterleavedShadowActor {
     // Tear down the activity indicator on turn end.
     this._activityStack = [];
     this._textActive = false;
+    if (this._activityPositionObserver) {
+      this._activityPositionObserver.disconnect();
+      this._activityPositionObserver = null;
+    }
     if (this._activityElement) {
       this._activityElement.remove();
       this._activityElement = null;
@@ -377,6 +402,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
           const formatted = this.formatContent(this._currentSegmentContent);
           contentEl.innerHTML = formatted;
           this._lastFormattedHtml = formatted;
+          this.restoreExpandedCodeBlocks(this._currentTextContainerId);
         }
       }
     }
@@ -426,13 +452,19 @@ export class MessageTurnActor extends InterleavedShadowActor {
    * the stack (defensive — out-of-order complete events shouldn't crash).
    */
   popActivity(kind: ActivityKind): void {
+    let removed = false;
     for (let i = this._activityStack.length - 1; i >= 0; i--) {
       if (this._activityStack[i].kind === kind) {
         this._activityStack.splice(i, 1);
+        removed = true;
         break;
       }
     }
-    this.renderActivity();
+    // Only re-render when we actually mutated state. Streaming text fires
+    // popActivity('tools') + popActivity('thinking') per token as defensive
+    // cleanup; without this guard both would re-render and thrash the
+    // indicator's position/animation every token.
+    if (removed) this.renderActivity();
   }
 
   /**
@@ -483,26 +515,55 @@ export class MessageTurnActor extends InterleavedShadowActor {
     if (this._activityStack.length > 0) {
       return this._activityStack[this._activityStack.length - 1].label;
     }
-    if (this._textActive) return 'Writing response...';
+    // Previously returned "Writing response..." while text streamed. Removed
+    // because the response text itself is visible right below the indicator,
+    // and the CSS animation reset on rapid re-renders caused visible flicker.
+    // Code-block activity (pushed by fence detection) still shows file-name
+    // context via the stack path above.
     return null;
+  }
+
+  /**
+   * After innerHTML has rebuilt the text container's children, re-apply
+   * `.expanded` to code blocks the user had toggled open. Without this,
+   * streaming token updates collapse code blocks mid-read.
+   */
+  private restoreExpandedCodeBlocks(containerId: string): void {
+    const expandedSet = this._expandedCodeBlocks.get(containerId);
+    if (!expandedSet || expandedSet.size === 0) return;
+    const container = this.getContainer(containerId);
+    if (!container) return;
+    const blocks = container.content.querySelectorAll('.code-block');
+    // Drop stale indexes (fewer blocks than expected, e.g., segment shrank).
+    for (const index of expandedSet) {
+      if (index >= blocks.length) {
+        expandedSet.delete(index);
+        continue;
+      }
+      blocks[index].classList.add('expanded');
+    }
+  }
+
+  /**
+   * Re-append the activity indicator to the turn root if new siblings have
+   * displaced it. Called from the mutation observer, not per render cycle —
+   * this is purely reactive to DOM mutations coming from other code paths
+   * (pending-changes render, tool-batch render, etc.).
+   */
+  private ensureActivityIsLastChild(): void {
+    if (!this._activityElement) return;
+    if (this._activityElement.classList.contains('hidden')) return;
+    if (this._activityElement.parentElement !== this.element) return;
+    if (this.element.lastElementChild === this._activityElement) return;
+    this.element.appendChild(this._activityElement);
   }
 
   private renderActivity(): void {
     const label = this.getActivityLabel();
 
-    if (label === null) {
-      if (this._activityElement) {
-        this._activityElement.remove();
-        this._activityElement = null;
-        this._activityLabelEl = null;
-        this._lastRenderedLabel = null;
-      }
-      return;
-    }
-
     // Build the skeleton DOM once — Moby icon, spurt drops, label span —
-    // and keep it alive across re-renders. innerHTML = was resetting the
-    // spurt animation to frame 0 on every streamed token, causing flicker.
+    // and keep it alive across hide/show cycles. Removing the element
+    // resets the spurt CSS animation on re-create, causing visible flicker.
     if (!this._activityElement) {
       this._activityElement = document.createElement('div');
       this._activityElement.className = 'activity-indicator';
@@ -532,18 +593,69 @@ export class MessageTurnActor extends InterleavedShadowActor {
       this._activityElement.appendChild(this._activityLabelEl);
     }
 
-    // Keep the indicator as the last child so new content renders above it.
+    // Always append (and keep it as the last child) regardless of whether
+    // we're about to hide it. Appending even when hidden reserves the
+    // indicator's height via `visibility: hidden`, so content above the
+    // turn doesn't jump when activity comes and goes during streaming.
     if (this._activityElement.parentElement !== this.element ||
         this.element.lastElementChild !== this._activityElement) {
       this.element.appendChild(this._activityElement);
     }
 
+    // Set up a mutation observer (once) so that later appends to the turn
+    // root (Pending Changes dropdown, tool batches, etc.) don't leave the
+    // activity indicator stranded mid-turn. Re-appends reactively instead
+    // of waiting for the next pushActivity/popActivity render cycle.
+    if (!this._activityPositionObserver) {
+      this._activityPositionObserver = new MutationObserver(() => {
+        this.ensureActivityIsLastChild();
+      });
+      this._activityPositionObserver.observe(this.element, { childList: true });
+    }
+
+    // Three visual states:
+    //   1. Not streaming → `.hidden` (everything invisible, layout preserved).
+    //   2. Streaming + no label → `.no-label` (moby visible, label text and
+    //      spurt droplets suppressed).
+    //   3. Streaming + label → neither class (moby + label + continuous spurt).
+    // Keeping Moby visible for the whole turn makes the indicator feel like
+    // a single persistent presence rather than a popup that flickers away
+    // every time an underlying request resolves.
+    const indicator = this._activityElement;
+    if (!this._isStreaming) {
+      indicator.classList.add('hidden');
+      indicator.classList.remove('no-label');
+      this._lastRenderedLabel = null;
+      return;
+    }
+    indicator.classList.remove('hidden');
+
+    if (label === null) {
+      indicator.classList.add('no-label');
+      this._lastRenderedLabel = null;
+      return;
+    }
+    indicator.classList.remove('no-label');
+
     // Only swap the label text when it actually changes — preserves the
     // Moby-spurts CSS animation state across the typical token-by-token
     // pushActivity flood.
     if (label !== this._lastRenderedLabel && this._activityLabelEl) {
-      this._activityLabelEl.textContent = label;
+      const labelEl = this._activityLabelEl;
+      const isFirstLabel = this._lastRenderedLabel === null;
       this._lastRenderedLabel = label;
+
+      if (isFirstLabel) {
+        // First appearance — no fade-out phase, just populate.
+        labelEl.textContent = label;
+      } else {
+        // Crossfade: fade out current text, swap, let CSS transition fade back in.
+        labelEl.classList.add('fading');
+        window.setTimeout(() => {
+          labelEl.textContent = label;
+          labelEl.classList.remove('fading');
+        }, 160);
+      }
     }
   }
 
@@ -672,16 +784,25 @@ export class MessageTurnActor extends InterleavedShadowActor {
       if (formatted !== this._lastFormattedHtml) {
         contentEl.innerHTML = formatted;
         this._lastFormattedHtml = formatted;
+        this.restoreExpandedCodeBlocks(this._currentTextContainerId);
       }
     }
 
     // Hide container when content is empty (e.g., shell tags stripped),
-    // show it again when content arrives
+    // show it again when content arrives. If we're transitioning from
+    // hidden → visible, re-fire the bubble-in animation so the first
+    // visible response feels consistent with how dropdowns slide in —
+    // the initial animation at createContainer() played while the host
+    // was `display: none`, so it was invisible to the user.
     const isEmpty = !content.trim();
     if (isEmpty) {
       container.host.setAttribute('hidden', '');
-    } else {
+    } else if (container.host.hasAttribute('hidden')) {
       container.host.removeAttribute('hidden');
+      container.host.classList.remove('anim-bubble-in');
+      void container.host.offsetWidth;
+      container.host.classList.add('anim-bubble-in');
+      window.setTimeout(() => container.host.classList.remove('anim-bubble-in'), 320);
     }
 
     this._currentSegmentContent = content;
@@ -739,6 +860,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
       const formatted = this.formatContent(this._currentSegmentContent);
       contentEl.innerHTML = formatted;
       this._lastFormattedHtml = formatted;
+      this.restoreExpandedCodeBlocks(this._currentTextContainerId);
     }
 
     // Segment finalized — pop the code-block activity frame (no-op if not on
@@ -1068,7 +1190,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
   /**
    * Add a pending file.
    */
-  addPendingFile(file: { filePath: string; diffId?: string; status?: PendingFileStatus; editMode?: EditMode }): string {
+  addPendingFile(file: { filePath: string; diffId?: string; status?: PendingFileStatus; action?: PendingFileAction; editMode?: EditMode }): string {
     // Show workspace-relative path (e.g., "src/game.ts" not just "game.ts")
     // For directories (no extension, no dots in last segment), append trailing slash
     let fileName = file.filePath;
@@ -1086,6 +1208,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
       fileName,
       diffId: file.diffId,
       status: file.status ?? 'pending',
+      action: file.action,
       iteration: this._pendingIteration
     };
 
@@ -1417,16 +1540,19 @@ export class MessageTurnActor extends InterleavedShadowActor {
     const isExpanded = container.host.classList.contains('expanded');
     const toggle = isExpanded ? '−' : '+';
 
-    // Count label with status-specific coloring
+    // Count label with status- and action-specific coloring.
     const rejectedCount = files.filter(f => f.status === 'rejected').length;
-    const deletedCount = files.filter(f => f.status === 'deleted').length;
+    const deletedCount = files.filter(f => f.status === 'deleted' || (f.status === 'applied' && f.action === 'deleted')).length;
+    const createdCount = files.filter(f => f.status === 'applied' && f.action === 'created').length;
+    const editedCount = files.filter(f => f.status === 'applied' && (f.action === 'modified' || f.action === undefined)).length;
     const errorCount = files.filter(f => f.status === 'error').length;
     const failureCount = errorCount + rejectedCount;
 
     let countLabel: string;
     if (isAuto) {
       const parts: string[] = [];
-      if (appliedCount > 0) parts.push(`<span class="count-applied">${appliedCount} applied</span>`);
+      if (createdCount > 0) parts.push(`<span class="count-created">${createdCount} created</span>`);
+      if (editedCount > 0) parts.push(`<span class="count-applied">${editedCount} edited</span>`);
       if (deletedCount > 0) parts.push(`<span class="count-deleted">${deletedCount} deleted</span>`);
       if (errorCount > 0) parts.push(`<span class="count-error">${errorCount} failed</span>`);
       countLabel = parts.length > 0 ? parts.join(', ') : `${files.length} file${files.length > 1 ? 's' : ''}`;
@@ -1436,7 +1562,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
       const expiredCount = files.filter(f => f.status === 'expired').length;
       const parts: string[] = [];
       if (appliedCount > 0) parts.push(`<span class="count-applied">${appliedCount} applied</span>`);
-      if (rejectedCount > 0) parts.push(`<span class="count-error">${rejectedCount} rejected</span>`);
+      if (rejectedCount > 0) parts.push(`<span class="count-rejected">${rejectedCount} rejected</span>`);
       if (expiredCount > 0) parts.push(`<span class="count-expired">${expiredCount} expired</span>`);
       countLabel = parts.length > 0 ? parts.join(', ') : `${files.length} file${files.length > 1 ? 's' : ''}`;
     }
@@ -1454,12 +1580,15 @@ export class MessageTurnActor extends InterleavedShadowActor {
       const tree = i === files.length - 1 ? '└─' : '├─';
       // In auto mode with applied status, show green checkmark
       const effectiveStatus = isAuto && file.status === 'applied' ? 'applied' : file.status;
-      const statusIcon = this.getPendingStatusIcon(effectiveStatus);
-      const statusClass = effectiveStatus;
+      const statusIcon = this.getPendingStatusIcon(effectiveStatus, file.action);
+      const statusClass = this.getPendingStatusClass(effectiveStatus, file.action);
 
       let actionsHtml = '';
       if (!isAuto && file.status === 'pending') {
+        // Pending changes group — show action word + accept/reject buttons.
+        const actionWord = this.getActionLabel(file.action);
         actionsHtml = `
+          <span class="pending-label action-${file.action ?? 'modified'}">${actionWord}</span>
           <div class="pending-actions">
             <button class="pending-btn accept-btn" data-file-id="${file.id}" data-diff-id="${file.diffId ?? ''}">Accept</button>
             <button class="pending-btn reject-btn" data-file-id="${file.id}" data-diff-id="${file.diffId ?? ''}">Reject</button>
@@ -1467,18 +1596,22 @@ export class MessageTurnActor extends InterleavedShadowActor {
         `;
       } else if (file.status === 'expired') {
         actionsHtml = `<span class="pending-label expired">Expired</span>`;
-      } else if (isAuto) {
-        if (file.status === 'error') {
-          actionsHtml = `<span class="pending-label error">Error</span>`;
-        } else if (file.status === 'deleted') {
-          actionsHtml = `<span class="pending-label deleted">Deleted</span>`;
-        } else {
-          actionsHtml = `<span class="pending-label auto-applied">Auto Applied</span>`;
-        }
+      } else if (file.status === 'rejected') {
+        actionsHtml = `<span class="pending-label rejected">Rejected</span>`;
+      } else if (file.status === 'error') {
+        actionsHtml = `<span class="pending-label error">Error</span>`;
+      } else if (file.action === 'deleted' || file.status === 'deleted') {
+        actionsHtml = `<span class="pending-label deleted">Deleted</span>`;
+      } else if (file.action === 'created') {
+        actionsHtml = `<span class="pending-label created">Created</span>`;
+      } else if (file.status === 'applied') {
+        actionsHtml = isAuto
+          ? `<span class="pending-label auto-applied">Auto Applied</span>`
+          : `<span class="pending-label applied">Edited</span>`;
       }
 
       itemsHtml += `
-        <div class="pending-item" data-status="${effectiveStatus}" data-superseded="${file.status === 'superseded'}">
+        <div class="pending-item" data-status="${effectiveStatus}" data-action="${file.action ?? ''}" data-superseded="${file.status === 'superseded'}">
           <span class="pending-tree">${tree}</span>
           <span class="pending-status ${statusClass}">${statusIcon}</span>
           <span class="pending-file" data-file-id="${file.id}" data-diff-id="${file.diffId ?? ''}" data-file-path="${file.filePath}">${this.escapeHtml(file.fileName)}</span>
@@ -1514,8 +1647,28 @@ export class MessageTurnActor extends InterleavedShadowActor {
       if (target.closest('.code-actions')) return;
 
       const codeBlock = header.closest('.code-block') as HTMLElement;
-      if (codeBlock) {
-        codeBlock.classList.toggle('expanded');
+      if (!codeBlock) return;
+
+      // Determine the block's position among siblings so we can re-apply
+      // expanded state after streaming re-renders the container's innerHTML.
+      const container = this.getContainer(containerId);
+      if (!container) return;
+      const allBlocks = Array.from(container.content.querySelectorAll('.code-block'));
+      const index = allBlocks.indexOf(codeBlock);
+      if (index < 0) return;
+
+      const nowExpanded = !codeBlock.classList.contains('expanded');
+      codeBlock.classList.toggle('expanded', nowExpanded);
+
+      let expandedSet = this._expandedCodeBlocks.get(containerId);
+      if (!expandedSet) {
+        expandedSet = new Set<number>();
+        this._expandedCodeBlocks.set(containerId, expandedSet);
+      }
+      if (nowExpanded) {
+        expandedSet.add(index);
+      } else {
+        expandedSet.delete(index);
       }
     });
 
@@ -1896,23 +2049,55 @@ export class MessageTurnActor extends InterleavedShadowActor {
     }
   }
 
-  private getPendingStatusIcon(status: PendingFileStatus): string {
+  private getPendingStatusIcon(status: PendingFileStatus, action?: PendingFileAction): string {
+    // Action-resolved applied: distinguish create/edit/delete.
+    if (status === 'applied') {
+      if (action === 'created') return '✚';
+      if (action === 'deleted') return '✕';
+      return '✓';
+    }
+    // Legacy: shell/delete path sets status='deleted' directly.
+    if (status === 'deleted') return '✕';
+    if (status === 'rejected') return '⊘';
     switch (status) {
       case 'pending': return '●';
-      case 'applied': return '✓';
-      case 'rejected': return '✗';
       case 'superseded': return '⊘';
-      case 'deleted': return '🗑️';
       case 'expired': return '○';
       case 'error': return '✗';
       default: return '●';
     }
   }
 
+  /** Resolve a display CSS class suffix (`.pending-status.<x>`) for status+action. */
+  private getPendingStatusClass(status: PendingFileStatus, action?: PendingFileAction): string {
+    if (status === 'applied') {
+      if (action === 'created') return 'created';
+      if (action === 'deleted') return 'deleted';
+      return 'applied';
+    }
+    return status;
+  }
+
+  /** Human-readable action label for the right-hand `.pending-label` span. */
+  private getActionLabel(action?: PendingFileAction): string {
+    if (action === 'created') return 'Create';
+    if (action === 'deleted') return 'Delete';
+    return 'Edit';
+  }
+
   private formatContent(content: string): string {
     if (!content) return '';
 
     const startExpanded = this._editMode === 'manual' || this._role === 'user';
+
+    // Normalize adjacent fence pairs with no newline between them. R1 sometimes
+    // emits ```\n...\n``````ruby\n — a close fence followed by an open fence
+    // on the same logical break. CommonMark treats the run of backticks as one
+    // lexer event and the block rendering flips/flops as tokens stream, which
+    // looks to the user like "the code dropdown appeared, disappeared, and
+    // came back". Split the run into close + open separated by blank lines so
+    // the parser sees two distinct fences.
+    content = content.replace(/(`{3,})(`{3,})(\w*)/g, '$1\n\n$2$3');
 
     // Normalize orphan fences: R1 sometimes emits "prose:```css" on one line
     // (no newline before the fence). CommonMark fence detection in

@@ -4,7 +4,9 @@ import { StatusBar } from '../views/statusBar';
 import { ConversationManager } from '../events';
 import { logger } from '../utils/logger';
 import { tracer } from '../tracing';
-import { workspaceTools, applyCodeEditTool, webSearchTool, executeToolCall } from '../tools/workspaceTools';
+import { workspaceTools, applyCodeEditTool, createFileTool, deleteFileTool, deleteDirectoryTool, webSearchTool, executeToolCall } from '../tools/workspaceTools';
+import { createFile as createFileCapability, deleteFile as deleteFileCapability } from '../capabilities/files';
+import { formatFilesAffected } from '../capabilities/types';
 import { parseDSMLToolCalls, stripDSML } from '../utils/dsmlParser';
 import { DiffManager } from './diffManager';
 import { WebSearchManager } from './webSearchManager';
@@ -24,7 +26,8 @@ import {
   isLongRunningCommand,
   containsWebSearchCommands,
   stripWebSearchTags,
-  ShellResult
+  ShellResult,
+  ShellCommand
 } from '../tools/reasonerShellExecutor';
 import { ContentTransformBuffer } from '../utils/ContentTransformBuffer';
 import { StructuralEventRecorder } from '../events/StructuralEventRecorder';
@@ -709,6 +712,12 @@ export class RequestOrchestrator {
             case 'web_search':
               logger.debug(`[ContentBuffer] Detected web_search tags, will be handled after iteration`);
               break;
+            case 'dsml':
+              // DSML tool-call blocks are suppressed from the streaming display.
+              // `parseDSMLToolCalls` converts them to structured `tool_calls`
+              // at end-of-response so the tool loop still executes.
+              logger.debug(`[ContentBuffer] Suppressed DSML tool-call block from stream`);
+              break;
           }
         }
       }
@@ -1068,12 +1077,14 @@ export class RequestOrchestrator {
     // ── 1. Identity + Conversational Gate ──
     let systemPrompt = `You are DeepSeek Moby, an expert programming assistant integrated into VS Code.
 
-Match your response to the user's intent:
-- Questions about code → explain clearly, no edits needed
-- Requests for changes → use the edit format described below
-- Architecture or design discussions → discuss tradeoffs, only edit if asked
-- Debugging help → analyze the problem, suggest fixes only when appropriate
-Not every message needs a code edit.\n`;
+Match your response to the user's intent. The distinction between "show me" and "change my code" is critical:
+
+- **Reference / teaching requests** ("show me", "give me an example", "what would X look like", "how do I", "demonstrate"): respond with a prose explanation and a plain markdown code block in your reply. Do NOT call create_file, apply_code_edit, or delete_file — the user wants to see code, not have files appear in their workspace.
+- **Edit requests** ("update foo.ts", "add X to my project", "fix this bug", "refactor Y"): use the appropriate edit tool.
+- **Architecture / design discussions**: discuss tradeoffs in prose; edit only if explicitly asked.
+- **Debugging**: analyze the problem in prose; suggest or apply fixes only when asked.
+
+When the user's phrasing is ambiguous, lean toward prose + markdown. Ask a clarifying question rather than creating files the user didn't ask for.\n`;
 
     // ── 2. Model-specific capabilities ──
     const wsState = await this.webSearchManager.getSettings();
@@ -1092,7 +1103,19 @@ You have tools to explore the codebase:
 - list_directory: See directory structure
 - get_file_info: Get file metadata
 ${webSearchLine}
-Use tools to understand the code before responding. Read relevant files first, then provide accurate answers.\n`;
+Use tools to understand the code before responding. Read relevant files first, then provide accurate answers.
+
+You have tools to modify the workspace:
+- apply_code_edit: Modify an existing file (use SEARCH/REPLACE format)
+- create_file: Create a new file with full content (prefer this over apply_code_edit when you know the file is new)
+- delete_file: Delete a file (moves to trash; requires user confirmation in ask mode)
+- delete_directory: Delete a directory (moves to trash; recursive="true" to delete populated directories and all contents; requires user confirmation in ask mode)
+
+Rules for file modifications:
+1. Paths are relative to the workspace root.
+2. After each operation, tool results include the absolute path of files touched — trust those paths over your own assumptions.
+3. delete_file and delete_directory are TERMINAL actions for that path in the turn. Once either succeeds, do not call apply_code_edit, create_file, or the other delete tool on the same path — that either fails or recreates what you just deleted.
+4. Use delete_file for files and delete_directory for directories. If you delete all files inside a directory and want to remove the now-empty directory too, call delete_directory on it (with recursive="false", the default). Set recursive="true" only when you explicitly want to delete a directory AND every file inside it in one operation.\n`;
     }
 
     // ── 3. Edit format (compact) ──
@@ -1211,18 +1234,18 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
 
       for (const cmd of parsedCommands) {
         if (allowAllCommands) {
-          approvedCommands.push(cmd);
+          approvedCommands.push({ ...cmd, approvalStatus: 'auto' });
           continue;
         }
 
         if (!this.commandApprovalManager) {
-          approvedCommands.push(cmd);
+          approvedCommands.push({ ...cmd, approvalStatus: 'auto' });
           continue;
         }
 
         const decision = this.commandApprovalManager.checkCommand(cmd.command);
         if (decision === 'allowed') {
-          approvedCommands.push(cmd);
+          approvedCommands.push({ ...cmd, approvalStatus: 'auto' });
         } else {
           // Both 'blocked' and 'ask' show the approval prompt — gives user the chance to override
           // Note: _approvalPending was already set synchronously in onFlush pre-scan
@@ -1240,13 +1263,14 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
           }
 
           if (userApproval.decision === 'allowed') {
-            approvedCommands.push(cmd);
+            approvedCommands.push({ ...cmd, approvalStatus: 'user-allowed' });
           } else {
             blockedResults.push({
               command: cmd.command,
               output: `Command rejected by user: ${cmd.command}`,
               success: false,
-              executionTimeMs: 0
+              executionTimeMs: 0,
+              approvalStatus: 'user-blocked'
             });
           }
         }
@@ -1561,11 +1585,13 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
 
             const allowAllCommands = vscode.workspace.getConfiguration('moby').get<boolean>('allowAllShellCommands') ?? false;
             let approved = true;
+            let approvalStatus: ShellCommand['approvalStatus'] = 'auto';
             if (!allowAllCommands && this.commandApprovalManager) {
               const decision = this.commandApprovalManager.checkCommand(commands[0].command);
               if (decision !== 'allowed') {
                 const userApproval = await this.commandApprovalManager.requestApproval(commands[0].command);
                 approved = userApproval.decision === 'allowed';
+                approvalStatus = approved ? 'user-allowed' : 'user-blocked';
               }
             }
 
@@ -1583,7 +1609,8 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
                 shellFileWatcher.onDidCreate(trackChange);
               } catch { /* watcher optional */ }
 
-              const results = await executeShellCommands(commands, workspacePath, { allowAllCommands, signal });
+              const taggedCommands = commands.map(c => ({ ...c, approvalStatus }));
+              const results = await executeShellCommands(taggedCommands, workspacePath, { allowAllCommands, signal });
               state.shellResultsForHistory.push(...results);
 
               await new Promise(resolve => setTimeout(resolve, 100));
@@ -1729,11 +1756,13 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
               .get<boolean>('allowAllShellCommands') ?? false;
 
             let approved = true;
+            let approvalStatus: ShellCommand['approvalStatus'] = 'auto';
             if (!allowAllCommands && this.commandApprovalManager) {
               const decision = this.commandApprovalManager.checkCommand(commands[0].command);
               if (decision !== 'allowed') {
                 const userApproval = await this.commandApprovalManager.requestApproval(commands[0].command);
                 approved = userApproval.decision === 'allowed';
+                approvalStatus = approved ? 'user-allowed' : 'user-blocked';
               }
             }
 
@@ -1757,7 +1786,8 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
               } catch { /* watcher optional */ }
 
               // Execute
-              const results = await executeShellCommands(commands, workspacePath, { allowAllCommands, signal });
+              const taggedCommands = commands.map(c => ({ ...c, approvalStatus }));
+              const results = await executeShellCommands(taggedCommands, workspacePath, { allowAllCommands, signal });
               state.shellResultsForHistory.push(...results);
 
               // Wait for file watcher
@@ -1978,7 +2008,10 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
             // ── Command Approval Gate ──
             // If bypass mode is off and CommandApprovalManager is available,
             // filter commands through the approval system before execution.
-            let approvedCommands = commands;
+            // Default to 'auto' when the gate is bypassed (allowAllCommands or
+            // no approval manager) — the executor's blocklist won't second-
+            // guess commands that have already been auto-approved.
+            let approvedCommands: ShellCommand[] = commands.map(c => ({ ...c, approvalStatus: 'auto' }));
             const blockedResults: ShellResult[] = [];
 
             logger.info(`[CommandApproval] Gate entered: ${commands.length} commands, bypass=${allowAllCommands}`);
@@ -1993,7 +2026,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
                 const decision = this.commandApprovalManager.checkCommand(cmd.command);
                 if (decision === 'allowed') {
                   logger.debug(`[CommandApproval] ALLOWED (rule match): "${cmd.command}"`);
-                  approvedCommands.push(cmd);
+                  approvedCommands.push({ ...cmd, approvalStatus: 'auto' });
                 } else if (decision === 'blocked') {
                   logger.info(`[CommandApproval] BLOCKED: "${cmd.command}"`);
                   blockedResults.push({
@@ -2001,6 +2034,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
                     output: 'Command blocked by security rules.',
                     success: false,
                     executionTimeMs: 0,
+                    approvalStatus: 'rule-blocked'
                   });
                 } else {
                   // 'ask' — block and wait for user approval via webview
@@ -2016,7 +2050,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
 
                   if (result.decision === 'allowed') {
                     logger.info(`[CommandApproval] APPROVED${result.persistent ? ' (always)' : ''}: "${cmd.command}"`);
-                    approvedCommands.push(cmd);
+                    approvedCommands.push({ ...cmd, approvalStatus: 'user-allowed' });
                   } else {
                     logger.info(`[CommandApproval] DENIED${result.persistent ? ' (always)' : ''}: "${cmd.command}"`);
                     blockedResults.push({
@@ -2024,6 +2058,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
                       output: 'Command blocked by user.',
                       success: false,
                       executionTimeMs: 0,
+                      approvalStatus: 'user-blocked'
                     });
                   }
                 }
@@ -2448,6 +2483,9 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
       const tools = [
         ...workspaceTools,
         applyCodeEditTool,
+        createFileTool,
+        deleteFileTool,
+        deleteDirectoryTool,
         ...(includeWebSearch ? [webSearchTool] : [])
       ];
 
@@ -2500,6 +2538,14 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
           detail = `info: ${args.path}`;
         } else if (name === 'web_search' && args.query) {
           detail = `search web: "${args.query}"`;
+        } else if (name === 'apply_code_edit' && args.file) {
+          detail = `edit: ${args.file}`;
+        } else if (name === 'create_file' && args.path) {
+          detail = `create: ${args.path}`;
+        } else if (name === 'delete_file' && args.path) {
+          detail = `delete: ${args.path}`;
+        } else if (name === 'delete_directory' && args.path) {
+          detail = `delete: ${args.path}${args.recursive === 'true' ? ' (recursive)' : ''}`;
         }
         return { name, detail, args };
       });
@@ -2606,9 +2652,14 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
                   const approvalResults = await this.diffManager.waitForPendingApprovals();
                   if (approvalResults.length > 0) {
                     const r = approvalResults[0];
-                    result = r.approved
-                      ? `Code edit applied to ${args.file}. User accepted the changes.`
-                      : `Code edit rejected for ${args.file}. User rejected the changes. Please try a different approach.`;
+                    if (r.approved) {
+                      const wsFolder = vscode.workspace.workspaceFolders?.[0];
+                      const absPath = wsFolder ? vscode.Uri.joinPath(wsFolder.uri, args.file).fsPath : undefined;
+                      result = `Code edit applied to ${args.file}. User accepted the changes.` +
+                        (absPath ? formatFilesAffected([{ absolutePath: absPath, relativePath: args.file, action: 'modified' }]) : '');
+                    } else {
+                      result = `Code edit rejected for ${args.file}. User rejected the changes. Please try a different approach.`;
+                    }
                   }
 
                   // Close the current tool batch after approval so retries render in a fresh batch
@@ -2623,6 +2674,10 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
                   const applied = await this.diffManager.applyCodeDirectlyForAutoMode(args.file, args.code, args.description, true);
                   if (applied) {
                     fileModifiedInBatch = true;
+                    const wsFolder = vscode.workspace.workspaceFolders?.[0];
+                    const absPath = wsFolder ? vscode.Uri.joinPath(wsFolder.uri, args.file).fsPath : undefined;
+                    result = `Code edit applied to ${args.file}.` +
+                      (absPath ? formatFilesAffected([{ absolutePath: absPath, relativePath: args.file, action: 'modified' }]) : '');
                   } else {
                     // If auto-apply failed (stale content), update the tool result
                     // so the LLM knows to re-read the file
@@ -2640,6 +2695,160 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
             }
           } catch (e) {
             logger.error(`[RequestOrchestrator] Failed to parse apply_code_edit arguments: ${e}`);
+          }
+        }
+
+        // Handle create_file: approval (ask) or direct capability call (auto).
+        if (toolCall.function.name === 'create_file' && success) {
+          try {
+            const args = JSON.parse(toolCall.function.arguments);
+            if (!args.path || typeof args.content !== 'string') {
+              result = `Error: create_file requires "path" and "content" arguments`;
+            } else {
+              const editMode = this.diffManager.currentEditMode;
+              if (editMode === 'ask' || editMode === 'manual') {
+                logger.info(`[RequestOrchestrator] create_file (${editMode}) — routing through diff approval for ${args.path}`);
+                const codeWithHeader = `# File: ${args.path}\n${args.content}`;
+                const language = args.language || 'plaintext';
+                if (editMode === 'ask') {
+                  await this.diffManager.handleAskModeDiff(codeWithHeader, language);
+                  const approvalResults = await this.diffManager.waitForPendingApprovals();
+                  const approved = approvalResults[0]?.approved ?? false;
+                  if (approved) {
+                    this.fileContextManager.trackReadFile(args.path);
+                    const wsFolder = vscode.workspace.workspaceFolders?.[0];
+                    const absPath = wsFolder ? vscode.Uri.joinPath(wsFolder.uri, args.path).fsPath : undefined;
+                    result = `Created file ${args.path}. User accepted the changes.` +
+                      (absPath ? formatFilesAffected([{ absolutePath: absPath, relativePath: args.path, action: 'created' }]) : '');
+                  } else {
+                    result = `Create file rejected for ${args.path}. User rejected the creation.`;
+                  }
+                  if (toolContainerStarted) {
+                    this._onToolCallsEnd.fire();
+                    toolContainerStarted = false;
+                    batchToolDetails = [];
+                  }
+                } else {
+                  // manual — open diff, no blocking approval
+                  await this.diffManager.showDiff(codeWithHeader, language);
+                  result = `Opened diff for ${args.path}. User will apply manually.`;
+                }
+              } else {
+                // auto mode — call capability directly
+                const capResult = await createFileCapability(args.path, args.content);
+                if (capResult.status === 'success') {
+                  this.fileContextManager.trackReadFile(args.path);
+                  this.diffManager.registerToolCreatedFile(args.path, args.description || 'Created by create_file');
+                  fileModifiedInBatch = true;
+                  result = `Created file ${args.path}.` + formatFilesAffected(capResult.filesAffected);
+                } else {
+                  result = `Error: ${capResult.error}`;
+                }
+              }
+            }
+          } catch (e: any) {
+            logger.error(`[RequestOrchestrator] Failed to handle create_file: ${e.message ?? e}`);
+            result = `Error: Failed to process create_file — ${e.message ?? e}`;
+          }
+        }
+
+        // Handle delete_file. Auto mode: direct capability call. Ask/manual:
+        // register a pending deletion so it appears as a row in the Pending
+        // Changes dropdown alongside edits — matches the review-everything-
+        // in-one-place mental model users have from R1.
+        if (toolCall.function.name === 'delete_file' && success) {
+          try {
+            const args = JSON.parse(toolCall.function.arguments);
+            if (!args.path) {
+              result = `Error: delete_file requires a "path" argument`;
+            } else {
+              const editMode = this.diffManager.currentEditMode;
+              if (editMode === 'ask' || editMode === 'manual') {
+                const diffId = this.diffManager.registerPendingDeletion(args.path);
+                const approvalResults = await this.diffManager.waitForPendingApprovals();
+                const approved = approvalResults.find(r => r.diffId === diffId)?.approved ?? false;
+                if (approved) {
+                  fileModifiedInBatch = true;
+                  const wsFolder = vscode.workspace.workspaceFolders?.[0];
+                  const absPath = wsFolder ? vscode.Uri.joinPath(wsFolder.uri, args.path).fsPath : undefined;
+                  result = `Deleted file ${args.path}. User accepted the deletion.` +
+                    (absPath ? formatFilesAffected([{ absolutePath: absPath, relativePath: args.path, action: 'deleted' }]) : '');
+                } else {
+                  result = `Delete file rejected for ${args.path}. User declined the deletion.`;
+                }
+                if (toolContainerStarted) {
+                  this._onToolCallsEnd.fire();
+                  toolContainerStarted = false;
+                  batchToolDetails = [];
+                }
+              } else {
+                // auto mode — direct capability call
+                const capResult = await deleteFileCapability(args.path);
+                if (capResult.status === 'success') {
+                  this.diffManager.registerToolDeletedFile(args.path);
+                  fileModifiedInBatch = true;
+                  result = `Deleted file ${args.path}.` + formatFilesAffected(capResult.filesAffected);
+                } else {
+                  result = `Error: ${capResult.error}`;
+                }
+              }
+            }
+          } catch (e: any) {
+            logger.error(`[RequestOrchestrator] Failed to handle delete_file: ${e.message ?? e}`);
+            result = `Error: Failed to process delete_file — ${e.message ?? e}`;
+          }
+        }
+
+        // Handle delete_directory. Mirrors delete_file's modes, plus a
+        // recursive flag for populated directories.
+        if (toolCall.function.name === 'delete_directory' && success) {
+          try {
+            const args = JSON.parse(toolCall.function.arguments);
+            if (!args.path) {
+              result = `Error: delete_directory requires a "path" argument`;
+            } else {
+              const recursive = args.recursive === 'true';
+              const editMode = this.diffManager.currentEditMode;
+              if (editMode === 'ask' || editMode === 'manual') {
+                const diffId = this.diffManager.registerPendingDirectoryDeletion(args.path, recursive);
+                const approvalResults = await this.diffManager.waitForPendingApprovals();
+                const approvalOutcome = approvalResults.find(r => r.diffId === diffId);
+                const approved = approvalOutcome?.approved ?? false;
+                if (approved) {
+                  fileModifiedInBatch = true;
+                  const wsFolder = vscode.workspace.workspaceFolders?.[0];
+                  const absPath = wsFolder ? vscode.Uri.joinPath(wsFolder.uri, args.path).fsPath : undefined;
+                  result = `Deleted directory ${args.path}${recursive ? ' (recursive)' : ''}. User accepted the deletion.` +
+                    (absPath ? formatFilesAffected([{ absolutePath: absPath, relativePath: args.path, action: 'deleted' }]) : '');
+                } else {
+                  // Distinguish user reject vs capability failure so the model
+                  // gets a useful error (e.g. "directory not empty, try recursive=true").
+                  result = `Delete directory rejected for ${args.path}. User declined the deletion (or the directory was not empty and recursive=false).`;
+                }
+                if (toolContainerStarted) {
+                  this._onToolCallsEnd.fire();
+                  toolContainerStarted = false;
+                  batchToolDetails = [];
+                }
+              } else {
+                // auto mode — direct capability call via DiffManager wrapper
+                // so the Modified Files dropdown updates on success.
+                const outcome = await this.diffManager.deleteDirectoryDirect(args.path, recursive);
+                if (outcome.status === 'applied') {
+                  fileModifiedInBatch = true;
+                  const wsFolder = vscode.workspace.workspaceFolders?.[0];
+                  const absPath = wsFolder ? vscode.Uri.joinPath(wsFolder.uri, args.path).fsPath : undefined;
+                  result = `Deleted directory ${args.path}${recursive ? ' (recursive)' : ''}.` +
+                    (absPath ? formatFilesAffected([{ absolutePath: absPath, relativePath: args.path, action: 'deleted' }]) : '');
+                } else {
+                  // Surface the capability-level error (e.g. "not empty").
+                  result = `Error: Failed to delete directory ${args.path}. ${recursive ? '' : 'Set recursive="true" if the directory is not empty.'}`;
+                }
+              }
+            }
+          } catch (e: any) {
+            logger.error(`[RequestOrchestrator] Failed to handle delete_directory: ${e.message ?? e}`);
+            result = `Error: Failed to process delete_directory — ${e.message ?? e}`;
           }
         }
 
@@ -2673,15 +2882,12 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
       // Update global index for next iteration
       globalToolIndex += response.tool_calls.length;
 
-      // If a file was modified in this iteration, close the batch and show modified files
+      // If a file was modified in this iteration, emit auto-applied changes
+      // so the Modified Files UI updates — but keep the batch open. Consecutive
+      // tool calls with no streamed text between them should render as one
+      // dropdown rather than fragmenting into "Used 1 tool" rows per file.
       if (fileModifiedInBatch) {
-        this._onToolCallsEnd.fire();
-        toolContainerStarted = false;
-        logger.info(`[Frontend] Sent toolCallsEnd (file modified, closing batch after iteration ${iterations})`);
-
         this.diffManager.emitAutoAppliedChanges();
-
-        batchToolDetails = [];
         fileModifiedInBatch = false;
       }
     }

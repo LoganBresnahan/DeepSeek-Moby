@@ -82,6 +82,14 @@ export function resetResolvedShell(): void {
 export interface ShellCommand {
   command: string;
   index: number;  // Position in the response for tracking
+  /**
+   * How this command was approved before reaching the executor.
+   * Set by the orchestrator after the approval-UI / rule-match step.
+   * When `'user-allowed'` or `'auto'`, the executor's catastrophic-
+   * operation blocklist is bypassed — the user has already said yes
+   * (either explicitly or via a persistent rule they created).
+   */
+  approvalStatus?: 'auto' | 'user-allowed' | 'user-blocked' | 'rule-blocked';
 }
 
 export interface ShellResult {
@@ -95,11 +103,17 @@ export interface ShellResult {
   iterationIndex?: number;
 }
 
-// Minimal blocklist - only truly catastrophic operations
-// Everything else is allowed - the LLM is trying to help, not destroy
+// Minimal blocklist - only truly catastrophic operations.
+// These patterns are a last-resort safety net; user-approved commands
+// (approvalStatus === 'user-allowed') bypass them. Everything else is
+// allowed — the LLM is trying to help, not destroy.
 const BLOCKED_PATTERNS: RegExp[] = [
-  // Catastrophic file deletion
-  /\brm\s+(-[rf]+\s+)*[\/~]/i,  // rm -rf / or rm -rf ~ (root or home deletion)
+  // Catastrophic file deletion: `rm -rf /`, `rm -rf /*`, `rm -rf ~`,
+  // `rm -rf ~/` — the bare-root / bare-home forms. A `/` or `~` followed
+  // by a path component (e.g. `/home/oof/x`) is NOT matched; that's a
+  // normal targeted delete and flows through the approval UI like any
+  // other rm.
+  /\brm\s+(-[rf]+\s+)+[\/~](?:\s|$|\/?\*?\s*$)/i,
 
   // Privilege escalation
   /\bsudo\s/i,
@@ -352,15 +366,32 @@ export function commandsDeleteFiles(commands: ShellCommand[]): boolean {
 }
 
 /**
- * Validate a command against security rules
- * Minimal validation - only block truly catastrophic operations
+ * Validate a command against security rules.
+ * Minimal validation — only blocks truly catastrophic operations.
+ *
+ * The blocklist is a last-resort safety net: commands the user has already
+ * approved (either via the approval UI or via a persistent rule they
+ * created) bypass it entirely. If you clicked "allow", the executor has
+ * no business second-guessing that decision.
  *
  * @param command - The shell command to validate
  * @param allowAll - If true, skip validation (allowAllShellCommands setting)
+ * @param approvalStatus - How the command was approved upstream
  */
-export function validateCommand(command: string, allowAll: boolean = false): { valid: boolean; reason?: string } {
+export function validateCommand(
+  command: string,
+  allowAll: boolean = false,
+  approvalStatus?: ShellCommand['approvalStatus']
+): { valid: boolean; reason?: string } {
   // Allow all commands if setting is enabled
   if (allowAll) {
+    return { valid: true };
+  }
+
+  // User-approved commands (or rule-approved, which is a user-created rule)
+  // bypass the blocklist. The approval UI already gave the user a chance
+  // to review and say no.
+  if (approvalStatus === 'user-allowed' || approvalStatus === 'auto') {
     return { valid: true };
   }
 
@@ -388,6 +419,7 @@ export async function executeShellCommand(
     maxOutputSize?: number;
     allowAllCommands?: boolean;
     signal?: AbortSignal;
+    approvalStatus?: ShellCommand['approvalStatus'];
   } = {}
 ): Promise<ShellResult> {
   const startTime = Date.now();
@@ -405,8 +437,8 @@ export async function executeShellCommand(
     };
   }
 
-  // Validate command first
-  const validation = validateCommand(command, allowAllCommands);
+  // Validate command first — user-approved commands bypass the blocklist.
+  const validation = validateCommand(command, allowAllCommands, options.approvalStatus);
   if (!validation.valid) {
     logger.warn(`[ReasonerShell] Command blocked: ${command} - ${validation.reason}`);
     return {
@@ -559,7 +591,8 @@ export async function executeShellCommands(
 
     const result = await executeShellCommand(cmd.command, workspacePath, {
       allowAllCommands: options.allowAllCommands,
-      signal: options.signal
+      signal: options.signal,
+      approvalStatus: cmd.approvalStatus
     });
     results.push(result);
   }

@@ -138,10 +138,11 @@ export class InputAreaShadowActor extends ShadowActor {
 
     this._value = textarea.value;
 
-    // Resume auto-resize when user types (exit manual collapse/expand)
-    if (this._collapsed || textarea.classList.contains('force-expanded')) {
+    // Typing should exit manual collapse (a collapsed box should grow with
+    // content) but preserve manual expand — if the user explicitly expanded,
+    // they want it to stay open while they type.
+    if (this._collapsed) {
       this._collapsed = false;
-      textarea.classList.remove('force-expanded');
     }
     this.autoResize();
 

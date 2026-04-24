@@ -1481,6 +1481,14 @@ textarea::placeholder {
   user-select: none;
 }
 
+/* Hidden state: keep the element in layout so content above doesn't jump
+ * when activity comes and goes during streaming. visibility preserves the
+ * reserved height; `display: none` collapsed it and caused visible shifts.
+ */
+.activity-indicator.hidden {
+  visibility: hidden;
+}
+
 .activity-indicator .activity-moby {
   position: relative;
   width: 22px;
@@ -1532,7 +1540,25 @@ textarea::placeholder {
   100% { opacity: 0; }
 }
 
+/* Suppress spurt and label when streaming has no active activity label.
+ * The whale itself stays visible so the indicator reads as a single
+ * persistent presence for the full duration of the request. */
+.activity-indicator.no-label .activity-spurt,
+.activity-indicator.hidden .activity-spurt {
+  visibility: hidden;
+}
+
+.activity-indicator.no-label .activity-label {
+  display: none;
+}
+
 .activity-indicator .activity-label {
-  /* no pulse — label is static while the Moby spurts */
   opacity: 0.9;
+  transition: opacity 0.16s ease;
+}
+
+/* Crossfade: actor adds .fading for ~160ms around a text swap, letting
+ * the old label dissolve before the new one replaces it. */
+.activity-indicator .activity-label.fading {
+  opacity: 0;
 }

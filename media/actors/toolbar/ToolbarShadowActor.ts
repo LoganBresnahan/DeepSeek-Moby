@@ -100,6 +100,7 @@ export class ToolbarShadowActor extends ShadowActor {
   private _webSearchEnabled = false;
   private _webSearchConfigured = true;
   private _apiKeyConfigured = true;
+  private _hasInputContent = false;
   private _filesModalOpen = false;
   private _planEnabled = false;
   private _streaming = false;
@@ -132,7 +133,8 @@ export class ToolbarShadowActor extends ShadowActor {
         'streaming.active': (value: unknown) => this.handleStreamingChange(value as boolean),
         'plans.activeCount': (value: unknown) => this.handlePlanCountChange(value as number),
         'files.selectedCount': (value: unknown) => this.handleFilesSelectedChange(value as number),
-        'session.model': (value: unknown) => this.handleModelChange(value as string)
+        'session.model': (value: unknown) => this.handleModelChange(value as string),
+        'input.value': (value: unknown) => this.handleInputValueChange(typeof value === 'string' ? value : '')
       }
     });
 
@@ -475,12 +477,23 @@ export class ToolbarShadowActor extends ShadowActor {
     if (!this._apiKeyConfigured) {
       sendBtn.disabled = true;
       sendBtn.classList.add('disabled');
+      sendBtn.classList.remove('primed');
       sendBtn.title = 'Send: DeepSeek API key not set';
     } else {
       sendBtn.disabled = false;
       sendBtn.classList.remove('disabled');
+      // "Primed" styling (green accent) when the user has typed something —
+      // a soft visual affordance that the button is ready to fire.
+      sendBtn.classList.toggle('primed', this._hasInputContent);
       sendBtn.title = 'Send message';
     }
+  }
+
+  private handleInputValueChange(value: string): void {
+    const hasContent = value.trim().length > 0;
+    if (hasContent === this._hasInputContent) return;
+    this._hasInputContent = hasContent;
+    this.updateSendButtonDisplay();
   }
 
   closeFilesModal(): void {

@@ -81,6 +81,7 @@ export interface ShellSegment {
 // ============================================
 
 export type PendingFileStatus = 'pending' | 'applied' | 'rejected' | 'superseded' | 'error' | 'deleted' | 'expired';
+export type PendingFileAction = 'created' | 'modified' | 'deleted';
 
 export interface PendingFile {
   id: string;
@@ -88,6 +89,8 @@ export interface PendingFile {
   fileName: string;
   diffId?: string;
   status: PendingFileStatus;
+  /** What kind of filesystem change — created, modified, or deleted. */
+  action?: PendingFileAction;
   iteration: number;
 }
 

@@ -531,7 +531,11 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       case 'toolCallsEnd':
         if (this._currentTurnId) {
           this.emitTurnEvent(this._currentTurnId, { type: 'tool-batch-complete', ts: Date.now() });
-          this._actors.virtualList.popTurnActivity(this._currentTurnId, 'tools');
+          // Keep the 'tools' activity alive across the API-call gap between
+          // batches. streamToken, iterationStart, and endResponse all pop it
+          // at the right moment. Popping here would flash the indicator off
+          // during the latency between an auto-mode file-write and the next
+          // tool iteration.
         }
         break;
 
@@ -603,6 +607,13 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         session.handleModelChanged({ model: msg.model as string });
         this._manager.publishDirect('model.current', msg.model);
         this._actors.toolbar.setModel(msg.model as string);
+        break;
+
+      case 'modelListUpdated':
+        // Full registered-model list (built-ins + custom entries from
+        // moby.customModels). The model-selector actor subscribes to
+        // `model.list` and rebuilds its dropdown.
+        this._manager.publishDirect('model.list', msg.models);
         break;
 
       case 'editModeSettings':
@@ -876,10 +887,11 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       type: 'text-append', content: token, iteration: this._currentIteration, ts: Date.now()
     });
 
-    // Activity: text is streaming. If thinking was the last-visible activity
-    // the reasoner has moved into content — pop the thinking frame so the
-    // indicator falls back to "Writing response...".
+    // Activity: text is streaming. Pop any thinking/tools frame so the
+    // indicator falls back to "Writing response..." (or whatever label the
+    // current content suggests via code-block detection).
     virtualList.popTurnActivity(this._currentTurnId, 'thinking');
+    virtualList.popTurnActivity(this._currentTurnId, 'tools');
     virtualList.setTurnTextActive(this._currentTurnId, true);
 
     streaming.handleContentChunk(token);
@@ -920,7 +932,8 @@ export class VirtualMessageGatewayActor extends EventStateActor {
 
     // Activity: thinking/text of the prior iteration are done; stop "Writing..."
     // fallback until the next content token arrives. Any lingering thinking frame
-    // pops here too.
+    // pops here too. 'tools' stays alive — it reflects the ongoing operation
+    // across the API-call gap between tool iterations.
     this._actors.virtualList.popTurnActivity(this._currentTurnId, 'thinking');
     this._actors.virtualList.setTurnTextActive(this._currentTurnId, false);
 
@@ -1094,6 +1107,47 @@ export class VirtualMessageGatewayActor extends EventStateActor {
     this.emitTurnEvent(this._currentTurnId, {
       type: 'tool-update', index: msg.index as number, status: msg.status as string, ts: Date.now()
     });
+
+    // Label lifecycle on the 'tools' activity:
+    //   running → "Writing X..." / "Reading X..." (specific, from tool detail)
+    //   done/error → "Processing..." (neutral, so we don't lie about what's
+    //     currently happening during the API-call gap between tools; the
+    //     old code kept the stale specific label for ~5-15s until the next
+    //     tool started).
+    if (msg.status === 'running') {
+      const label = this.deriveToolActivityLabel(msg.detail as string | undefined);
+      if (label) {
+        this._actors.virtualList.pushTurnActivity(this._currentTurnId, 'tools', label);
+      }
+    } else if (msg.status === 'done' || msg.status === 'error') {
+      this._actors.virtualList.pushTurnActivity(this._currentTurnId, 'tools', 'Processing...');
+    }
+  }
+
+  /**
+   * Map a tool detail string (e.g. "create: src/foo.ts") to a present-
+   * continuous activity label (e.g. "Writing src/foo.ts..."). Returns null
+   * for unknown shapes so the caller can leave the existing label alone.
+   */
+  private deriveToolActivityLabel(detail?: string): string | null {
+    if (!detail) return null;
+    const verbMap: Array<[string, string]> = [
+      ['create: ', 'Writing '],
+      ['edit: ', 'Editing '],
+      ['delete: ', 'Deleting '],
+      ['read: ', 'Reading '],
+      ['list: ', 'Listing '],
+      ['search: ', 'Searching for '],
+      ['grep: ', 'Searching for '],
+      ['info: ', 'Inspecting '],
+    ];
+    for (const [prefix, verb] of verbMap) {
+      if (detail.startsWith(prefix)) {
+        return `${verb}${detail.slice(prefix.length)}...`;
+      }
+    }
+    if (detail.startsWith('search web: ')) return 'Searching the web...';
+    return null;
   }
 
   private handleToolCallsUpdate(msg: { type: string; [key: string]: unknown }): void {
@@ -1112,7 +1166,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
 
   private handleDiffListChanged(msg: { type: string; [key: string]: unknown }): void {
     const { virtualList } = this._actors;
-    const diffs = msg.diffs as Array<{ filePath: string; status: string; diffId?: string; iteration?: number; superseded?: boolean }>;
+    const diffs = msg.diffs as Array<{ filePath: string; status: string; diffId?: string; iteration?: number; superseded?: boolean; action?: 'created' | 'modified' | 'deleted' }>;
     const source = (msg.source as string) || 'unknown';
 
     const turnId = this._currentTurnId || this._lastStreamingTurnId;
@@ -1127,6 +1181,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
 
     for (const diff of diffs) {
       const status = diff.status as 'pending' | 'applied' | 'rejected' | 'superseded' | 'error' | 'deleted' | 'expired';
+      const action = diff.action;
 
       // Check if this diff exists in ANY turn (global search by diffId)
       if (diff.diffId) {
@@ -1144,6 +1199,22 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       const existingByPath = currentPaths.get(diff.filePath);
       if (existingByPath) {
         const isResolved = existingByPath.status === 'rejected' || existingByPath.status === 'applied';
+        // Dedupe: in auto-applied flows, a file that's already `applied` in
+        // this turn stays as a single row — update its diffId/timestamp in
+        // place instead of piling up N rows for the same path. Only applies
+        // when the new entry is also auto-applied (not a pending entry that
+        // needs its own review). Rejected rows always get a new entry so
+        // users can still see "rejected then re-tried".
+        const shouldDedupe = isResolved
+          && existingByPath.status === 'applied'
+          && status === 'applied'
+          && diff.diffId
+          && existingByPath.diffId !== diff.diffId;
+        if (shouldDedupe) {
+          log.debug(`diffListChanged: ${diff.filePath} already applied — updating existing row (dedupe)`);
+          existingByPath.diffId = diff.diffId;
+          continue;
+        }
         if (isResolved && diff.diffId && existingByPath.diffId !== diff.diffId) {
           log.debug(`diffListChanged: ${diff.filePath} resolved (${existingByPath.status}) with new diffId — creating new pending entry`);
           // Fall through to create a new pending file entry
@@ -1184,6 +1255,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         filePath: diff.filePath,
         diffId: diff.diffId,
         status,
+        action,
         editMode: msg.editMode as EditMode | undefined
       });
     }
@@ -1506,7 +1578,9 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       creditsPerPrompt: webSearch?.creditsPerPrompt,
       maxResultsPerSearch: webSearch?.maxResultsPerSearch,
       cacheDuration: webSearch?.cacheDuration,
-      autoSaveHistory: msg.autoSaveHistory
+      autoSaveHistory: msg.autoSaveHistory,
+      apiKeyConfigured: msg.apiKeyConfigured,
+      tavilyConfigured: webSearch?.configured
     });
   }
 

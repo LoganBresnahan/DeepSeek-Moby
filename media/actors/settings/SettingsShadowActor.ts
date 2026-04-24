@@ -35,6 +35,11 @@ export interface SettingsValues {
   maxResultsPerSearch: number;
   cacheDuration: number;
   autoSaveHistory: boolean;
+  // Dot indicators in the API Keys section — drive the green/grey dot
+  // next to each button so the user can see at a glance whether a key
+  // is already in SecretStorage.
+  apiKeyConfigured?: boolean;
+  tavilyConfigured?: boolean;
 }
 
 export interface DefaultPrompt {
@@ -59,11 +64,18 @@ export class SettingsShadowActor extends PopupShadowActor {
   private _maxResultsPerSearch = 5;
   private _cacheDuration = 15;
   private _autoSaveHistory = true;
+  private _apiKeyConfigured = false;
+  private _tavilyConfigured = false;
 
   // Preview state
   private _defaultPromptVisible = false;
   private _defaultPromptModel = '';
   private _defaultPromptContent = '';
+
+  // Custom models surfaced from `moby.customModels` — the settings popup
+  // renders a row per entry so users can set/clear the per-model API key
+  // without editing JSON.
+  private _customModels: Array<{ id: string; name: string; hasApiKey?: boolean }> = [];
 
   constructor(manager: EventStateManager, element: HTMLElement, vscode: VSCodeAPI) {
     const config: PopupConfig = {
@@ -77,7 +89,17 @@ export class SettingsShadowActor extends PopupShadowActor {
       publications: {},
       subscriptions: {
         'settings.values': (value: unknown) => this.handleSettingsUpdate(value as SettingsValues),
-        'settings.defaultPrompt': (value: unknown) => this.handleDefaultPrompt(value as DefaultPrompt)
+        'settings.defaultPrompt': (value: unknown) => this.handleDefaultPrompt(value as DefaultPrompt),
+        'model.list': (value: unknown) => {
+          // Same channel the model selector subscribes to. Filter down to
+          // custom models for the settings-popup key management section.
+          if (!Array.isArray(value)) return;
+          const all = value as Array<{ id: string; name: string; isCustom?: boolean; hasApiKey?: boolean }>;
+          this._customModels = all
+            .filter(m => m.isCustom)
+            .map(m => ({ id: m.id, name: m.name, hasApiKey: m.hasApiKey }));
+          this.updateBodyContent(this.renderPopupContent());
+        }
       },
       additionalStyles: settingsShadowStyles,
       openRequestKey: 'settings.popup.open',
@@ -97,10 +119,37 @@ export class SettingsShadowActor extends PopupShadowActor {
       <div class="settings-section">
         <div class="settings-section-title">API Keys</div>
         <div class="settings-btn-row">
-          <button class="settings-action-btn" data-action="setApiKey">DeepSeek API Key</button>
-          <button class="settings-action-btn" data-action="setTavilyApiKey">Tavily API Key</button>
+          <div class="settings-keyed-btn">
+            <span class="key-status-dot ${this._apiKeyConfigured ? 'has-key' : 'no-key'}" title="${this._apiKeyConfigured ? 'Key stored in SecretStorage' : 'No key set'}"></span>
+            <button class="settings-action-btn" data-action="setApiKey">DeepSeek API Key</button>
+          </div>
+          <div class="settings-keyed-btn">
+            <span class="key-status-dot ${this._tavilyConfigured ? 'has-key' : 'no-key'}" title="${this._tavilyConfigured ? 'Key stored in SecretStorage' : 'No key set'}"></span>
+            <button class="settings-action-btn" data-action="setTavilyApiKey">Tavily API Key</button>
+          </div>
         </div>
       </div>
+
+      ${this._customModels?.length ? `
+      <div class="settings-divider"></div>
+
+      <!-- Custom Model API Keys Section -->
+      <div class="settings-section">
+        <div class="settings-section-title">Custom Model API Keys</div>
+        ${this._customModels.map(m => `
+          <div class="custom-model-key-row">
+            <div class="custom-model-key-label">
+              <span class="key-status-dot ${m.hasApiKey ? 'has-key' : 'no-key'}" title="${m.hasApiKey ? 'Key stored in SecretStorage' : 'No key set'}"></span>
+              <span class="custom-model-key-name" title="${this.escapeHtml(m.id)}">${this.escapeHtml(m.name)}</span>
+            </div>
+            <div class="custom-model-key-actions">
+              <button class="settings-action-btn" data-action="setCustomModelApiKey" data-model-id="${this.escapeHtml(m.id)}">${m.hasApiKey ? 'Update' : 'Set'}</button>
+              ${m.hasApiKey ? `<button class="settings-action-btn settings-action-btn-danger" data-action="clearCustomModelApiKey" data-model-id="${this.escapeHtml(m.id)}">Clear</button>` : ''}
+            </div>
+          </div>
+        `).join('')}
+      </div>
+      ` : ''}
 
       <div class="settings-divider"></div>
 
@@ -188,7 +237,7 @@ export class SettingsShadowActor extends PopupShadowActor {
     this.delegate('click', '[data-action]', (e, element) => {
       const action = element.getAttribute('data-action');
       if (action) {
-        this.handleAction(action);
+        this.handleAction(action, element);
       }
     });
   }
@@ -244,6 +293,14 @@ export class SettingsShadowActor extends PopupShadowActor {
     }
     if (settings.autoSaveHistory !== undefined && settings.autoSaveHistory !== this._autoSaveHistory) {
       this._autoSaveHistory = settings.autoSaveHistory;
+      changed = true;
+    }
+    if (settings.apiKeyConfigured !== undefined && settings.apiKeyConfigured !== this._apiKeyConfigured) {
+      this._apiKeyConfigured = settings.apiKeyConfigured;
+      changed = true;
+    }
+    if (settings.tavilyConfigured !== undefined && settings.tavilyConfigured !== this._tavilyConfigured) {
+      this._tavilyConfigured = settings.tavilyConfigured;
       changed = true;
     }
 
@@ -328,7 +385,7 @@ export class SettingsShadowActor extends PopupShadowActor {
   // Action Handlers
   // ============================================
 
-  private handleAction(action: string): void {
+  private handleAction(action: string, element?: HTMLElement): void {
     switch (action) {
       case 'openLogs':
         this._vscode.postMessage({ type: 'openLogs' });
@@ -384,6 +441,30 @@ export class SettingsShadowActor extends PopupShadowActor {
         this._vscode.postMessage({ type: 'executeCommand', command: 'moby.setTavilyApiKey' });
         this.close();
         break;
+
+      case 'setCustomModelApiKey': {
+        const modelId = element?.getAttribute('data-model-id');
+        if (!modelId) break;
+        this._vscode.postMessage({
+          type: 'executeCommand',
+          command: 'moby.setCustomModelApiKey',
+          args: [modelId]
+        });
+        this.close();
+        break;
+      }
+
+      case 'clearCustomModelApiKey': {
+        const modelId = element?.getAttribute('data-model-id');
+        if (!modelId) break;
+        this._vscode.postMessage({
+          type: 'executeCommand',
+          command: 'moby.clearCustomModelApiKey',
+          args: [modelId]
+        });
+        this.close();
+        break;
+      }
 
       case 'manageEncryptionKey':
         this._vscode.postMessage({ type: 'executeCommand', command: 'moby.manageEncryptionKey' });

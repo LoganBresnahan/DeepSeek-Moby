@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { isLongRunningCommand, formatShellResultsForContext } from '../../../src/tools/reasonerShellExecutor';
+import { isLongRunningCommand, formatShellResultsForContext, validateCommand } from '../../../src/tools/reasonerShellExecutor';
 
 // Re-implement the pure functions for testing (same logic as reasonerShellExecutor.ts)
 // This avoids importing the module which has vscode dependencies
@@ -76,34 +76,6 @@ function containsWebSearchCommands(content: string): boolean {
 
 function stripWebSearchTags(content: string): string {
   return content.replace(/<web_search>[\s\S]*?<\/web_search>/gi, '').trim();
-}
-
-const BLOCKED_PATTERNS: RegExp[] = [
-  /\brm\s+(-[rf]+\s+)*[\/~]/i,
-  /\bsudo\s/i,
-  /\bsu\s+-/i,
-  /\bshutdown\b/i,
-  /\breboot\b/i,
-  /\bpoweroff\b/i,
-  /\bdd\s+.*of=\/dev\//i,
-  /\bmkfs\b/i,
-];
-
-function validateCommand(command: string, allowAll: boolean = false): { valid: boolean; reason?: string } {
-  // Allow all commands if setting is enabled
-  if (allowAll) {
-    return { valid: true };
-  }
-
-  for (const pattern of BLOCKED_PATTERNS) {
-    if (pattern.test(command)) {
-      return {
-        valid: false,
-        reason: `Blocked: Potentially dangerous operation`
-      };
-    }
-  }
-  return { valid: true };
 }
 
 describe('reasonerShellExecutor', () => {
@@ -312,8 +284,11 @@ Some code here`;
 
     it('blocks catastrophic rm commands', () => {
       expect(validateCommand('rm -rf /').valid).toBe(false);
+      expect(validateCommand('rm -rf /*').valid).toBe(false);
       expect(validateCommand('rm -rf ~').valid).toBe(false);
       expect(validateCommand('rm -rf ~/').valid).toBe(false);
+      expect(validateCommand('rm -f /').valid).toBe(false);
+      expect(validateCommand('rm -rf / ').valid).toBe(false); // trailing space
     });
 
     it('allows safe rm commands', () => {
@@ -321,6 +296,17 @@ Some code here`;
       expect(validateCommand('rm file.txt').valid).toBe(true);
       expect(validateCommand('rm -rf node_modules').valid).toBe(true);
       expect(validateCommand('rm -rf ./build').valid).toBe(true);
+    });
+
+    it('allows rm with absolute paths that target something specific', () => {
+      // Regression: the old regex matched any `rm` with a `/`-starting path,
+      // so `rm -f /home/user/foo.txt` was wrongly blocked. Only bare-root /
+      // bare-home targets should trip the catastrophic guard.
+      expect(validateCommand('rm /home/user/foo.txt').valid).toBe(true);
+      expect(validateCommand('rm -f /home/user/foo.txt').valid).toBe(true);
+      expect(validateCommand('rm -rf /home/user/build').valid).toBe(true);
+      expect(validateCommand('rm -rf ~/Downloads/foo.zip').valid).toBe(true);
+      expect(validateCommand('rm -rf /tmp/workdir').valid).toBe(true);
     });
 
     it('blocks sudo commands', () => {
@@ -360,6 +346,35 @@ Some code here`;
       it('defaults to false when allowAll not specified', () => {
         expect(validateCommand('rm -rf /').valid).toBe(false);
         expect(validateCommand('cat file.txt').valid).toBe(true);
+      });
+    });
+
+    describe('approval-status bypass', () => {
+      it('bypasses the blocklist when user explicitly approved', () => {
+        // The user already saw the command in the approval UI and clicked
+        // "allow" — the executor has no business second-guessing them.
+        expect(validateCommand('rm -rf /', false, 'user-allowed').valid).toBe(true);
+        expect(validateCommand('sudo apt install pkg', false, 'user-allowed').valid).toBe(true);
+      });
+
+      it('bypasses the blocklist when a user-created rule auto-approved', () => {
+        // `'auto'` means a persistent rule the user set previously matched.
+        // Same trust level as a just-now approval.
+        expect(validateCommand('rm -rf /', false, 'auto').valid).toBe(true);
+        expect(validateCommand('shutdown now', false, 'auto').valid).toBe(true);
+      });
+
+      it('still runs the blocklist when approvalStatus is missing', () => {
+        // Defensive: if a caller forgets to tag, fall back to safe default.
+        expect(validateCommand('rm -rf /').valid).toBe(false);
+        expect(validateCommand('rm -rf /', false, undefined).valid).toBe(false);
+      });
+
+      it('still runs the blocklist for user-blocked and rule-blocked', () => {
+        // These statuses mean the command was rejected upstream and shouldn't
+        // be executed anyway, but defensively the blocklist still applies.
+        expect(validateCommand('rm -rf /', false, 'user-blocked').valid).toBe(false);
+        expect(validateCommand('rm -rf /', false, 'rule-blocked').valid).toBe(false);
       });
     });
   });

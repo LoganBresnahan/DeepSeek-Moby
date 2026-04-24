@@ -10,9 +10,10 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { DiffEngine } from '../utils/diff';
 import { logger } from '../utils/logger';
-import { DiffMetadata, DiffInfo, DiffListChangedEvent, CodeAppliedEvent, DiffApprovalResult } from './types';
+import { DiffMetadata, DiffInfo, DiffListChangedEvent, CodeAppliedEvent, DiffApprovalResult, DiffResolutionOutcome } from './types';
 import { FileContextManager } from './fileContextManager';
 import { extractCodeBlocks } from '../utils/codeBlocks';
+import { deleteFile as deleteFileCapability, deleteDirectory as deleteDirectoryCapability } from '../capabilities/files';
 
 export class DiffManager {
   // ── Events ──
@@ -40,7 +41,7 @@ export class DiffManager {
   // ── State ──
 
   private activeDiffs: Map<string, DiffMetadata> = new Map();
-  private resolvedDiffs: Array<{ filePath: string; timestamp: number; status: 'applied' | 'rejected'; iteration: number; diffId: string }> = [];
+  private resolvedDiffs: Array<{ filePath: string; timestamp: number; status: 'applied' | 'rejected'; iteration: number; diffId: string; action?: 'created' | 'modified' | 'deleted' }> = [];
   private _lastNotifiedDiffIndex = 0;
   private autoAppliedFiles: Array<{ filePath: string; timestamp: number; description?: string }> = [];
   private diffTabGroupId: number | null = null;
@@ -56,6 +57,19 @@ export class DiffManager {
   private pendingApprovals = new Map<string, {
     resolve: (result: DiffApprovalResult) => void;
     filePath: string;
+  }>();
+
+  // Pending deletions awaiting user approval in ask mode. Unlike edit diffs
+  // (tracked in `activeDiffs`), deletions have no content to preview — the
+  // dropdown just shows the file path + Delete label + Accept/Reject.
+  // `kind` distinguishes file vs directory so the accept handler dispatches
+  // to the right capability; `recursive` applies only to directories.
+  private pendingDeletes = new Map<string, {
+    filePath: string;
+    iteration: number;
+    timestamp: number;
+    kind: 'file' | 'directory';
+    recursive?: boolean;
   }>();
 
   private disposables: vscode.Disposable[] = [];
@@ -326,9 +340,11 @@ export class DiffManager {
         }
       }
 
+      const isCreate = this.extractNewFileContent(code) !== null;
       const metadata: DiffMetadata = {
         proposedUri, originalUri, targetFilePath: targetPath,
-        code, language, timestamp, iteration, diffId, superseded: false
+        code, language, timestamp, iteration, diffId, superseded: false,
+        action: isCreate ? 'created' : 'modified'
       };
 
       this.activeDiffs.set(proposedUri.toString(), metadata);
@@ -352,7 +368,7 @@ export class DiffManager {
     }
   }
 
-  async applyCode(code: string, language: string): Promise<void> {
+  async applyCode(code: string, language: string): Promise<DiffResolutionOutcome | null> {
     const activeEditor = vscode.window.activeTextEditor;
     let targetMetadata: DiffMetadata | undefined;
 
@@ -385,6 +401,10 @@ export class DiffManager {
 
     const cleanCode = code.replace(/^#\s*File:.*\n/i, '');
 
+    // Tracks what actually happened — returned to the caller so DB writes
+    // reflect reality rather than assuming 'applied' on every invocation.
+    let outcome: DiffResolutionOutcome | null = null;
+
     try {
       if (targetFilePath) {
         // Target file known — apply via WorkspaceEdit (no visible editor needed)
@@ -392,7 +412,7 @@ export class DiffManager {
         if (!workspaceFolders || workspaceFolders.length === 0) {
           this._onWarning.fire({ message: 'No workspace folder open' });
           this.sendCodeAppliedStatus(false, 'No workspace folder open');
-          return;
+          return { filePath: targetFilePath, status: 'rejected' };
         }
 
         let document: vscode.TextDocument | undefined;
@@ -422,7 +442,7 @@ export class DiffManager {
         if (!document || !fileUri) {
           this._onWarning.fire({ message: `File not found in workspace: ${targetFilePath}` });
           this.sendCodeAppliedStatus(false, `File not found: ${targetFilePath}`);
-          return;
+          return { filePath: targetFilePath, status: 'rejected' };
         }
 
         const currentContent = document.getText();
@@ -437,6 +457,7 @@ export class DiffManager {
         await vscode.workspace.applyEdit(edit);
         await document.save();
         this.sendCodeAppliedStatus(result.success, result.success ? undefined : 'Patch applied with fallback', targetFilePath);
+        outcome = { filePath: targetFilePath, status: 'applied' };
 
         // Close the diff tab and focus the target file
         if (targetMetadata) {
@@ -462,25 +483,29 @@ export class DiffManager {
         }
 
         if (!editor || editor.document.uri.scheme !== 'file') {
+          // No target file, no suitable editor — open the code as an untitled
+          // document for the user to copy from. Nothing was applied to a
+          // tracked file, so return null (caller skips DB update).
           const doc = await vscode.workspace.openTextDocument({
             content: cleanCode,
             language: this.mapLanguage(language)
           });
           await vscode.window.showTextDocument(doc);
           this.sendCodeAppliedStatus(true);
-          return;
+          return null;
         }
 
         const document = editor.document;
         const currentContent = document.getText();
         const selection = editor.selection;
+        const fallbackPath = vscode.workspace.asRelativePath(document.uri);
 
         if (!selection.isEmpty) {
           const edit = new vscode.WorkspaceEdit();
           edit.replace(document.uri, selection, cleanCode);
           await vscode.workspace.applyEdit(edit);
           this.sendCodeAppliedStatus(true);
-          return;
+          return { filePath: fallbackPath, status: 'applied' };
         }
 
         const result = this.diffEngine.applyChanges(currentContent, cleanCode);
@@ -493,6 +518,7 @@ export class DiffManager {
         edit.replace(document.uri, fullRange, result.content);
         await vscode.workspace.applyEdit(edit);
         this.sendCodeAppliedStatus(result.success, result.success ? undefined : 'Patch applied with fallback');
+        outcome = { filePath: fallbackPath, status: 'applied' };
       }
 
       if (targetMetadata) {
@@ -500,23 +526,176 @@ export class DiffManager {
       } else {
         await this.closeDiffEditor();
       }
+
+      return outcome;
     } catch (error: any) {
       logger.error('Failed to apply code', error.message);
       this.sendCodeAppliedStatus(false, error.message);
+      return targetFilePath ? { filePath: targetFilePath, status: 'rejected' } : null;
     }
   }
 
-  async acceptSpecificDiff(diffId: string): Promise<void> {
+  /**
+   * Register a pending file deletion for user approval in ask mode.
+   * Emits a `diffListChanged` event so the webview shows the file in the
+   * Pending Changes dropdown with Delete / Accept / Reject. The returned
+   * diffId is registered as a pending approval — callers should await
+   * `waitForPendingApprovals()` to block until resolved.
+   */
+  registerPendingDeletion(filePath: string): string {
+    return this.registerPendingDeleteEntry(filePath, { kind: 'file' });
+  }
+
+  /**
+   * Register a pending directory deletion for user approval in ask mode.
+   * Emits a `diffListChanged` event so the webview shows the directory as
+   * a pending row with Accept/Reject. `recursive=true` deletes all contents
+   * on accept; `recursive=false` only proceeds if the directory is empty.
+   */
+  registerPendingDirectoryDeletion(filePath: string, recursive: boolean): string {
+    return this.registerPendingDeleteEntry(filePath, { kind: 'directory', recursive });
+  }
+
+  private registerPendingDeleteEntry(
+    filePath: string,
+    opts: { kind: 'file' | 'directory'; recursive?: boolean }
+  ): string {
+    const currentCount = this.fileEditCounts.get(filePath) || 0;
+    const iteration = currentCount + 1;
+    this.fileEditCounts.set(filePath, iteration);
+    const timestamp = Date.now();
+    const diffId = `${filePath}-delete-${timestamp}-${iteration}`;
+
+    this.pendingDeletes.set(diffId, {
+      filePath,
+      iteration,
+      timestamp,
+      kind: opts.kind,
+      recursive: opts.recursive
+    });
+    this.currentResponseFileChanges.push({ filePath, status: 'pending', iteration });
+    this.registerPendingApproval(diffId, filePath);
+
+    logger.info(`[DiffManager] Registered pending ${opts.kind} deletion: ${filePath}${opts.recursive ? ' (recursive)' : ''} (diffId=${diffId})`);
+
+    this._onDiffListChanged.fire({
+      diffs: [{
+        filePath,
+        timestamp,
+        status: 'pending',
+        iteration,
+        diffId,
+        superseded: false,
+        action: 'deleted'
+      }],
+      editMode: this.editMode
+    });
+
+    return diffId;
+  }
+
+  private async acceptPendingDeletion(diffId: string): Promise<DiffResolutionOutcome> {
+    const pending = this.pendingDeletes.get(diffId);
+    if (!pending) {
+      logger.warn(`[DiffManager] acceptPendingDeletion: no pending delete for diffId=${diffId}`);
+      return { filePath: '', status: 'rejected' };
+    }
+    logger.info(`[DiffManager] Accepting pending ${pending.kind} deletion: ${pending.filePath}${pending.recursive ? ' (recursive)' : ''} (diffId=${diffId})`);
+
+    const capResult = pending.kind === 'directory'
+      ? await deleteDirectoryCapability(pending.filePath, { recursive: pending.recursive ?? false })
+      : await deleteFileCapability(pending.filePath);
+    const status: 'applied' | 'rejected' = capResult.status === 'success' ? 'applied' : 'rejected';
+
+    this.resolvedDiffs.push({
+      filePath: pending.filePath,
+      timestamp: Date.now(),
+      status,
+      iteration: pending.iteration,
+      diffId,
+      action: 'deleted'
+    });
+    this.updateFileChangeStatus(pending.filePath, pending.iteration, status);
+    this.notifyDiffResolved(pending.filePath, diffId, status, pending.iteration, 'deleted');
+
+    this.pendingDeletes.delete(diffId);
+
+    const pendingApproval = this.pendingApprovals.get(diffId);
+    if (pendingApproval) {
+      pendingApproval.resolve({
+        filePath: pending.filePath,
+        diffId,
+        approved: capResult.status === 'success'
+      });
+      this.pendingApprovals.delete(diffId);
+    }
+
+    if (capResult.status !== 'success') {
+      logger.warn(`[DiffManager] ${pending.kind} deletion capability failed for ${pending.filePath}: ${capResult.error}`);
+    }
+
+    return { filePath: pending.filePath, status };
+  }
+
+  /**
+   * Direct capability wrapper for auto-mode directory deletion. Registers the
+   * result in `autoAppliedFiles` on success so the Modified Files dropdown
+   * shows it, same as tool-created files.
+   */
+  async deleteDirectoryDirect(filePath: string, recursive: boolean): Promise<DiffResolutionOutcome> {
+    const capResult = await deleteDirectoryCapability(filePath, { recursive });
+    if (capResult.status === 'success') {
+      this.registerToolDeletedFile(filePath);
+      return { filePath, status: 'applied' };
+    }
+    return { filePath, status: 'rejected' };
+  }
+
+  private rejectPendingDeletion(diffId: string): DiffResolutionOutcome {
+    const pending = this.pendingDeletes.get(diffId);
+    if (!pending) {
+      logger.warn(`[DiffManager] rejectPendingDeletion: no pending delete for diffId=${diffId}`);
+      return { filePath: '', status: 'rejected' };
+    }
+    logger.info(`[DiffManager] Rejecting pending deletion: ${pending.filePath} (diffId=${diffId})`);
+
+    this.resolvedDiffs.push({
+      filePath: pending.filePath,
+      timestamp: Date.now(),
+      status: 'rejected',
+      iteration: pending.iteration,
+      diffId,
+      action: 'deleted'
+    });
+    this.updateFileChangeStatus(pending.filePath, pending.iteration, 'rejected');
+    this.notifyDiffResolved(pending.filePath, diffId, 'rejected', pending.iteration, 'deleted');
+
+    this.pendingDeletes.delete(diffId);
+
+    const pendingApproval = this.pendingApprovals.get(diffId);
+    if (pendingApproval) {
+      pendingApproval.resolve({ filePath: pending.filePath, diffId, approved: false });
+      this.pendingApprovals.delete(diffId);
+    }
+
+    return { filePath: pending.filePath, status: 'rejected' };
+  }
+
+  async acceptSpecificDiff(diffId: string): Promise<DiffResolutionOutcome | null> {
+    // Route pending deletions (no DiffMetadata) to their own handler.
+    if (this.pendingDeletes.has(diffId)) {
+      return this.acceptPendingDeletion(diffId);
+    }
     const metadata = Array.from(this.activeDiffs.values()).find(m => m.diffId === diffId);
     if (!metadata) {
       logger.warn(`[DiffManager] No diff found for diffId: ${diffId}`);
-      return;
+      return null;
     }
 
     if (metadata.superseded) {
       logger.warn(`[DiffManager] Cannot accept superseded diff: ${diffId}`);
       this._onWarning.fire({ message: 'This version has been superseded by a newer edit. Please use the newer version.' });
-      return;
+      return null;
     }
 
     logger.info(`[DiffManager] Accepting specific diff: ${diffId} (${metadata.targetFilePath})`);
@@ -587,7 +766,8 @@ export class DiffManager {
         timestamp: metadata.timestamp,
         status: 'applied',
         iteration: metadata.iteration,
-        diffId: metadata.diffId
+        diffId: metadata.diffId,
+        action: metadata.action
       });
 
       this.updateFileChangeStatus(metadata.targetFilePath, metadata.iteration, 'applied');
@@ -596,7 +776,7 @@ export class DiffManager {
       this.sendCodeAppliedStatus(true, undefined, metadata.targetFilePath);
 
       // Notify webview of the resolved status so the dropdown updates
-      this.notifyDiffResolved(metadata.targetFilePath, metadata.diffId, 'applied', metadata.iteration);
+      this.notifyDiffResolved(metadata.targetFilePath, metadata.diffId, 'applied', metadata.iteration, metadata.action);
 
       // Resolve pending approval if one exists (blocking ask mode)
       const pendingApproval = this.pendingApprovals.get(diffId);
@@ -605,17 +785,23 @@ export class DiffManager {
         this.pendingApprovals.delete(diffId);
       }
 
+      return { filePath: metadata.targetFilePath, status: 'applied' };
     } catch (error: any) {
       logger.error(`[DiffManager] Failed to accept diff ${diffId}:`, error.message);
       this.sendCodeAppliedStatus(false, error.message);
+      return { filePath: metadata.targetFilePath, status: 'rejected' };
     }
   }
 
-  async rejectSpecificDiff(diffId: string): Promise<void> {
+  async rejectSpecificDiff(diffId: string): Promise<DiffResolutionOutcome | null> {
+    // Route pending deletions (no DiffMetadata) to their own handler.
+    if (this.pendingDeletes.has(diffId)) {
+      return this.rejectPendingDeletion(diffId);
+    }
     const metadata = Array.from(this.activeDiffs.values()).find(m => m.diffId === diffId);
     if (!metadata) {
       logger.warn(`[DiffManager] No diff found for diffId: ${diffId}`);
-      return;
+      return null;
     }
 
     logger.info(`[DiffManager] Rejecting specific diff: ${diffId} (${metadata.targetFilePath})`);
@@ -625,6 +811,7 @@ export class DiffManager {
       timestamp: metadata.timestamp,
       status: 'rejected',
       iteration: metadata.iteration,
+      action: metadata.action,
       diffId: metadata.diffId
     });
 
@@ -632,7 +819,7 @@ export class DiffManager {
     await this.closeSingleDiff(metadata);
 
     // Notify webview of the resolved status so the dropdown updates
-    this.notifyDiffResolved(metadata.targetFilePath, metadata.diffId, 'rejected', metadata.iteration);
+    this.notifyDiffResolved(metadata.targetFilePath, metadata.diffId, 'rejected', metadata.iteration, metadata.action);
 
     // Resolve pending approval if one exists (blocking ask mode)
     const pendingApproval = this.pendingApprovals.get(diffId);
@@ -640,55 +827,79 @@ export class DiffManager {
       pendingApproval.resolve({ filePath: metadata.targetFilePath, diffId, approved: false });
       this.pendingApprovals.delete(diffId);
     }
+
+    return { filePath: metadata.targetFilePath, status: 'rejected' };
   }
 
   /**
    * Find the metadata for the currently active diff editor (if any).
    */
-  private getActiveDiffMetadata(): DiffMetadata | undefined {
-    const editor = vscode.window.activeTextEditor;
-    if (!editor || editor.document.uri.scheme !== 'deepseek-diff') return undefined;
-
-    const uriString = editor.document.uri.toString();
-    for (const metadata of this.activeDiffs.values()) {
-      if (metadata.proposedUri.toString() === uriString || metadata.originalUri.toString() === uriString) {
-        return metadata;
+  private getActiveDiffMetadata(hintUri?: vscode.Uri): DiffMetadata | undefined {
+    // When the editor/title toolbar button is clicked, VS Code passes the
+    // resource URI as the command argument. Prefer that — activeTextEditor
+    // can be stale (unfocused side of a diff, or a non-diff editor if the
+    // user clicked away before clicking the toolbar).
+    if (hintUri) {
+      const uriString = hintUri.toString();
+      for (const metadata of this.activeDiffs.values()) {
+        if (metadata.proposedUri.toString() === uriString || metadata.originalUri.toString() === uriString) {
+          return metadata;
+        }
       }
     }
+
+    // Fallback to activeTextEditor (e.g., for keybinding-triggered invocations).
+    const editor = vscode.window.activeTextEditor;
+    if (editor && editor.document.uri.scheme === 'deepseek-diff') {
+      const uriString = editor.document.uri.toString();
+      for (const metadata of this.activeDiffs.values()) {
+        if (metadata.proposedUri.toString() === uriString || metadata.originalUri.toString() === uriString) {
+          return metadata;
+        }
+      }
+    }
+
+    // Last-resort fallback for ask mode: if there's exactly one active diff
+    // open, assume the user meant that one. Prevents the "No active diff"
+    // dead-end when the toolbar click loses the URI association.
+    if (this.activeDiffs.size === 1) {
+      return Array.from(this.activeDiffs.values())[0];
+    }
+
     return undefined;
   }
 
   /**
    * Get the file path of the currently active diff (for DB status updates).
    */
-  getActiveDiffFilePath(): string | undefined {
-    return this.getActiveDiffMetadata()?.targetFilePath;
+  getActiveDiffFilePath(hintUri?: vscode.Uri): string | undefined {
+    return this.getActiveDiffMetadata(hintUri)?.targetFilePath;
   }
 
   /**
    * Accept the currently active diff in the editor.
    * Called from the editor/title toolbar button.
    */
-  async acceptActiveDiff(): Promise<void> {
-    const metadata = this.getActiveDiffMetadata();
+  async acceptActiveDiff(hintUri?: vscode.Uri): Promise<DiffResolutionOutcome | null> {
+    const metadata = this.getActiveDiffMetadata(hintUri);
     if (!metadata) {
       logger.warn('[DiffManager] No active diff to accept');
-      return;
+      return null;
     }
-    await this.acceptSpecificDiff(metadata.diffId);
+    return this.acceptSpecificDiff(metadata.diffId);
   }
 
   /**
    * Reject the currently active diff in the editor.
    * Called from the editor/title toolbar button.
    */
-  async rejectActiveDiff(): Promise<void> {
-    const metadata = this.getActiveDiffMetadata();
+  async rejectActiveDiff(hintUri?: vscode.Uri): Promise<DiffResolutionOutcome | null> {
+    const metadata = this.getActiveDiffMetadata(hintUri);
     if (!metadata) {
       logger.warn('[DiffManager] No active diff to reject');
-      return;
+      return null;
     }
-    await this.rejectSpecificDiff(metadata.diffId);
+    return this.rejectSpecificDiff(metadata.diffId);
   }
 
   async acceptAllDiffs(): Promise<void> {
@@ -773,6 +984,18 @@ export class DiffManager {
         this._onWarning.fire({ message: `Code edit may not have been applied correctly to ${filePath}: ${result.message || 'No matching code found'}` });
       }
 
+      // Idempotent-edit skip: if the computed new content matches what's
+      // already on disk, this is a no-op write. Common with R1 auto-
+      // continuations that re-emit the same file via SEARCH/REPLACE after
+      // already creating it via shell heredoc. Skip the write, the
+      // autoAppliedFiles entry, and the dropdown notification — the file
+      // is unchanged and surfacing it as a new "applied" event is noise.
+      if (result.content === currentContent) {
+        logger.info(`[DiffManager] Auto mode: Skipped idempotent apply for ${filePath} (content unchanged)`);
+        this.sendCodeAppliedStatus(true);
+        return true;
+      }
+
       const edit = new vscode.WorkspaceEdit();
       const fullRange = new vscode.Range(
         document.positionAt(0),
@@ -792,7 +1015,7 @@ export class DiffManager {
       this.autoAppliedFiles.push({ filePath, timestamp: Date.now(), description });
 
       this.resolvedDiffs.push({
-        filePath, timestamp: Date.now(), status: 'applied', iteration, diffId
+        filePath, timestamp: Date.now(), status: 'applied', iteration, diffId, action: 'modified'
       });
 
       this.currentResponseFileChanges.push({ filePath, status: 'applied', iteration });
@@ -852,7 +1075,7 @@ export class DiffManager {
       logger.info(`[DiffManager] Auto mode: Created new file ${filePath}`);
 
       this.autoAppliedFiles.push({ filePath, timestamp: Date.now(), description });
-      this.resolvedDiffs.push({ filePath, timestamp: Date.now(), status: 'applied', iteration, diffId });
+      this.resolvedDiffs.push({ filePath, timestamp: Date.now(), status: 'applied', iteration, diffId, action: 'created' });
       this.currentResponseFileChanges.push({ filePath, status: 'applied', iteration });
 
       if (!skipNotification) {
@@ -1095,8 +1318,15 @@ export class DiffManager {
   cancelPendingApprovals(): void {
     for (const [diffId, pending] of this.pendingApprovals.entries()) {
       pending.resolve({ filePath: pending.filePath, diffId, approved: false });
+      // For pending deletions, also emit a rejected status so the dropdown row
+      // flips from pending to rejected instead of hanging on Accept/Reject.
+      const del = this.pendingDeletes.get(diffId);
+      if (del) {
+        this.notifyDiffResolved(del.filePath, diffId, 'rejected', del.iteration, 'deleted');
+      }
     }
     this.pendingApprovals.clear();
+    this.pendingDeletes.clear();
   }
 
   handleDebouncedDiff(code: string, language: string): void {
@@ -1262,6 +1492,45 @@ which I already edited - would you like me to update it?"
   }
 
   /**
+   * Register a file created or modified by a native tool call (bypassed the
+   * diff engine — the tool wrote directly via the capability layer).
+   * Adds to the auto-applied list so the "Modified Files" dropdown shows it.
+   */
+  registerToolCreatedFile(filePath: string, description?: string): void {
+    const currentCount = this.fileEditCounts.get(filePath) || 0;
+    const iteration = currentCount + 1;
+    this.fileEditCounts.set(filePath, iteration);
+    const diffId = `${filePath}-${Date.now()}-${iteration}`;
+
+    logger.info(`[DiffManager] Tool created/modified file: ${filePath}`);
+
+    this.autoAppliedFiles.push({ filePath, timestamp: Date.now(), description: description ?? 'Created by tool' });
+    this.resolvedDiffs.push({ filePath, timestamp: Date.now(), status: 'applied', iteration, diffId, action: 'created' });
+    this.currentResponseFileChanges.push({ filePath, status: 'applied', iteration });
+
+    this.notifyAutoAppliedFilesChanged();
+  }
+
+  /**
+   * Register a file deleted by a native tool call. Parallels the shell
+   * deletion path but doesn't require a batch.
+   */
+  registerToolDeletedFile(filePath: string): void {
+    const currentCount = this.fileEditCounts.get(filePath) || 0;
+    const iteration = currentCount + 1;
+    this.fileEditCounts.set(filePath, iteration);
+    const diffId = `${filePath}-${Date.now()}-${iteration}`;
+
+    logger.info(`[DiffManager] Tool deleted file: ${filePath}`);
+
+    this.resolvedDiffs.push({ filePath, timestamp: Date.now(), status: 'applied', iteration, diffId, action: 'deleted' });
+    this.currentResponseFileChanges.push({ filePath, status: 'applied', iteration });
+
+    this._lastNotifiedDiffIndex = this.resolvedDiffs.length;
+    this.notifyDeletedFilesChanged([filePath]);
+  }
+
+  /**
    * Register files modified by shell commands (bypassed the diff engine).
    * Adds them to the auto-applied list so the "Modified Files" dropdown shows them.
    */
@@ -1277,7 +1546,7 @@ which I already edited - would you like me to update it?"
       logger.info(`[DiffManager] Shell modified file: ${filePath}`);
 
       this.autoAppliedFiles.push({ filePath, timestamp: Date.now(), description: 'Modified by shell command' });
-      this.resolvedDiffs.push({ filePath, timestamp: Date.now(), status: 'applied', iteration, diffId });
+      this.resolvedDiffs.push({ filePath, timestamp: Date.now(), status: 'applied', iteration, diffId, action: 'modified' });
       this.currentResponseFileChanges.push({ filePath, status: 'applied', iteration });
     }
 
@@ -1299,7 +1568,7 @@ which I already edited - would you like me to update it?"
 
       logger.info(`[DiffManager] Shell deleted file: ${filePath}`);
 
-      this.resolvedDiffs.push({ filePath, timestamp: Date.now(), status: 'applied', iteration, diffId });
+      this.resolvedDiffs.push({ filePath, timestamp: Date.now(), status: 'applied', iteration, diffId, action: 'deleted' });
       this.currentResponseFileChanges.push({ filePath, status: 'applied', iteration });
     }
 
@@ -1322,7 +1591,8 @@ which I already edited - would you like me to update it?"
       status: 'deleted' as const,
       iteration: 1,
       diffId: `${filePath}-deleted-${Date.now()}`,
-      superseded: false
+      superseded: false,
+      action: 'deleted' as const
     }));
 
     logger.debug(`[Frontend] Sending diffListChanged (deleted) message: ${diffsArray.length} files`);
@@ -1450,14 +1720,15 @@ which I already edited - would you like me to update it?"
       proposedUri: meta.proposedUri.toString(),
       iteration: meta.iteration,
       diffId: meta.diffId,
-      superseded: meta.superseded || false
+      superseded: meta.superseded || false,
+      action: meta.action
     }));
 
     this._onDiffListChanged.fire({ diffs: activeDiffsList, editMode: this.editMode });
   }
 
-  private notifyDiffResolved(filePath: string, diffId: string, status: 'applied' | 'rejected', iteration: number): void {
-    logger.info(`[DiffManager] notifyDiffResolved: ${filePath} → ${status} (diffId=${diffId}, editMode=${this.editMode})`);
+  private notifyDiffResolved(filePath: string, diffId: string, status: 'applied' | 'rejected', iteration: number, action?: 'created' | 'modified' | 'deleted'): void {
+    logger.info(`[DiffManager] notifyDiffResolved: ${filePath} → ${status} (diffId=${diffId}, editMode=${this.editMode}, action=${action ?? '?'})`);
     this._onAutoAppliedFilesChanged.fire({
       diffs: [{
         filePath,
@@ -1465,7 +1736,8 @@ which I already edited - would you like me to update it?"
         status,
         iteration,
         diffId,
-        superseded: false
+        superseded: false,
+        action
       }],
       editMode: this.editMode
     });
@@ -1488,7 +1760,8 @@ which I already edited - would you like me to update it?"
       status: d.status,
       iteration: d.iteration,
       diffId: d.diffId,
-      superseded: false
+      superseded: false,
+      action: d.action
     }));
 
     logger.debug(`[Frontend] Sending diffListChanged (auto-applied) message: ${diffsArray.length} new files`);

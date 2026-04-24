@@ -10,6 +10,7 @@ import { logger } from './utils/logger';
 import { UnifiedLogExporter } from './logging/UnifiedLogExporter';
 import { TokenService } from './services/tokenService';
 import { DrawingServer } from './providers/drawingServer';
+import { registerCustomModels } from './models/registry';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -27,7 +28,26 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // Initialize configuration
   const config = ConfigManager.getInstance();
-  
+
+  // Load user-declared custom models into the registry before anything that
+  // reads capabilities runs. Re-run on config changes so hot-adding a model
+  // via settings.json doesn't require an extension reload.
+  const reloadCustomModels = () => {
+    const raw = vscode.workspace.getConfiguration('moby').get<unknown[]>('customModels') ?? [];
+    const { loaded, errors } = registerCustomModels(raw);
+    if (loaded > 0) logger.info(`[Registry] Loaded ${loaded} custom model(s)`);
+    for (const err of errors) logger.warn(`[Registry] Custom model rejected — ${err}`);
+  };
+  reloadCustomModels();
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration('moby.customModels')) {
+        reloadCustomModels();
+        chatProvider?.sendModelList();
+      }
+    })
+  );
+
   // Initialize WASM tokenizer (exact token counting)
   const tokenService = TokenService.getInstance(context.extensionPath);
   try {
@@ -147,13 +167,18 @@ function registerCommands(context: vscode.ExtensionContext) {
     // API Key management
     { name: 'setApiKey', handler: () => setApiKey(context) },
     { name: 'setTavilyApiKey', handler: () => setTavilyApiKey(context) },
+    { name: 'setCustomModelApiKey', handler: (modelId?: string) => setCustomModelApiKey(context, modelId) },
+    { name: 'clearCustomModelApiKey', handler: (modelId?: string) => clearCustomModelApiKey(context, modelId) },
+    { name: 'addCustomModel', handler: () => addCustomModel() },
 
     // Database encryption key
     { name: 'manageEncryptionKey', handler: () => manageEncryptionKey(context, conversationManager) },
 
-    // Diff editor toolbar actions
-    { name: 'acceptActiveDiff', handler: () => chatProvider.acceptActiveDiff() },
-    { name: 'rejectActiveDiff', handler: () => chatProvider.rejectActiveDiff() }
+    // Diff editor toolbar actions. The editor/title menu passes the resource
+    // URI as the first argument when the button is clicked — forward it so
+    // DiffManager can look up the diff even if activeTextEditor is stale.
+    { name: 'acceptActiveDiff', handler: (uri?: vscode.Uri) => chatProvider.acceptActiveDiff(uri) },
+    { name: 'rejectActiveDiff', handler: (uri?: vscode.Uri) => chatProvider.rejectActiveDiff(uri) }
   ];
 
   commands.forEach(({ name, handler }) => {
@@ -313,6 +338,288 @@ async function setApiKey(context: vscode.ExtensionContext): Promise<void> {
   chatProvider.refreshSettings();
 }
 
+/**
+ * SecretStorage key prefix for per-custom-model API keys.
+ * Keyed by the model id declared in `moby.customModels` — e.g.
+ * `moby.customModelKey.qwen2.5-coder:7b-instruct`.
+ */
+function customModelSecretKey(modelId: string): string {
+  return `moby.customModelKey.${modelId}`;
+}
+
+async function setCustomModelApiKey(
+  context: vscode.ExtensionContext,
+  modelIdArg?: string
+): Promise<void> {
+  // Let the caller pass a specific model id (from the settings popup), or
+  // surface a quickPick listing custom models when invoked via the palette.
+  const customModels = getCustomModelsFromConfig();
+  if (customModels.length === 0) {
+    vscode.window.showInformationMessage('No custom models configured. Add entries to `moby.customModels` first.');
+    return;
+  }
+
+  let modelId = modelIdArg;
+  if (!modelId) {
+    const pick = await vscode.window.showQuickPick(
+      customModels.map(m => ({ label: m.name ?? m.id, description: m.id, id: m.id })),
+      { placeHolder: 'Select a custom model to set the API key for' }
+    );
+    if (!pick) return;
+    modelId = pick.id;
+  }
+
+  const secretKey = customModelSecretKey(modelId);
+  const current = await context.secrets.get(secretKey);
+  const model = customModels.find(m => m.id === modelId);
+  const input = await vscode.window.showInputBox({
+    prompt: current
+      ? `Enter a new API key for "${model?.name ?? modelId}", or clear the field to remove it`
+      : `Enter the API key for "${model?.name ?? modelId}"`,
+    password: true,
+    placeHolder: 'sk-...',
+    value: current ? '••••••••' : '',
+    ignoreFocusOut: true
+  });
+  if (input === undefined) return;
+  if (input === '••••••••') return;
+
+  if (!input.trim()) {
+    await context.secrets.delete(secretKey);
+    vscode.window.showInformationMessage(`API key removed for "${model?.name ?? modelId}".`);
+  } else {
+    await context.secrets.store(secretKey, input.trim());
+    vscode.window.showInformationMessage(`API key saved for "${model?.name ?? modelId}".`);
+  }
+  chatProvider?.sendModelList();
+  // Re-evaluate the active model's apiKeyConfigured — setting/clearing a
+  // per-model key can flip the send-button gate if this model is active.
+  chatProvider?.refreshSettings();
+}
+
+async function clearCustomModelApiKey(
+  context: vscode.ExtensionContext,
+  modelIdArg?: string
+): Promise<void> {
+  const customModels = getCustomModelsFromConfig();
+  let modelId = modelIdArg;
+  if (!modelId) {
+    const pick = await vscode.window.showQuickPick(
+      customModels.map(m => ({ label: m.name ?? m.id, description: m.id, id: m.id })),
+      { placeHolder: 'Select a custom model to clear the API key for' }
+    );
+    if (!pick) return;
+    modelId = pick.id;
+  }
+  await context.secrets.delete(customModelSecretKey(modelId));
+  const model = customModels.find(m => m.id === modelId);
+  vscode.window.showInformationMessage(`API key cleared for "${model?.name ?? modelId}".`);
+  chatProvider?.sendModelList();
+  chatProvider?.refreshSettings();
+}
+
+/** Read the raw `moby.customModels` entries from settings for quickPick display. */
+function getCustomModelsFromConfig(): Array<{ id: string; name?: string }> {
+  const raw = vscode.workspace.getConfiguration('moby').get<Array<{ id?: string; name?: string }>>('customModels') ?? [];
+  return raw.filter((m): m is { id: string; name?: string } => typeof m?.id === 'string');
+}
+
+/**
+ * Templates offered by the "Moby: Add Custom Model" quickPick. Kept in sync
+ * with the `examples` array in package.json — package.json is the JSON-schema
+ * source of truth for autocomplete, and these are the same templates surfaced
+ * through a friendlier UX (no Ctrl+Space required).
+ */
+const CUSTOM_MODEL_TEMPLATES: Array<{
+  label: string;
+  description: string;
+  detail: string;
+  entry: Record<string, unknown>;
+}> = [
+  {
+    label: 'Ollama — Qwen 2.5 Coder 7B',
+    description: 'http://localhost:11434/v1',
+    detail: 'Local Ollama with native tool calling',
+    entry: {
+      id: 'qwen2.5-coder:7b-instruct',
+      name: 'Qwen 2.5 Coder 7B (Ollama)',
+      toolCalling: 'native',
+      reasoningTokens: 'none',
+      editProtocol: ['native-tool'],
+      shellProtocol: 'none',
+      supportsTemperature: true,
+      maxOutputTokens: 8192,
+      maxTokensConfigKey: 'maxTokensCustomQwen',
+      streaming: true,
+      apiEndpoint: 'http://localhost:11434/v1',
+      apiKey: 'ollama',
+      requestFormat: 'openai'
+    }
+  },
+  {
+    label: 'LM Studio (Local)',
+    description: 'http://localhost:1234/v1',
+    detail: 'Local LM Studio — replace `id` with your loaded model name',
+    entry: {
+      id: 'local-model-in-lm-studio',
+      name: 'LM Studio (Local)',
+      toolCalling: 'native',
+      reasoningTokens: 'none',
+      editProtocol: ['native-tool'],
+      shellProtocol: 'none',
+      supportsTemperature: true,
+      maxOutputTokens: 4096,
+      maxTokensConfigKey: 'maxTokensCustomLMStudio',
+      streaming: true,
+      apiEndpoint: 'http://localhost:1234/v1',
+      apiKey: 'lm-studio',
+      requestFormat: 'openai'
+    }
+  },
+  {
+    label: 'llama.cpp Server',
+    description: 'http://localhost:8080/v1',
+    detail: 'Local llama.cpp — uses SEARCH/REPLACE for edits + <shell> for commands (R1-style)',
+    entry: {
+      id: 'local-llama-cpp',
+      name: 'llama.cpp Server',
+      toolCalling: 'none',
+      reasoningTokens: 'none',
+      editProtocol: ['search-replace'],
+      shellProtocol: 'xml-shell',
+      supportsTemperature: true,
+      maxOutputTokens: 4096,
+      maxTokensConfigKey: 'maxTokensCustomLlamaCpp',
+      streaming: true,
+      apiEndpoint: 'http://localhost:8080/v1',
+      apiKey: 'llamacpp',
+      requestFormat: 'openai'
+    }
+  },
+  {
+    label: 'OpenAI GPT-4o mini',
+    description: 'https://api.openai.com/v1',
+    detail: 'Hosted OpenAI — set API key via the settings popup',
+    entry: {
+      id: 'gpt-4o-mini',
+      name: 'OpenAI GPT-4o mini',
+      toolCalling: 'native',
+      reasoningTokens: 'none',
+      editProtocol: ['native-tool'],
+      shellProtocol: 'none',
+      supportsTemperature: true,
+      maxOutputTokens: 16384,
+      maxTokensConfigKey: 'maxTokensCustomOpenAI',
+      streaming: true,
+      apiEndpoint: 'https://api.openai.com/v1',
+      requestFormat: 'openai'
+    }
+  },
+  {
+    label: 'Kimi (Moonshot)',
+    description: 'https://api.moonshot.ai/v1',
+    detail: 'Hosted Moonshot — set API key via the settings popup',
+    entry: {
+      id: 'moonshot-v1-128k',
+      name: 'Kimi (Moonshot)',
+      toolCalling: 'native',
+      reasoningTokens: 'none',
+      editProtocol: ['native-tool'],
+      shellProtocol: 'none',
+      supportsTemperature: true,
+      maxOutputTokens: 32768,
+      maxTokensConfigKey: 'maxTokensCustomKimi',
+      streaming: true,
+      apiEndpoint: 'https://api.moonshot.ai/v1',
+      requestFormat: 'openai'
+    }
+  },
+  {
+    label: 'Llama 3.3 70B (Groq)',
+    description: 'https://api.groq.com/openai/v1',
+    detail: 'Hosted Groq — fast inference, set API key via settings popup',
+    entry: {
+      id: 'llama-3.3-70b-versatile',
+      name: 'Llama 3.3 70B (Groq)',
+      toolCalling: 'native',
+      reasoningTokens: 'none',
+      editProtocol: ['native-tool'],
+      shellProtocol: 'none',
+      supportsTemperature: true,
+      maxOutputTokens: 32768,
+      maxTokensConfigKey: 'maxTokensCustomGroq',
+      streaming: true,
+      apiEndpoint: 'https://api.groq.com/openai/v1',
+      requestFormat: 'openai'
+    }
+  }
+];
+
+/**
+ * Command: surface a quickPick of common provider templates and either
+ * insert the selected one into `moby.customModels` or open settings.json
+ * for manual editing. Much friendlier than requiring users to know about
+ * the `examples` array in the JSON schema.
+ */
+async function addCustomModel(): Promise<void> {
+  const items = [
+    ...CUSTOM_MODEL_TEMPLATES.map(t => ({
+      label: t.label,
+      description: t.description,
+      detail: t.detail,
+      template: t
+    })),
+    {
+      label: '$(edit) Custom (edit JSON directly)',
+      description: '',
+      detail: 'Open settings.json to write your own entry from scratch',
+      template: null as null | typeof CUSTOM_MODEL_TEMPLATES[number]
+    }
+  ];
+
+  const pick = await vscode.window.showQuickPick(items, {
+    placeHolder: 'Pick a template to add a custom model, or edit JSON directly',
+    matchOnDescription: true,
+    matchOnDetail: true
+  });
+  if (!pick) return;
+
+  if (!pick.template) {
+    // User chose to edit from scratch — drop them into the user settings
+    // JSON file directly. Ctrl+F for `moby.customModels` to find the block.
+    await vscode.commands.executeCommand('workbench.action.openSettingsJson');
+    return;
+  }
+
+  // Append the template entry to the existing array (or create one).
+  const config = vscode.workspace.getConfiguration('moby');
+  const existing = config.get<Array<Record<string, unknown>>>('customModels') ?? [];
+
+  // Refuse if an entry with this id is already registered.
+  if (existing.some(m => m?.id === pick.template!.entry.id)) {
+    const answer = await vscode.window.showWarningMessage(
+      `An entry with id "${pick.template.entry.id}" already exists in moby.customModels. Open settings.json to edit it?`,
+      'Open settings.json',
+      'Cancel'
+    );
+    if (answer === 'Open settings.json') {
+      await vscode.commands.executeCommand('workbench.action.openSettingsJson');
+    }
+    return;
+  }
+
+  const updated = [...existing, pick.template.entry];
+  await config.update('customModels', updated, vscode.ConfigurationTarget.Global);
+
+  // Open settings.json so the user can see what was added and tweak fields
+  // (e.g. LM Studio's `id` needs their actual loaded model name).
+  await vscode.commands.executeCommand('workbench.action.openSettingsJson');
+
+  vscode.window.showInformationMessage(
+    `Added "${pick.template.entry.name}" to your custom models. ${pick.template.entry.apiKey ? 'Select it from the model dropdown to start using it.' : 'Set an API key via the settings popup, then pick it from the model dropdown.'}`
+  );
+}
+
 async function setTavilyApiKey(context: vscode.ExtensionContext): Promise<void> {
   const current = await context.secrets.get('moby.tavilyApiKey');
   const input = await vscode.window.showInputBox({
@@ -357,7 +664,10 @@ async function manageEncryptionKey(context: vscode.ExtensionContext, cm: Convers
     { label: '$(refresh) Generate New Key', description: 'Generate a random key and re-encrypt', id: 'generate' },
   ], {
     title: 'Database Encryption Key',
-    placeHolder: current ? `Current key: ${current.substring(0, 8)}...` : 'No key set',
+    // Don't leak any part of the key into the placeholder — even a prefix
+    // narrows the search space and ends up in clipboard history / screen
+    // recordings. Just confirm presence/absence.
+    placeHolder: current ? 'Key is set (stored in SecretStorage)' : 'No key set',
   });
 
   if (!action) return;

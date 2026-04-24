@@ -76,7 +76,7 @@ vi.mock('../../../src/tracing', () => ({
   tracer: { event: vi.fn(), setLogOutput: vi.fn() }
 }));
 
-import { workspaceTools, executeToolCall, webSearchTool, applyCodeEditTool } from '../../../src/tools/workspaceTools';
+import { workspaceTools, executeToolCall, webSearchTool, applyCodeEditTool, createFileTool, deleteFileTool, deleteDirectoryTool } from '../../../src/tools/workspaceTools';
 import type { ToolCall } from '../../../src/deepseekClient';
 import * as vscode from 'vscode';
 
@@ -160,6 +160,28 @@ describe('workspaceTools', () => {
       expect(applyCodeEditTool).toBeDefined();
       expect(applyCodeEditTool.function.name).toBe('apply_code_edit');
     });
+
+    it('has create_file tool with path + content required', () => {
+      expect(createFileTool).toBeDefined();
+      expect(createFileTool.function.name).toBe('create_file');
+      expect(createFileTool.function.parameters.required).toEqual(
+        expect.arrayContaining(['path', 'content'])
+      );
+    });
+
+    it('has delete_file tool with path required', () => {
+      expect(deleteFileTool).toBeDefined();
+      expect(deleteFileTool.function.name).toBe('delete_file');
+      expect(deleteFileTool.function.parameters.required).toContain('path');
+    });
+
+    it('has delete_directory tool with path required + optional recursive flag', () => {
+      expect(deleteDirectoryTool).toBeDefined();
+      expect(deleteDirectoryTool.function.name).toBe('delete_directory');
+      expect(deleteDirectoryTool.function.parameters.required).toContain('path');
+      expect(deleteDirectoryTool.function.parameters.properties.recursive).toBeDefined();
+      expect(deleteDirectoryTool.function.parameters.properties.recursive.enum).toEqual(['true', 'false']);
+    });
   });
 
   // ── executeToolCall dispatch ─────────────────────────────────────
@@ -203,6 +225,47 @@ describe('workspaceTools', () => {
       expect(result).toContain('Acknowledged');
       expect(result).toContain('src/main.ts');
       expect(result).toContain('Add logging');
+    });
+
+    it('dispatches create_file and returns acknowledgment', async () => {
+      const result = await executeToolCall(makeToolCall('create_file', {
+        path: 'src/new.ts',
+        content: 'export const x = 1;',
+        description: 'Add utility'
+      }));
+      expect(result).toContain('Acknowledged');
+      expect(result).toContain('src/new.ts');
+      expect(result).toContain('Add utility');
+    });
+
+    it('dispatches delete_file and returns acknowledgment', async () => {
+      const result = await executeToolCall(makeToolCall('delete_file', {
+        path: 'src/old.ts',
+        description: 'Remove unused file'
+      }));
+      expect(result).toContain('Acknowledged');
+      expect(result).toContain('src/old.ts');
+      expect(result).toContain('Remove unused file');
+    });
+
+    it('dispatches delete_directory (recursive) and returns acknowledgment', async () => {
+      const result = await executeToolCall(makeToolCall('delete_directory', {
+        path: 'lib',
+        recursive: 'true',
+        description: 'Clean up elixir code'
+      }));
+      expect(result).toContain('Acknowledged');
+      expect(result).toContain('lib');
+      expect(result).toContain('recursive');
+      expect(result).toContain('Clean up elixir code');
+    });
+
+    it('dispatches delete_directory (empty-only) with a different label', async () => {
+      const result = await executeToolCall(makeToolCall('delete_directory', {
+        path: 'empty_dir'
+      }));
+      expect(result).toContain('Acknowledged');
+      expect(result).toContain('empty-only');
     });
   });
 

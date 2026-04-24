@@ -81,12 +81,13 @@ describe('MessageTurnActor', () => {
         timestamp: Date.now()
       });
 
-      // Add some content (startStreaming renders role header = 1 child)
+      // Add some content (startStreaming renders role header = 1 child, and
+      // pre-allocates a hidden activity indicator that reserves layout space)
       actor.startStreaming();
       actor.createTextSegment('Hello');
       actor.startThinkingIteration();
 
-      expect(element.children.length).toBe(3); // header + text + thinking
+      expect(element.children.length).toBe(4); // header + text + thinking + activity indicator
 
       // Reset
       actor.reset();
@@ -194,22 +195,30 @@ describe('MessageTurnActor', () => {
     it('startStreaming renders role header immediately', () => {
       expect(element.children.length).toBe(0);
       actor.startStreaming();
-      // Role header should be rendered as the first child
-      expect(element.children.length).toBe(1);
+      // Role header rendered as first child + activity indicator pre-allocated
+      // at the end in .no-label state (Moby visible, label text suppressed).
+      expect(element.children.length).toBe(2);
       const header = element.children[0] as HTMLElement;
       expect(header.classList.contains('header-container')).toBe(true);
       expect(header.classList.contains('assistant')).toBe(true);
+      const last = element.children[1] as HTMLElement;
+      expect(last.classList.contains('activity-indicator')).toBe(true);
+      expect(last.classList.contains('hidden')).toBe(false);
+      expect(last.classList.contains('no-label')).toBe(true);
     });
 
     it('startStreaming role header is idempotent with subsequent content', () => {
       actor.startStreaming();
-      expect(element.children.length).toBe(1); // header only
+      expect(element.children.length).toBe(2); // header + hidden activity indicator
       actor.createTextSegment('Hello');
-      // Header + text segment (not two headers)
-      expect(element.children.length).toBe(2);
-      const children = Array.from(element.children) as HTMLElement[];
-      expect(children[0].classList.contains('header-container')).toBe(true);
-      expect(children[1].classList.contains('text-container')).toBe(true);
+      // Header + text segment + activity indicator (not two headers).
+      // Order isn't asserted — the MutationObserver moves activity to last
+      // asynchronously, but the presence contract holds synchronously.
+      expect(element.children.length).toBe(3);
+      expect(element.querySelector('.header-container')).not.toBeNull();
+      expect(element.querySelector('.text-container')).not.toBeNull();
+      expect(element.querySelector('.activity-indicator')).not.toBeNull();
+      expect(element.querySelectorAll('.header-container').length).toBe(1);
     });
 
     it('endStreaming clears streaming state', () => {
@@ -258,12 +267,14 @@ describe('MessageTurnActor', () => {
       expect(actor.getActivityLabel()).toBe('Generating code...');
 
       // Segment finalizes mid-turn (e.g., right before a <shell> executes).
-      // The code-block frame pops; the text fallback re-takes the label.
+      // The code-block frame pops; with no specific activity on the stack
+      // and text streaming, the indicator hides (response text itself is
+      // visible right below it — no redundant label needed).
       actor.setTextActive(true);
       actor.completeCurrentTextSegment();
 
       expect(actor.isStreaming()).toBe(true);
-      expect(actor.getActivityLabel()).toBe('Writing response...');
+      expect(actor.getActivityLabel()).toBeNull();
     });
 
     it('completeCurrentTextSegment preserves text content', () => {
@@ -374,26 +385,44 @@ describe('MessageTurnActor', () => {
     function getIndicator(): HTMLElement | null {
       return element.querySelector('.activity-indicator');
     }
+    // An indicator is "visible with a label" only when neither .hidden nor
+    // .no-label is set. The .no-label state (streaming with no active label)
+    // shows just the Moby icon as a persistent request-active marker.
+    function getVisibleIndicator(): HTMLElement | null {
+      const el = getIndicator();
+      if (!el) return null;
+      if (el.classList.contains('hidden')) return null;
+      if (el.classList.contains('no-label')) return null;
+      return el;
+    }
 
     it('no indicator before startStreaming', () => {
       expect(getIndicator()).toBeNull();
       expect(actor.getActivityLabel()).toBeNull();
     });
 
-    it('no indicator on startStreaming before any event fires', () => {
+    it('indicator element present in no-label state on startStreaming (Moby visible, label suppressed)', () => {
       actor.startStreaming();
       expect(actor.getActivityLabel()).toBeNull();
-      expect(getIndicator()).toBeNull();
+      // Element is in DOM with .no-label class → Moby icon visible as a
+      // persistent "request active" marker, but label text and spurt
+      // droplets are suppressed until an activity is pushed.
+      expect(getIndicator()).not.toBeNull();
+      expect(getIndicator()?.classList.contains('hidden')).toBe(false);
+      expect(getIndicator()?.classList.contains('no-label')).toBe(true);
+      expect(getVisibleIndicator()).toBeNull();
     });
 
-    it('text-active swaps label to "Writing response..."', () => {
+    it('text-active alone does not show a label (response text is its own indicator)', () => {
       actor.startStreaming();
       actor.setTextActive(true);
-      expect(actor.getActivityLabel()).toBe('Writing response...');
-      expect(getIndicator()?.textContent).toContain('Writing response...');
+      expect(actor.getActivityLabel()).toBeNull();
+      // Moby stays visible via .no-label, but there is no labelled indicator.
+      expect(getIndicator()?.classList.contains('no-label')).toBe(true);
+      expect(getVisibleIndicator()).toBeNull();
     });
 
-    it('pushed activity overrides the text fallback', () => {
+    it('pushed activity shows even when text is streaming', () => {
       actor.startStreaming();
       actor.setTextActive(true);
       actor.pushActivity('thinking', 'Thinking...');
@@ -415,12 +444,12 @@ describe('MessageTurnActor', () => {
       expect(actor.getActivityLabel()).toBe('Thinking...');
     });
 
-    it('pop falls back to text if stack empties and text is active', () => {
+    it('pop with empty stack hides the indicator even if text is active', () => {
       actor.startStreaming();
       actor.setTextActive(true);
       actor.pushActivity('shell', 'Running ls');
       actor.popActivity('shell');
-      expect(actor.getActivityLabel()).toBe('Writing response...');
+      expect(actor.getActivityLabel()).toBeNull();
     });
 
     it('pushActivity same kind updates label in place (no duplicates)', () => {
@@ -473,21 +502,21 @@ describe('MessageTurnActor', () => {
 
     it('hidden when not streaming even if frames exist', () => {
       actor.pushActivity('shell', 'Running ls');
-      expect(getIndicator()).toBeNull();
+      expect(getVisibleIndicator()).toBeNull();
       expect(actor.getActivityLabel()).toBeNull();
     });
 
     it('unclosed fence pushes a code-block frame ("Writing X...")', () => {
       actor.startStreaming();
       actor.setTextActive(true);
-      expect(actor.getActivityLabel()).toBe('Writing response...');
+      expect(actor.getActivityLabel()).toBeNull();
 
       actor.createTextSegment();
       actor.updateTextContent('Here:\n```typescript\n# File: src/game.ts\n');
       expect(actor.getActivityLabel()).toBe('Writing src/game.ts...');
     });
 
-    it('fence close pops the code-block frame back to fallback', () => {
+    it('fence close pops the code-block frame and the indicator hides', () => {
       actor.startStreaming();
       actor.setTextActive(true);
       actor.createTextSegment();
@@ -495,7 +524,7 @@ describe('MessageTurnActor', () => {
       expect(actor.getActivityLabel()).toBe('Generating code...');
 
       actor.updateTextContent('Here:\n```typescript\nconst x = 1;\n```\n');
-      expect(actor.getActivityLabel()).toBe('Writing response...');
+      expect(actor.getActivityLabel()).toBeNull();
     });
 
     it('higher-priority frames beat the code-block frame', () => {
@@ -520,7 +549,7 @@ describe('MessageTurnActor', () => {
       expect(actor.getActivityLabel()).toBe('Generating code...');
 
       actor.completeCurrentTextSegment();
-      expect(actor.getActivityLabel()).toBe('Writing response...');
+      expect(actor.getActivityLabel()).toBeNull();
     });
   });
 
@@ -916,8 +945,9 @@ describe('MessageTurnActor', () => {
       expect(queryInShadow(containers[0], '.code-block')).toBeTruthy();
       // No inline placeholder ever — code-block frame was popped when fence closed
       expect(queryInShadow(containers[0], '.code-generating')).toBeNull();
-      // Activity line falls back to the text label
-      expect(actor.getActivityLabel()).toBe('Writing response...');
+      // Activity indicator hides when no specific frame is active and only
+      // response text is streaming (text is its own indicator below).
+      expect(actor.getActivityLabel()).toBeNull();
     });
 
     it('unified label reflects # File: header (Writing filename)', () => {

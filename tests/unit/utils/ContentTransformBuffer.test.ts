@@ -385,4 +385,69 @@ describe('mightContainPatternStart', () => {
     expect(mightContainPatternStart('regular text')).toBe(false);
     expect(mightContainPatternStart('a < b')).toBe(false);
   });
+
+  it('detects DSML tool-call tag prefixes', () => {
+    expect(mightContainPatternStart('<｜')).toBe(true);
+    expect(mightContainPatternStart('<｜D')).toBe(true);
+    expect(mightContainPatternStart('<｜DSML')).toBe(true);
+    expect(mightContainPatternStart('<｜DSML｜function_c')).toBe(true);
+  });
+});
+
+describe('ContentTransformBuffer DSML stripping', () => {
+  let buffer: ContentTransformBuffer;
+  let flushedSegments: BufferedSegment[];
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    flushedSegments = [];
+    buffer = new ContentTransformBuffer({
+      debounceMs: 150,
+      onFlush: (segments) => {
+        flushedSegments.push(...segments);
+      }
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('detects complete DSML blocks and emits empty content', () => {
+    buffer.append('<｜DSML｜function_calls><｜DSML｜invoke name="read_file"></｜DSML｜invoke></｜DSML｜function_calls>');
+
+    const dsmlSegments = flushedSegments.filter(s => s.type === 'dsml');
+    expect(dsmlSegments).toHaveLength(1);
+    expect(dsmlSegments[0].content).toBe('');
+    expect(dsmlSegments[0].complete).toBe(true);
+  });
+
+  it('does not leak raw DSML tokens to text segments', () => {
+    buffer.append('Here are the steps: <｜DSML｜function_calls><｜DSML｜invoke name="x"></｜DSML｜invoke></｜DSML｜function_calls> done.');
+
+    const textContent = flushedSegments
+      .filter(s => s.type === 'text')
+      .map(s => s.content as string)
+      .join('');
+    expect(textContent).not.toContain('DSML');
+    expect(textContent).not.toContain('<｜');
+    expect(textContent).toContain('Here are the steps:');
+    expect(textContent).toContain('done.');
+  });
+
+  it('holds back partial DSML across multiple chunks until complete', () => {
+    buffer.append('Text before <｜DSML｜function_calls>');
+    // The start tag is complete but no end — should hold back everything from the start
+    expect(flushedSegments.some(s => typeof s.content === 'string' && (s.content as string).includes('<｜'))).toBe(false);
+
+    buffer.append('<｜DSML｜invoke name="x"></｜DSML｜invoke></｜DSML｜function_calls>');
+    buffer.flush();
+
+    const textContent = flushedSegments
+      .filter(s => s.type === 'text')
+      .map(s => s.content as string)
+      .join('');
+    expect(textContent).toBe('Text before ');
+    expect(flushedSegments.some(s => s.type === 'dsml')).toBe(true);
+  });
 });

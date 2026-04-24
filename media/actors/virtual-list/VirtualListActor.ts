@@ -868,7 +868,7 @@ export class VirtualListActor extends EventStateActor {
   /**
    * Add a pending file.
    */
-  addPendingFile(turnId: string, file: { filePath: string; diffId?: string; status?: 'pending' | 'applied' | 'rejected' | 'superseded' | 'error' | 'deleted' | 'expired'; editMode?: 'manual' | 'ask' | 'auto' }): string | null {
+  addPendingFile(turnId: string, file: { filePath: string; diffId?: string; status?: 'pending' | 'applied' | 'rejected' | 'superseded' | 'error' | 'deleted' | 'expired'; action?: 'created' | 'modified' | 'deleted'; editMode?: 'manual' | 'ask' | 'auto' }): string | null {
     const turn = this._turnMap.get(turnId);
     if (!turn) {
       log.warn(`addPendingFile: turn ${turnId} not found`);
@@ -887,6 +887,7 @@ export class VirtualListActor extends EventStateActor {
       fileName,
       diffId: file.diffId,
       status: file.status ?? 'pending',
+      action: file.action,
       iteration: fileIndex + 1,
       editMode: file.editMode ?? this._editMode
     };
@@ -896,7 +897,7 @@ export class VirtualListActor extends EventStateActor {
 
     const bound = this._boundActors.get(turnId);
     if (bound) {
-      bound.actor.addPendingFile({ ...file, status: pendingFile.status, editMode: pendingFile.editMode });
+      bound.actor.addPendingFile({ ...file, status: pendingFile.status, action: pendingFile.action, editMode: pendingFile.editMode });
     }
 
     return fileId;

@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { DeepSeekClient } from '../deepseekClient';
 import { ConfigManager } from '../utils/config';
 import { ConversationManager } from '../events';
+import { DEFAULT_MODEL_ID } from '../models/registry';
 
 export class StatusBar {
   private statusBarItem: vscode.StatusBarItem;
@@ -32,7 +33,7 @@ export class StatusBar {
   }
 
   async update() {
-    const model = this.config.get<string>('model') || 'deepseek-chat';
+    const model = this.config.get<string>('model') || DEFAULT_MODEL_ID;
 
     // Get stats from chat history
     const stats = await this.conversationManager.getSessionStats();

@@ -138,6 +138,8 @@ export interface PendingFileData {
   fileName: string;
   diffId?: string;
   status: 'pending' | 'applied' | 'rejected' | 'superseded' | 'error' | 'deleted' | 'expired';
+  /** What kind of filesystem change — created, modified, or deleted. */
+  action?: 'created' | 'modified' | 'deleted';
   iteration: number;
   /** Edit mode at time of creation — preserved across virtual scroll re-binds */
   editMode: EditMode;

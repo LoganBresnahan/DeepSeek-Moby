@@ -97,6 +97,11 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
       subscriptions: {
         'model.current': (value: unknown) => this.handleModelChange(value as string),
         'model.settings': (value: unknown) => this.handleSettingsUpdate(value as ModelSettings),
+        'model.list': (value: unknown) => {
+          // Extension sends the full registered-model list (built-ins + custom)
+          // on webview load and after moby.customModels changes.
+          if (Array.isArray(value)) this.setModels(value as ModelOption[]);
+        },
         'streaming.active': (value: unknown) => this.handleStreamingChange(value as boolean)
       },
       additionalStyles: modelSelectorShadowStyles,
@@ -153,6 +158,9 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
 
     return `
       ${models.map(model => this.renderModelOption(model)).join('')}
+      <div class="model-add-custom-row">
+        <button class="model-add-custom-btn" data-action="addCustomModel">+ Add custom model…</button>
+      </div>
       <div class="model-dropdown-divider"></div>
       ${!isReasoner ? this.renderParameterControl('temperature', 'Temperature', temperature.toString(), 0, 2, 0.1, 'Controls randomness. 0 = deterministic, 2 = very creative') : ''}
       ${isReasoner
@@ -225,6 +233,16 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
       if (modelId && modelId !== this._selectedModel) {
         this.selectModel(modelId);
       }
+    });
+
+    // "+ Add custom model..." link: dispatches to the quickPick command
+    // so users can pick a provider template without editing JSON.
+    this.delegate('click', '[data-action="addCustomModel"]', () => {
+      this._vscode.postMessage({
+        type: 'executeCommand',
+        command: 'moby.addCustomModel'
+      });
+      this.close();
     });
 
     // Slider input (via delegation)

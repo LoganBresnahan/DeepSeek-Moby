@@ -20,6 +20,7 @@ import * as path from 'path';
 import { logger } from '../utils/logger';
 import type { TokenCounter } from './tokenCounter';
 import type { DeepSeekTokenizer } from 'deepseek-moby-wasm';
+import { getCapabilities } from '../models/registry';
 
 /** Per-message overhead: role tokens, formatting, separators */
 const MESSAGE_OVERHEAD_TOKENS = 4;
@@ -27,19 +28,7 @@ const MESSAGE_OVERHEAD_TOKENS = 4;
 /** System prompt wrapper overhead (BOS token, role tokens, etc.) */
 const SYSTEM_OVERHEAD_TOKENS = 8;
 
-/**
- * Maps model IDs to their vocab file names.
- * Models in the same generation share a tokenizer.
- */
-const MODEL_VOCAB_MAP: Record<string, string> = {
-  'deepseek-chat': 'deepseek-v3',
-  'deepseek-reasoner': 'deepseek-v3',
-  // When V4 drops, add:
-  // 'deepseek-chat-v4': 'deepseek-v4',
-  // 'deepseek-reasoner-v4': 'deepseek-v4',
-};
-
-/** Default vocab to use when model isn't in the map */
+/** Default vocab used for TokenService bootstrap (before any model is selected) */
 const DEFAULT_VOCAB = 'deepseek-v3';
 
 export class TokenService implements TokenCounter {
@@ -81,15 +70,28 @@ export class TokenService implements TokenCounter {
 
   /**
    * Select the active tokenizer for a model.
-   * Loads the vocab lazily if not already loaded.
+   *
+   * Pulls the vocab name from the model's registry capability. Models that
+   * don't declare a `tokenizer` (custom local models like Qwen, Llama, etc.)
+   * skip the WASM vocab load — `DynamicTokenCounter` routes them to the
+   * estimation counter automatically.
+   *
+   * Returns true if an exact WASM vocab is active for this model, false
+   * if the caller should fall back to estimation.
    */
-  async selectModel(modelId: string): Promise<void> {
-    const vocabName = MODEL_VOCAB_MAP[modelId] || DEFAULT_VOCAB;
+  async selectModel(modelId: string): Promise<boolean> {
+    const vocabName = getCapabilities(modelId).tokenizer;
+    if (!vocabName) {
+      // No exact vocab for this model — estimation will handle counting.
+      logger.debug(`[TokenService] No tokenizer declared for "${modelId}" — using estimation counter.`);
+      return false;
+    }
     if (vocabName === this.activeVocab && this.tokenizers.has(vocabName)) {
-      return; // Already active and loaded
+      return true; // Already active and loaded
     }
     this.activeVocab = vocabName;
     await this.loadVocab(vocabName);
+    return true;
   }
 
   /**
