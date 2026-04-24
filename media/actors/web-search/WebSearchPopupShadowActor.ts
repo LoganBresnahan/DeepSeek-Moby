@@ -326,10 +326,14 @@ export class WebSearchPopupShadowActor extends PopupShadowActor {
     });
 
     // Engine checkboxes (SearXNG). Rebuild the array from current checkbox state.
+    // The `this.shadow` accessor is the ShadowActor base's shadow root —
+    // an earlier draft used `this.shadowRoot` which is `undefined` here, and
+    // the optional-chained queries silently returned an empty array, so every
+    // checkbox toggle wiped the engines list to []. Important to use the
+    // typed `shadow` accessor.
     this.delegate('change', '.ws-engines input[type="checkbox"]', () => {
-      const engines = Array.from(
-        this.shadowRoot?.querySelectorAll<HTMLInputElement>('.ws-engines input[type="checkbox"]:checked') ?? []
-      ).map(el => el.dataset.engine!).filter(Boolean);
+      const checked = this.queryAll<HTMLInputElement>('.ws-engines input[type="checkbox"]:checked');
+      const engines = Array.from(checked).map(el => el.dataset.engine!).filter(Boolean);
       this._searxng.engines = engines;
       this._vscode.postMessage({ type: 'setSearxngEngines', engines });
     });
@@ -405,7 +409,13 @@ export class WebSearchPopupShadowActor extends PopupShadowActor {
   // ============================================
 
   private delegateInput(selector: string, handler: (value: string) => void): void {
-    this.shadowRoot?.addEventListener('input', (e) => {
+    // IMPORTANT: must use `this.shadow`, not `this.shadowRoot`. The
+    // ShadowActor base exposes the shadow root as `shadow`. An earlier
+    // draft used `this.shadowRoot?.addEventListener(...)` which silently
+    // resolved to `undefined?.…` and never attached the listener — sliders
+    // appeared frozen because the inline label updates ran in handlers
+    // that were never registered.
+    this.shadow.addEventListener('input', (e) => {
       const target = (e.target as HTMLElement)?.closest(selector);
       if (target) handler((target as HTMLInputElement).value);
     });

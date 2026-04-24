@@ -106,14 +106,18 @@ export class WebSearchManager {
     this.enabled = enabled;
 
     if (enabled && !(await this.provider.isConfigured())) {
-      logger.info('[WebSearch] Toggle rejected: Tavily API key not configured');
+      const providerId = this.registry.activeId();
+      const hint = providerId === 'tavily'
+        ? 'Set a Tavily API key via the settings popup, or switch to SearXNG.'
+        : 'Set a SearXNG endpoint via the settings popup, or switch to Tavily.';
+      logger.info(`[WebSearch] Toggle rejected: provider "${providerId}" not configured`);
       tracer.trace('state.publish', 'webSearch.toggle.rejected', {
-        data: { reason: 'api_key_not_configured' }
+        data: { reason: 'provider_not_configured', provider: providerId }
       });
       this.enabled = false;
       this._onToggled.fire({ enabled: false });
       this._onSearchError.fire({
-        message: 'Tavily API key not configured. Use the "DeepSeek Moby: Set Tavily API Key" command.'
+        message: `Web search provider "${providerId}" is not configured. ${hint}`
       });
       return;
     }

@@ -361,16 +361,23 @@ export class ToolbarShadowActor extends ShadowActor {
     const searchBtn = this.query<HTMLButtonElement>('.search-btn');
     if (!searchBtn) return;
 
-    searchBtn.classList.remove('active', 'mode-auto', 'mode-manual', 'disabled');
+    searchBtn.classList.remove('active', 'mode-auto', 'mode-manual', 'unconfigured');
+    // Always keep the button clickable. Previously we disabled it when the
+    // active provider had no key/endpoint, but that locked users out of
+    // opening the popup to switch providers — e.g. a user with Tavily set
+    // up but currently on SearXNG (no endpoint yet) couldn't click the
+    // button to swap back to Tavily. The popup is the only place to
+    // configure providers, so it must always be reachable.
+    searchBtn.disabled = false;
 
     if (!this._webSearchConfigured) {
-      searchBtn.classList.add('disabled');
-      searchBtn.title = 'Web search: Tavily API key not set';
-      searchBtn.disabled = true;
+      // Visual hint that the active provider isn't ready, but still
+      // clickable. Users open the popup, configure the provider (or pick
+      // a different one), and the dot/state updates live.
+      searchBtn.classList.add('unconfigured');
+      searchBtn.title = 'Web search: active provider not configured (click to set up)';
       return;
     }
-
-    searchBtn.disabled = false;
 
     if (this._webSearchMode === 'auto') {
       searchBtn.classList.add('mode-auto');

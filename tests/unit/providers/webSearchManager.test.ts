@@ -179,7 +179,8 @@ describe('WebSearchManager', () => {
       expect(manager.isEnabled).toBe(false);
       expect(toggleEvents).toEqual([{ enabled: false }]);
       expect(errorEvents).toHaveLength(1);
-      expect(errorEvents[0].message).toContain('Tavily API key not configured');
+      // Message is now provider-aware; mock registry has activeId() === 'tavily'.
+      expect(errorEvents[0].message).toContain('"tavily" is not configured');
     });
   });
 
@@ -598,23 +599,25 @@ describe('WebSearchManager', () => {
   // ── searchByQuery ──
 
   describe('searchByQuery', () => {
-    it('should return error when mode is off', async () => {
+    it('should return instructive message when mode is off', async () => {
       manager.setMode('off');
 
       const result = await manager.searchByQuery('test query');
 
-      expect(result).toContain('Error:');
-      expect(result).toContain('auto mode is not enabled');
+      // Phrased as instruction rather than error so weak tool-callers
+      // don't loop. See webSearchManager.searchByQuery.
+      expect(result).toContain('already been performed');
+      expect(result).toContain('do not retry');
       expect(mockTavily.search).not.toHaveBeenCalled();
     });
 
-    it('should return error when mode is manual', async () => {
+    it('should return instructive message when mode is manual', async () => {
       manager.setMode('manual');
 
       const result = await manager.searchByQuery('test query');
 
-      expect(result).toContain('Error:');
-      expect(result).toContain('auto mode is not enabled');
+      expect(result).toContain('already been performed');
+      expect(result).toContain('do not retry');
       expect(mockTavily.search).not.toHaveBeenCalled();
     });
 
