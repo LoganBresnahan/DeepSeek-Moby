@@ -154,4 +154,159 @@ export const webSearchShadowStyles = `
     background: var(--vscode-list-hoverBackground);
     color: var(--vscode-foreground);
   }
+
+  /* ── Provider picker (Phase 2: Tavily vs SearXNG) ── */
+  .ws-provider-options {
+    display: flex;
+    gap: 6px;
+  }
+
+  .ws-provider-btn {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    padding: 6px 8px;
+    background: transparent;
+    border: 1px solid var(--vscode-input-border);
+    border-radius: 4px;
+    cursor: pointer;
+    text-align: left;
+    color: var(--vscode-foreground);
+    transition: background 0.15s, border-color 0.15s;
+  }
+
+  .ws-provider-btn:hover:not(:disabled) {
+    background: var(--vscode-list-hoverBackground);
+  }
+
+  .ws-provider-btn.active {
+    background: var(--vscode-terminal-ansiBlue, #3b8eea);
+    color: var(--vscode-editor-background);
+    border-color: var(--vscode-terminal-ansiBlue, #3b8eea);
+  }
+
+  .ws-provider-btn .ws-provider-name {
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .ws-provider-btn .ws-provider-hint {
+    font-size: 10px;
+    opacity: 0.75;
+  }
+
+  /* ── SearXNG endpoint row ── */
+  .ws-endpoint-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .ws-endpoint-value {
+    flex: 1;
+    padding: 4px 6px;
+    background: var(--vscode-textCodeBlock-background, rgba(255,255,255,0.04));
+    border-radius: 3px;
+    font-family: var(--vscode-editor-font-family);
+    font-size: 11px;
+    color: var(--vscode-foreground);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .ws-endpoint-value.unset {
+    color: var(--vscode-descriptionForeground);
+    font-style: italic;
+  }
+
+  .ws-endpoint-btn {
+    padding: 4px 10px;
+    background: transparent;
+    border: 1px solid var(--vscode-input-border);
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 11px;
+    color: var(--vscode-foreground);
+    transition: background 0.15s;
+  }
+
+  .ws-endpoint-btn:hover:not(:disabled) {
+    background: var(--vscode-list-hoverBackground);
+  }
+
+  /* ── SearXNG engines checkbox grid ── */
+  .ws-engines {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px 10px;
+    margin-top: 2px;
+  }
+
+  .ws-engine-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    cursor: pointer;
+    color: var(--vscode-foreground);
+  }
+
+  .ws-engine-item input[type="checkbox"] {
+    margin: 0;
+    cursor: pointer;
+  }
+
+  .ws-engines-hint {
+    margin-top: 6px;
+    font-size: 10px;
+    color: var(--vscode-descriptionForeground);
+    opacity: 0.8;
+  }
+
+  /* ── Test connection row ── */
+  .ws-test-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .ws-test-btn {
+    padding: 4px 10px;
+    background: transparent;
+    border: 1px solid var(--vscode-input-border);
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 11px;
+    color: var(--vscode-foreground);
+    transition: background 0.15s;
+    flex-shrink: 0;
+  }
+
+  .ws-test-btn:hover:not(:disabled) {
+    background: var(--vscode-list-hoverBackground);
+  }
+
+  .ws-test-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .ws-test-result {
+    flex: 1;
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .ws-test-result.ok {
+    color: var(--vscode-terminal-ansiGreen, #4eb14e);
+  }
+
+  .ws-test-result.err {
+    color: var(--vscode-errorForeground, #e74856);
+  }
 `;

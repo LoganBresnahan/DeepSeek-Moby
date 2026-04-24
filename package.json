@@ -393,6 +393,36 @@
           ],
           "description": "Controls how web search works: off (disabled), manual (user toggle only), or auto (LLM decides)"
         },
+        "moby.webSearch.provider": {
+          "type": "string",
+          "default": "tavily",
+          "enum": [
+            "tavily",
+            "searxng"
+          ],
+          "enumDescriptions": [
+            "Tavily — hosted, paid; requires an API key from tavily.com",
+            "SearXNG — self-hosted metasearch; free, no API key; requires a running instance"
+          ],
+          "description": "Which web search backend to use. Tavily is the default. SearXNG is ideal for local-first / privacy-focused setups."
+        },
+        "moby.webSearch.searxng.endpoint": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Base URL of your SearXNG instance (e.g. `http://localhost:8080`). JSON format must be enabled in the instance's `settings.yml` (`search.formats: [html, json]`)."
+        },
+        "moby.webSearch.searxng.engines": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "google",
+            "bing",
+            "duckduckgo"
+          ],
+          "description": "Which SearXNG engines to query. Leave empty to use the instance's default engine set. Common values: google, bing, duckduckgo, brave, wikipedia, github, stackoverflow."
+        },
         "moby.editMode": {
           "type": "string",
           "default": "manual",
@@ -507,6 +537,11 @@
       {
         "command": "moby.setTavilyApiKey",
         "title": "Set Tavily API Key",
+        "category": "Moby"
+      },
+      {
+        "command": "moby.setSearxngEndpoint",
+        "title": "Set SearXNG Endpoint",
         "category": "Moby"
       },
       {

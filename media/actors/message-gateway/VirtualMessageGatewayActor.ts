@@ -666,8 +666,27 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         if (msg.configured !== undefined) {
           toolbar.setWebSearchConfigured(msg.configured as boolean);
         }
+        if (msg.provider !== undefined) {
+          this._manager.publishDirect('webSearch.provider', msg.provider);
+        }
+        if (msg.providerStatus !== undefined) {
+          this._manager.publishDirect('webSearch.providerStatus', msg.providerStatus);
+        }
+        if (msg.searxng !== undefined) {
+          this._manager.publishDirect('webSearch.searxng', msg.searxng);
+        }
         break;
       }
+
+      case 'webSearchTestResult':
+        // Result of a "Test connection" click in the web-search popup.
+        // Fields: requestId, provider, success, message.
+        this._manager.publishDirect('webSearch.testResult', {
+          provider: msg.provider,
+          success: msg.success,
+          message: msg.message
+        });
+        break;
 
       case 'webSearching':
         this._manager.publishDirect('status.message', { type: 'info', message: `Searching the web (${msg.current}/${msg.total})...` });
@@ -1554,7 +1573,16 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       log.debug('Tracing enabled:', msg.tracingEnabled);
     }
 
-    const webSearch = msg.webSearch as { searchDepth?: string; creditsPerPrompt?: number; maxResultsPerSearch?: number; cacheDuration?: number; mode?: string; configured?: boolean } | undefined;
+    const webSearch = msg.webSearch as {
+      searchDepth?: string;
+      creditsPerPrompt?: number;
+      maxResultsPerSearch?: number;
+      cacheDuration?: number;
+      mode?: string;
+      configured?: boolean;
+      provider?: string;
+      providerStatus?: Record<string, boolean>;
+    } | undefined;
 
     // Sync web search mode and configured state to toolbar
     // (popup gets its state via onOpen → getWebSearchSettings → webSearchSettings response)
@@ -1567,6 +1595,9 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       toolbar.setWebSearchConfigured(webSearch.configured);
     }
 
+    // Per-provider configured status for the settings popup's dots. These
+    // are provider-specific and independent of which provider is active.
+    const providerStatus = webSearch?.providerStatus ?? {};
     this._manager.publishDirect('settings.values', {
       logLevel: msg.logLevel,
       webviewLogLevel: msg.webviewLogLevel,
@@ -1580,7 +1611,9 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       cacheDuration: webSearch?.cacheDuration,
       autoSaveHistory: msg.autoSaveHistory,
       apiKeyConfigured: msg.apiKeyConfigured,
-      tavilyConfigured: webSearch?.configured
+      tavilyConfigured: providerStatus.tavily ?? webSearch?.configured ?? false,
+      searxngConfigured: providerStatus.searxng ?? false,
+      webSearchProvider: webSearch?.provider
     });
   }
 

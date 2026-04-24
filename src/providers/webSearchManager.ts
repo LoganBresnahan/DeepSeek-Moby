@@ -159,14 +159,65 @@ export class WebSearchManager {
 
   /**
    * Get current settings snapshot for webview sync.
+   *
+   * `configured` reflects the *active* provider's status — used by the toolbar
+   * toggle and the auto-mode `web_search` tool gate. `providerStatus` is the
+   * per-provider map — used by the settings popup to render a status dot
+   * next to each provider's config row independently.
    */
-  async getSettings(): Promise<{ enabled: boolean; settings: WebSearchSettings; configured: boolean; mode: WebSearchMode }> {
+  async getSettings(): Promise<{
+    enabled: boolean;
+    settings: WebSearchSettings;
+    configured: boolean;
+    mode: WebSearchMode;
+    provider: string;
+    providerStatus: Record<string, boolean>;
+  }> {
     return {
       enabled: this.enabled,
       settings: { ...this.settings },
       configured: await this.provider.isConfigured(),
-      mode: this.mode
+      mode: this.mode,
+      provider: this.registry.activeId(),
+      providerStatus: await this.registry.getConfiguredStatus()
     };
+  }
+
+  /**
+   * Fire a minimal search against a specific provider and report whether it
+   * succeeded. Used by the web-search popup's "Test connection" button so
+   * users can validate SearXNG endpoints (and sanity-check Tavily keys)
+   * during setup, without waiting for the first real turn to fail.
+   *
+   * Bypasses cache; always hits the live endpoint. Returns a structured
+   * result rather than throwing so the webview can render success/error
+   * inline.
+   */
+  async testProvider(providerId: string): Promise<{ success: boolean; message: string; resultCount?: number }> {
+    // Look the provider up explicitly — testProvider is the one place
+    // we don't want to dispatch through active().
+    const provider = providerId === 'tavily'
+      ? this.registry.getTavilyClient()
+      : providerId === 'searxng'
+        ? this.registry.getSearxngClient()
+        : null;
+    if (!provider) {
+      return { success: false, message: `Unknown provider: ${providerId}` };
+    }
+    if (!(await provider.isConfigured())) {
+      return { success: false, message: 'Provider is not configured (missing API key or endpoint).' };
+    }
+    try {
+      const response = await provider.search('test', { maxResults: 1 });
+      return {
+        success: true,
+        message: `OK — ${response.results.length} result(s) returned in ${response.responseTime}ms.`,
+        resultCount: response.results.length
+      };
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error);
+      return { success: false, message: msg };
+    }
   }
 
   /**
@@ -353,7 +404,13 @@ export class WebSearchManager {
    */
   async searchByQuery(query: string): Promise<string> {
     if (this.mode !== 'auto') {
-      return 'Error: Web search auto mode is not enabled.';
+      // Phrased as instruction, not error. The previous string started
+      // with "Error:" and said "not enabled" — weak tool-calling models
+      // read that as a transient failure worth retrying and looped. The
+      // text below tells the model explicitly that search has already
+      // been done for this turn (manual mode injects results upstream)
+      // and that the tool should not be called again.
+      return 'Web search has already been performed for this turn. The results are in the system prompt above. Use those results instead of calling web_search — do not retry this tool.';
     }
 
     if (!(await this.provider.isConfigured())) {

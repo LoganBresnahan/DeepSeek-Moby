@@ -1153,13 +1153,18 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
       systemPrompt += modifiedFilesContext;
     }
 
-    // Auto web search
+    // Manual-mode web search: pre-fetch and inject into the system prompt.
+    // The explicit "do not call web_search" guidance below is load-bearing
+    // for weak tool-calling models (7B / 14B local) that pattern-match on
+    // prior assistant turns in history — they'll otherwise emit a
+    // web_search tool call this turn despite the tool not being in the
+    // schema. Telling them explicitly stops the loop.
     const webSearchContext = await this.webSearchManager.searchForMessage(message);
     if (webSearchContext) {
       const today = new Date().toLocaleDateString('en-US', {
         weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
       });
-      systemPrompt += `\n\n--- WEB SEARCH RESULTS (${today}) ---\n${webSearchContext}\n--- END WEB SEARCH RESULTS ---\n`;
+      systemPrompt += `\n\n--- WEB SEARCH RESULTS (${today}) ---\n${webSearchContext}\n--- END WEB SEARCH RESULTS ---\n\nThese results were retrieved for you. Use them to answer the user's question — do not call the web_search tool, it is unavailable this turn.\n`;
     }
 
     // ── 5. Active plans ──

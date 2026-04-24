@@ -40,6 +40,11 @@ export interface SettingsValues {
   // is already in SecretStorage.
   apiKeyConfigured?: boolean;
   tavilyConfigured?: boolean;
+  searxngConfigured?: boolean;
+  /** Id of the currently-active web-search provider. Used to mark which row
+   *  is in use (so users who see both rows know which one is actually wired
+   *  up for searches). */
+  webSearchProvider?: string;
 }
 
 export interface DefaultPrompt {
@@ -66,6 +71,8 @@ export class SettingsShadowActor extends PopupShadowActor {
   private _autoSaveHistory = true;
   private _apiKeyConfigured = false;
   private _tavilyConfigured = false;
+  private _searxngConfigured = false;
+  private _webSearchProvider = 'tavily';
 
   // Preview state
   private _defaultPromptVisible = false;
@@ -123,9 +130,26 @@ export class SettingsShadowActor extends PopupShadowActor {
             <span class="key-status-dot ${this._apiKeyConfigured ? 'has-key' : 'no-key'}" title="${this._apiKeyConfigured ? 'Key stored in SecretStorage' : 'No key set'}"></span>
             <button class="settings-action-btn" data-action="setApiKey">DeepSeek API Key</button>
           </div>
+        </div>
+      </div>
+
+      <div class="settings-divider"></div>
+
+      <!-- Web Search Section — Tavily + SearXNG rows, each with its own dot.
+           The active provider (from moby.webSearch.provider) gets an "Active"
+           marker so users can see which one is actually wired up. -->
+      <div class="settings-section">
+        <div class="settings-section-title">Web Search</div>
+        <div class="settings-btn-row">
           <div class="settings-keyed-btn">
-            <span class="key-status-dot ${this._tavilyConfigured ? 'has-key' : 'no-key'}" title="${this._tavilyConfigured ? 'Key stored in SecretStorage' : 'No key set'}"></span>
+            <span class="key-status-dot ${this._tavilyConfigured ? 'has-key' : 'no-key'}" title="${this._tavilyConfigured ? 'Tavily API key stored' : 'No Tavily API key set'}"></span>
             <button class="settings-action-btn" data-action="setTavilyApiKey">Tavily API Key</button>
+            ${this._webSearchProvider === 'tavily' ? '<span class="provider-active-badge" title="Currently active web search provider">Active</span>' : ''}
+          </div>
+          <div class="settings-keyed-btn">
+            <span class="key-status-dot ${this._searxngConfigured ? 'has-key' : 'no-key'}" title="${this._searxngConfigured ? 'SearXNG endpoint configured' : 'No SearXNG endpoint set'}"></span>
+            <button class="settings-action-btn" data-action="setSearxngEndpoint">SearXNG Endpoint</button>
+            ${this._webSearchProvider === 'searxng' ? '<span class="provider-active-badge" title="Currently active web search provider">Active</span>' : ''}
           </div>
         </div>
       </div>
@@ -303,6 +327,14 @@ export class SettingsShadowActor extends PopupShadowActor {
       this._tavilyConfigured = settings.tavilyConfigured;
       changed = true;
     }
+    if (settings.searxngConfigured !== undefined && settings.searxngConfigured !== this._searxngConfigured) {
+      this._searxngConfigured = settings.searxngConfigured;
+      changed = true;
+    }
+    if (settings.webSearchProvider !== undefined && settings.webSearchProvider !== this._webSearchProvider) {
+      this._webSearchProvider = settings.webSearchProvider;
+      changed = true;
+    }
 
     if (changed) {
       this.updateBodyContent(this.renderPopupContent());
@@ -439,6 +471,11 @@ export class SettingsShadowActor extends PopupShadowActor {
 
       case 'setTavilyApiKey':
         this._vscode.postMessage({ type: 'executeCommand', command: 'moby.setTavilyApiKey' });
+        this.close();
+        break;
+
+      case 'setSearxngEndpoint':
+        this._vscode.postMessage({ type: 'executeCommand', command: 'moby.setSearxngEndpoint' });
         this.close();
         break;
 

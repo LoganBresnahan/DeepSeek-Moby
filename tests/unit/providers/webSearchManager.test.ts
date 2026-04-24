@@ -46,11 +46,15 @@ function createMockTavilyClient(configured = true) {
 // ── Registry mock ──
 // WebSearchManager now dispatches through a WebSearchProviderRegistry rather
 // than holding a direct TavilyClient reference. Tests wrap the mock Tavily
-// in a minimal registry surface that returns it from active().
+// in a minimal registry surface that returns it from active(). Phase 2 added
+// `activeId()` and `getConfiguredStatus()` for provider-aware UI payloads.
 function createMockRegistry(tavily: ReturnType<typeof createMockTavilyClient>) {
   return {
     active: () => tavily,
-    getTavilyClient: () => tavily
+    activeId: () => 'tavily' as const,
+    getTavilyClient: () => tavily,
+    getSearxngClient: () => tavily, // tests don't exercise SearXNG
+    getConfiguredStatus: async () => ({ tavily: true, searxng: false })
   };
 }
 

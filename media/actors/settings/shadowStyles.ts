@@ -225,6 +225,19 @@ export const settingsShadowStyles = `
     gap: 6px;
   }
 
+  /* Tiny "Active" pill next to whichever provider is currently in use.
+   * Visible on the Tavily or SearXNG row depending on moby.webSearch.provider. */
+  .provider-active-badge {
+    font-size: 10px;
+    font-weight: 500;
+    padding: 1px 6px;
+    border-radius: 8px;
+    background: var(--vscode-terminal-ansiGreen, #4eb14e);
+    color: var(--vscode-editor-background, #1e1e1e);
+    letter-spacing: 0.3px;
+    text-transform: uppercase;
+  }
+
   .key-status-dot.has-key {
     background: var(--vscode-terminal-ansiGreen, #4eb14e);
   }

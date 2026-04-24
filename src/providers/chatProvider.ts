@@ -239,7 +239,9 @@ export class ChatProvider implements vscode.WebviewViewProvider {
             maxResultsPerSearch: wsState.settings.maxResultsPerSearch,
             cacheDuration: wsState.settings.cacheDuration,
             mode: wsState.mode,
-            configured: wsState.configured
+            configured: wsState.configured,
+            provider: wsState.provider,
+            providerStatus: wsState.providerStatus
           }
         });
         const config = vscode.workspace.getConfiguration('moby');
@@ -689,6 +691,32 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         case 'clearSearchCache':
           this.webSearchManager.clearCache();
           break;
+        case 'setWebSearchProvider': {
+          // Persist the chosen provider id. The config-change listener in
+          // extension.ts re-fires refreshSettings so the UI updates live.
+          const nextProvider = data.provider as string;
+          await vscode.workspace.getConfiguration('moby')
+            .update('webSearch.provider', nextProvider, vscode.ConfigurationTarget.Global);
+          break;
+        }
+        case 'setSearxngEngines': {
+          const engines = Array.isArray(data.engines) ? data.engines : [];
+          await vscode.workspace.getConfiguration('moby')
+            .update('webSearch.searxng.engines', engines, vscode.ConfigurationTarget.Global);
+          break;
+        }
+        case 'testWebSearchProvider': {
+          const requestId = data.requestId as string;
+          const providerId = data.provider as string;
+          const result = await this.webSearchManager.testProvider(providerId);
+          this._view?.webview.postMessage({
+            type: 'webSearchTestResult',
+            requestId,
+            provider: providerId,
+            ...result
+          });
+          break;
+        }
         case 'setEditMode':
           this.diffManager.setEditMode(data.mode);
           break;
@@ -949,6 +977,15 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     this.sendCurrentSettings();
   }
 
+  /** Test-connection shortcut for command-layer callers (the setSearxngEndpoint
+   *  wizard runs this after writing the endpoint to surface reachability
+   *  errors immediately rather than on the first real search). Thin wrapper
+   *  over webSearchManager.testProvider so `extension.ts` doesn't have to
+   *  reach through the manager. */
+  public async testWebSearchProvider(providerId: string): Promise<{ success: boolean; message: string }> {
+    return this.webSearchManager.testProvider(providerId);
+  }
+
   /**
    * Open the history modal in the chat view.
    * Reveals the chat panel and triggers the history modal to open.
@@ -995,10 +1032,15 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       balance = await this.deepSeekClient.getBalance();
     } catch (e) { /* silent */ }
 
-    const tavilyStats = this.tavilyClient.getUsageStats();
+    // Tavily-specific stats are only meaningful when Tavily is the active
+    // provider. For SearXNG (or any non-Tavily provider) we send nulls so
+    // the stats modal can omit the Tavily section rather than showing stale
+    // counters from a previous session.
+    const tavilyActive = this.webSearchRegistry.activeId() === 'tavily';
+    const tavilyStats = tavilyActive ? this.tavilyClient.getUsageStats() : null;
 
     let tavilyApiUsage = null;
-    if (await this.tavilyClient.isConfigured()) {
+    if (tavilyActive && await this.tavilyClient.isConfigured()) {
       try {
         tavilyApiUsage = await this.tavilyClient.getApiUsage();
       } catch (e) { /* silent */ }
@@ -1033,12 +1075,12 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         // Silently fail if balance fetch fails
       }
 
-      // Get Tavily search stats (local tracking)
-      const tavilyStats = this.tavilyClient.getUsageStats();
+      // Tavily-specific stats only when Tavily is the active provider.
+      const tavilyActive = this.webSearchRegistry.activeId() === 'tavily';
+      const tavilyStats = tavilyActive ? this.tavilyClient.getUsageStats() : null;
 
-      // Get real Tavily API usage (from /usage endpoint)
       let tavilyApiUsage = null;
-      if (await this.tavilyClient.isConfigured()) {
+      if (tavilyActive && await this.tavilyClient.isConfigured()) {
         try {
           tavilyApiUsage = await this.tavilyClient.getApiUsage();
         } catch (e) {
@@ -1137,7 +1179,9 @@ export class ChatProvider implements vscode.WebviewViewProvider {
           maxResultsPerSearch: wsState.settings.maxResultsPerSearch,
           cacheDuration: wsState.settings.cacheDuration,
           mode: wsState.mode,
-          configured: wsState.configured
+          configured: wsState.configured,
+          provider: wsState.provider,
+          providerStatus: wsState.providerStatus
         }
       });
       // Send edit mode separately
@@ -1149,13 +1193,26 @@ export class ChatProvider implements vscode.WebviewViewProvider {
   }
 
   private async sendWebSearchSettings() {
-    const { enabled, settings, configured, mode } = await this.webSearchManager.getSettings();
+    const { enabled, settings, configured, mode, provider, providerStatus } =
+      await this.webSearchManager.getSettings();
+    const config = vscode.workspace.getConfiguration('moby');
+    // SearXNG-specific config lives in VS Code settings (non-secret, easy
+    // to edit manually). Pull here and pass to the popup so it can render
+    // the right provider section.
+    const searxngEndpoint = (config.get<string>('webSearch.searxng.endpoint') || '').trim();
+    const searxngEngines = config.get<string[]>('webSearch.searxng.engines') ?? [];
     this._view?.webview.postMessage({
       type: 'webSearchSettings',
       enabled,
       settings,
       configured,
-      mode
+      mode,
+      provider,
+      providerStatus,
+      searxng: {
+        endpoint: searxngEndpoint,
+        engines: searxngEngines
+      }
     });
   }
 

@@ -561,6 +561,17 @@ export class MessageTurnActor extends InterleavedShadowActor {
   private renderActivity(): void {
     const label = this.getActivityLabel();
 
+    // If streaming has ended we must not create (or re-create) an indicator
+    // element. `endStreaming()` tears down `_activityElement` fully; a late
+    // callback (trailing `popActivity`, `setTextActive(false)`, or the
+    // pending-changes MutationObserver firing after abort) would otherwise
+    // hit the `!this._activityElement` branch below, spawn a fresh element,
+    // and leave a 26px `.hidden` div orphaned at the bottom of the turn
+    // forever. Compounds across a session as visible gaps between turns.
+    if (!this._isStreaming && !this._activityElement) {
+      return;
+    }
+
     // Build the skeleton DOM once — Moby icon, spurt drops, label span —
     // and keep it alive across hide/show cycles. Removing the element
     // resets the spurt CSS animation on re-create, causing visible flicker.

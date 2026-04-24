@@ -6,6 +6,7 @@ import { StatusBar } from './views/statusBar';
 import { ConfigManager } from './utils/config';
 import { ConversationManager, createLLMSummarizer } from './events';
 import { WebSearchProviderRegistry } from './clients/webSearchProviderRegistry';
+import { pickServiceLocation, resolveServiceUrl } from './utils/serviceLocation';
 import { logger } from './utils/logger';
 import { UnifiedLogExporter } from './logging/UnifiedLogExporter';
 import { TokenService } from './services/tokenService';
@@ -44,6 +45,16 @@ export async function activate(context: vscode.ExtensionContext) {
       if (e.affectsConfiguration('moby.customModels')) {
         reloadCustomModels();
         chatProvider?.sendModelList();
+      }
+      // Web-search provider / endpoint / engines — settings popup dots
+      // and the web-search popup's provider-specific section need to
+      // update live when any of these change.
+      if (
+        e.affectsConfiguration('moby.webSearch.provider') ||
+        e.affectsConfiguration('moby.webSearch.searxng.endpoint') ||
+        e.affectsConfiguration('moby.webSearch.searxng.engines')
+      ) {
+        chatProvider?.refreshSettings();
       }
     })
   );
@@ -168,6 +179,7 @@ function registerCommands(context: vscode.ExtensionContext) {
     // API Key management
     { name: 'setApiKey', handler: () => setApiKey(context) },
     { name: 'setTavilyApiKey', handler: () => setTavilyApiKey(context) },
+    { name: 'setSearxngEndpoint', handler: () => setSearxngEndpoint() },
     { name: 'setCustomModelApiKey', handler: (modelId?: string) => setCustomModelApiKey(context, modelId) },
     { name: 'clearCustomModelApiKey', handler: (modelId?: string) => clearCustomModelApiKey(context, modelId) },
     { name: 'addCustomModel', handler: () => addCustomModel() },
@@ -435,12 +447,22 @@ const CUSTOM_MODEL_TEMPLATES: Array<{
   label: string;
   description: string;
   detail: string;
+  /** 'local' runs the service-location picker wizard after template selection
+   *  so the user picks `localhost` vs `host.docker.internal` vs LAN instead
+   *  of memorizing networking trivia. 'hosted' skips the picker and uses the
+   *  template's baked-in URL verbatim (api.groq.com, api.openai.com, etc.). */
+  endpointKind: 'local' | 'hosted';
+  /** Default TCP port for the 'local' wizard. Ignored when endpointKind is
+   *  'hosted'. Parsed from the template's `apiEndpoint` during setup. */
+  defaultPort?: number;
   entry: Record<string, unknown>;
 }> = [
   {
     label: 'Ollama — Qwen 2.5 Coder 7B',
     description: 'http://localhost:11434/v1',
     detail: 'Local Ollama with native tool calling',
+    endpointKind: 'local',
+    defaultPort: 11434,
     entry: {
       id: 'qwen2.5-coder:7b-instruct',
       name: 'Qwen 2.5 Coder 7B (Ollama)',
@@ -461,6 +483,8 @@ const CUSTOM_MODEL_TEMPLATES: Array<{
     label: 'LM Studio (Local)',
     description: 'http://localhost:1234/v1',
     detail: 'Local LM Studio — replace `id` with your loaded model name',
+    endpointKind: 'local',
+    defaultPort: 1234,
     entry: {
       id: 'local-model-in-lm-studio',
       name: 'LM Studio (Local)',
@@ -481,6 +505,8 @@ const CUSTOM_MODEL_TEMPLATES: Array<{
     label: 'llama.cpp Server',
     description: 'http://localhost:8080/v1',
     detail: 'Local llama.cpp — uses SEARCH/REPLACE for edits + <shell> for commands (R1-style)',
+    endpointKind: 'local',
+    defaultPort: 8080,
     entry: {
       id: 'local-llama-cpp',
       name: 'llama.cpp Server',
@@ -501,6 +527,7 @@ const CUSTOM_MODEL_TEMPLATES: Array<{
     label: 'OpenAI GPT-4o mini',
     description: 'https://api.openai.com/v1',
     detail: 'Hosted OpenAI — set API key via the settings popup',
+    endpointKind: 'hosted',
     entry: {
       id: 'gpt-4o-mini',
       name: 'OpenAI GPT-4o mini',
@@ -520,6 +547,7 @@ const CUSTOM_MODEL_TEMPLATES: Array<{
     label: 'Kimi (Moonshot)',
     description: 'https://api.moonshot.ai/v1',
     detail: 'Hosted Moonshot — set API key via the settings popup',
+    endpointKind: 'hosted',
     entry: {
       id: 'moonshot-v1-128k',
       name: 'Kimi (Moonshot)',
@@ -539,6 +567,7 @@ const CUSTOM_MODEL_TEMPLATES: Array<{
     label: 'Llama 3.3 70B (Groq)',
     description: 'https://api.groq.com/openai/v1',
     detail: 'Hosted Groq — fast inference, set API key via settings popup',
+    endpointKind: 'hosted',
     entry: {
       id: 'llama-3.3-70b-versatile',
       name: 'Llama 3.3 70B (Groq)',
@@ -609,7 +638,24 @@ async function addCustomModel(): Promise<void> {
     return;
   }
 
-  const updated = [...existing, pick.template.entry];
+  // For local-backend templates, run the location picker so the user picks
+  // "same machine" / "Windows host (from WSL)" / "another machine" instead
+  // of needing to know about host.docker.internal / localhost nuances. The
+  // picker produces a URL; we splice it over the template's baked-in value.
+  const entryWithEndpoint = { ...pick.template.entry };
+  if (pick.template.endpointKind === 'local') {
+    const defaultPort = pick.template.defaultPort ?? parsePortFromUrl(pick.template.entry.apiEndpoint as string) ?? 8080;
+    const pathSuffix = parsePathFromUrl(pick.template.entry.apiEndpoint as string) ?? '/v1';
+    const location = await pickServiceLocation({
+      serviceName: pick.template.entry.name as string,
+      defaultPort,
+      pathSuffix
+    });
+    if (!location) return; // user cancelled
+    entryWithEndpoint.apiEndpoint = resolveServiceUrl(location);
+  }
+
+  const updated = [...existing, entryWithEndpoint];
   await config.update('customModels', updated, vscode.ConfigurationTarget.Global);
 
   // Open settings.json so the user can see what was added and tweak fields
@@ -617,8 +663,29 @@ async function addCustomModel(): Promise<void> {
   await vscode.commands.executeCommand('workbench.action.openSettingsJson');
 
   vscode.window.showInformationMessage(
-    `Added "${pick.template.entry.name}" to your custom models. ${pick.template.entry.apiKey ? 'Select it from the model dropdown to start using it.' : 'Set an API key via the settings popup, then pick it from the model dropdown.'}`
+    `Added "${entryWithEndpoint.name}" to your custom models. ${entryWithEndpoint.apiKey ? 'Select it from the model dropdown to start using it.' : 'Set an API key via the settings popup, then pick it from the model dropdown.'}`
   );
+}
+
+/** Extract port from a URL, or null if parse fails / port not explicit. */
+function parsePortFromUrl(url: string): number | null {
+  try {
+    const u = new URL(url);
+    if (u.port) return Number(u.port);
+    return u.protocol === 'https:' ? 443 : 80;
+  } catch {
+    return null;
+  }
+}
+
+/** Extract path (including leading slash) from a URL, or null on parse fail. */
+function parsePathFromUrl(url: string): string | null {
+  try {
+    const u = new URL(url);
+    return u.pathname === '/' ? '' : u.pathname;
+  } catch {
+    return null;
+  }
 }
 
 async function setTavilyApiKey(context: vscode.ExtensionContext): Promise<void> {
@@ -642,6 +709,64 @@ async function setTavilyApiKey(context: vscode.ExtensionContext): Promise<void> 
   } else {
     await context.secrets.store('moby.tavilyApiKey', input.trim());
     vscode.window.showInformationMessage('Tavily API key saved securely.');
+  }
+  chatProvider.refreshSettings();
+}
+
+async function setSearxngEndpoint(): Promise<void> {
+  // Runs the location-picker wizard (covers same-machine / WSL-to-Windows /
+  // LAN / custom URL) and writes the resolved URL into VS Code config. After
+  // the write, fires a test-connection against the new endpoint so the user
+  // gets immediate feedback rather than finding out the first real query
+  // fails mid-turn.
+  //
+  // A final "clear endpoint" option is added to the picker pass-through
+  // because users occasionally want to remove the setting without leaving
+  // garbage behind. Picker cancellation leaves the current setting alone.
+  const config = vscode.workspace.getConfiguration('moby');
+  const current = (config.get<string>('webSearch.searxng.endpoint') || '').trim();
+
+  // If there's already an endpoint set, offer a shortcut to clear it before
+  // running the full picker. Otherwise jump straight to the picker.
+  if (current) {
+    const action = await vscode.window.showQuickPick(
+      [
+        { label: 'Change endpoint', description: current, action: 'change' as const },
+        { label: 'Clear endpoint', description: 'Remove the SearXNG URL from settings', action: 'clear' as const }
+      ],
+      {
+        title: 'SearXNG endpoint',
+        placeHolder: 'What would you like to do?',
+        ignoreFocusOut: true
+      }
+    );
+    if (!action) return;
+    if (action.action === 'clear') {
+      await config.update('webSearch.searxng.endpoint', '', vscode.ConfigurationTarget.Global);
+      vscode.window.showInformationMessage('SearXNG endpoint cleared.');
+      chatProvider.refreshSettings();
+      return;
+    }
+  }
+
+  const location = await pickServiceLocation({
+    serviceName: 'SearXNG',
+    defaultPort: 8080
+    // SearXNG endpoint is the base URL — the client appends /search. No path suffix.
+  });
+  if (!location) return;
+
+  const url = resolveServiceUrl(location).replace(/\/$/, '');
+  await config.update('webSearch.searxng.endpoint', url, vscode.ConfigurationTarget.Global);
+
+  // Test connection against the freshly-saved endpoint. The webSearchManager
+  // reads the URL from config directly so the update above is already
+  // visible; any race is a few ms at worst.
+  const testResult = await chatProvider.testWebSearchProvider('searxng');
+  if (testResult.success) {
+    vscode.window.showInformationMessage(`SearXNG endpoint set to ${url}. ${testResult.message}`);
+  } else {
+    vscode.window.showWarningMessage(`SearXNG endpoint set to ${url}, but test failed: ${testResult.message}`);
   }
   chatProvider.refreshSettings();
 }
