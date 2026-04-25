@@ -46,9 +46,13 @@
           "default": "deepseek-chat",
           "examples": [
             "deepseek-chat",
-            "deepseek-reasoner"
+            "deepseek-reasoner",
+            "deepseek-v4-flash",
+            "deepseek-v4-flash-thinking",
+            "deepseek-v4-pro",
+            "deepseek-v4-pro-thinking"
           ],
-          "markdownDescription": "Which model to use. Built-ins: `deepseek-chat`, `deepseek-reasoner`. Also accepts any `id` declared in `#moby.customModels#`."
+          "markdownDescription": "Which model to use. Built-ins: `deepseek-chat`, `deepseek-reasoner` (both retiring 2026-07-24), `deepseek-v4-flash`, `deepseek-v4-flash-thinking`, `deepseek-v4-pro`, `deepseek-v4-pro-thinking`. Also accepts any `id` declared in `#moby.customModels#`."
         },
         "moby.customModels": {
           "type": "array",
@@ -298,14 +302,42 @@
           "default": 8192,
           "minimum": 256,
           "maximum": 8192,
-          "description": "[Chat model only] Maximum output tokens per response. Max: 8,192"
+          "description": "[Chat model only — retiring 2026-07-24] Maximum output tokens per response. Max: 8,192"
         },
         "moby.maxTokensReasonerModel": {
           "type": "number",
           "default": 65536,
           "minimum": 256,
           "maximum": 65536,
-          "description": "[Reasoner model only] Maximum output tokens per response. Max: 65,536"
+          "description": "[Reasoner model only — retiring 2026-07-24] Maximum output tokens per response. Max: 65,536"
+        },
+        "moby.maxTokensV4Flash": {
+          "type": "number",
+          "default": 32768,
+          "minimum": 256,
+          "maximum": 384000,
+          "description": "[DeepSeek V4 Flash] Maximum output tokens per response. Default: 32,768 (practical); API cap: 384,000."
+        },
+        "moby.maxTokensV4FlashThinking": {
+          "type": "number",
+          "default": 65536,
+          "minimum": 256,
+          "maximum": 384000,
+          "description": "[DeepSeek V4 Flash (Thinking)] Maximum output tokens per response. Default: 65,536; API cap: 384,000."
+        },
+        "moby.maxTokensV4Pro": {
+          "type": "number",
+          "default": 32768,
+          "minimum": 256,
+          "maximum": 384000,
+          "description": "[DeepSeek V4 Pro] Maximum output tokens per response. Default: 32,768 (practical); API cap: 384,000."
+        },
+        "moby.maxTokensV4ProThinking": {
+          "type": "number",
+          "default": 65536,
+          "minimum": 256,
+          "maximum": 384000,
+          "description": "[DeepSeek V4 Pro (Thinking)] Maximum output tokens per response. Default: 65,536; API cap: 384,000."
         },
         "moby.showStatusBar": {
           "type": "boolean",

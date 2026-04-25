@@ -15,6 +15,8 @@ export type ReasoningTokens = 'inline' | 'none';
 export type EditProtocol = 'native-tool' | 'search-replace';
 export type ShellProtocol = 'xml-shell' | 'none';
 export type RequestFormat = 'openai' | 'anthropic';
+export type ReasoningEffort = 'high' | 'max';
+export type ReasoningEcho = 'required' | 'optional' | 'none';
 
 export interface ModelCapabilities {
   // How the model expresses intent.
@@ -27,7 +29,16 @@ export interface ModelCapabilities {
   supportsTemperature: boolean;
 
   // Limits.
+  /** Default value sent as `max_tokens` if the user hasn't overridden
+   *  via the maxTokens slider. Also the fallback for the slider's upper
+   *  bound when `maxOutputTokensCap` is absent (V3 behavior). */
   maxOutputTokens: number;
+  /** Upper bound for the per-model maxTokens slider. Defaults to
+   *  `maxOutputTokens` when omitted — matches V3 where the default and
+   *  cap coincided. V4 sets this to 384000 so the slider reaches the
+   *  real API cap even though the practical default is much lower.
+   *  See [docs/plans/deepseek-v4-integration.md](../../docs/plans/deepseek-v4-integration.md). */
+  maxOutputTokensCap?: number;
 
   // VS Code config key for the user-adjustable per-model max tokens override.
   // Historical naming — preserved to avoid breaking existing user settings.
@@ -56,6 +67,24 @@ export interface ModelCapabilities {
    */
   tokenizer?: 'deepseek-v3';
   requestFormat: RequestFormat;
+
+  // ── V4-era axes (see docs/plans/deepseek-v4-integration.md) ─────────
+
+  /** Inject `{"thinking": {"type": "enabled"}}` into the request body.
+   *  Only V4 thinking variants set this. `deepseekClient` also strips any
+   *  Moby-side `-thinking` suffix from the model id before sending, so the
+   *  upstream DeepSeek API sees the bare `deepseek-v4-flash` / `-pro`. */
+  sendThinkingParam?: boolean;
+
+  /** Default reasoning effort for thinking-capable models. User override
+   *  lives in `moby.modelOptions.<id>.reasoningEffort`. */
+  reasoningEffort?: ReasoningEffort;
+
+  /** Whether `reasoning_content` must be echoed back in subsequent
+   *  requests when serializing assistant turns that contained tool_calls.
+   *  V4-thinking returns 400 if not. Default `'none'` means strip from
+   *  history before re-sending (current chat-model behavior). */
+  reasoningEcho?: ReasoningEcho;
 }
 
 export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
@@ -84,6 +113,77 @@ export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
     apiEndpoint: 'https://api.deepseek.com',
     tokenizer: 'deepseek-v3',
     requestFormat: 'openai',
+  },
+
+  // ── V4 preview (2026-04-24) ─────────────────────────────────────────
+  // Each upstream model is represented by TWO registry entries — one for
+  // non-thinking, one for thinking. The `-thinking` suffix is a Moby-side
+  // identifier stripped before the API call; upstream sees the bare
+  // `deepseek-v4-flash` / `deepseek-v4-pro`. Keeps the user's cost/quality
+  // decision at model-pick time (same pattern as chat vs reasoner today)
+  // and avoids dynamic capability resolution mid-session.
+
+  'deepseek-v4-flash': {
+    toolCalling: 'native',
+    reasoningTokens: 'none',
+    editProtocol: ['native-tool', 'search-replace'],
+    shellProtocol: 'none',
+    supportsTemperature: true,
+    maxOutputTokens: 32768,           // practical default
+    maxOutputTokensCap: 384000,       // real API cap
+    maxTokensConfigKey: 'maxTokensV4Flash',
+    streaming: true,
+    apiEndpoint: 'https://api.deepseek.com',
+    tokenizer: 'deepseek-v3',          // V4 uses same vocab + new specials; see plan
+    requestFormat: 'openai',
+  },
+  'deepseek-v4-flash-thinking': {
+    toolCalling: 'native',
+    reasoningTokens: 'inline',
+    editProtocol: ['native-tool', 'search-replace'],
+    shellProtocol: 'none',
+    supportsTemperature: false,        // thinking mode rejects temperature/top_p
+    maxOutputTokens: 65536,
+    maxOutputTokensCap: 384000,
+    maxTokensConfigKey: 'maxTokensV4FlashThinking',
+    streaming: true,
+    apiEndpoint: 'https://api.deepseek.com',
+    tokenizer: 'deepseek-v3',
+    requestFormat: 'openai',
+    sendThinkingParam: true,
+    reasoningEffort: 'high',
+    reasoningEcho: 'required',
+  },
+  'deepseek-v4-pro': {
+    toolCalling: 'native',
+    reasoningTokens: 'none',
+    editProtocol: ['native-tool', 'search-replace'],
+    shellProtocol: 'none',
+    supportsTemperature: true,
+    maxOutputTokens: 32768,
+    maxOutputTokensCap: 384000,
+    maxTokensConfigKey: 'maxTokensV4Pro',
+    streaming: true,
+    apiEndpoint: 'https://api.deepseek.com',
+    tokenizer: 'deepseek-v3',
+    requestFormat: 'openai',
+  },
+  'deepseek-v4-pro-thinking': {
+    toolCalling: 'native',
+    reasoningTokens: 'inline',
+    editProtocol: ['native-tool', 'search-replace'],
+    shellProtocol: 'none',
+    supportsTemperature: false,
+    maxOutputTokens: 65536,
+    maxOutputTokensCap: 384000,
+    maxTokensConfigKey: 'maxTokensV4ProThinking',
+    streaming: true,
+    apiEndpoint: 'https://api.deepseek.com',
+    tokenizer: 'deepseek-v3',
+    requestFormat: 'openai',
+    sendThinkingParam: true,
+    reasoningEffort: 'max',            // pro defaults to max — paying for quality
+    reasoningEcho: 'required',
   },
 };
 
@@ -122,15 +222,18 @@ export interface RegisteredModelInfo {
 
 /**
  * Return display metadata for every registered model (built-in + custom).
- * Used by the model selector UI.
+ * Used by the model selector UI. The `maxTokens` value is the slider's
+ * upper bound — `maxOutputTokensCap` when set (V4), else `maxOutputTokens`
+ * (V3 behavior where default and cap coincide).
  */
 export function getAllRegisteredModels(): RegisteredModelInfo[] {
   const out: RegisteredModelInfo[] = [];
   for (const id of Object.keys(MODEL_REGISTRY)) {
+    const caps = MODEL_REGISTRY[id];
     out.push({
       id,
       name: BUILTIN_DISPLAY_NAMES[id] ?? id,
-      maxTokens: MODEL_REGISTRY[id].maxOutputTokens,
+      maxTokens: caps.maxOutputTokensCap ?? caps.maxOutputTokens,
       isCustom: false,
     });
   }
@@ -139,7 +242,7 @@ export function getAllRegisteredModels(): RegisteredModelInfo[] {
     out.push({
       id,
       name: CUSTOM_MODEL_NAMES.get(id) ?? id,
-      maxTokens: caps.maxOutputTokens,
+      maxTokens: caps.maxOutputTokensCap ?? caps.maxOutputTokens,
       isCustom: true,
     });
   }
@@ -147,8 +250,14 @@ export function getAllRegisteredModels(): RegisteredModelInfo[] {
 }
 
 const BUILTIN_DISPLAY_NAMES: Record<string, string> = {
-  'deepseek-chat': 'DeepSeek Chat (V3)',
-  'deepseek-reasoner': 'DeepSeek Reasoner (R1)',
+  // V3 models — retiring 2026-07-24, hint in the label so users start migrating.
+  'deepseek-chat': 'DeepSeek Chat (V3 — retiring Jul 2026)',
+  'deepseek-reasoner': 'DeepSeek Reasoner (R1 — retiring Jul 2026)',
+  // V4 preview models.
+  'deepseek-v4-flash': 'DeepSeek V4 Flash',
+  'deepseek-v4-flash-thinking': 'DeepSeek V4 Flash (Thinking)',
+  'deepseek-v4-pro': 'DeepSeek V4 Pro',
+  'deepseek-v4-pro-thinking': 'DeepSeek V4 Pro (Thinking)',
 };
 
 /**
@@ -196,6 +305,21 @@ export function validateCustomModelEntry(entry: unknown): { ok: true } | { ok: f
   if (e.apiKey !== undefined && typeof e.apiKey !== 'string') return { ok: false, error: 'apiKey must be a string if provided' };
   if (e.tokenizer !== undefined && e.tokenizer !== 'deepseek-v3') return { ok: false, error: 'tokenizer must be "deepseek-v3" or omitted' };
   if (e.requestFormat !== 'openai') return { ok: false, error: 'requestFormat must be "openai"' };
+  // V4-era axes (all optional). Validate shapes when present.
+  if (e.maxOutputTokensCap !== undefined) {
+    if (typeof e.maxOutputTokensCap !== 'number' || e.maxOutputTokensCap < (e.maxOutputTokens as number)) {
+      return { ok: false, error: 'maxOutputTokensCap must be a number ≥ maxOutputTokens when provided' };
+    }
+  }
+  if (e.sendThinkingParam !== undefined && typeof e.sendThinkingParam !== 'boolean') {
+    return { ok: false, error: 'sendThinkingParam must be boolean if provided' };
+  }
+  if (e.reasoningEffort !== undefined && e.reasoningEffort !== 'high' && e.reasoningEffort !== 'max') {
+    return { ok: false, error: 'reasoningEffort must be "high" or "max" if provided' };
+  }
+  if (e.reasoningEcho !== undefined && e.reasoningEcho !== 'required' && e.reasoningEcho !== 'optional' && e.reasoningEcho !== 'none') {
+    return { ok: false, error: 'reasoningEcho must be "required", "optional", or "none" if provided' };
+  }
   return { ok: true };
 }
 

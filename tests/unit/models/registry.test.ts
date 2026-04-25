@@ -301,7 +301,9 @@ describe('model registry', () => {
         expect(qwen?.isCustom).toBe(true);
         expect(qwen?.name).toBe('Qwen 2.5 Coder (Ollama)');
         expect(chat?.isCustom).toBe(false);
-        expect(chat?.name).toBe('DeepSeek Chat (V3)');
+        // Display name carries a retirement hint since V3 chat/reasoner
+        // are scheduled for removal 2026-07-24 (replaced by V4 variants).
+        expect(chat?.name).toContain('DeepSeek Chat (V3');
       });
 
       it('empty input clears existing custom models', () => {
