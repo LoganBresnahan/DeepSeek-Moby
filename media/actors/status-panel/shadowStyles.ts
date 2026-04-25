@@ -72,15 +72,27 @@ export const statusPanelShadowStyles = `
   }
 }
 
+/* One-shot mode (animation: forwards) used by showMessage / showWarning /
+ * showError; continuous mode (animation: infinite) used while
+ * activity-streaming is true. */
 .moby.spurting .droplet {
   animation: spurt 0.6s ease-out forwards;
 }
 
-.moby.spurting .droplet:nth-child(1) { animation-delay: 0ms; left: 3px; }
-.moby.spurting .droplet:nth-child(2) { animation-delay: 50ms; left: 10px; }
-.moby.spurting .droplet:nth-child(3) { animation-delay: 100ms; left: 17px; }
-.moby.spurting .droplet:nth-child(4) { animation-delay: 75ms; left: 6px; }
-.moby.spurting .droplet:nth-child(5) { animation-delay: 125ms; left: 14px; }
+.moby.activity-active .droplet {
+  animation: spurt 0.9s ease-out infinite;
+}
+
+.moby.spurting .droplet:nth-child(1),
+.moby.activity-active .droplet:nth-child(1) { animation-delay: 0ms; left: 3px; }
+.moby.spurting .droplet:nth-child(2),
+.moby.activity-active .droplet:nth-child(2) { animation-delay: 50ms; left: 10px; }
+.moby.spurting .droplet:nth-child(3),
+.moby.activity-active .droplet:nth-child(3) { animation-delay: 100ms; left: 17px; }
+.moby.spurting .droplet:nth-child(4),
+.moby.activity-active .droplet:nth-child(4) { animation-delay: 75ms; left: 6px; }
+.moby.spurting .droplet:nth-child(5),
+.moby.activity-active .droplet:nth-child(5) { animation-delay: 125ms; left: 14px; }
 
 /* Colored spurt variants */
 .moby.spurt-blue .droplet {
@@ -114,6 +126,28 @@ export const statusPanelShadowStyles = `
   white-space: nowrap;
   min-width: 0;
   cursor: default; /* Show tooltip on hover */
+}
+
+.messages.suppressed {
+  display: none;
+}
+
+/* Activity label — set via the activity.label subscription, displaces the
+ * messages slot while streaming. Hidden by default; .visible shows it. */
+.activity-text {
+  flex: 1;
+  font-size: 13px;
+  color: var(--vscode-foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  cursor: default;
+  display: none;
+}
+
+.activity-text.visible {
+  display: inline-block;
 }
 
 /* Separator */

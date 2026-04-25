@@ -48,6 +48,8 @@ export class StatusPanelShadowActor extends ShadowActor {
   private _message = '';
   private _warning = '';
   private _error = '';
+  private _activityLabel: string | null = null;
+  private _activityStreaming = false;
 
   // Timeouts for auto-clear
   private _messageTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -65,6 +67,7 @@ export class StatusPanelShadowActor extends ShadowActor {
   private _warningsEl: HTMLElement | null = null;
   private _leftPanel: HTMLElement | null = null;
   private _rightPanel: HTMLElement | null = null;
+  private _activityEl: HTMLElement | null = null;
 
   // Handlers
   private _onLogs: LogsHandler | null = null;
@@ -102,6 +105,12 @@ export class StatusPanelShadowActor extends ShadowActor {
           } else {
             this.showMessage(msg.message);
           }
+        },
+        'activity.label': (value: unknown) => {
+          this.setActivity(value as string | null);
+        },
+        'activity.streaming': (value: unknown) => {
+          this.setActivityStreaming(value as boolean);
         }
       }
     });
@@ -134,6 +143,7 @@ export class StatusPanelShadowActor extends ShadowActor {
           </div>
         </div>
         <div class="left-panel">
+          <span class="activity-text"></span>
           <span class="messages"></span>
         </div>
         <div class="separator"></div>
@@ -150,6 +160,7 @@ export class StatusPanelShadowActor extends ShadowActor {
     this._warningsEl = this.query('.warnings');
     this._leftPanel = this.query('.left-panel');
     this._rightPanel = this.query('.right-panel');
+    this._activityEl = this.query('.activity-text');
 
     // Setup event handlers
     this.delegate('click', '.logs-btn', () => {
@@ -250,6 +261,53 @@ export class StatusPanelShadowActor extends ShadowActor {
     setTimeout(() => {
       this._moby?.classList.remove('spurting');
     }, 700);
+  }
+
+  // ============================================
+  // Activity Indicator (driven by MessageTurnActor publishes)
+  // ============================================
+
+  /**
+   * Set the streaming flag — drives the continuous-spurt animation. Called
+   * via the `activity.streaming` subscription. Independent of the label so
+   * that "streaming with no specific activity" still shows motion.
+   */
+  setActivityStreaming(on: boolean): void {
+    if (this._activityStreaming === on) return;
+    this._activityStreaming = on;
+    if (!this._moby) return;
+    if (on) {
+      // Continuous spurt — `activity-active` runs the spurt animation on
+      // `infinite`, distinct from `spurting` (one-shot, 700ms, used by
+      // showMessage/Warning/Error). Always cyan while streaming.
+      this._moby.classList.remove('spurt-yellow', 'spurt-red');
+      this._moby.classList.add('spurt-blue', 'activity-active');
+    } else {
+      this._moby.classList.remove('activity-active');
+    }
+  }
+
+  /**
+   * Set the activity label shown next to the moby. `null` hides it.
+   * Coexists with `showMessage` — activity takes the slot when present,
+   * messages take it when activity is null.
+   */
+  setActivity(label: string | null): void {
+    this._activityLabel = label;
+    if (!this._activityEl || !this._messagesEl) return;
+    if (label) {
+      this._activityEl.textContent = label;
+      this._activityEl.title = label;
+      this._activityEl.classList.add('visible');
+      // Hide the transient message slot while activity is showing — the
+      // activity label is the more current signal.
+      this._messagesEl.classList.add('suppressed');
+    } else {
+      this._activityEl.textContent = '';
+      this._activityEl.title = '';
+      this._activityEl.classList.remove('visible');
+      this._messagesEl.classList.remove('suppressed');
+    }
   }
 
   // ============================================

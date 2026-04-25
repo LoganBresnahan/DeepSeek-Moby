@@ -44,7 +44,12 @@ if (usesActorSystem) {
     console.log(`chat.ts -> chat.js: ${(outputSize / 1024).toFixed(1)}KB (bundled)`);
   } catch (error) {
     console.error('Failed to build chat.ts:', error.message);
-    // Fall through to legacy build
+    // Exit nonzero so `npm run compile` (and CI) stops here instead of
+    // letting webpack succeed for the extension while the webview bundle
+    // is stale. The previous "fall through to legacy build" comment was
+    // from before the legacy bundle was retired — there's nothing to fall
+    // through to anymore, and silent failures bit us once already.
+    process.exit(1);
   }
 }
 

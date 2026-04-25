@@ -81,13 +81,14 @@ describe('MessageTurnActor', () => {
         timestamp: Date.now()
       });
 
-      // Add some content (startStreaming renders role header = 1 child, and
-      // pre-allocates a hidden activity indicator that reserves layout space)
+      // Add some content. Activity indicator now lives in the input-bar
+      // StatusPanelShadowActor (driven by `activity.label` publishes), not
+      // in the turn DOM — so the turn has just header + text + thinking.
       actor.startStreaming();
       actor.createTextSegment('Hello');
       actor.startThinkingIteration();
 
-      expect(element.children.length).toBe(4); // header + text + thinking + activity indicator
+      expect(element.children.length).toBe(3); // header + text + thinking
 
       // Reset
       actor.reset();
@@ -192,35 +193,30 @@ describe('MessageTurnActor', () => {
       expect(actor.isStreaming()).toBe(true);
     });
 
-    it('startStreaming renders role header + waiting-state activity indicator', () => {
+    it('startStreaming renders role header + publishes waiting-state activity', () => {
       expect(element.children.length).toBe(0);
       actor.startStreaming();
-      // Role header rendered as first child + activity indicator in
-      // "waiting for response…" state (Moby visible with spurt + label,
-      // pre-first-token). Once any content signal arrives, indicator
-      // drops into `.no-label` (bare whale).
-      expect(element.children.length).toBe(2);
+      // Role header is the only child. Activity indicator lives in the
+      // status-panel actor (input bar) and is driven via publish to the
+      // shared EventStateManager.
+      expect(element.children.length).toBe(1);
       const header = element.children[0] as HTMLElement;
       expect(header.classList.contains('header-container')).toBe(true);
       expect(header.classList.contains('assistant')).toBe(true);
-      const last = element.children[1] as HTMLElement;
-      expect(last.classList.contains('activity-indicator')).toBe(true);
-      expect(last.classList.contains('hidden')).toBe(false);
-      expect(last.classList.contains('no-label')).toBe(false);
       expect(actor.getActivityLabel()).toBe('Waiting for response…');
+      expect(manager.getState('activity.streaming')).toBe(true);
+      expect(manager.getState('activity.label')).toBe('Waiting for response…');
     });
 
     it('startStreaming role header is idempotent with subsequent content', () => {
       actor.startStreaming();
-      expect(element.children.length).toBe(2); // header + hidden activity indicator
+      expect(element.children.length).toBe(1); // header only
       actor.createTextSegment('Hello');
-      // Header + text segment + activity indicator (not two headers).
-      // Order isn't asserted — the MutationObserver moves activity to last
-      // asynchronously, but the presence contract holds synchronously.
-      expect(element.children.length).toBe(3);
+      // Header + text segment (not two headers). Activity indicator is no
+      // longer in the turn DOM — it's published to the status-panel actor.
+      expect(element.children.length).toBe(2);
       expect(element.querySelector('.header-container')).not.toBeNull();
       expect(element.querySelector('.text-container')).not.toBeNull();
-      expect(element.querySelector('.activity-indicator')).not.toBeNull();
       expect(element.querySelectorAll('.header-container').length).toBe(1);
     });
 
@@ -385,46 +381,32 @@ describe('MessageTurnActor', () => {
       actor.bind({ turnId: 'turn-1', role: 'assistant', timestamp: Date.now() });
     });
 
-    function getIndicator(): HTMLElement | null {
-      return element.querySelector('.activity-indicator');
-    }
-    // An indicator is "visible with a label" only when neither .hidden nor
-    // .no-label is set. The .no-label state (streaming with no active label)
-    // shows just the Moby icon as a persistent request-active marker.
-    function getVisibleIndicator(): HTMLElement | null {
-      const el = getIndicator();
-      if (!el) return null;
-      if (el.classList.contains('hidden')) return null;
-      if (el.classList.contains('no-label')) return null;
-      return el;
-    }
+    // Activity indicator now lives in the StatusPanelShadowActor (input bar),
+    // driven by `activity.label` and `activity.streaming` publishes on the
+    // shared EventStateManager. Tests assert on those state keys instead of
+    // probing turn-local DOM.
 
-    it('no indicator before startStreaming', () => {
-      expect(getIndicator()).toBeNull();
+    it('no activity published before startStreaming', () => {
       expect(actor.getActivityLabel()).toBeNull();
+      expect(manager.getState('activity.streaming')).toBeFalsy();
     });
 
-    it('indicator shows waiting-state label immediately on startStreaming', () => {
+    it('startStreaming publishes waiting-state activity', () => {
       actor.startStreaming();
-      // Pre-first-token: visible indicator with Moby + spurt + "Waiting for
-      // response…" label. Prevents the UI from looking frozen while the
-      // model chews on the prompt before emitting its first token.
       expect(actor.getActivityLabel()).toBe('Waiting for response…');
-      expect(getIndicator()).not.toBeNull();
-      expect(getIndicator()?.classList.contains('hidden')).toBe(false);
-      expect(getIndicator()?.classList.contains('no-label')).toBe(false);
-      expect(getVisibleIndicator()).not.toBeNull();
+      expect(manager.getState('activity.streaming')).toBe(true);
+      expect(manager.getState('activity.label')).toBe('Waiting for response…');
     });
 
-    it('text-active flips the indicator out of waiting-state into bare-whale', () => {
+    it('text-active flips activity out of waiting-state into bare-whale', () => {
       actor.startStreaming();
       expect(actor.getActivityLabel()).toBe('Waiting for response…');
       actor.setTextActive(true);
-      // First content signal has arrived — bare-whale .no-label state takes
-      // over because response text itself is the visible cue now.
+      // First content signal has arrived — label clears, but streaming flag
+      // stays on so the moby keeps spurting silently.
       expect(actor.getActivityLabel()).toBeNull();
-      expect(getIndicator()?.classList.contains('no-label')).toBe(true);
-      expect(getVisibleIndicator()).toBeNull();
+      expect(manager.getState('activity.label')).toBeNull();
+      expect(manager.getState('activity.streaming')).toBe(true);
     });
 
     it('pushed activity shows even when text is streaming', () => {
@@ -482,32 +464,29 @@ describe('MessageTurnActor', () => {
       expect(actor.getActivityLabel()).toBeNull();
     });
 
-    it('endStreaming removes indicator from DOM', () => {
+    it('endStreaming clears activity publish state', () => {
       actor.startStreaming();
       actor.pushActivity('thinking', 'Thinking...');
-      expect(getIndicator()).not.toBeNull();
+      expect(manager.getState('activity.label')).toBe('Thinking...');
       actor.endStreaming();
-      expect(getIndicator()).toBeNull();
       expect(actor.getActivityLabel()).toBeNull();
+      expect(manager.getState('activity.streaming')).toBe(false);
+      expect(manager.getState('activity.label')).toBeNull();
     });
 
     it('reset clears activity state', () => {
       actor.startStreaming();
       actor.pushActivity('shell', 'Running ls');
       actor.reset();
-      expect(getIndicator()).toBeNull();
-    });
-
-    it('indicator element stays as the last child of the turn root', () => {
-      actor.startStreaming();
-      actor.createTextSegment('Hello');
-      actor.pushActivity('thinking', 'Thinking...');
-      expect(element.lastElementChild).toBe(getIndicator());
+      expect(actor.getActivityLabel()).toBeNull();
     });
 
     it('hidden when not streaming even if frames exist', () => {
       actor.pushActivity('shell', 'Running ls');
-      expect(getVisibleIndicator()).toBeNull();
+      // Without isStreaming=true, getActivityLabel returns null even though
+      // the stack has a frame. The status-panel sees `activity.label = null`
+      // and clears its label slot.
+      expect(actor.getActivityLabel()).toBeNull();
       expect(actor.getActivityLabel()).toBeNull();
     });
 

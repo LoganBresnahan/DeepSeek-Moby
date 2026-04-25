@@ -172,17 +172,6 @@ export class MessageTurnActor extends InterleavedShadowActor {
   // long the model takes to emit its first token — could be 30s+ on thinking
   // models, which looks like the UI has hung.
   private _firstTokenReceived = false;
-  // Lazily-created host element for the indicator. Appended to this.element.
-  private _activityElement: HTMLElement | null = null;
-  // The child span whose textContent is updated on label change. Kept alive
-  // across re-renders so the Moby-spurts animation doesn't reset every frame.
-  private _activityLabelEl: HTMLElement | null = null;
-  // Last label rendered to the DOM — used to short-circuit no-op renders.
-  private _lastRenderedLabel: string | null = null;
-  // Observes the turn root so the activity indicator stays visually last
-  // even when other containers (Pending Changes, Modified Files) get
-  // appended to the turn after it. See ensureActivityIsLastChild().
-  private _activityPositionObserver: MutationObserver | null = null;
   // Tracks which code blocks the user has expanded, keyed by text container id.
   // Streaming token updates re-render the container's innerHTML (rebuilds all
   // code-block DOM); this lets us re-apply `.expanded` so user clicks don't
@@ -226,7 +215,12 @@ export class MessageTurnActor extends InterleavedShadowActor {
         'turn.textSegmentCount': () => this._textSegments.size,
         'turn.thinkingCount': () => this._thinkingIterations.size,
         'turn.toolBatchCount': () => this._toolBatches.size,
-        'turn.shellSegmentCount': () => this._shellSegments.size
+        'turn.shellSegmentCount': () => this._shellSegments.size,
+        // Drives the StatusPanelShadowActor's activity slot in the input bar.
+        // Last-writer-wins: only one turn streams at a time, so the singleton
+        // shape is fine even though publications are per-actor.
+        'activity.streaming': () => this._isStreaming,
+        'activity.label': () => this._isStreaming ? this.getActivityLabel() : null
       },
       subscriptions: {}  // MessageTurnActor is controlled directly, not via pub/sub
     });
@@ -295,19 +289,11 @@ export class MessageTurnActor extends InterleavedShadowActor {
     this._hasInterleaved = false;
     this._headerRendered = false;
 
-    // Reset activity indicator
+    // Reset activity indicator state. The DOM lives in the input-bar
+    // StatusPanelShadowActor, which gets a fresh `activity.label = null`
+    // publish on the next render cycle.
     this._activityStack = [];
     this._textActive = false;
-    if (this._activityPositionObserver) {
-      this._activityPositionObserver.disconnect();
-      this._activityPositionObserver = null;
-    }
-    if (this._activityElement) {
-      this._activityElement.remove();
-      this._activityElement = null;
-      this._activityLabelEl = null;
-      this._lastRenderedLabel = null;
-    }
 
     // Remove data attributes
     this.element.removeAttribute('data-turn-id');
@@ -374,10 +360,8 @@ export class MessageTurnActor extends InterleavedShadowActor {
     // ensureRoleHeader() is idempotent (checks _headerRendered), so subsequent calls are no-ops.
     this.ensureRoleHeader();
 
-    // Build the activity indicator element eagerly (hidden). Paired with the
-    // `.hidden { visibility: hidden }` CSS rule, this reserves the indicator's
-    // height from the moment streaming starts, so content doesn't jump the
-    // first time a real activity pushes onto the stack.
+    // Publish initial activity state ('Waiting for response…' label) so the
+    // status-panel whale starts spurting the moment streaming begins.
     this.renderActivity();
 
     log.debug('startStreaming:', this._turnId, `role=${this._role}`);
@@ -387,19 +371,12 @@ export class MessageTurnActor extends InterleavedShadowActor {
     this._isStreaming = false;
     this._firstTokenReceived = false;
 
-    // Tear down the activity indicator on turn end.
+    // Tear down activity state on turn end. The status-panel subscription
+    // sees `activity.streaming = false` + `activity.label = null` and goes
+    // idle; no DOM lives in the turn anymore.
     this._activityStack = [];
     this._textActive = false;
-    if (this._activityPositionObserver) {
-      this._activityPositionObserver.disconnect();
-      this._activityPositionObserver = null;
-    }
-    if (this._activityElement) {
-      this._activityElement.remove();
-      this._activityElement = null;
-      this._activityLabelEl = null;
-      this._lastRenderedLabel = null;
-    }
+    this.renderActivity();
 
     // Mark current text segment as complete and re-render to remove
     // the "Seeking/Developing..." animation (formatContent skips it
@@ -580,129 +557,16 @@ export class MessageTurnActor extends InterleavedShadowActor {
   }
 
   /**
-   * Re-append the activity indicator to the turn root if new siblings have
-   * displaced it. Called from the mutation observer, not per render cycle —
-   * this is purely reactive to DOM mutations coming from other code paths
-   * (pending-changes render, tool-batch render, etc.).
+   * Publish current activity state to the EventStateManager. The
+   * StatusPanelShadowActor in the input bar subscribes and renders. Moving
+   * the indicator out of the turn DOM eliminates per-token layout shift,
+   * which made streaming feel hectic.
    */
-  private ensureActivityIsLastChild(): void {
-    if (!this._activityElement) return;
-    if (this._activityElement.classList.contains('hidden')) return;
-    if (this._activityElement.parentElement !== this.element) return;
-    if (this.element.lastElementChild === this._activityElement) return;
-    this.element.appendChild(this._activityElement);
-  }
-
   private renderActivity(): void {
-    const label = this.getActivityLabel();
-
-    // If streaming has ended we must not create (or re-create) an indicator
-    // element. `endStreaming()` tears down `_activityElement` fully; a late
-    // callback (trailing `popActivity`, `setTextActive(false)`, or the
-    // pending-changes MutationObserver firing after abort) would otherwise
-    // hit the `!this._activityElement` branch below, spawn a fresh element,
-    // and leave a 26px `.hidden` div orphaned at the bottom of the turn
-    // forever. Compounds across a session as visible gaps between turns.
-    if (!this._isStreaming && !this._activityElement) {
-      return;
-    }
-
-    // Build the skeleton DOM once — Moby icon, spurt drops, label span —
-    // and keep it alive across hide/show cycles. Removing the element
-    // resets the spurt CSS animation on re-create, causing visible flicker.
-    if (!this._activityElement) {
-      this._activityElement = document.createElement('div');
-      this._activityElement.className = 'activity-indicator';
-      this._activityElement.setAttribute('data-actor', 'turn');
-
-      const mobyIconUrl = document.body.dataset.mobyIcon || '';
-      if (mobyIconUrl) {
-        const moby = document.createElement('div');
-        moby.className = 'activity-moby';
-        const img = document.createElement('img');
-        img.src = mobyIconUrl;
-        img.alt = 'Moby';
-        moby.appendChild(img);
-        const spurt = document.createElement('div');
-        spurt.className = 'activity-spurt';
-        for (let i = 0; i < 5; i++) {
-          const drop = document.createElement('span');
-          drop.className = 'drop';
-          spurt.appendChild(drop);
-        }
-        moby.appendChild(spurt);
-        this._activityElement.appendChild(moby);
-      }
-
-      this._activityLabelEl = document.createElement('span');
-      this._activityLabelEl.className = 'activity-label';
-      this._activityElement.appendChild(this._activityLabelEl);
-    }
-
-    // Always append (and keep it as the last child) regardless of whether
-    // we're about to hide it. Appending even when hidden reserves the
-    // indicator's height via `visibility: hidden`, so content above the
-    // turn doesn't jump when activity comes and goes during streaming.
-    if (this._activityElement.parentElement !== this.element ||
-        this.element.lastElementChild !== this._activityElement) {
-      this.element.appendChild(this._activityElement);
-    }
-
-    // Set up a mutation observer (once) so that later appends to the turn
-    // root (Pending Changes dropdown, tool batches, etc.) don't leave the
-    // activity indicator stranded mid-turn. Re-appends reactively instead
-    // of waiting for the next pushActivity/popActivity render cycle.
-    if (!this._activityPositionObserver) {
-      this._activityPositionObserver = new MutationObserver(() => {
-        this.ensureActivityIsLastChild();
-      });
-      this._activityPositionObserver.observe(this.element, { childList: true });
-    }
-
-    // Three visual states:
-    //   1. Not streaming → `.hidden` (everything invisible, layout preserved).
-    //   2. Streaming + no label → `.no-label` (moby visible, label text and
-    //      spurt droplets suppressed).
-    //   3. Streaming + label → neither class (moby + label + continuous spurt).
-    // Keeping Moby visible for the whole turn makes the indicator feel like
-    // a single persistent presence rather than a popup that flickers away
-    // every time an underlying request resolves.
-    const indicator = this._activityElement;
-    if (!this._isStreaming) {
-      indicator.classList.add('hidden');
-      indicator.classList.remove('no-label');
-      this._lastRenderedLabel = null;
-      return;
-    }
-    indicator.classList.remove('hidden');
-
-    if (label === null) {
-      indicator.classList.add('no-label');
-      this._lastRenderedLabel = null;
-      return;
-    }
-    indicator.classList.remove('no-label');
-
-    // Only swap the label text when it actually changes — preserves the
-    // Moby-spurts CSS animation state across the typical token-by-token
-    // pushActivity flood.
-    if (label !== this._lastRenderedLabel && this._activityLabelEl) {
-      const labelEl = this._activityLabelEl;
-      const isFirstLabel = this._lastRenderedLabel === null;
-      this._lastRenderedLabel = label;
-
-      if (isFirstLabel) {
-        // First appearance — no fade-out phase, just populate.
-        labelEl.textContent = label;
-      } else {
-        // Crossfade: fade out current text, swap, let CSS transition fade back in.
-        labelEl.classList.add('fading');
-        window.setTimeout(() => {
-          labelEl.textContent = label;
-          labelEl.classList.remove('fading');
-        }, 160);
-      }
-    }
+    this.publish({
+      'activity.streaming': this._isStreaming,
+      'activity.label': this._isStreaming ? this.getActivityLabel() : null
+    });
   }
 
   /** Check if ANY turn is currently streaming (global state). */
