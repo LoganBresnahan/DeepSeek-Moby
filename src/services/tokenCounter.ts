@@ -41,12 +41,10 @@ const TOOL_CALL_OVERHEAD = 8;
  */
 export function countRequestTokens(
   counter: TokenCounter,
-  requestMessages: Array<{
-    role: string;
-    content: string | Array<{ type: string; text?: string }>;
-    tool_calls?: Array<{ id: string; type: string; function: { name: string; arguments: string } }>;
-    tool_call_id?: string;
-  }>,
+  // Relaxed to `Record<string, unknown>` so serializer additions (e.g.
+  // `reasoning_content` for V4-thinking) don't require signature churn.
+  // Only role/content/tool_calls/tool_call_id are read below.
+  requestMessages: Array<Record<string, unknown>>,
   systemPrompt?: string,
   tools?: Array<{ type: string; function: { name: string; description: string; parameters: unknown } }>
 ): number {
@@ -60,14 +58,19 @@ export function countRequestTokens(
   // Messages — content + all structured fields
   for (const msg of requestMessages) {
     // Content text
-    const text = typeof msg.content === 'string'
-      ? msg.content
-      : msg.content.map(c => c.type === 'text' && c.text ? c.text : '[image]').join('');
-    total += counter.countMessage(msg.role, text);
+    const role = typeof msg.role === 'string' ? msg.role : '';
+    const content = msg.content as string | Array<{ type: string; text?: string }> | undefined;
+    const text = typeof content === 'string'
+      ? content
+      : Array.isArray(content)
+        ? content.map(c => c.type === 'text' && c.text ? c.text : '[image]').join('')
+        : '';
+    total += counter.countMessage(role, text);
 
     // Tool call metadata (assistant messages that invoke tools)
-    if (msg.tool_calls) {
-      for (const tc of msg.tool_calls) {
+    const toolCalls = msg.tool_calls as Array<{ function: { name: string; arguments: string } }> | undefined;
+    if (Array.isArray(toolCalls)) {
+      for (const tc of toolCalls) {
         total += counter.count(tc.function.name);
         total += counter.count(tc.function.arguments);
         total += TOOL_CALL_OVERHEAD;
@@ -75,7 +78,7 @@ export function countRequestTokens(
     }
 
     // Tool result linkage
-    if (msg.tool_call_id) {
+    if (typeof msg.tool_call_id === 'string') {
       total += counter.count(msg.tool_call_id);
     }
   }

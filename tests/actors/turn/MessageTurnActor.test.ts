@@ -192,11 +192,13 @@ describe('MessageTurnActor', () => {
       expect(actor.isStreaming()).toBe(true);
     });
 
-    it('startStreaming renders role header immediately', () => {
+    it('startStreaming renders role header + waiting-state activity indicator', () => {
       expect(element.children.length).toBe(0);
       actor.startStreaming();
-      // Role header rendered as first child + activity indicator pre-allocated
-      // at the end in .no-label state (Moby visible, label text suppressed).
+      // Role header rendered as first child + activity indicator in
+      // "waiting for response…" state (Moby visible with spurt + label,
+      // pre-first-token). Once any content signal arrives, indicator
+      // drops into `.no-label` (bare whale).
       expect(element.children.length).toBe(2);
       const header = element.children[0] as HTMLElement;
       expect(header.classList.contains('header-container')).toBe(true);
@@ -204,7 +206,8 @@ describe('MessageTurnActor', () => {
       const last = element.children[1] as HTMLElement;
       expect(last.classList.contains('activity-indicator')).toBe(true);
       expect(last.classList.contains('hidden')).toBe(false);
-      expect(last.classList.contains('no-label')).toBe(true);
+      expect(last.classList.contains('no-label')).toBe(false);
+      expect(actor.getActivityLabel()).toBe('Waiting for response…');
     });
 
     it('startStreaming role header is idempotent with subsequent content', () => {
@@ -401,23 +404,25 @@ describe('MessageTurnActor', () => {
       expect(actor.getActivityLabel()).toBeNull();
     });
 
-    it('indicator element present in no-label state on startStreaming (Moby visible, label suppressed)', () => {
+    it('indicator shows waiting-state label immediately on startStreaming', () => {
       actor.startStreaming();
-      expect(actor.getActivityLabel()).toBeNull();
-      // Element is in DOM with .no-label class → Moby icon visible as a
-      // persistent "request active" marker, but label text and spurt
-      // droplets are suppressed until an activity is pushed.
+      // Pre-first-token: visible indicator with Moby + spurt + "Waiting for
+      // response…" label. Prevents the UI from looking frozen while the
+      // model chews on the prompt before emitting its first token.
+      expect(actor.getActivityLabel()).toBe('Waiting for response…');
       expect(getIndicator()).not.toBeNull();
       expect(getIndicator()?.classList.contains('hidden')).toBe(false);
-      expect(getIndicator()?.classList.contains('no-label')).toBe(true);
-      expect(getVisibleIndicator()).toBeNull();
+      expect(getIndicator()?.classList.contains('no-label')).toBe(false);
+      expect(getVisibleIndicator()).not.toBeNull();
     });
 
-    it('text-active alone does not show a label (response text is its own indicator)', () => {
+    it('text-active flips the indicator out of waiting-state into bare-whale', () => {
       actor.startStreaming();
+      expect(actor.getActivityLabel()).toBe('Waiting for response…');
       actor.setTextActive(true);
+      // First content signal has arrived — bare-whale .no-label state takes
+      // over because response text itself is the visible cue now.
       expect(actor.getActivityLabel()).toBeNull();
-      // Moby stays visible via .no-label, but there is no labelled indicator.
       expect(getIndicator()?.classList.contains('no-label')).toBe(true);
       expect(getVisibleIndicator()).toBeNull();
     });

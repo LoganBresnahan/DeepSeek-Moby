@@ -1449,13 +1449,13 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
       let firstReasoningTokenTime: number | null = null;
       let firstContentTokenTime: number | null = null;
 
+      logger.info(`[Iteration] Starting iteration ${shellIteration + 1}, messages in context: ${currentHistoryMessages.length}`);
+      logger.info(`[Timing] Iteration ${shellIteration + 1} started at ${new Date().toISOString()}`);
       if (isReasonerModel) {
-        logger.info(`[R1-Shell] Starting iteration ${shellIteration + 1}, messages in context: ${currentHistoryMessages.length}`);
-        logger.info(`[Timing] Iteration ${shellIteration + 1} started at ${new Date().toISOString()}`);
         logger.setIteration(shellIteration + 1);
         this._onIterationStart.fire({ iteration: shellIteration + 1 });
       } else {
-        logger.setIteration(1);
+        logger.setIteration(shellIteration + 1);
       }
 
       // ── Stream with interrupt-and-resume support ──
@@ -1861,14 +1861,14 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
         throw streamError;
       }
 
-      // Log iteration completion for debugging R1 continuation
-      if (isReasonerModel) {
-        const iterationDuration = Date.now() - iterationStartTime;
-        logger.info(`[Timing] Iteration ${shellIteration + 1} complete in ${iterationDuration}ms`);
-        logger.info(`[R1-Shell] Iteration ${shellIteration + 1} complete, response length: ${iterationResponse.length} chars`);
-        logger.info(`[R1-Shell] Response preview: ${iterationResponse.substring(0, 300).replace(/\n/g, '\\n')}...`);
+      // Iteration boundary log — applies to every multi-iteration loop, not just R1.
+      const iterationDuration = Date.now() - iterationStartTime;
+      logger.info(`[Timing] Iteration ${shellIteration + 1} complete in ${iterationDuration}ms`);
+      logger.info(`[Iteration] Iteration ${shellIteration + 1} complete, response length: ${iterationResponse.length} chars`);
+      logger.info(`[Iteration] Response preview: ${iterationResponse.substring(0, 300).replace(/\n/g, '\\n')}...`);
 
-        // Save iteration reasoning AND content, reset for next iteration
+      // R1-only: save iteration reasoning/content for the per-iteration replay UI.
+      if (isReasonerModel) {
         if (state.currentIterationReasoning) {
           state.reasoningIterations.push(state.currentIterationReasoning);
           state.currentIterationReasoning = '';
@@ -2572,12 +2572,23 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
         this._onToolCallsUpdate.fire({ tools: [...batchToolDetails] });
       }
 
-      // Add assistant message with tool calls (required for API contract)
-      toolMessages.push({
+      // Add assistant message with tool calls (required for API contract).
+      // Preserve `reasoning_content` when the model returned it — V4-thinking
+      // requires it be echoed back on every subsequent request that includes
+      // this assistant turn, otherwise the API 400s with
+      //   "The `reasoning_content` in the thinking mode must be passed back"
+      // The wire-format serializer in DeepSeekClient gates the actual outbound
+      // inclusion on the ACTIVE model's `reasoningEcho === 'required'` so we
+      // don't leak the field to non-thinking models mid-session.
+      const assistantMsg: ApiMessage = {
         role: 'assistant',
         content: response.content || '',
         tool_calls: response.tool_calls
-      });
+      };
+      if (response.reasoning_content) {
+        assistantMsg.reasoning_content = response.reasoning_content;
+      }
+      toolMessages.push(assistantMsg);
 
       // Count assistant message tokens
       if (budgetLimit > 0) {

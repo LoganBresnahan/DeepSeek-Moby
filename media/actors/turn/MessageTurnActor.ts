@@ -163,6 +163,15 @@ export class MessageTurnActor extends InterleavedShadowActor {
   // True while text is actively streaming (a text-append has arrived without a
   // matching text-finalize). Drives the "Writing response..." fallback label.
   private _textActive = false;
+  // True once ANY content signal has reached this turn — first streamed text,
+  // first reasoning chunk, first pushed activity, or the first tool call.
+  // False from startStreaming until that first signal. Drives the "Waiting
+  // for response…" fallback label so the user sees motion (Moby spurts) while
+  // the request is in flight and we haven't heard back yet. Without this the
+  // indicator sits in `.no-label` state (bare whale, no spurt) for however
+  // long the model takes to emit its first token — could be 30s+ on thinking
+  // models, which looks like the UI has hung.
+  private _firstTokenReceived = false;
   // Lazily-created host element for the indicator. Appended to this.element.
   private _activityElement: HTMLElement | null = null;
   // The child span whose textContent is updated on label change. Kept alive
@@ -355,6 +364,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
   startStreaming(): void {
     this._isStreaming = true;
     this._hasInterleaved = false;
+    this._firstTokenReceived = false;
     this.publish({ 'turn.streaming': true });
 
     // Render role header immediately so the turn has visible height from the start.
@@ -375,6 +385,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
 
   endStreaming(): void {
     this._isStreaming = false;
+    this._firstTokenReceived = false;
 
     // Tear down the activity indicator on turn end.
     this._activityStack = [];
@@ -436,7 +447,18 @@ export class MessageTurnActor extends InterleavedShadowActor {
    * stack is what gets shown. Idempotent per kind — if the same kind is
    * already on the stack, its label is updated instead of pushing a duplicate.
    */
+  /** Flip `_firstTokenReceived` true on the first content signal of this
+   *  turn. No-op after the first call. Centralized so every entry point
+   *  (push, text, thinking, tools, shell) can mark it consistently. */
+  private markFirstTokenReceived(): void {
+    this._firstTokenReceived = true;
+  }
+
   pushActivity(kind: ActivityKind, label: string): void {
+    // Any push means the API has started doing something — first reasoning
+    // token, first tool call, code-block fence detected. Mark the "we've
+    // heard back" flag so the indicator moves past the waiting-state label.
+    this.markFirstTokenReceived();
     const existing = this._activityStack.find(f => f.kind === kind);
     if (existing) {
       if (existing.label === label) return; // No-op if unchanged — preserves animation state
@@ -475,6 +497,12 @@ export class MessageTurnActor extends InterleavedShadowActor {
   setTextActive(on: boolean): void {
     if (this._textActive === on) return;
     this._textActive = on;
+    // The first time text goes active, content has started streaming — flip
+    // out of the waiting-state label so the indicator goes to its bare-whale
+    // `.no-label` state (response text itself takes over as the visible
+    // signal). Leaving `on === false` unchanged is correct: that's the
+    // finalize signal, and _firstTokenReceived is already true by then.
+    if (on) this.markFirstTokenReceived();
     this.renderActivity();
   }
 
@@ -514,6 +542,13 @@ export class MessageTurnActor extends InterleavedShadowActor {
     if (!this._isStreaming) return null;
     if (this._activityStack.length > 0) {
       return this._activityStack[this._activityStack.length - 1].label;
+    }
+    // Pre-first-token: show a "waiting" label so the indicator spurts and
+    // the user can tell the request is in flight. Flips to null (bare
+    // whale, no spurt) once any content signal has arrived. Response text
+    // itself takes over the visible state from that point forward.
+    if (!this._firstTokenReceived) {
+      return 'Waiting for response…';
     }
     // Previously returned "Writing response..." while text streamed. Removed
     // because the response text itself is visible right below the indicator,
@@ -731,6 +766,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
    * For assistant messages, creates streaming structure.
    */
   createTextSegment(content: string = '', options?: { isContinuation?: boolean }): string {
+    this.markFirstTokenReceived();
     this._currentPendingGroup = null;
     this._textSegmentCounter++;
     const segmentId = `${this._turnId}-text-${this._textSegmentCounter}`;
@@ -924,6 +960,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
    * Start a new thinking iteration.
    */
   startThinkingIteration(): number {
+    this.markFirstTokenReceived();
     this.ensureRoleHeader();
     this._currentPendingGroup = null;
 
@@ -1042,6 +1079,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
    * Start a new tool batch.
    */
   startToolBatch(tools: Array<{ name: string; detail: string }>): string {
+    this.markFirstTokenReceived();
     this.ensureRoleHeader();
     this._currentPendingGroup = null;
     const container = this.createContainer('message', {
@@ -1122,6 +1160,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
    * Create a shell segment.
    */
   createShellSegment(commands: Array<{ command: string; cwd?: string }>): string {
+    this.markFirstTokenReceived();
     this._currentPendingGroup = null;
     log.debug(`createShellSegment: creating with ${commands.length} commands`);
 

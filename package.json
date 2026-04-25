@@ -339,6 +339,29 @@
           "maximum": 384000,
           "description": "[DeepSeek V4 Pro (Thinking)] Maximum output tokens per response. Default: 65,536; API cap: 384,000."
         },
+        "moby.modelOptions": {
+          "type": "object",
+          "default": {},
+          "markdownDescription": "Per-model options keyed by model id. Currently supports `reasoningEffort` (`high` or `max`) for V4 thinking models. Example:\n```jsonc\n\"moby.modelOptions\": {\n  \"deepseek-v4-flash-thinking\": { \"reasoningEffort\": \"max\" }\n}\n```",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "reasoningEffort": {
+                "type": "string",
+                "enum": [
+                  "high",
+                  "max"
+                ],
+                "enumDescriptions": [
+                  "Default effort — fast, usually sufficient",
+                  "Maximum effort — higher cost and latency, better on complex agentic tasks"
+                ],
+                "description": "Override the default reasoning effort for this thinking-capable model."
+              }
+            },
+            "additionalProperties": false
+          }
+        },
         "moby.showStatusBar": {
           "type": "boolean",
           "default": true,
