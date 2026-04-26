@@ -14,6 +14,7 @@ Short, dated records of significant architectural and behavioral decisions. Each
 | [0002](0002-strip-heredocs-before-long-running-check.md) | Strip heredocs before long-running command pattern matching | Accepted | 2026-04-17 |
 | [0003](0003-events-table-sole-source-of-truth.md) | Events table is the sole source of truth for session history | Accepted | 2026-04-19 |
 | [0004](0004-r1-path-semantics-guards.md) | R1 path-semantics guards and model-specific guard policy | Accepted | 2026-04-20 |
+| [0005](0005-preserve-bundler-ts-module-resolution.md) | TypeScript module resolution: preserve + bundler | Accepted | 2026-04-26 |
 
 ## When to write an ADR
 
