@@ -256,16 +256,20 @@ const x = 42;
       expect(result.operation).toBe('search-replace');
     });
 
-    it('falls back to line diff when no search/replace blocks are present', () => {
+    it('refuses to apply when no SEARCH/REPLACE blocks and snippet is too small for full replace', () => {
+      // The previous behavior was a line-diff merge that silently kept BOTH
+      // original and new content (success=true), which duplicated code on
+      // disk when edit_file got raw snippets. New behavior: return
+      // success=false with an explicit message so the caller resends in a
+      // parseable format.
       const original = 'line1\nline2\nline3';
       const newCode = 'line1\nline2\nnewline\nline3';
 
       const result = engine.applyChanges(original, newCode);
 
-      expect(result.content).toContain('newline');
-      expect(result.content).toContain('line1');
-      expect(result.content).toContain('line2');
-      expect(result.content).toContain('line3');
+      expect(result.success).toBe(false);
+      expect(result.content).toBe(original);
+      expect(result.message).toMatch(/SEARCH\/REPLACE/);
     });
 
     it('handles full file replacement detection', () => {

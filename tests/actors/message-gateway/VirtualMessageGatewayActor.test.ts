@@ -556,7 +556,7 @@ describe('VirtualMessageGatewayActor', () => {
             model: 'deepseek-chat',
             toolCalls: [
               { name: 'read_file', detail: 'src/app.ts', status: 'done' },
-              { name: 'apply_code_edit', detail: 'fixing bug', status: 'done' }
+              { name: 'edit_file', detail: 'fixing bug', status: 'done' }
             ],
             filesModified: ['src/app.ts'],
             timestamp: 2000
@@ -567,7 +567,7 @@ describe('VirtualMessageGatewayActor', () => {
       // Tools rendered
       expect(mockActors.virtualList.startToolBatch).toHaveBeenCalledWith('turn-2', [
         { name: 'read_file', detail: 'src/app.ts' },
-        { name: 'apply_code_edit', detail: 'fixing bug' }
+        { name: 'edit_file', detail: 'fixing bug' }
       ]);
       expect(mockActors.virtualList.updateTool).toHaveBeenCalledWith('turn-2', 0, 'done');
       expect(mockActors.virtualList.updateTool).toHaveBeenCalledWith('turn-2', 1, 'done');

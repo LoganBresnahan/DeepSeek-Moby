@@ -63,7 +63,7 @@ The backend (VS Code extension) follows an **Event-Driven Coordinator pattern** 
 │  │  │Buffer           │  │                 │  │ Executor            │     │ │
 │  │  │                 │  │ • read_file     │  │                     │     │ │
 │  │  │ • Tag filtering │  │ • write_file    │  │ • <shell> parsing   │     │ │
-│  │  │ • Lookahead     │  │ • search_files  │  │ • Command safety    │     │ │
+│  │  │ • Lookahead     │  │ • find_files  │  │ • Command safety    │     │ │
 │  │  │ • Debouncing    │  │ • list_dir      │  │ • Execution         │     │ │
 │  │  └─────────────────┘  └─────────────────┘  └─────────────────────┘     │ │
 │  └─────────────────────────────────────────────────────────────────────────┘ │
@@ -242,7 +242,7 @@ Stream ends
          │   └─► While hasToolCalls && iteration < max:
          │       • Execute tools (read_file, write_file, etc.)
          │       • _onToolCallsStart/Update/End.fire(...)
-         │       • diffManager.handleAutoShowDiff() for apply_code_edit
+         │       • diffManager.handleAutoShowDiff() for edit_file
          │       │
          │       ├─► [ASK MODE] If file modified in batch:
          │       │   • Close tool batch → emit pending files

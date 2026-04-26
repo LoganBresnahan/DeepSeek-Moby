@@ -87,7 +87,7 @@ Scenarios that have been implemented but not yet exercised in a VS Code dev host
 1. Trigger a turn with a reasoning-capable model so a **thinking** dropdown appears. Click the header to collapse/expand → transitions smoothly both ways.
 2. Same for **tools** dropdown (any tool call).
 3. Same for **shell** dropdown (R1 shell interrupt).
-4. Same for **pending** (pending changes after any `apply_code_edit` in ask mode).
+4. Same for **pending** (pending changes after any `edit_file` in ask mode).
 5. Code dropdown still animates (regression check).
 6. Collapsed state has **no 1px sliver** or phantom padding — the entire body (border + padding + content) collapses cleanly.
 

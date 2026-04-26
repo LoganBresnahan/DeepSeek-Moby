@@ -450,7 +450,7 @@ The extension currently has two code paths tied to DeepSeek model names (`deepse
 Send messages + tool definitions → model returns tool_calls → execute → feed result back → loop
 ```
 
-The model uses structured function calling (OpenAI `tool_calls` format) to invoke extension-defined tools: `apply_code_edit`, `web_search`, `read_file`, `shell_execute`, etc.
+The model uses structured function calling (OpenAI `tool_calls` format) to invoke extension-defined tools: `edit_file`, `web_search`, `read_file`, `shell_execute`, etc.
 
 **What makes this model-agnostic:**
 - The tool definitions are extension-owned, not model-specific

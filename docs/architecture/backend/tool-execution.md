@@ -88,13 +88,13 @@ Creates or overwrites a file.
 }
 ```
 
-### search_files
+### find_files
 
 Searches for files by pattern.
 
 ```typescript
 {
-  name: 'search_files',
+  name: 'find_files',
   description: 'Search for files matching a pattern',
   parameters: {
     type: 'object',
@@ -466,7 +466,7 @@ async applyDiff(diffId: string): Promise<void> {
 │  │  │      ─────────────────────                              │││
 │  │  │      const config = { ... }                             │││
 │  │  ├─────────────────────────────────────────────────────────┤││
-│  │  │  ✓  search_files                                        │││
+│  │  │  ✓  find_files                                        │││
 │  │  │      pattern: "*.test.ts"                               │││
 │  │  │      ─────────────────────                              │││
 │  │  │      Found 12 files                                     │││

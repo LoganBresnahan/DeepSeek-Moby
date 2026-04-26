@@ -180,7 +180,7 @@ export class FileContextManager {
   }
 
   /**
-   * Track a file read by the LLM tool loop (read_file or apply_code_edit).
+   * Track a file read by the LLM tool loop (read_file or edit_file).
    */
   trackReadFile(filePath: string): void {
     this.readFilesInTurn.add(filePath);

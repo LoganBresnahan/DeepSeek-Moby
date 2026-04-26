@@ -53,7 +53,7 @@ Rejected as premature. Without real traces of non-path-related thrash, we don't 
 
 Retire the `<shell>` / SEARCH-REPLACE protocol, ship Chat-only.
 
-Rejected — for now — because Chat's tool surface is currently weaker than R1 for agentic work. Chat can't create or delete files (planned work, [CLAUDE.md](../../../CLAUDE.md)). Dropping R1 before Chat reaches parity cuts off the only agentic option. The path forward is **Chat parity first, then reconsider R1's status.** Gated on the create_file / delete_file work.
+Rejected — for now — because Chat's tool surface is currently weaker than R1 for agentic work. Chat can't create or delete files (planned work, [CLAUDE.md](../../../CLAUDE.md)). Dropping R1 before Chat reaches parity cuts off the only agentic option. The path forward is **Chat parity first, then reconsider R1's status.** Gated on the write_file / delete_file work.
 
 ### D. Comment model-scope inline in the prompt text
 
@@ -65,7 +65,7 @@ Rejected immediately after trying it — HTML comments inside a template literal
 
 **Positive:**
 - Path-confusion thrash (the observed failure mode) has two independent lines of defense: R1 knows the rules, and if it violates them anyway the tool result tells it where files actually landed. Self-correction mid-turn becomes possible.
-- B's pattern is model-agnostic even though its implementation is R1-specific. When Chat's `apply_code_edit` tool result grows richer feedback, the same "absolute path of what changed" shape transfers directly.
+- B's pattern is model-agnostic even though its implementation is R1-specific. When Chat's `edit_file` tool result grows richer feedback, the same "absolute path of what changed" shape transfers directly.
 - No detector-style guards ship. No false-positive risk, no model-specific tuning cost, no "guards rotting as V4 changes behavior" liability.
 - Policy articulated: future "should we build a guard?" debates have a test — is it tool-surface or detector? Tool-surface wins by default; detectors require data.
 
@@ -76,6 +76,6 @@ Rejected immediately after trying it — HTML comments inside a template literal
 
 **Follow-ups:**
 - Observe next R1 sessions for thrash patterns. If path-confusion is closed but new shapes emerge, capture traces and revisit the detector question with data.
-- When Chat grows `create_file` / `delete_file`, apply the B pattern to Chat's tool-result builders. That's the first test of whether the policy holds — is the B pattern genuinely model-agnostic, or does it need adaptation?
+- When Chat grows `write_file` / `delete_file`, apply the B pattern to Chat's tool-result builders. That's the first test of whether the policy holds — is the B pattern genuinely model-agnostic, or does it need adaptation?
 - Giant-command approval UX (24KB heredoc preview was unreviewable). Not this ADR — separate UX issue tracked in CLAUDE.md.
 - ADR 000X (future): if we do move to persistent shell cwd, that's a semantic change worth its own record.

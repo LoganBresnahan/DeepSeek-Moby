@@ -31,15 +31,16 @@ describe('file capabilities', () => {
       expect(vscode.workspace.fs.writeFile).toHaveBeenCalledOnce();
     });
 
-    it('refuses to create a file that already exists', async () => {
+    it('overwrites an existing file and reports modified', async () => {
       (vscode.workspace.fs.stat as any).mockResolvedValue({ type: vscode.FileType.File, size: 100 });
 
       const result = await createFile('existing.ts', 'content');
 
-      expect(result.status).toBe('failure');
-      expect(result.error).toMatch(/already exists/);
-      expect(result.filesAffected).toEqual([]);
-      expect(vscode.workspace.fs.writeFile).not.toHaveBeenCalled();
+      expect(result.status).toBe('success');
+      expect(result.filesAffected).toHaveLength(1);
+      expect(result.filesAffected[0].action).toBe('modified');
+      expect(result.filesAffected[0].relativePath).toBe('existing.ts');
+      expect(vscode.workspace.fs.writeFile).toHaveBeenCalledOnce();
     });
 
     it('refuses paths that escape the workspace', async () => {

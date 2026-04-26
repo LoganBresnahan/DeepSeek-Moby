@@ -140,4 +140,43 @@ export const modelSelectorShadowStyles = `
     line-height: 1.3;
     opacity: 0.7;
   }
+
+  /* Reasoning-effort sub-control — appears under the active model entry
+     when the model is thinking-capable (registry default present). */
+  .reasoning-effort {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px 8px 24px;
+    font-size: 11px;
+    color: var(--vscode-descriptionForeground);
+  }
+
+  .reasoning-effort-label {
+    flex: 0 0 auto;
+    opacity: 0.85;
+  }
+
+  .reasoning-effort-pill {
+    flex: 0 0 auto;
+    padding: 2px 8px;
+    font-size: 11px;
+    line-height: 1.4;
+    border-radius: 10px;
+    border: 1px solid var(--vscode-input-border);
+    background: transparent;
+    color: var(--vscode-foreground);
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s, color 0.12s;
+  }
+
+  .reasoning-effort-pill:hover {
+    background: var(--vscode-toolbar-hoverBackground);
+  }
+
+  .reasoning-effort-pill.active {
+    background: var(--vscode-button-background);
+    border-color: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+  }
 `;

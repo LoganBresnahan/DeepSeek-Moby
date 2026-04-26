@@ -270,7 +270,7 @@ The inspector (`media/dev/inspector/InspectorShadowActor.ts`, 1712 lines) is alr
 - Some users prefer to manually curate context rather than trust the LLM
 
 **Arguments for simplifying:**
-- DeepSeek models with tool use can read files themselves (read_file, search_files tools)
+- DeepSeek models with tool use can read files themselves (read_file, find_files tools)
 - Users may not understand why they need to manually add files
 - The UI is another thing to learn and can be confusing
 

@@ -768,7 +768,7 @@ describe('MessageTurnActor', () => {
       actor.addPendingFile({ filePath: '/path/to/file.ts', diffId: 'diff-1', status: 'rejected' });
 
       // Group 2: same file, new diffId (retry)
-      actor.startToolBatch([{ name: 'apply_code_edit', detail: 'file.ts' }]);
+      actor.startToolBatch([{ name: 'edit_file', detail: 'file.ts' }]);
       actor.completeToolBatch();
       actor.addPendingFile({ filePath: '/path/to/file.ts', diffId: 'diff-2' });
 
@@ -788,12 +788,12 @@ describe('MessageTurnActor', () => {
       actor.setEditMode('auto');
 
       // First tool batch + modified file
-      actor.startToolBatch([{ name: 'apply_code_edit', detail: 'file1.ts' }]);
+      actor.startToolBatch([{ name: 'edit_file', detail: 'file1.ts' }]);
       actor.completeToolBatch();
       actor.addPendingFile({ filePath: 'src/file1.ts', status: 'applied' });
 
       // Second tool batch + modified file
-      actor.startToolBatch([{ name: 'apply_code_edit', detail: 'file2.ts' }]);
+      actor.startToolBatch([{ name: 'edit_file', detail: 'file2.ts' }]);
       actor.completeToolBatch();
       actor.addPendingFile({ filePath: 'src/file2.ts', status: 'applied' });
 
@@ -809,7 +809,7 @@ describe('MessageTurnActor', () => {
     it('groups consecutive pending files in same container', () => {
       actor.setEditMode('auto');
 
-      actor.startToolBatch([{ name: 'apply_code_edit', detail: 'files' }]);
+      actor.startToolBatch([{ name: 'edit_file', detail: 'files' }]);
       actor.completeToolBatch();
       actor.addPendingFile({ filePath: 'src/file1.ts', status: 'applied' });
       actor.addPendingFile({ filePath: 'src/file2.ts', status: 'applied' });

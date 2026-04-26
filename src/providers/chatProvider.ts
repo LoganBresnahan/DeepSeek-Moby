@@ -575,6 +575,27 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         case 'setFileEditLoops':
           await this.settingsManager.updateSettings({ maxFileEditLoops: data.fileEditLoops });
           break;
+        case 'setReasoningEffort': {
+          // Phase 4 — model-selector pill writes the per-model override into
+          // `moby.modelOptions.<id>.reasoningEffort`. The orchestrator reads
+          // this fresh on every request via `applyThinkingMode`, so the
+          // change takes effect on the next turn without any local cache
+          // invalidation. The config-change listener (registered in
+          // extension.ts) re-broadcasts the model list so the active pill
+          // ends up reflecting persisted state on every webview.
+          const model = data.model as string;
+          const effort = data.effort as 'high' | 'max' | undefined;
+          if (!model || (effort !== 'high' && effort !== 'max')) {
+            logger.warn(`[ChatProvider] setReasoningEffort: invalid payload (model=${model}, effort=${effort})`);
+            break;
+          }
+          const config = vscode.workspace.getConfiguration('moby');
+          const current = config.get<Record<string, { reasoningEffort?: 'high' | 'max' }>>('modelOptions') ?? {};
+          const next = { ...current, [model]: { ...(current[model] ?? {}), reasoningEffort: effort } };
+          await config.update('modelOptions', next, vscode.ConfigurationTarget.Global);
+          logger.info(`[ChatProvider] setReasoningEffort: ${model} → ${effort}`);
+          break;
+        }
         case 'setMaxTokens': {
           const model = data.model as string || this.deepSeekClient.getModel();
           const config = vscode.workspace.getConfiguration('moby');
@@ -1400,11 +1421,21 @@ export class ChatProvider implements vscode.WebviewViewProvider {
   public async sendModelList(): Promise<void> {
     if (!this._view) return;
     const models = getAllRegisteredModels();
+    // Pull the per-model overrides bag once. Each entry's effective effort
+    // is `override > registry default`. Sending `reasoningEffort` (the
+    // effective value) plus `reasoningEffortDefault` (already on the
+    // RegisteredModelInfo) lets the selector render the right active pill.
+    const modelOptions = vscode.workspace.getConfiguration('moby')
+      .get<Record<string, { reasoningEffort?: 'high' | 'max' }>>('modelOptions') ?? {};
     // Decorate custom models with key-presence for the settings popup UI.
     const decorated = await Promise.all(models.map(async (m) => {
-      if (!m.isCustom) return m;
+      const reasoningEffort = modelOptions[m.id]?.reasoningEffort ?? m.reasoningEffortDefault;
+      const withEffort = reasoningEffort
+        ? { ...m, reasoningEffort }
+        : m;
+      if (!m.isCustom) return withEffort;
       const hasApiKey = await this.deepSeekClient.hasPerModelKey(m.id);
-      return { ...m, hasApiKey };
+      return { ...withEffort, hasApiKey };
     }));
     this._view.webview.postMessage({
       type: 'modelListUpdated',

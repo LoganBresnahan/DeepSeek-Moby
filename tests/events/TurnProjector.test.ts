@@ -261,7 +261,7 @@ describe('TurnProjector', () => {
 
       it('handles Chat model flow: tools → files → text', () => {
         log.load([
-          { type: 'tool-batch-start', tools: [{ name: 'read_file', detail: 'Reading...' }, { name: 'apply_code_edit', detail: 'Editing...' }], ts: 1 },
+          { type: 'tool-batch-start', tools: [{ name: 'read_file', detail: 'Reading...' }, { name: 'edit_file', detail: 'Editing...' }], ts: 1 },
           { type: 'tool-update', index: 0, status: 'done', ts: 2 },
           { type: 'tool-update', index: 1, status: 'done', ts: 3 },
           { type: 'tool-batch-complete', ts: 4 },

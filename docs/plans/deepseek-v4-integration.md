@@ -216,6 +216,159 @@ Existing R1 (`deepseek-reasoner`) doesn't have this requirement (R1 has no tool-
 
 After Phase 3: V4-thinking with multi-turn tool loops works.
 
+### Phase 3.5 — System prompt minimal variant for V4-thinking (~1.5 hours)
+
+**Motivation.** Today's system prompt is one ~60-line block built in `requestOrchestrator.ts` around the `buildSystemPrompt`/`#systemPrompt` path (line 1075+). It was calibrated for V3 — a model that can't reliably disambiguate "show me an example" from "create a file for me" without an explicit decision tree. V4-thinking with `reasoning_effort=high` runs the prompt through its reasoning pass before acting; verbose instructions cost reasoning tokens, and the prompt's enumeration of edit-trigger phrases ("update foo.ts", "add X", "fix this bug") appears to bias V4 toward edit behavior even on read-only questions.
+
+Observed in [logs/445pm.log], a V4-flash-thinking turn made an `edit_file` adding `aliases: aliases()` to `mix.exs`, immediately reverted it, then attempted a third edit that failed — all in response to a user question about Sudoku board sizes. The model treated a question about an existing project as continuation of an unfinished build. Plausibly the prompt encouraged that read.
+
+**Changes.**
+
+1. Add a new optional capability axis: `promptStyle: 'minimal' | 'standard'`. Defaults to `'standard'` when omitted. V3 / R1 / V4-non-thinking / custom models keep today's prompt unchanged.
+
+2. Set `promptStyle: 'minimal'` on `deepseek-v4-flash-thinking` and `deepseek-v4-pro-thinking`. Pro-thinking shares the flag because `reasoning_effort=max` makes the over-prescriptive prompt even more expensive in reasoning tokens.
+
+3. Refactor the inline system-prompt construction. Extract a `buildSystemPrompt(modelId, editMode, …)` helper that branches on `caps.promptStyle`. Both branches share the same skeleton so future axes (per-mode tool descriptions, web-search hints) compose cleanly.
+
+**Two variants to start:**
+
+| Section | Standard (today) | Minimal (V4-thinking) |
+|---|---|---|
+| Identity ("You are DeepSeek Moby…") | keep | keep |
+| Reference/teaching vs edit-request decision tree | keep | **drop** — V4 infers intent from phrasing |
+| Tool list — explore tools | keep with current framing | keep, **neutral framing** ("Tools available:" not "You have tools to") |
+| Tool list — modify-workspace tools | keep with current framing | keep, **neutral framing**, drop edit-trigger phrase enumeration |
+| Numbered rules 1–5 (paths, terminal actions, delete-vs-create, etc.) | keep all | keep #2 ("trust absolute paths from tool results" — load-bearing per ADR 0004) and #3 ("delete is terminal in the turn" — prevents real bugs); drop the rest |
+| Edit-mode descriptor (manual / ask / auto) | keep | keep |
+| `# File:` header / SEARCH-REPLACE format guidance | keep (R1 needs it; non-thinking V4 still benefits) | keep — `edit_file`'s structured schema already pushes the right shape, but a one-line reminder costs little |
+
+**Empirical comparison protocol.** Don't ship the minimal variant on intuition alone. Run the same prompts on both styles and compare:
+
+- API call count.
+- Total wall time.
+- Number of edits attempted vs. number actually needed for the task.
+- Whether the response correctness matches user intent.
+
+Test prompts (run on both `promptStyle` values for `deepseek-v4-flash-thinking`):
+
+- **Creation-heavy:** "Build me a sudoku game in Elixir." — should produce a similar number of `write_file` calls in both. Regression is the worst case.
+- **Read-only question:** "What does the function `solve/1` in `lib/sudoku/solver.ex` do?" — minimal should not produce any edits; standard sometimes will.
+- **Targeted edit:** "Rename the function `foo` to `bar` in `src/file.ts`." — both should produce one `edit_file` with a single search/replace pair.
+- **The exact regression:** "Explain Sudoku board sizes" — pointed at an existing Sudoku project. Replays the [445pm.log] over-eager-edit case. Minimal should answer without any edits; standard reproduced the wasted edit + revert.
+
+**Pass criterion.** Minimal must produce same-or-fewer API calls, same-or-fewer attempted edits, with same-or-better response quality across all four prompts. If any test regresses materially (e.g., minimal misses a guardrail and creates the wrong file), the per-test fix is to fold the relevant standard-prompt language back into minimal — not to abandon the variant.
+
+**What we are NOT doing in Phase 3.5.**
+
+- **Per-turn dynamic prompt selection.** The prompt style is fixed by model capability. A future axis could let users override per-session, but adding that machinery before we know the variants are useful is premature.
+- **Custom prompt strings in `moby.modelOptions`.** Users can already set `customSystemPrompt` for their custom models; we don't extend that to built-in entries here. Stay scoped to the registry-controlled split.
+- **Splitting V3-era guidance from R1-era guidance.** R1 has its own system-prompt path via `getReasonerShellPrompt` already — out of scope.
+
+**Risks and mitigation.**
+
+- *Removing rules that were quietly load-bearing.* Mitigation: keep the two rules with documented incident history (#2 absolute-path rule from ADR 0004; #3 terminal-action rule). For each rule we drop, leave a one-line code comment explaining what it was guarding against, so re-adding is fast if a regression appears.
+- *Per-model prompts diverge over time.* Mitigation: shared skeleton in the builder; the two branches are diffs of each other, not parallel rewrites.
+- *Empirical results don't show a clear win.* Acceptable outcome — we ship the registry axis but leave V4-thinking on `'standard'` for now, and the infrastructure is in place to revisit.
+
+After Phase 3.5: V4-thinking models use a prompt calibrated for reasoning-style models. V3 / R1 / V4-non-thinking / custom models unchanged. The capability axis is reusable for any future model that wants its own prompt flavor.
+
+**Status (2026-04-25):** Code changes shipped — capability axis, V4-thinking entries flipped to `'minimal'`, both prompt variants live. The formal four-prompt empirical comparison is deferred to the manual-test backlog as future validation; the trigger to run it is a real-world V4-thinking turn that misbehaves in a way the standard prompt would have caught (e.g., creating files on a "show me" question, ignoring a clarifying-question opportunity). Initial real-turn evidence on `'minimal'` is positive — the Sudoku-Elixir build (6:03pm log) handled 31 tool calls cleanly with three successful `edit_file` patches and no thrash, comparing favorably to the prior pre-refactor turns where `apply_code_edit` + the destructive-merge fallback produced repeated failures.
+
+### Phase 3.75 — `run_shell` tool for native-tool models (~3 hours)
+
+**Motivation.** V4 has a meaningful capability gap relative to peer tools: it can read `package.json` and infer the test command, but can't execute it. It can write code, but can't verify the code compiles. Every other framework targeting developer use cases — Claude Code, Cursor, Cline, Aider — exposes shell as a first-class tool. R1 has shell via the `<shell>` XML transport (because R1 lacks native tool calling), but V4 / V3-chat / native-tool custom models don't. This is the single highest-leverage capability we could add — common follow-up tasks like "run the tests", "format the code", "install this dependency", "run git status" currently break the loop and force the user to leave the chat to run the command themselves.
+
+**The infrastructure already exists.** `CommandApprovalManager`, `executeShellCommands`, the approval UI, the `LONG_RUNNING_PATTERNS` list, the `BLOCKED_PATTERNS` blocklist, the `allowAllShellCommands` bypass, the shell-result dropdown UI — all of this is wired and serves R1's `<shell>` path today. We're not building new safety machinery, we're routing native tool calls into existing safety machinery.
+
+**Threat-model note.** Shell is the only tool with unbounded harm. Approval is the line of defense. The threat surface for V4 isn't worse than R1's today: prompt injection attacks against shell already exist via R1's `<shell>` transport, and they hit the same approval gate. We're not opening new attack surface, just letting more models reach the existing gate.
+
+**Capability axis update.** `shellProtocol` gains a third value: `'xml-shell' | 'native-tool' | 'none'`.
+
+| Value | Models | Transport |
+|---|---|---|
+| `'xml-shell'` | `deepseek-reasoner` (R1) | Parses `<shell>...</shell>` tags from content; existing path. |
+| `'native-tool'` | `deepseek-chat`, `deepseek-v4-flash[-thinking]`, `deepseek-v4-pro[-thinking]`, custom models with `toolCalling: 'native'` | New: `run_shell` tool in the OpenAI-compat `tools` array. |
+| `'none'` | Reserved — currently unused | No shell access. |
+
+The orchestrator's tool-array assembly conditionally includes `runShellTool` when `caps.shellProtocol === 'native-tool'`. Same dispatcher pattern as the existing edit/file tools.
+
+**Tool schema.**
+
+```ts
+export const runShellTool: Tool = {
+  type: 'function',
+  function: {
+    name: 'run_shell',
+    description:
+      'Run a shell command in the workspace and return its output. ' +
+      'Use this for actions that have no dedicated tool: running tests, ' +
+      'compiling, installing dependencies, git operations, etc. ' +
+      'Long-running commands (servers, watch modes, REPLs) are refused — ' +
+      'the result will tell you to ask the user to run them manually. ' +
+      'In ask mode, each command requires user approval before executing.',
+    parameters: {
+      type: 'object',
+      properties: {
+        command: {
+          type: 'string',
+          description: 'The shell command to execute. A single command line; chain with `&&` if you need multiple steps.'
+        },
+        description: {
+          type: 'string',
+          description: 'Brief description of what this command does, shown to the user during approval.'
+        }
+      },
+      required: ['command']
+    }
+  }
+};
+```
+
+**Dispatch path.** Mirrors the existing `<shell>` flow with one less parsing step:
+
+1. Model emits a `run_shell` tool call.
+2. Orchestrator's `runToolLoop` recognizes the name; passes the `command` string into the existing `parseShellCommands` (via a single-command shim), the `CommandApprovalManager.requestApproval` flow, and `executeShellCommands` with the same long-running-detection guard.
+3. The captured stdout/stderr + file-watcher diff (modified/deleted files) is formatted via `formatShellResultsForContext` — identical to R1 — so the assistant gets the same absolute-path ground truth (ADR 0004 B-pattern).
+4. Activity indicator: `pushTurnActivity('shell', `Running ${preview}`)` — same UI as R1's inline shell.
+
+No new approval machinery. No new output capture. No new UI components. Just one new tool entry that funnels into the existing pipeline.
+
+**Prompt updates.** Both `MINIMAL` and `STANDARD` variants gain one line under the modify-workspace section:
+
+> `- run_shell: Run a shell command in the workspace (tests, builds, git, etc.). Long-running commands (servers, watch modes) are refused.`
+
+Standard variant additionally adds a rule:
+
+> *Use the dedicated tool when one exists — `read_file` not `cat`, `find_files` not `find`, `grep` not `grep`. Reach for `run_shell` when no dedicated tool fits (running tests, building, git operations, installing deps).*
+
+Minimal variant skips the rule — V4-thinking can infer this from the tool descriptions.
+
+**System-prompt scope question.** R1's prompt (via `getReasonerShellPrompt`) is unchanged. R1 keeps `<shell>` and the existing path-semantics rules from ADR 0004. Phase 3.75 does not touch R1.
+
+**What we are NOT doing in Phase 3.75.**
+
+- **Per-turn shell toggle.** Always-on for native-tool models; user can suppress via `allowAllShellCommands` setting flip or by clearing rules. Reserved for a future plan if telemetry shows users want finer control.
+- **Streaming shell output.** Output captures fully before being sent back to the model. Live streaming of long-running output is deferred — most useful commands (test, build, git) finish in seconds.
+- **Interactive shell sessions.** No persistent shell, no stdin. Each `run_shell` call is a fresh invocation, same as R1's existing semantics. Persistent cwd would be its own ADR.
+- **Per-OS shell selection beyond what `resolveShell()` already does.** Existing logic (Git Bash on Windows, default shell elsewhere) covers the standard cases.
+
+**Risks and mitigation.**
+
+- *Models call `run_shell` for things tools cover better.* (e.g., `cat foo.ts` instead of `read_file`.) Mitigation: explicit guidance in the standard prompt, descriptions in the tool schema. Empirical: watch for it in real turns and tighten the prompt if it persists.
+- *Tool-def overhead.* `run_shell` adds ~200 tokens to every request that includes the tools array. Acceptable cost for the capability lift.
+- *Approval-flow fatigue.* Users in ask mode get prompted on every command. Existing mitigations (per-prefix allow/block rules, `allowAllShellCommands` bypass) already address this for R1; same behavior carries over.
+
+**Manual test backlog entries (post-ship):**
+
+- T1: V4-flash-thinking turn that needs to run tests — verify model picks `run_shell`, command appears in approval UI, output flows back into the conversation.
+- T2: Long-running detection still rejects `npm run dev` / `flask run` / etc. via `LONG_RUNNING_PATTERNS`.
+- T3: `allowAllShellCommands=true` bypasses approval for native-tool path same as for R1.
+- T4: File-watcher diff (modified/deleted files) appears in the tool result with absolute paths — ADR 0004 B-pattern preserved.
+- T5: Interrupt during shell execution (user clicks stop) cancels cleanly — same path R1 uses.
+- T6: Custom model with `toolCalling: 'native'` and `shellProtocol: 'native-tool'` (e.g., a Qwen-Coder template) gets `run_shell` automatically.
+
+After Phase 3.75: V4 / V3-chat / native-tool custom models can run tests, build code, do git operations, install dependencies, and recover from compile errors mid-turn. R1's path is unchanged.
+
 ### Phase 4 — `reasoningEffort` UI + per-model override (~2 hours)
 
 - Add `moby.modelOptions` schema to `package.json`.

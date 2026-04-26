@@ -841,7 +841,15 @@ describe('RequestOrchestrator', () => {
       expect(mockClient.chat).not.toHaveBeenCalled();
     });
 
-    it('should call showDiff for apply_code_edit in manual mode', async () => {
+    // edit_file takes a structured `edits: [{search, replace}, ...]`
+    // array. The orchestrator synthesizes the SEARCH/REPLACE block string
+    // that downstream diff machinery expects, so the assertions check the
+    // synthesized format rather than the raw model-facing input.
+    const edit = { search: 'old code', replace: 'console.log("hello")' };
+    const expectedBlock =
+      `<<<<<<< SEARCH\nold code\n=======\nconsole.log("hello")\n>>>>>>> REPLACE`;
+
+    it('should call showDiff for edit_file in manual mode', async () => {
       mockDiffManager.currentEditMode = 'manual';
 
       let callCount = 0;
@@ -854,10 +862,10 @@ describe('RequestOrchestrator', () => {
               id: 'tc-1',
               type: 'function',
               function: {
-                name: 'apply_code_edit',
+                name: 'edit_file',
                 arguments: JSON.stringify({
                   file: 'src/index.ts',
-                  code: 'console.log("hello")',
+                  edits: [edit],
                   language: 'typescript'
                 })
               }
@@ -870,14 +878,14 @@ describe('RequestOrchestrator', () => {
       await orchestrator.handleMessage('Edit the file', null, async () => '', undefined);
 
       expect(mockDiffManager.showDiff).toHaveBeenCalledWith(
-        '# File: src/index.ts\nconsole.log("hello")',
+        `# File: src/index.ts\n${expectedBlock}`,
         'typescript'
       );
       expect(mockDiffManager.applyCodeDirectlyForAutoMode).not.toHaveBeenCalled();
       expect(mockDiffManager.handleAskModeDiff).not.toHaveBeenCalled();
     });
 
-    it('should call applyCodeDirectlyForAutoMode for apply_code_edit in auto mode', async () => {
+    it('should call applyCodeDirectlyForAutoMode for edit_file in auto mode', async () => {
       mockDiffManager.currentEditMode = 'auto';
 
       let callCount = 0;
@@ -890,10 +898,10 @@ describe('RequestOrchestrator', () => {
               id: 'tc-1',
               type: 'function',
               function: {
-                name: 'apply_code_edit',
+                name: 'edit_file',
                 arguments: JSON.stringify({
                   file: 'src/index.ts',
-                  code: 'console.log("hello")',
+                  edits: [edit],
                   language: 'typescript'
                 })
               }
@@ -907,14 +915,14 @@ describe('RequestOrchestrator', () => {
 
       expect(mockDiffManager.applyCodeDirectlyForAutoMode).toHaveBeenCalledWith(
         'src/index.ts',
-        'console.log("hello")',
+        expectedBlock,
         undefined,
         true
       );
       expect(mockDiffManager.showDiff).not.toHaveBeenCalled();
     });
 
-    it('should call handleAskModeDiff for apply_code_edit in ask mode', async () => {
+    it('should call handleAskModeDiff for edit_file in ask mode', async () => {
       mockDiffManager.currentEditMode = 'ask';
       mockDiffManager.waitForPendingApprovals.mockResolvedValue([{ approved: true, filePath: 'src/index.ts' }]);
 
@@ -928,10 +936,10 @@ describe('RequestOrchestrator', () => {
               id: 'tc-1',
               type: 'function',
               function: {
-                name: 'apply_code_edit',
+                name: 'edit_file',
                 arguments: JSON.stringify({
                   file: 'src/index.ts',
-                  code: 'console.log("hello")',
+                  edits: [edit],
                   language: 'typescript'
                 })
               }
@@ -944,7 +952,7 @@ describe('RequestOrchestrator', () => {
       await orchestrator.handleMessage('Edit the file', null, async () => '', undefined);
 
       expect(mockDiffManager.handleAskModeDiff).toHaveBeenCalledWith(
-        '# File: src/index.ts\nconsole.log("hello")',
+        `# File: src/index.ts\n${expectedBlock}`,
         'typescript'
       );
       expect(mockDiffManager.showDiff).not.toHaveBeenCalled();
@@ -1639,7 +1647,7 @@ describe('RequestOrchestrator', () => {
       recorder.startTurn('turn-x', 'session-1');
 
       (orchestrator as any)._onToolCallsStart.fire({
-        tools: [{ name: 'apply_code_edit', detail: '', status: 'pending' }],
+        tools: [{ name: 'edit_file', detail: '', status: 'pending' }],
       });
       (orchestrator as any)._onToolCallUpdate.fire({ index: 0, status: 'done', detail: '' });
       (orchestrator as any)._onToolCallsEnd.fire();

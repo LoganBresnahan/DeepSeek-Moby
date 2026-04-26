@@ -1,10 +1,11 @@
 import * as vscode from 'vscode';
 import { DeepSeekClient, Message as ApiMessage } from '../deepseekClient';
+import { getCapabilities, PromptStyle } from '../models/registry';
 import { StatusBar } from '../views/statusBar';
 import { ConversationManager } from '../events';
 import { logger } from '../utils/logger';
 import { tracer } from '../tracing';
-import { workspaceTools, applyCodeEditTool, createFileTool, deleteFileTool, deleteDirectoryTool, webSearchTool, executeToolCall } from '../tools/workspaceTools';
+import { workspaceTools, applyCodeEditTool, createFileTool, deleteFileTool, deleteDirectoryTool, runShellTool, webSearchTool, executeToolCall } from '../tools/workspaceTools';
 import { createFile as createFileCapability, deleteFile as deleteFileCapability } from '../capabilities/files';
 import { formatFilesAffected } from '../capabilities/types';
 import { parseDSMLToolCalls, stripDSML } from '../utils/dsmlParser';
@@ -726,7 +727,9 @@ export class RequestOrchestrator {
     // Log the API request
     const model = this.deepSeekClient.getModel();
     const hasAttachments = attachments && attachments.length > 0;
-    const requestStartTime = Date.now();
+    // performance.now() — monotonic, immune to wall-clock lurches (WSL2
+    // sleep/resume can produce negative durations with Date.now()).
+    const requestStartTime = performance.now();
 
     // Declare outside try so it's accessible in catch for partial save
     let toolCallsForHistory: Array<{ name: string; detail: string; status: string }> = [];
@@ -889,7 +892,7 @@ export class RequestOrchestrator {
 
       // Log successful response
       const tokenCount = this.deepSeekClient.estimateTokens(cleanResponse + streamState.fullReasoning);
-      logger.apiResponse(tokenCount, Date.now() - requestStartTime);
+      logger.apiResponse(tokenCount, Math.round(performance.now() - requestStartTime));
 
       // Update status bar
       this.statusBar.updateLastResponse();
@@ -998,10 +1001,54 @@ export class RequestOrchestrator {
 
       this._onError.fire({ error: errorMessage });
 
+      // Finalize the in_progress assistant_message with status='interrupted'
+      // and an error marker. Without this, ConversationManager hydration sees
+      // a turn whose only assistant_message row is status='in_progress' and
+      // synthesizes a `shutdown-interrupted` event — surfacing the misleading
+      // "*[Interrupted by shutdown]*" marker on a turn that actually died to
+      // an API error. Mirrors the abort path above ([line ~950]) but with a
+      // marker that names the real cause.
+      if (sessionId) {
+        const partialContent = streamState.accumulatedResponse || streamState.fullResponse || '';
+        const errorMarker = `*[API error: ${errorMessage}]*`;
+        const savedText = partialContent
+          ? `${stripUnfencedSearchReplace(stripWebSearchTags(stripShellTags(stripDSML(partialContent))))}\n\n${errorMarker}`
+          : errorMarker;
+        try {
+          for (let i = 0; i < streamState.reasoningIterations.length; i++) {
+            this.conversationManager.recordAssistantReasoning(sessionId, streamState.reasoningIterations[i], i);
+          }
+          await this.conversationManager.recordAssistantMessage(
+            sessionId, savedText, model, 'stop', undefined, undefined, undefined,
+            { status: 'interrupted', turnId: this._currentTurnId ?? undefined }
+          );
+          logger.info(`[RequestOrchestrator] Saved error-finalized turn to history`);
+        } catch (saveError: any) {
+          logger.error(`[RequestOrchestrator] Failed to finalize errored turn: ${saveError.message}`);
+        }
+        // Surface the marker live too, so the user sees the cause of the
+        // failure inline instead of a silent stop.
+        this._onStreamToken.fire({ token: `\n\n${errorMarker}` });
+        this._onEndResponse.fire({
+          role: 'assistant',
+          content: savedText,
+          reasoning_content: streamState.fullReasoning || undefined,
+          finish_reason: 'stop'
+        } as any);
+      }
+
       // ADR 0003 Phase 3 follow-up: drain the structural recorder on non-abort
       // error paths too, so a crashed/failed turn leaves a lastCompletedTurn
       // inspectable via `Moby: Export Turn as JSON`. Without this, the recorder
       // stays mid-turn until the next handleMessage discards it silently.
+      if (this._currentIterationForRecorder > 0) {
+        this._flushCodeBlocksForIteration(this._currentIterationForRecorder);
+        this._appendStructuralEvent({
+          type: 'iteration-end',
+          iteration: this._currentIterationForRecorder,
+          ts: Date.now(),
+        });
+      }
       this.structuralEvents.drainTurn();
     } finally {
       const wasAborted = this.abortController === null || signal.aborted;
@@ -1073,49 +1120,19 @@ export class RequestOrchestrator {
     const isReasonerModel = this.deepSeekClient.isReasonerModel();
     const customSystemPrompt = this.savedPromptManager?.getActiveContent() || '';
     const editMode = this.diffManager.currentEditMode;
+    const promptStyle: PromptStyle = getCapabilities(this.deepSeekClient.getModel()).promptStyle ?? 'standard';
 
     // ── 1. Identity + Conversational Gate ──
-    let systemPrompt = `You are DeepSeek Moby, an expert programming assistant integrated into VS Code.
-
-Match your response to the user's intent. The distinction between "show me" and "change my code" is critical:
-
-- **Reference / teaching requests** ("show me", "give me an example", "what would X look like", "how do I", "demonstrate"): respond with a prose explanation and a plain markdown code block in your reply. Do NOT call create_file, apply_code_edit, or delete_file — the user wants to see code, not have files appear in their workspace.
-- **Edit requests** ("update foo.ts", "add X to my project", "fix this bug", "refactor Y"): use the appropriate edit tool.
-- **Architecture / design discussions**: discuss tradeoffs in prose; edit only if explicitly asked.
-- **Debugging**: analyze the problem in prose; suggest or apply fixes only when asked.
-
-When the user's phrasing is ambiguous, lean toward prose + markdown. Ask a clarifying question rather than creating files the user didn't ask for.\n`;
+    let systemPrompt = buildIdentityAndGate(promptStyle);
 
     // ── 2. Model-specific capabilities ──
     const wsState = await this.webSearchManager.getSettings();
     const webSearchAutoAvailable = wsState.mode === 'auto' && wsState.configured;
+    const runShellAvailable = getCapabilities(this.deepSeekClient.getModel()).shellProtocol === 'native-tool';
     if (isReasonerModel) {
       systemPrompt += getReasonerShellPrompt({ webSearchAvailable: webSearchAutoAvailable });
     } else {
-      const webSearchLine = webSearchAutoAvailable
-        ? '- web_search: Search the web for current information\n'
-        : '';
-      systemPrompt += `
-You have tools to explore the codebase:
-- read_file: Read file contents
-- search_files: Find files by name pattern
-- grep_content: Search for text/patterns in files
-- list_directory: See directory structure
-- get_file_info: Get file metadata
-${webSearchLine}
-Use tools to understand the code before responding. Read relevant files first, then provide accurate answers.
-
-You have tools to modify the workspace:
-- apply_code_edit: Modify an existing file (use SEARCH/REPLACE format)
-- create_file: Create a new file with full content (prefer this over apply_code_edit when you know the file is new)
-- delete_file: Delete a file (moves to trash; requires user confirmation in ask mode)
-- delete_directory: Delete a directory (moves to trash; recursive="true" to delete populated directories and all contents; requires user confirmation in ask mode)
-
-Rules for file modifications:
-1. Paths are relative to the workspace root.
-2. After each operation, tool results include the absolute path of files touched — trust those paths over your own assumptions.
-3. delete_file and delete_directory are TERMINAL actions for that path in the turn. Once either succeeds, do not call apply_code_edit, create_file, or the other delete tool on the same path — that either fails or recreates what you just deleted.
-4. Use delete_file for files and delete_directory for directories. If you delete all files inside a directory and want to remove the now-empty directory too, call delete_directory on it (with recursive="false", the default). Set recursive="true" only when you explicitly want to delete a directory AND every file inside it in one operation.\n`;
+      systemPrompt += buildToolGuidance(promptStyle, webSearchAutoAvailable, runShellAvailable);
     }
 
     // ── 3. Edit format (compact) ──
@@ -1444,8 +1461,9 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
       this._inlineExecutedCommands.clear();
       this._inlineExecutionPromise = null;
 
-      // Timing metrics for debugging
-      const iterationStartTime = Date.now();
+      // Timing metrics for debugging — performance.now() throughout so
+      // durations stay positive even if Date.now() lurches mid-iteration.
+      const iterationStartTime = performance.now();
       let firstReasoningTokenTime: number | null = null;
       let firstContentTokenTime: number | null = null;
 
@@ -1468,10 +1486,10 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
           async (token) => {
             // Track timing for first content token
             if (!firstContentTokenTime) {
-              firstContentTokenTime = Date.now();
-              const waitTime = firstContentTokenTime - iterationStartTime;
+              firstContentTokenTime = performance.now();
+              const waitTime = Math.round(firstContentTokenTime - iterationStartTime);
               const afterReasoning = firstReasoningTokenTime
-                ? firstContentTokenTime - firstReasoningTokenTime
+                ? Math.round(firstContentTokenTime - firstReasoningTokenTime)
                 : 0;
               logger.info(`[Timing] First content token after ${waitTime}ms (${afterReasoning}ms after reasoning started)`);
               if (!isReasonerModel) {
@@ -1506,8 +1524,8 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
           // Reasoning callback for deepseek-reasoner
           isReasonerModel ? (reasoningToken) => {
             if (!firstReasoningTokenTime) {
-              firstReasoningTokenTime = Date.now();
-              const waitTime = firstReasoningTokenTime - iterationStartTime;
+              firstReasoningTokenTime = performance.now();
+              const waitTime = Math.round(firstReasoningTokenTime - iterationStartTime);
               logger.info(`[Timing] First reasoning token after ${waitTime}ms`);
               logger.apiStreamProgress('first-token');
               logger.apiStreamProgress('thinking-start');
@@ -1862,7 +1880,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
       }
 
       // Iteration boundary log — applies to every multi-iteration loop, not just R1.
-      const iterationDuration = Date.now() - iterationStartTime;
+      const iterationDuration = Math.round(performance.now() - iterationStartTime);
       logger.info(`[Timing] Iteration ${shellIteration + 1} complete in ${iterationDuration}ms`);
       logger.info(`[Iteration] Iteration ${shellIteration + 1} complete, response length: ${iterationResponse.length} chars`);
       logger.info(`[Iteration] Response preview: ${iterationResponse.substring(0, 300).replace(/\n/g, '\\n')}...`);
@@ -2082,7 +2100,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
             }
 
             // Execute approved commands with file change detection
-            const shellStartTime = Date.now();
+            const shellStartTime = performance.now();
             logger.info(`[Timing] Shell execution started at ${new Date().toISOString()}`);
 
             // Watch for file changes during shell execution
@@ -2119,7 +2137,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
               ? await executeShellCommands(approvedCommands, workspacePath, { allowAllCommands, signal })
               : [];
             const results = [...blockedResults, ...executedResults];
-            const shellDuration = Date.now() - shellStartTime;
+            const shellDuration = Math.round(performance.now() - shellStartTime);
             logger.info(`[Timing] Shell execution completed in ${shellDuration}ms`);
 
             // Dispose watcher and notify DiffManager of modified/deleted files
@@ -2482,15 +2500,22 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
         break;
       }
 
-      // Build tools array (include web_search only when mode is 'auto' and Tavily is configured)
+      // Build tools array. `web_search` is included when mode='auto' and a
+      // provider is configured. `run_shell` is included for native-tool-
+      // calling models that have `shellProtocol: 'native-tool'` (V3 chat,
+      // V4 family, custom natives). R1 stays on the `<shell>` XML transport
+      // — its `shellProtocol: 'xml-shell'` keeps the schema out of the
+      // tools array and the existing parser owns its dispatch.
       const toolLoopWsState = await this.webSearchManager.getSettings();
       const includeWebSearch = toolLoopWsState.mode === 'auto' && toolLoopWsState.configured;
+      const includeRunShell = getCapabilities(this.deepSeekClient.getModel()).shellProtocol === 'native-tool';
       const tools = [
         ...workspaceTools,
         applyCodeEditTool,
         createFileTool,
         deleteFileTool,
         deleteDirectoryTool,
+        ...(includeRunShell ? [runShellTool] : []),
         ...(includeWebSearch ? [webSearchTool] : [])
       ];
 
@@ -2533,20 +2558,20 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
         let detail = name;
         if (name === 'read_file' && args.path) {
           detail = `read: ${args.path}`;
-        } else if (name === 'search_files' && args.pattern) {
-          detail = `search: ${args.pattern}`;
-        } else if (name === 'grep_content' && args.query) {
+        } else if (name === 'find_files' && args.pattern) {
+          detail = `find: ${args.pattern}`;
+        } else if (name === 'grep' && args.query) {
           detail = `grep: "${args.query}"`;
         } else if (name === 'list_directory') {
           detail = `list: ${args.path || '.'}`;
-        } else if (name === 'get_file_info' && args.path) {
-          detail = `info: ${args.path}`;
+        } else if (name === 'file_metadata' && args.path) {
+          detail = `metadata: ${args.path}`;
         } else if (name === 'web_search' && args.query) {
           detail = `search web: "${args.query}"`;
-        } else if (name === 'apply_code_edit' && args.file) {
+        } else if (name === 'edit_file' && args.file) {
           detail = `edit: ${args.file}`;
-        } else if (name === 'create_file' && args.path) {
-          detail = `create: ${args.path}`;
+        } else if (name === 'write_file' && args.path) {
+          detail = `write: ${args.path}`;
         } else if (name === 'delete_file' && args.path) {
           detail = `delete: ${args.path}`;
         } else if (name === 'delete_directory' && args.path) {
@@ -2648,19 +2673,33 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
           }
         }
 
-        // Track apply_code_edit tool calls for file path extraction
-        if (toolCall.function.name === 'apply_code_edit' && success) {
+        // Track edit_file tool calls for file path extraction
+        if (toolCall.function.name === 'edit_file' && success) {
           try {
-            logger.info(`[RequestOrchestrator] apply_code_edit tool called - args: ${toolCall.function.arguments}`);
+            logger.info(`[RequestOrchestrator] edit_file tool called - args: ${toolCall.function.arguments}`);
             const args = JSON.parse(toolCall.function.arguments);
-            logger.info(`[RequestOrchestrator] Parsed apply_code_edit args: ${JSON.stringify(args)}`);
+            logger.info(`[RequestOrchestrator] Parsed edit_file args: ${JSON.stringify(args)}`);
             if (args.file) {
               this.fileContextManager.trackReadFile(args.file);
 
-              if (args.code) {
+              // Build SEARCH/REPLACE block string from the structured `edits`
+              // array. The DiffEngine downstream still parses this format, so
+              // synthesizing it here keeps that infrastructure unchanged
+              // while the model-facing schema is structured (no free-form
+              // code that the engine had to guess about).
+              const editsArray = Array.isArray(args.edits) ? args.edits as Array<{ search?: string; replace?: string }> : null;
+              const code = editsArray
+                ? editsArray.map(e =>
+                    `<<<<<<< SEARCH\n${e.search ?? ''}\n=======\n${e.replace ?? ''}\n>>>>>>> REPLACE`
+                  ).join('\n\n')
+                : '';
+
+              if (!editsArray || editsArray.length === 0) {
+                result = `edit_file failed for ${args.file}: missing or empty 'edits' array. Resend the call with at least one {search, replace} pair, or use write_file for a full-file rewrite.`;
+              } else if (code) {
                 if (this.diffManager.currentEditMode === 'ask') {
-                  logger.info(`[RequestOrchestrator] Triggering blocking diff for apply_code_edit in ask mode`);
-                  const codeWithHeader = `# File: ${args.file}\n${args.code}`;
+                  logger.info(`[RequestOrchestrator] Triggering blocking diff for edit_file in ask mode`);
+                  const codeWithHeader = `# File: ${args.file}\n${code}`;
                   const language = args.language || 'plaintext';
                   await this.diffManager.handleAskModeDiff(codeWithHeader, language);
 
@@ -2687,7 +2726,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
                   }
                 } else if (this.diffManager.currentEditMode === 'auto') {
                   logger.info(`[RequestOrchestrator] Auto-applying code edit for: ${args.file}`);
-                  const applied = await this.diffManager.applyCodeDirectlyForAutoMode(args.file, args.code, args.description, true);
+                  const applied = await this.diffManager.applyCodeDirectlyForAutoMode(args.file, code, args.description, true);
                   if (applied) {
                     fileModifiedInBatch = true;
                     const wsFolder = vscode.workspace.workspaceFolders?.[0];
@@ -2695,35 +2734,37 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
                     result = `Code edit applied to ${args.file}.` +
                       (absPath ? formatFilesAffected([{ absolutePath: absPath, relativePath: args.file, action: 'modified' }]) : '');
                   } else {
-                    // If auto-apply failed (stale content), update the tool result
-                    // so the LLM knows to re-read the file
-                    result = `Code edit failed for ${args.file}: the file content has changed since you last read it. Please read the file again before making edits.`;
+                    // Auto-apply failed — either stale content or the search
+                    // text didn't match the current file. The model needs
+                    // both signals: re-read, and double-check the search
+                    // text matches verbatim.
+                    result = `edit_file failed for ${args.file}: one or more SEARCH snippets did not match the current file (the file may have changed since you last read it, or the SEARCH text is not verbatim). Re-read the file, then resend with SEARCH text that quotes the current contents exactly.`;
                   }
                 } else if (this.diffManager.currentEditMode === 'manual') {
                   logger.info(`[RequestOrchestrator] Opening diff for manual review: ${args.file}`);
-                  const codeWithHeader = `# File: ${args.file}\n${args.code}`;
+                  const codeWithHeader = `# File: ${args.file}\n${code}`;
                   const language = args.language || 'plaintext';
                   await this.diffManager.showDiff(codeWithHeader, language);
                 }
               }
             } else {
-              logger.warn(`[RequestOrchestrator] apply_code_edit called but no file in args`);
+              logger.warn(`[RequestOrchestrator] edit_file called but no file in args`);
             }
           } catch (e) {
-            logger.error(`[RequestOrchestrator] Failed to parse apply_code_edit arguments: ${e}`);
+            logger.error(`[RequestOrchestrator] Failed to parse edit_file arguments: ${e}`);
           }
         }
 
-        // Handle create_file: approval (ask) or direct capability call (auto).
-        if (toolCall.function.name === 'create_file' && success) {
+        // Handle write_file: approval (ask) or direct capability call (auto).
+        if (toolCall.function.name === 'write_file' && success) {
           try {
             const args = JSON.parse(toolCall.function.arguments);
             if (!args.path || typeof args.content !== 'string') {
-              result = `Error: create_file requires "path" and "content" arguments`;
+              result = `Error: write_file requires "path" and "content" arguments`;
             } else {
               const editMode = this.diffManager.currentEditMode;
               if (editMode === 'ask' || editMode === 'manual') {
-                logger.info(`[RequestOrchestrator] create_file (${editMode}) — routing through diff approval for ${args.path}`);
+                logger.info(`[RequestOrchestrator] write_file (${editMode}) — routing through diff approval for ${args.path}`);
                 const codeWithHeader = `# File: ${args.path}\n${args.content}`;
                 const language = args.language || 'plaintext';
                 if (editMode === 'ask') {
@@ -2754,7 +2795,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
                 const capResult = await createFileCapability(args.path, args.content);
                 if (capResult.status === 'success') {
                   this.fileContextManager.trackReadFile(args.path);
-                  this.diffManager.registerToolCreatedFile(args.path, args.description || 'Created by create_file');
+                  this.diffManager.registerToolCreatedFile(args.path, args.description || 'Created by write_file');
                   fileModifiedInBatch = true;
                   result = `Created file ${args.path}.` + formatFilesAffected(capResult.filesAffected);
                 } else {
@@ -2763,8 +2804,139 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
               }
             }
           } catch (e: any) {
-            logger.error(`[RequestOrchestrator] Failed to handle create_file: ${e.message ?? e}`);
-            result = `Error: Failed to process create_file — ${e.message ?? e}`;
+            logger.error(`[RequestOrchestrator] Failed to handle write_file: ${e.message ?? e}`);
+            result = `Error: Failed to process write_file — ${e.message ?? e}`;
+          }
+        }
+
+        // Handle run_shell — native-tool path mirrors R1's <shell> pipeline.
+        // Same approval flow, same long-running detection, same file-watcher
+        // diff with absolute-path ground truth (ADR 0004 B-pattern). Result
+        // string replaces the `executeToolCall` acknowledgment so the model
+        // sees actual stdout/stderr.
+        if (toolCall.function.name === 'run_shell' && success) {
+          try {
+            const args = JSON.parse(toolCall.function.arguments);
+            const commandStr = typeof args.command === 'string' ? args.command : '';
+            if (!commandStr.trim()) {
+              result = `Error: run_shell requires a non-empty "command" argument.`;
+            } else {
+              // Reuse the same parser the <shell> path uses — keeps long-running
+              // rejection, heredoc handling, and ShellCommand shape consistent.
+              const parsed = parseShellCommands(`<shell>${commandStr}</shell>`);
+              if (parsed.length === 0) {
+                result = `Error: run_shell could not parse the command "${commandStr.substring(0, 80)}".`;
+              } else if (isLongRunningCommand(parsed[0].command)) {
+                // Same policy as R1's path: refuse rather than execute and hang.
+                result = `Skipped long-running command "${parsed[0].command}". This command starts a server, watch mode, or REPL that wouldn't return on its own. Ask the user to run it manually.`;
+                this._onShellExecuting.fire({ commands: [{ command: parsed[0].command, description: 'Skipped (long-running)' }] });
+                this._onShellResults.fire({ results: [{ command: parsed[0].command, output: result, success: true }] });
+              } else {
+                const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+                const workspacePath = workspaceFolder?.uri.fsPath ?? process.cwd();
+
+                // Approval flow — identical decision tree to the R1 inline path.
+                const allowAllCommands = vscode.workspace.getConfiguration('moby').get<boolean>('allowAllShellCommands') ?? false;
+                let approvedCommand: ShellCommand | null = null;
+                let blockedResult: ShellResult | null = null;
+
+                if (allowAllCommands || !this.commandApprovalManager) {
+                  approvedCommand = { ...parsed[0], approvalStatus: 'auto' };
+                } else {
+                  const decision = this.commandApprovalManager.checkCommand(parsed[0].command);
+                  if (decision === 'allowed') {
+                    approvedCommand = { ...parsed[0], approvalStatus: 'auto' };
+                  } else {
+                    const userApproval = await this.commandApprovalManager.requestApproval(parsed[0].command);
+                    if (userApproval.decision === 'allowed') {
+                      approvedCommand = { ...parsed[0], approvalStatus: 'user-allowed' };
+                    } else {
+                      blockedResult = {
+                        command: parsed[0].command,
+                        output: `Command rejected by user: ${parsed[0].command}`,
+                        success: false,
+                        executionTimeMs: 0,
+                        approvalStatus: 'user-blocked'
+                      };
+                    }
+                  }
+                }
+
+                // Notify the frontend before execution so the shell dropdown
+                // appears with the running command.
+                const preview = parsed[0].command.length > 50
+                  ? parsed[0].command.substring(0, 50) + '...'
+                  : parsed[0].command;
+                this._onShellExecuting.fire({ commands: [{ command: parsed[0].command, description: preview }] });
+
+                // File watcher — captures modified/deleted paths so the tool
+                // result can list absolute paths (ADR 0004).
+                const modifiedFiles = new Set<string>();
+                const deletedFiles = new Set<string>();
+                let shellFileWatcher: vscode.FileSystemWatcher | null = null;
+                try {
+                  shellFileWatcher = vscode.workspace.createFileSystemWatcher(
+                    new vscode.RelativePattern(workspacePath, '**/*')
+                  );
+                  const trackChange = (uri: vscode.Uri) => {
+                    const rel = vscode.workspace.asRelativePath(uri, false);
+                    if (!shouldIgnoreWatcherPath(rel)) modifiedFiles.add(rel);
+                  };
+                  shellFileWatcher.onDidChange(trackChange);
+                  shellFileWatcher.onDidCreate(trackChange);
+                  shellFileWatcher.onDidDelete((uri: vscode.Uri) => {
+                    const rel = vscode.workspace.asRelativePath(uri, false);
+                    if (!shouldIgnoreWatcherPath(rel)) {
+                      deletedFiles.add(rel);
+                      modifiedFiles.delete(rel);
+                    }
+                  });
+                } catch {
+                  shellFileWatcher = null;
+                }
+
+                let executedResults: ShellResult[] = [];
+                if (approvedCommand) {
+                  executedResults = await executeShellCommands([approvedCommand], workspacePath, { allowAllCommands, signal });
+                }
+
+                // Drain watcher events that arrived during execution.
+                if (shellFileWatcher) {
+                  await new Promise(resolve => setTimeout(resolve, 100));
+                  shellFileWatcher.dispose();
+                  if (modifiedFiles.size > 0) {
+                    this.diffManager.registerShellModifiedFiles([...modifiedFiles]);
+                  }
+                  if (deletedFiles.size > 0) {
+                    this.diffManager.registerShellDeletedFiles([...deletedFiles]);
+                  }
+                }
+
+                const allResults = blockedResult ? [blockedResult, ...executedResults] : executedResults;
+
+                this._onShellResults.fire({
+                  results: allResults.map(r => ({
+                    command: r.command,
+                    output: r.output.substring(0, 500) + (r.output.length > 500 ? '...' : ''),
+                    success: r.success
+                  }))
+                });
+
+                // Format with absolute-path ground truth so the model sees
+                // the same shape as R1's <shell> results.
+                result = formatShellResultsForContext(allResults, {
+                  modifiedFiles: [...modifiedFiles],
+                  deletedFiles: [...deletedFiles],
+                  workspacePath,
+                });
+                if (modifiedFiles.size > 0 || deletedFiles.size > 0) {
+                  fileModifiedInBatch = true;
+                }
+              }
+            }
+          } catch (e: any) {
+            logger.error(`[RequestOrchestrator] run_shell failed: ${e.message ?? e}`);
+            result = `Error: run_shell failed — ${e.message ?? e}`;
           }
         }
 
@@ -2925,4 +3097,131 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
 
     return { toolMessages, limitReached, budgetExceeded, allToolDetails };
   }
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// System Prompt Sections (Phase 3.5 infrastructure)
+// ──────────────────────────────────────────────────────────────────────
+//
+// Two functions, one per section that V4-thinking might want trimmed:
+//   - buildIdentityAndGate: identity line + the "reference vs edit" decision tree
+//   - buildToolGuidance:    explore-tool list + modify-workspace tool list + numbered rules
+//
+// Both branch on PromptStyle. For Phase 3.5 step 1 (infrastructure only),
+// 'minimal' and 'standard' return identical content — the structural split
+// is what we're shipping. Step 2 (content review) decides what minimal
+// actually drops; step 3 runs the empirical comparison protocol.
+//
+// See [docs/plans/deepseek-v4-integration.md] Phase 3.5 for the planned
+// content split and the test prompts that will validate it.
+
+function buildIdentityAndGate(promptStyle: PromptStyle): string {
+  if (promptStyle === 'minimal') {
+    return MINIMAL_IDENTITY_AND_GATE;
+  }
+  return STANDARD_IDENTITY_AND_GATE;
+}
+
+function buildToolGuidance(
+  promptStyle: PromptStyle,
+  webSearchAutoAvailable: boolean,
+  runShellAvailable: boolean
+): string {
+  const webSearchLine = webSearchAutoAvailable
+    ? '- web_search: Search the web for current information\n'
+    : '';
+  // Phase 3.75 — only include run_shell when the model has it. R1's prompt
+  // is built separately (`getReasonerShellPrompt`) so this branch covers
+  // V3 / V4 / native-tool custom models only.
+  const runShellLine = runShellAvailable
+    ? '- run_shell: Run a shell command in the workspace (tests, builds, git, installs, etc.). Long-running commands like servers and watch modes are refused.\n'
+    : '';
+  if (promptStyle === 'minimal') {
+    return renderMinimalToolGuidance(webSearchLine, runShellLine);
+  }
+  return renderStandardToolGuidance(webSearchLine, runShellLine);
+}
+
+// ── Minimal variant — V4-thinking ─────────────────────────────────────
+// Calibrated for thinking-style models that infer intent from phrasing.
+// Drops the reference-vs-edit decision tree (V4 doesn't need pattern-
+// matching against listed phrases — its reasoning pass classifies intent
+// natively), keeps the load-bearing rules with documented incident
+// history (#2 absolute-path-trust from ADR 0004; the delete-terminal
+// rule). Tool descriptions trust the schema to carry detail — the prompt
+// list is for orientation, not duplication.
+
+const MINIMAL_IDENTITY_AND_GATE = `You are DeepSeek Moby, an expert programming assistant integrated into VS Code.
+
+When the user asks a question, answer the question. Use file-modification tools only when the user has clearly asked you to change a file. When intent is ambiguous, prefer prose and a markdown code block over creating files. Ask a clarifying question rather than guessing.
+
+Reading files is cheap; editing files is consequential. Read whatever you need to answer accurately, but only modify files when the user has asked for a change.\n`;
+
+function renderMinimalToolGuidance(webSearchLine: string, runShellLine: string): string {
+  return `
+Tools available for codebase exploration:
+- read_file: Read file contents
+- find_files: Find files by name pattern
+- grep: Search file contents for text or patterns
+- list_directory: See directory structure
+- file_metadata: Get a file's size, type, and a content preview
+${webSearchLine}
+Tools available for workspace modification:
+- edit_file: Patch specific sections of an existing file (search/replace pairs)
+- write_file: Create a new file or overwrite an existing one entirely
+- delete_file: Delete a file (moves to trash)
+- delete_directory: Delete a directory (moves to trash; recursive="true" to delete contents)
+${runShellLine}
+Rules:
+1. Tool results include the absolute path of files touched — trust those paths over your own assumptions when they disagree.
+2. delete_file and delete_directory are terminal for that path in the turn. Once either succeeds, do not call delete_file/delete_directory on the same path again.\n`;
+}
+
+// ── Standard variant — V3 / R1 / V4-non-thinking / custom models ──────
+
+const STANDARD_IDENTITY_AND_GATE = `You are DeepSeek Moby, an expert programming assistant integrated into VS Code.
+
+Match your response to the user's intent. The distinction between "show me" and "change my code" is critical:
+
+- **Reference / teaching requests** ("show me", "give me an example", "what would X look like", "how do I", "demonstrate"): respond with a prose explanation and a plain markdown code block in your reply. Do NOT call write_file, edit_file, or delete_file — the user wants to see code, not have files appear in their workspace.
+- **Edit requests** ("update foo.ts", "add X to my project", "fix this bug", "refactor Y"): use the appropriate edit tool.
+- **Architecture / design discussions**: discuss tradeoffs in prose; edit only if explicitly asked.
+- **Debugging**: analyze the problem in prose; suggest or apply fixes only when asked.
+
+When the user's phrasing is ambiguous, lean toward prose + markdown. Ask a clarifying question rather than creating files the user didn't ask for.\n`;
+
+function renderStandardToolGuidance(webSearchLine: string, runShellLine: string): string {
+  // The "use the dedicated tool first" guidance below only matters when
+  // run_shell is present — otherwise there's no shell-as-fallback to
+  // disambiguate against. Conditional addition keeps the prompt compact
+  // for non-native-tool models.
+  const shellRule = runShellLine
+    ? '6. Use the dedicated tool when one exists — `read_file` not `cat`, `find_files` not `find`, `grep` not raw `grep`. Reach for `run_shell` when no dedicated tool fits (running tests, building, git operations, installing deps).\n'
+    : '';
+  return `
+You have tools to explore the codebase:
+- read_file: Read file contents
+- find_files: Find files by name pattern
+- grep: Search for text/patterns in file contents
+- list_directory: See directory structure
+- file_metadata: Get a file's size, type, and a short content preview
+${webSearchLine}
+Use tools to understand the code before responding. Read relevant files first, then provide accurate answers.
+
+You have tools to modify the workspace:
+- edit_file: Patch specific sections of an existing file. Each call takes \`edits: [{search, replace}, ...]\` where \`search\` is the exact original snippet to find (verbatim, including whitespace) and \`replace\` is the new content. Include enough surrounding context in \`search\` to make the location unique — usually 2-3 lines.
+- write_file: Write a file. Creates if missing, overwrites entirely if it exists. Use this for new files AND for full-file rewrites.
+- delete_file: Delete a file (moves to trash; requires user confirmation in ask mode). To clear or reset a file, prefer write_file with the new contents — don't round-trip through delete + create.
+- delete_directory: Delete a directory (moves to trash; recursive="true" to delete populated directories and all contents; requires user confirmation in ask mode).
+${runShellLine}
+Rules for file modifications:
+1. Paths are relative to the workspace root.
+2. After each operation, tool results include the absolute path of files touched — trust those paths over your own assumptions.
+3. Choose the right tool for the change you're making:
+   - Targeted patch (change a specific function, fix a bug in one place, add a method): edit_file with \`edits\`.
+   - New file or full-file rewrite: write_file.
+   - edit_file fails if the \`search\` text doesn't match the file exactly. If you get that error, re-read the file and quote the current contents verbatim.
+4. delete_file and delete_directory are terminal for that path in the turn. Once either succeeds, do not call delete_file/delete_directory on the same path again. (write_file is fine — it'll just create a fresh file.)
+5. Use delete_file for files and delete_directory for directories. If you delete all files inside a directory and want to remove the now-empty directory too, call delete_directory on it (with recursive="false", the default). Set recursive="true" only when you explicitly want to delete a directory AND every file inside it in one operation.
+${shellRule}\n`;
 }

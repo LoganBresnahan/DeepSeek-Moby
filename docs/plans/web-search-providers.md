@@ -343,7 +343,7 @@ After Phase 3, the dispatch strategy is registry-driven and the user controls na
 
 - Provider abstraction is **model-agnostic**. `tavily` and `searxng` work the same regardless of which model is active. They're part of the tool surface, not a model detector. (See [ADR 0004](../architecture/decisions/0004-r1-path-semantics-guards.md) for the policy on tool-surface vs detector-style guards.)
 - The `webSearch` capability axis is **model-specific** by definition. Belongs in the model registry, not in the web-search code.
-- Native-tool dispatch path goes through [workspaceTools.ts](../../src/tools/workspaceTools.ts) alongside `read_file` / `apply_code_edit` — same mechanism, different tool name. No special-casing in the orchestrator beyond registering the schema.
+- Native-tool dispatch path goes through [workspaceTools.ts](../../src/tools/workspaceTools.ts) alongside `read_file` / `edit_file` — same mechanism, different tool name. No special-casing in the orchestrator beyond registering the schema.
 
 ## File organization policy
 

@@ -27,12 +27,27 @@ export interface Message {
   eventId?: string;
 }
 
+// JSON Schema fragment for tool parameter descriptions. Loose by design —
+// the full JSON Schema spec is recursive (objects nest properties, arrays
+// nest item schemas), and pinning the exact shape here would force every
+// tool definition to widen its own type. The model-facing schema validator
+// is what actually enforces correctness.
+export type ToolParamSchema = {
+  type: string;
+  description?: string;
+  enum?: string[];
+  items?: ToolParamSchema;
+  properties?: Record<string, ToolParamSchema>;
+  required?: string[];
+  minItems?: number;
+};
+
 export interface ToolFunction {
   name: string;
   description: string;
   parameters: {
     type: 'object';
-    properties: Record<string, { type: string; description: string; enum?: string[] }>;
+    properties: Record<string, ToolParamSchema>;
     required?: string[];
   };
 }
@@ -240,10 +255,14 @@ export class DeepSeekClient {
    * wire shape. Responsible for one subtle V4-era rule:
    *
    *   When the active model has `reasoningEcho: 'required'` (V4-thinking
-   *   family), any assistant message that carries a `reasoning_content`
-   *   field MUST be forwarded with it. Stripping it produces a 400:
+   *   family), every assistant message MUST carry the `reasoning_content`
+   *   field — even if its value is the empty string. Omitting the field
+   *   produces a 400:
    *     "The `reasoning_content` in the thinking mode must be passed
    *      back to the API."
+   *   We saw this on a long tool loop where one mid-loop response had no
+   *   reasoning_content at all (model emitted 0 chars); the next request
+   *   omitted the field on that history entry and the API rejected.
    *
    *   For every other model (V3 chat/reasoner, custom OpenAI-compat models)
    *   we drop `reasoning_content` on the way out — it's DeepSeek-proprietary
@@ -255,13 +274,21 @@ export class DeepSeekClient {
   private serializeMessagesForRequest(messages: Message[], modelId: string): Array<Record<string, unknown>> {
     const caps = getCapabilities(modelId);
     const echo = caps.reasoningEcho === 'required';
-    return messages.map(m => ({
-      role: m.role,
-      content: m.content,
-      ...(m.tool_call_id && { tool_call_id: m.tool_call_id }),
-      ...(m.tool_calls && { tool_calls: m.tool_calls }),
-      ...(echo && m.reasoning_content && { reasoning_content: m.reasoning_content })
-    }));
+    return messages.map(m => {
+      const wire: Record<string, unknown> = {
+        role: m.role,
+        content: m.content,
+        ...(m.tool_call_id && { tool_call_id: m.tool_call_id }),
+        ...(m.tool_calls && { tool_calls: m.tool_calls })
+      };
+      if (echo && m.role === 'assistant') {
+        // Field must be present on every assistant message; empty string
+        // is the documented placeholder when the model returned no
+        // reasoning for this turn.
+        wire.reasoning_content = m.reasoning_content ?? '';
+      }
+      return wire;
+    });
   }
 
   private applyThinkingMode(requestBody: Record<string, unknown>, modelId: string): void {
@@ -343,7 +370,11 @@ export class DeepSeekClient {
         executionMode: 'async',
         data: { model, iteration, messageCount: requestMessages.length, hasTools: !!requestBody.tools }
       });
-      const callStartTime = Date.now();
+      // performance.now() is monotonic and immune to system-clock adjustments
+      // (WSL2 sleep/resume can briefly jump Date.now() forward and back, which
+      // produced negative durations in earlier logs). Date.now() stays the
+      // source of wall-clock log timestamps elsewhere.
+      const callStartTime = performance.now();
 
       const response = await this.getHttpClient().post<{
         choices: Array<{
@@ -369,7 +400,7 @@ export class DeepSeekClient {
       // Note: systemPrompt is already unshifted into requestMessages above
       this.crossValidateTokens(requestMessages, usage, requestBody.tools);
 
-      const callDuration = Date.now() - callStartTime;
+      const callDuration = Math.round(performance.now() - callStartTime);
       logger.info(
         `[ApiCall] model=${model} iter=${iteration || 1} mode=non-stream ` +
         `finish=${finishReason ?? 'unknown'} ` +
@@ -471,7 +502,8 @@ export class DeepSeekClient {
         executionMode: 'async',
         data: { model, iteration, messageCount: requestMessages.length }
       });
-      const iterStartTime = Date.now();
+      // Monotonic clock — see comment in chat() above for why.
+      const iterStartTime = performance.now();
 
       // Hoisted out of the Promise so the post-await summary log can read them.
       let finishReason: string | undefined;
@@ -611,7 +643,7 @@ export class DeepSeekClient {
       // Note: systemPrompt is already unshifted into requestMessages above
       this.crossValidateTokens(requestMessages, result.usage);
 
-      const iterDuration = Date.now() - iterStartTime;
+      const iterDuration = Math.round(performance.now() - iterStartTime);
       // Single per-iteration summary line. Lets us answer "why did the loop end?"
       // and "did the model emit any reasoning?" without scraping multiple log lines.
       logger.info(

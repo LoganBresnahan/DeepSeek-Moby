@@ -38,8 +38,8 @@ export const workspaceTools: Tool[] = [
   {
     type: 'function',
     function: {
-      name: 'search_files',
-      description: 'Search for files in the workspace by name pattern. Returns a list of matching file paths.',
+      name: 'find_files',
+      description: 'Find files in the workspace by name pattern. Searches the file *names* (not contents) — use `grep` to search inside files. Returns a list of matching file paths.',
       parameters: {
         type: 'object',
         properties: {
@@ -59,8 +59,8 @@ export const workspaceTools: Tool[] = [
   {
     type: 'function',
     function: {
-      name: 'grep_content',
-      description: 'Search for text or patterns within file contents. Similar to grep/ripgrep. Returns matching lines with file paths and line numbers.',
+      name: 'grep',
+      description: 'Search for text or patterns within file contents. Similar to grep/ripgrep. Returns matching lines with file paths and line numbers. To search file *names* (not contents), use `find_files`.',
       parameters: {
         type: 'object',
         properties: {
@@ -105,8 +105,8 @@ export const workspaceTools: Tool[] = [
   {
     type: 'function',
     function: {
-      name: 'get_file_info',
-      description: 'Get information about a file including its size, type, and a preview of its contents.',
+      name: 'file_metadata',
+      description: 'Get metadata for a file: size, type, and a short preview of contents. Use `read_file` if you need the full contents.',
       parameters: {
         type: 'object',
         properties: {
@@ -146,8 +146,8 @@ export const webSearchTool: Tool = {
 export const createFileTool: Tool = {
   type: 'function',
   function: {
-    name: 'create_file',
-    description: 'Create a new file in the workspace with the given content. Fails if the file already exists — use apply_code_edit for existing files. Prefer this over apply_code_edit with empty SEARCH when you know the file is new.',
+    name: 'write_file',
+    description: 'Write a file with the given content. Creates the file if it does not exist; overwrites it entirely if it does. Use this for new files, full-file rewrites, and any case where you want to replace the whole file. For targeted patches that change only specific sections of an existing file, use `edit_file` instead — it preserves the rest of the file.',
     parameters: {
       type: 'object',
       properties: {
@@ -180,7 +180,7 @@ export const deleteFileTool: Tool = {
   type: 'function',
   function: {
     name: 'delete_file',
-    description: 'Delete a file in the workspace. Moves to the OS trash for recoverability. Refuses to delete directories. Requires user confirmation in ask mode. This is a TERMINAL action for the given path — once it succeeds, the file is gone. Do NOT call apply_code_edit or create_file on the same path in the same turn (e.g., to "mark" or "clear" the file); those calls will either fail or recreate the deleted file.',
+    description: 'Delete a file in the workspace. Moves to the OS trash for recoverability. Refuses to delete directories. Requires user confirmation in ask mode. Use this when the file should genuinely be removed. To "clear" or reset a file, prefer `write_file` with the desired contents (which overwrites) — `delete_file` followed by `write_file` round-trips through the trash unnecessarily.',
     parameters: {
       type: 'object',
       properties: {
@@ -205,7 +205,7 @@ export const deleteDirectoryTool: Tool = {
   type: 'function',
   function: {
     name: 'delete_directory',
-    description: 'Delete a directory in the workspace. Moves to the OS trash for recoverability. By default only deletes empty directories; pass recursive="true" to delete a populated directory AND all its contents (everything inside is also moved to trash). Requires user confirmation in ask mode. This is a TERMINAL action for the given path — once it succeeds, the directory is gone. Do NOT call create_file, apply_code_edit, or delete_file/delete_directory on the same path in the same turn.',
+    description: 'Delete a directory in the workspace. Moves to the OS trash for recoverability. By default only deletes empty directories; pass recursive="true" to delete a populated directory AND all its contents (everything inside is also moved to trash). Requires user confirmation in ask mode. This is a TERMINAL action for the given path — once it succeeds, the directory is gone. Do NOT call delete_file/delete_directory on the same path again. (write_file is fine — it just creates a fresh file.)',
     parameters: {
       type: 'object',
       properties: {
@@ -228,34 +228,85 @@ export const deleteDirectoryTool: Tool = {
   }
 };
 
-// Apply code edit tool - for chat model only (reasoner can't use tools)
-// Provides structured output with guaranteed file path
+// Run-shell tool — exposes the existing R1 shell-execution pipeline to
+// native-tool-calling models. The model sends a `command` string; the
+// orchestrator routes it through `parseShellCommands` + the existing
+// CommandApprovalManager + executeShellCommands. Long-running command
+// detection (`isLongRunningCommand`) and the catastrophic-operation
+// blocklist apply here exactly as they do for R1's `<shell>` path.
+//
+// Only included in the tools array when the active model has
+// `shellProtocol: 'native-tool'` (see registry). R1 stays on `<shell>`.
+export const runShellTool: Tool = {
+  type: 'function',
+  function: {
+    name: 'run_shell',
+    description: 'Run a shell command in the workspace and return its output. Use this for actions with no dedicated tool: running tests, compiling, installing dependencies, git operations, etc. Long-running commands (servers, watch modes, REPLs) are refused — the result will tell you to ask the user to run them manually. In ask mode, each command requires user approval before executing.',
+    parameters: {
+      type: 'object',
+      properties: {
+        command: {
+          type: 'string',
+          description: 'The shell command to execute. A single command line; chain with `&&` if you need multiple sequential steps.'
+        },
+        description: {
+          type: 'string',
+          description: 'Brief description of what this command does, shown to the user during approval.'
+        }
+      },
+      required: ['command']
+    }
+  }
+};
+
+// Edit-file tool — patch an existing file with one or more search/replace
+// pairs. Each pair locates a snippet in the current file and replaces it.
+// The schema enforces this shape so the model can't send free-form code
+// that the diff engine then has to guess about.
+//
+// For full-file rewrites (or for creating brand-new files), use
+// `write_file` — it overwrites on existing paths.
 export const applyCodeEditTool: Tool = {
   type: 'function',
   function: {
-    name: 'apply_code_edit',
-    description: 'Apply code changes to a specific file. Use this when you want to edit or update code in a file. This ensures the file path is correctly specified.',
+    name: 'edit_file',
+    description: 'Patch an existing file by replacing specific snippets. Each edit names exactly the original code to find (`search`) and the new code to put in its place (`replace`). The `search` text must appear verbatim in the current file — quote it exactly, including indentation and surrounding lines for uniqueness. For full-file rewrites or new files, use `write_file` instead (it overwrites).',
     parameters: {
       type: 'object',
       properties: {
         file: {
           type: 'string',
-          description: 'The relative path to the file to edit (e.g., "src/index.ts", "CHANGELOG.md")'
+          description: 'Relative path to the file to edit (e.g., "src/index.ts").'
         },
-        code: {
-          type: 'string',
-          description: 'The code content to apply. Use SEARCH/REPLACE format for edits or full content for new code.'
+        edits: {
+          type: 'array',
+          description: 'One or more search/replace pairs applied in order. To delete a section, use empty `replace`. To insert at the top, use empty `search`.',
+          items: {
+            type: 'object',
+            properties: {
+              search: {
+                type: 'string',
+                description: 'Exact text to find in the file. Include enough surrounding context to uniquely identify the location — at least 2-3 lines is usually enough. Indentation and whitespace must match the file.'
+              },
+              replace: {
+                type: 'string',
+                description: 'New text to put in place of the search. Use empty string to delete the matched section.'
+              }
+            },
+            required: ['search', 'replace']
+          },
+          minItems: 1
         },
         language: {
           type: 'string',
-          description: 'The programming language of the code (e.g., "typescript", "javascript", "markdown")'
+          description: 'Language hint for the diff preview (e.g., "typescript").'
         },
         description: {
           type: 'string',
-          description: 'Brief description of what this edit does'
+          description: 'Brief description of what this edit does.'
         }
       },
-      required: ['file', 'code']
+      required: ['file', 'edits']
     }
   }
 };
@@ -285,26 +336,26 @@ export async function executeToolCall(toolCall: ToolCall): Promise<string> {
       case 'read_file':
         return await readFile(workspacePath, args.path, args.startLine, args.endLine);
 
-      case 'search_files':
+      case 'find_files':
         return await searchFiles(workspacePath, args.pattern, args.maxResults);
 
-      case 'grep_content':
+      case 'grep':
         return await grepContent(workspacePath, args.query, args.filePattern, args.maxResults);
 
       case 'list_directory':
         return await listDirectory(workspacePath, args.path || '.', args.recursive === 'true');
 
-      case 'get_file_info':
+      case 'file_metadata':
         return await getFileInfo(workspacePath, args.path);
 
-      case 'apply_code_edit':
+      case 'edit_file':
         // This tool doesn't execute anything - it's for signaling edit intent with structured file path
-        // The file path tracking happens in chatProvider.ts
+        // The orchestrator's edit dispatch path applies the search/replace blocks.
         return `Acknowledged: Code edit for file "${args.file}" will be applied. ${args.description || ''}`;
 
-      case 'create_file':
-        // Orchestrator handles the actual creation + approval flow.
-        return `Acknowledged: Creation of "${args.path}" will be processed. ${args.description || ''}`;
+      case 'write_file':
+        // Orchestrator handles the actual write + approval flow.
+        return `Acknowledged: Write to "${args.path}" will be processed. ${args.description || ''}`;
 
       case 'delete_file':
         // Orchestrator handles the actual deletion + confirmation flow.
@@ -313,6 +364,12 @@ export async function executeToolCall(toolCall: ToolCall): Promise<string> {
       case 'delete_directory':
         // Orchestrator handles the actual deletion + confirmation flow.
         return `Acknowledged: Directory deletion of "${args.path}"${args.recursive === 'true' ? ' (recursive)' : ' (empty-only)'} will be processed. ${args.description || ''}`;
+
+      case 'run_shell':
+        // Orchestrator handles the actual approval + execution flow,
+        // mirroring the existing R1 <shell> pipeline (CommandApprovalManager
+        // + executeShellCommands). Same blocklist and long-running guards.
+        return `Acknowledged: Shell command "${(args.command ?? '').substring(0, 80)}" will be processed. ${args.description || ''}`;
 
       default:
         return `Error: Unknown function "${functionName}"`;

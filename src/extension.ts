@@ -46,6 +46,14 @@ export async function activate(context: vscode.ExtensionContext) {
         reloadCustomModels();
         chatProvider?.sendModelList();
       }
+      // Phase 4 — re-broadcast the model list when modelOptions changes
+      // (per-model reasoningEffort overrides) so the selector's active
+      // pill reflects edits made directly to settings.json, not just the
+      // ones routed through the popup. `sendModelList` re-reads the
+      // override bag and re-decorates each entry with the effective effort.
+      if (e.affectsConfiguration('moby.modelOptions')) {
+        chatProvider?.sendModelList();
+      }
       // Web-search provider / endpoint / engines — settings popup dots
       // and the web-search popup's provider-specific section need to
       // update live when any of these change.

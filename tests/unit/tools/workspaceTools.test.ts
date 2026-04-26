@@ -128,14 +128,14 @@ describe('workspaceTools', () => {
       expect(readFile!.function.parameters.required).toContain('path');
     });
 
-    it('has search_files tool', () => {
-      const searchFiles = workspaceTools.find(t => t.function.name === 'search_files');
+    it('has find_files tool', () => {
+      const searchFiles = workspaceTools.find(t => t.function.name === 'find_files');
       expect(searchFiles).toBeDefined();
       expect(searchFiles!.function.parameters.required).toContain('pattern');
     });
 
-    it('has grep_content tool', () => {
-      const grep = workspaceTools.find(t => t.function.name === 'grep_content');
+    it('has grep tool', () => {
+      const grep = workspaceTools.find(t => t.function.name === 'grep');
       expect(grep).toBeDefined();
       expect(grep!.function.parameters.required).toContain('query');
     });
@@ -145,8 +145,8 @@ describe('workspaceTools', () => {
       expect(listDir).toBeDefined();
     });
 
-    it('has get_file_info tool', () => {
-      const info = workspaceTools.find(t => t.function.name === 'get_file_info');
+    it('has file_metadata tool', () => {
+      const info = workspaceTools.find(t => t.function.name === 'file_metadata');
       expect(info).toBeDefined();
       expect(info!.function.parameters.required).toContain('path');
     });
@@ -156,14 +156,14 @@ describe('workspaceTools', () => {
       expect(webSearchTool.function.name).toBe('web_search');
     });
 
-    it('has apply_code_edit tool as separate export', () => {
+    it('has edit_file tool as separate export', () => {
       expect(applyCodeEditTool).toBeDefined();
-      expect(applyCodeEditTool.function.name).toBe('apply_code_edit');
+      expect(applyCodeEditTool.function.name).toBe('edit_file');
     });
 
-    it('has create_file tool with path + content required', () => {
+    it('has write_file tool with path + content required', () => {
       expect(createFileTool).toBeDefined();
-      expect(createFileTool.function.name).toBe('create_file');
+      expect(createFileTool.function.name).toBe('write_file');
       expect(createFileTool.function.parameters.required).toEqual(
         expect.arrayContaining(['path', 'content'])
       );
@@ -216,8 +216,8 @@ describe('workspaceTools', () => {
       expect(result).toContain('File: src/index.ts');
     });
 
-    it('dispatches apply_code_edit and returns acknowledgment', async () => {
-      const result = await executeToolCall(makeToolCall('apply_code_edit', {
+    it('dispatches edit_file and returns acknowledgment', async () => {
+      const result = await executeToolCall(makeToolCall('edit_file', {
         file: 'src/main.ts',
         code: 'console.log("hi")',
         description: 'Add logging'
@@ -227,8 +227,8 @@ describe('workspaceTools', () => {
       expect(result).toContain('Add logging');
     });
 
-    it('dispatches create_file and returns acknowledgment', async () => {
-      const result = await executeToolCall(makeToolCall('create_file', {
+    it('dispatches write_file and returns acknowledgment', async () => {
+      const result = await executeToolCall(makeToolCall('write_file', {
         path: 'src/new.ts',
         content: 'export const x = 1;',
         description: 'Add utility'
@@ -353,14 +353,14 @@ describe('workspaceTools', () => {
 
   // ── searchFiles ──────────────────────────────────────────────────
 
-  describe('search_files', () => {
+  describe('find_files', () => {
     it('uses vscode.workspace.findFiles with the pattern', async () => {
       (vscode.workspace.findFiles as any).mockResolvedValue([
         { fsPath: '/workspace/src/a.ts' },
         { fsPath: '/workspace/src/b.ts' }
       ]);
 
-      const result = await executeToolCall(makeToolCall('search_files', { pattern: '**/*.ts' }));
+      const result = await executeToolCall(makeToolCall('find_files', { pattern: '**/*.ts' }));
 
       expect(vscode.workspace.findFiles).toHaveBeenCalledWith(
         '**/*.ts',
@@ -373,7 +373,7 @@ describe('workspaceTools', () => {
     it('respects custom maxResults', async () => {
       (vscode.workspace.findFiles as any).mockResolvedValue([]);
 
-      await executeToolCall(makeToolCall('search_files', { pattern: '*.js', maxResults: '5' }));
+      await executeToolCall(makeToolCall('find_files', { pattern: '*.js', maxResults: '5' }));
 
       expect(vscode.workspace.findFiles).toHaveBeenCalledWith('*.js', '**/node_modules/**', 5);
     });
@@ -381,7 +381,7 @@ describe('workspaceTools', () => {
     it('returns "No files found" when no matches', async () => {
       (vscode.workspace.findFiles as any).mockResolvedValue([]);
 
-      const result = await executeToolCall(makeToolCall('search_files', { pattern: '*.xyz' }));
+      const result = await executeToolCall(makeToolCall('find_files', { pattern: '*.xyz' }));
       expect(result).toContain('No files found');
     });
   });
@@ -454,7 +454,7 @@ describe('workspaceTools', () => {
 
   // ── getFileInfo ──────────────────────────────────────────────────
 
-  describe('get_file_info', () => {
+  describe('file_metadata', () => {
     it('returns file metadata', async () => {
       mockFs.statSync.mockImplementation(() => ({
         isDirectory: () => false,
@@ -464,7 +464,7 @@ describe('workspaceTools', () => {
       }));
       mockFs.readFileSync.mockReturnValue('const x = 1;\nconst y = 2;');
 
-      const result = await executeToolCall(makeToolCall('get_file_info', { path: 'src/index.ts' }));
+      const result = await executeToolCall(makeToolCall('file_metadata', { path: 'src/index.ts' }));
 
       expect(result).toContain('File: src/index.ts');
       expect(result).toContain('Size: 2048 bytes');
@@ -475,12 +475,12 @@ describe('workspaceTools', () => {
     it('returns error when file does not exist', async () => {
       mockFs.existsSync.mockReturnValue(false);
 
-      const result = await executeToolCall(makeToolCall('get_file_info', { path: 'nope.ts' }));
+      const result = await executeToolCall(makeToolCall('file_metadata', { path: 'nope.ts' }));
       expect(result).toContain('Error: File not found');
     });
 
     it('prevents access outside workspace', async () => {
-      const result = await executeToolCall(makeToolCall('get_file_info', { path: '../../etc/shadow' }));
+      const result = await executeToolCall(makeToolCall('file_metadata', { path: '../../etc/shadow' }));
       expect(result).toContain('Error: Cannot access files outside the workspace');
     });
 
@@ -493,7 +493,7 @@ describe('workspaceTools', () => {
       });
       mockFs.readFileSync.mockReturnValue('hello\nworld');
 
-      const result = await executeToolCall(makeToolCall('get_file_info', { path: 'small.txt' }));
+      const result = await executeToolCall(makeToolCall('file_metadata', { path: 'small.txt' }));
 
       expect(result).toContain('Preview');
       expect(result).toContain('hello');
@@ -502,7 +502,7 @@ describe('workspaceTools', () => {
 
   // ── grepContent ──────────────────────────────────────────────────
 
-  describe('grep_content', () => {
+  describe('grep', () => {
     it('calls ripgrep with correct arguments', async () => {
       mockCp.spawnSync.mockReturnValue({
         stdout: 'src/index.ts:5:const foo = "bar";\n',
@@ -510,7 +510,7 @@ describe('workspaceTools', () => {
         status: 0
       });
 
-      const result = await executeToolCall(makeToolCall('grep_content', { query: 'foo' }));
+      const result = await executeToolCall(makeToolCall('grep', { query: 'foo' }));
 
       expect(mockCp.spawnSync).toHaveBeenCalledWith(
         'rg',
@@ -527,14 +527,14 @@ describe('workspaceTools', () => {
     it('returns "No matches found" when no results', async () => {
       mockCp.spawnSync.mockReturnValue({ stdout: '', stderr: '', status: 1 });
 
-      const result = await executeToolCall(makeToolCall('grep_content', { query: 'nonexistent' }));
+      const result = await executeToolCall(makeToolCall('grep', { query: 'nonexistent' }));
       expect(result).toContain('No matches found');
     });
 
     it('passes filePattern as glob filter', async () => {
       mockCp.spawnSync.mockReturnValue({ stdout: 'match\n', stderr: '', status: 0 });
 
-      await executeToolCall(makeToolCall('grep_content', {
+      await executeToolCall(makeToolCall('grep', {
         query: 'test',
         filePattern: '*.ts'
       }));
@@ -558,8 +558,8 @@ describe('workspaceTools', () => {
       expect(result).toContain('Error: Cannot list directories outside the workspace');
     });
 
-    it('get_file_info blocks workspace escape via ../', async () => {
-      const result = await executeToolCall(makeToolCall('get_file_info', { path: '../../../etc/shadow' }));
+    it('file_metadata blocks workspace escape via ../', async () => {
+      const result = await executeToolCall(makeToolCall('file_metadata', { path: '../../../etc/shadow' }));
       expect(result).toContain('Error: Cannot access files outside the workspace');
     });
   });

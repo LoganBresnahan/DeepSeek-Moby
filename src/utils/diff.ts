@@ -517,67 +517,24 @@ export class DiffEngine {
     }
     cleanCode = cleanCode.replace(/^#\s*File:.*\n/i, '');
 
-    // Strategy 1: Full file replacement
+    // Strategy 1: Full file replacement (handles `# File:` headers and
+    // structurally-similar full rewrites — see shouldReplaceWholeFile).
     if (this.shouldReplaceWholeFile(original, cleanCode)) {
       return { content: cleanCode, success: true, operation: 'replace' };
     }
 
-    // Strategy 2: Use LINE-LEVEL diff to merge
-    const result = this.mergeWithLineDiff(original, cleanCode);
-    if (result) {
-      return result;
-    }
-
-    // Fallback: append at end
-    const needsNewline = original.length > 0 && !original.endsWith('\n');
+    // No legitimate strategy matched. The previous fallback ran a
+    // line-diff merge that *kept* both original and new content, then
+    // returned `success: true` — which silently duplicated code on disk
+    // when edit_file got raw snippets. Refusing here forces the
+    // caller (edit_file / R1 SEARCH/REPLACE / etc.) to resend in
+    // a parseable format.
     return {
-      content: original + (needsNewline ? '\n\n' : '\n') + cleanCode,
+      content: original,
       success: false,
-      operation: 'insert',
+      message: 'Could not locate the change in the file. Resend the edit using SEARCH/REPLACE blocks (for targeted patches) or a full-file rewrite with a `# File:` header (for whole-file replacement).',
+      operation: 'replace',
     };
-  }
-
-  /**
-   * Merge AI output into original using line-level diff.
-   */
-  private mergeWithLineDiff(original: string, cleanCode: string): DiffResult | null {
-    try {
-      const changes = Diff.diffLines(original, cleanCode);
-
-      // Build result: KEEP original content (unchanged + removed), ADD new content (added)
-      let result = '';
-      let hasInsertions = false;
-
-      for (const change of changes) {
-        if (!change.added && !change.removed) {
-          // Unchanged: shared between original and AI output - keep it
-          result += change.value;
-        } else if (change.added) {
-          // Added: in AI output but not in original - this is NEW, add it
-          result += change.value;
-          hasInsertions = true;
-        } else if (change.removed) {
-          // Removed: in original but not in AI output - KEEP IT
-          // The AI just showed a snippet, we don't want to delete original content
-          result += change.value;
-        }
-      }
-
-      // Only return success if we actually had insertions
-      if (hasInsertions) {
-        return {
-          content: result,
-          success: true,
-          operation: 'insert',
-        };
-      }
-
-      // No new content found
-      return null;
-    } catch (e) {
-      // If line-level diff fails, return null to fall back
-      return null;
-    }
   }
 
   /**

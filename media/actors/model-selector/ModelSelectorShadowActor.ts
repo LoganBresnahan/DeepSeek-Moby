@@ -33,6 +33,12 @@ export interface ModelOption {
   name: string;
   description: string;
   maxTokens: number;
+  /** Set when the model is thinking-capable. Presence of this field drives
+   *  the "Reasoning effort: [High] [Max]" sub-control in the dropdown. */
+  reasoningEffortDefault?: 'high' | 'max';
+  /** Effective effort (user override if set, otherwise the registry default).
+   *  Drives which pill renders as active. */
+  reasoningEffort?: 'high' | 'max';
 }
 
 export interface ModelSettings {
@@ -177,11 +183,25 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
   private renderModelOption(model: ModelOption): string {
     const selectedModel = this._selectedModel || 'deepseek-chat';
     const isSelected = model.id === selectedModel;
+    // Reasoning-effort sub-control: only on the active model AND only when
+    // the model is thinking-capable (registry default present). Inactive
+    // models hide the control to keep the dropdown compact.
+    const showEffort = isSelected && model.reasoningEffortDefault !== undefined;
+    const activeEffort = model.reasoningEffort ?? model.reasoningEffortDefault ?? 'high';
+    const effortControl = showEffort
+      ? `
+      <div class="reasoning-effort" data-model="${this.escapeHtml(model.id)}">
+        <span class="reasoning-effort-label">Reasoning effort:</span>
+        <button class="reasoning-effort-pill ${activeEffort === 'high' ? 'active' : ''}" data-action="setReasoningEffort" data-effort="high">High</button>
+        <button class="reasoning-effort-pill ${activeEffort === 'max' ? 'active' : ''}" data-action="setReasoningEffort" data-effort="max">Max</button>
+      </div>`
+      : '';
     return `
       <div class="model-option ${isSelected ? 'selected' : ''}" data-model="${this.escapeHtml(model.id)}">
         <span class="model-option-name">${this.escapeHtml(model.name)}</span>
         <span class="model-option-desc">${this.escapeHtml(model.description)}</span>
       </div>
+      ${effortControl}
     `;
   }
 
@@ -243,6 +263,30 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
         command: 'moby.addCustomModel'
       });
       this.close();
+    });
+
+    // Reasoning-effort pill — writes through to settings.json on the
+    // extension side. The orchestrator reads the override fresh on every
+    // request, so the change takes effect on the next turn without any
+    // local cache to invalidate. We optimistically update the local model
+    // entry so the active pill swaps immediately; the canonical
+    // `modelListUpdated` arriving after the config-change listener fires
+    // will overwrite it (and should match).
+    this.delegate('click', '.reasoning-effort-pill', (e, element) => {
+      e.stopPropagation();
+      const effort = element.getAttribute('data-effort') as 'high' | 'max' | null;
+      const wrapper = element.closest<HTMLElement>('.reasoning-effort');
+      const modelId = wrapper?.getAttribute('data-model');
+      if (!effort || !modelId) return;
+      this._vscode.postMessage({
+        type: 'setReasoningEffort',
+        model: modelId,
+        effort
+      });
+      // Optimistic local update so the pill flips immediately.
+      const target = this._models.find(m => m.id === modelId);
+      if (target) target.reasoningEffort = effort;
+      this.updateBodyContent(this.renderPopupContent());
     });
 
     // Slider input (via delegation)

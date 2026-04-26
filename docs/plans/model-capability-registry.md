@@ -9,7 +9,7 @@ Today, model-specific branching is scattered across the codebase via `isReasoner
 
 This has two costs today:
 
-1. **Adding `create_file` / `delete_file` to Chat.** The planned work is straightforward (add schemas, dispatch to fs helpers), but with the current structure, each new tool adds another `!isReasonerModel()` check. The hole gets deeper.
+1. **Adding `write_file` / `delete_file` to Chat.** The planned work is straightforward (add schemas, dispatch to fs helpers), but with the current structure, each new tool adds another `!isReasonerModel()` check. The hole gets deeper.
 
 2. **ADR 0004's B-pattern is implemented once for R1.** When we add Chat tool-result feedback (absolute paths of files touched), we'd replicate the pattern in a second place — not because the pattern differs, but because there's no shared point to add it.
 
@@ -31,7 +31,7 @@ Transport adapters are the only place that differs between models. The capabilit
 
 A minimal version would keep the ad-hoc architecture and just replace `isReasonerModel()` with `supportsNativeTools(model)`. That fixes the hardcoded strings but leaves two problems:
 
-- Capability functions would still live in disparate places ([workspaceTools.ts](../../src/tools/workspaceTools.ts) dispatches tools, [reasonerShellExecutor.ts](../../src/tools/reasonerShellExecutor.ts) parses shell, [diffManager.ts](../../src/providers/diffManager.ts) handles diffs). Adding `create_file` still means touching several files and deciding whose job it is.
+- Capability functions would still live in disparate places ([workspaceTools.ts](../../src/tools/workspaceTools.ts) dispatches tools, [reasonerShellExecutor.ts](../../src/tools/reasonerShellExecutor.ts) parses shell, [diffManager.ts](../../src/providers/diffManager.ts) handles diffs). Adding `write_file` still means touching several files and deciding whose job it is.
 - The B-pattern (ADR 0004 absolute-path feedback) would still be implemented per-transport rather than once at the capability boundary.
 
 A proper capability layer pays off over the minimal version in Phase 2+ when we actually start adding tools.
@@ -158,16 +158,16 @@ interface Transport {
 
 ### Phase 2 — Capability layer + Chat's create/delete ✅ Shipped
 
-**Goal:** Chat gets `create_file` and `delete_file`. The B-pattern lands once, applies to all transports.
+**Goal:** Chat gets `write_file` and `delete_file`. The B-pattern lands once, applies to all transports.
 
 **What landed:**
 - [src/capabilities/types.ts](../../src/capabilities/types.ts) + [src/capabilities/files.ts](../../src/capabilities/files.ts) with `createFile` + `deleteFile` capabilities returning `CapabilityResult` + the `formatFilesAffected` B-pattern formatter.
-- Tool schemas `create_file` + `delete_file` wired in [workspaceTools.ts](../../src/tools/workspaceTools.ts).
+- Tool schemas `write_file` + `delete_file` wired in [workspaceTools.ts](../../src/tools/workspaceTools.ts).
 - Orchestrator dispatch for all three edit tools routes through the capabilities and appends the absolute-path feedback. Delete in ask mode queues a "pending deletion" in the Pending Changes dropdown (same UX shape as edits) rather than a modal.
 - WSL / remote-fs trash fallback: `deleteFile` retries with `useTrash: false` when the provider doesn't support trash.
 - DiffManager register methods (`registerToolCreatedFile`, `registerToolDeletedFile`, `registerPendingDeletion`) complete the capability↔UI plumbing.
 - Accept/reject outcomes now flow back from DiffManager → chatProvider → DB so status writes match reality (fixed a desync where failed deletes were recorded as `applied`).
-- Chat system prompt updated with the edit-tools section + rules for file modifications (incl. the "delete is terminal" rule after observing post-delete `apply_code_edit` over-eagerness).
+- Chat system prompt updated with the edit-tools section + rules for file modifications (incl. the "delete is terminal" rule after observing post-delete `edit_file` over-eagerness).
 
 **What we did NOT do** (and why it's fine):
 - Did not migrate R1's shell heredoc path onto the `createFile` capability. R1's existing absolute-path feedback (via `formatShellResultsForContext`) already satisfies the B-pattern for the shell transport; unification is cleanup-only and was parked.
@@ -197,7 +197,7 @@ After **Phase 1**, adding a local model is one registry entry:
 }
 ```
 
-**Phase 2** makes this even better — a local model that only supports `native-tool` editing automatically gets all the Chat tools (including the forthcoming create_file/delete_file) via its declared transport. Zero new code per model.
+**Phase 2** makes this even better — a local model that only supports `native-tool` editing automatically gets all the Chat tools (including the forthcoming write_file/delete_file) via its declared transport. Zero new code per model.
 
 **What Phase 1+2 does NOT give us:**
 - **A UI to add models.** The registry is code-level for now. A settings UI is a follow-up (likely: a JSON field in VS Code settings mapping into registry entries).

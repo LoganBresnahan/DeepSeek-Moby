@@ -13,10 +13,11 @@
 export type ToolCalling = 'native' | 'none';
 export type ReasoningTokens = 'inline' | 'none';
 export type EditProtocol = 'native-tool' | 'search-replace';
-export type ShellProtocol = 'xml-shell' | 'none';
+export type ShellProtocol = 'xml-shell' | 'native-tool' | 'none';
 export type RequestFormat = 'openai' | 'anthropic';
 export type ReasoningEffort = 'high' | 'max';
 export type ReasoningEcho = 'required' | 'optional' | 'none';
+export type PromptStyle = 'minimal' | 'standard';
 
 export interface ModelCapabilities {
   // How the model expresses intent.
@@ -85,6 +86,17 @@ export interface ModelCapabilities {
    *  V4-thinking returns 400 if not. Default `'none'` means strip from
    *  history before re-sending (current chat-model behavior). */
   reasoningEcho?: ReasoningEcho;
+
+  /** System-prompt flavor. `'minimal'` is calibrated for thinking-style
+   *  models that infer intent from phrasing; it strips the explicit
+   *  reference-vs-edit decision tree and most numbered file-modification
+   *  rules, leaving only load-bearing guardrails. `'standard'` (the
+   *  default) is today's prompt — kept for V3 / non-thinking / custom
+   *  models that benefit from explicit instructions.
+   *
+   *  See [docs/plans/deepseek-v4-integration.md] Phase 3.5 for the
+   *  content split and empirical comparison protocol. */
+  promptStyle?: PromptStyle;
 }
 
 export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
@@ -92,7 +104,7 @@ export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
     toolCalling: 'native',
     reasoningTokens: 'none',
     editProtocol: ['native-tool', 'search-replace'],
-    shellProtocol: 'none',
+    shellProtocol: 'native-tool',
     supportsTemperature: true,
     maxOutputTokens: 8192,
     maxTokensConfigKey: 'maxTokensChatModel',
@@ -127,7 +139,7 @@ export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
     toolCalling: 'native',
     reasoningTokens: 'none',
     editProtocol: ['native-tool', 'search-replace'],
-    shellProtocol: 'none',
+    shellProtocol: 'native-tool',
     supportsTemperature: true,
     maxOutputTokens: 32768,           // practical default
     maxOutputTokensCap: 384000,       // real API cap
@@ -141,7 +153,7 @@ export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
     toolCalling: 'native',
     reasoningTokens: 'inline',
     editProtocol: ['native-tool', 'search-replace'],
-    shellProtocol: 'none',
+    shellProtocol: 'native-tool',
     supportsTemperature: false,        // thinking mode rejects temperature/top_p
     maxOutputTokens: 65536,
     maxOutputTokensCap: 384000,
@@ -153,12 +165,13 @@ export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
     sendThinkingParam: true,
     reasoningEffort: 'high',
     reasoningEcho: 'required',
+    promptStyle: 'minimal',
   },
   'deepseek-v4-pro': {
     toolCalling: 'native',
     reasoningTokens: 'none',
     editProtocol: ['native-tool', 'search-replace'],
-    shellProtocol: 'none',
+    shellProtocol: 'native-tool',
     supportsTemperature: true,
     maxOutputTokens: 32768,
     maxOutputTokensCap: 384000,
@@ -172,7 +185,7 @@ export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
     toolCalling: 'native',
     reasoningTokens: 'inline',
     editProtocol: ['native-tool', 'search-replace'],
-    shellProtocol: 'none',
+    shellProtocol: 'native-tool',
     supportsTemperature: false,
     maxOutputTokens: 65536,
     maxOutputTokensCap: 384000,
@@ -184,6 +197,7 @@ export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
     sendThinkingParam: true,
     reasoningEffort: 'max',            // pro defaults to max — paying for quality
     reasoningEcho: 'required',
+    promptStyle: 'minimal',
   },
 };
 
@@ -218,6 +232,12 @@ export interface RegisteredModelInfo {
   name: string;
   maxTokens: number;
   isCustom: boolean;
+  /** Registry default for reasoning_effort (only present on thinking-capable
+   *  models). The model selector uses presence of this field to decide
+   *  whether to render the High/Max pill sub-control. The current effective
+   *  value (override > registry default) is sent as `reasoningEffort` below
+   *  by `sendModelList()`. */
+  reasoningEffortDefault?: ReasoningEffort;
 }
 
 /**
@@ -235,6 +255,7 @@ export function getAllRegisteredModels(): RegisteredModelInfo[] {
       name: BUILTIN_DISPLAY_NAMES[id] ?? id,
       maxTokens: caps.maxOutputTokensCap ?? caps.maxOutputTokens,
       isCustom: false,
+      ...(caps.reasoningEffort !== undefined && { reasoningEffortDefault: caps.reasoningEffort }),
     });
   }
   for (const [id, caps] of CUSTOM_MODELS.entries()) {
@@ -244,6 +265,7 @@ export function getAllRegisteredModels(): RegisteredModelInfo[] {
       name: CUSTOM_MODEL_NAMES.get(id) ?? id,
       maxTokens: caps.maxOutputTokensCap ?? caps.maxOutputTokens,
       isCustom: true,
+      ...(caps.reasoningEffort !== undefined && { reasoningEffortDefault: caps.reasoningEffort }),
     });
   }
   return out;
@@ -296,7 +318,7 @@ export function validateCustomModelEntry(entry: unknown): { ok: true } | { ok: f
       return { ok: false, error: `editProtocol entry must be "native-tool" or "search-replace", got "${p}"` };
     }
   }
-  if (e.shellProtocol !== 'xml-shell' && e.shellProtocol !== 'none') return { ok: false, error: 'shellProtocol must be "xml-shell" or "none"' };
+  if (e.shellProtocol !== 'xml-shell' && e.shellProtocol !== 'native-tool' && e.shellProtocol !== 'none') return { ok: false, error: 'shellProtocol must be "xml-shell", "native-tool", or "none"' };
   if (typeof e.supportsTemperature !== 'boolean') return { ok: false, error: 'supportsTemperature must be boolean' };
   if (typeof e.maxOutputTokens !== 'number' || e.maxOutputTokens < 128) return { ok: false, error: 'maxOutputTokens must be a number >= 128' };
   if (typeof e.maxTokensConfigKey !== 'string' || !e.maxTokensConfigKey) return { ok: false, error: 'missing maxTokensConfigKey' };
@@ -319,6 +341,9 @@ export function validateCustomModelEntry(entry: unknown): { ok: true } | { ok: f
   }
   if (e.reasoningEcho !== undefined && e.reasoningEcho !== 'required' && e.reasoningEcho !== 'optional' && e.reasoningEcho !== 'none') {
     return { ok: false, error: 'reasoningEcho must be "required", "optional", or "none" if provided' };
+  }
+  if (e.promptStyle !== undefined && e.promptStyle !== 'minimal' && e.promptStyle !== 'standard') {
+    return { ok: false, error: 'promptStyle must be "minimal" or "standard" if provided' };
   }
   return { ok: true };
 }

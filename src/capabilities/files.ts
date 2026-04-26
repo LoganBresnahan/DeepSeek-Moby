@@ -32,8 +32,13 @@ function resolveWorkspacePath(relativePath: string): { absolutePath: string; wor
 }
 
 /**
- * Create a new file with the given content. Fails if the file already
- * exists (use the edit path to modify existing files).
+ * Write a file with the given content. Creates if missing, overwrites
+ * entirely if it exists. The "create or overwrite" shape (instead of
+ * fail-on-exists) lets callers express "I want this file to look like
+ * this" without round-tripping through delete_file first.
+ *
+ * `action` distinguishes the two cases for downstream tracking
+ * (`'created'` vs `'modified'`).
  */
 export async function createFile(
   relativePath: string,
@@ -46,15 +51,12 @@ export async function createFile(
   const { absolutePath } = resolved;
   const uri = vscode.Uri.file(absolutePath);
 
+  let existed = false;
   try {
     await vscode.workspace.fs.stat(uri);
-    return {
-      status: 'failure',
-      error: `File already exists: ${relativePath}. Use apply_code_edit to modify it, or delete_file to remove it first.`,
-      filesAffected: [],
-    };
+    existed = true;
   } catch {
-    // Stat failed — file does not exist, which is what we want.
+    // Stat failed — file does not exist; this is a fresh create.
   }
 
   try {
@@ -63,12 +65,12 @@ export async function createFile(
     await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(content));
     return {
       status: 'success',
-      filesAffected: [{ absolutePath, relativePath, action: 'created' }],
+      filesAffected: [{ absolutePath, relativePath, action: existed ? 'modified' : 'created' }],
     };
   } catch (error: any) {
     return {
       status: 'failure',
-      error: `Failed to create ${relativePath}: ${error.message ?? String(error)}`,
+      error: `Failed to write ${relativePath}: ${error.message ?? String(error)}`,
       filesAffected: [],
     };
   }

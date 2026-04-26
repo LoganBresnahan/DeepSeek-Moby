@@ -612,9 +612,9 @@ export async function executeShellCommands(
  * Model scope: currently wired only on the R1 path (this file is R1-specific
  * because R1 lacks native tool calling — we parse <shell> tags instead). The
  * pattern itself — "tell the model which absolute paths actually changed" —
- * is model-agnostic. If/when Chat grows file-write tools (planned: create_file
- * / delete_file), its `apply_code_edit` tool-result builder should emit the
- * same absolute-path ground truth.
+ * is model-agnostic. Chat / V4 already have these tools (write_file, edit_file,
+ * delete_file); their tool-result builders in `requestOrchestrator` emit the
+ * same absolute-path ground truth via `formatFilesAffected`.
  */
 export function formatShellResultsForContext(
   results: ShellResult[],

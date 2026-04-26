@@ -833,7 +833,7 @@ test.describe('2H. Dropdown Design', () => {
     const page = await freshPage();
     await replayHistory(page, [
       { role: 'assistant', content: '', model: 'deepseek-chat', turnEvents: [
-        { type: 'tool-batch-start', tools: [{ name: 'apply_code_edit', detail: 'Editing' }], ts: 1 },
+        { type: 'tool-batch-start', tools: [{ name: 'edit_file', detail: 'Editing' }], ts: 1 },
         { type: 'tool-update', index: 0, status: 'error', ts: 2 },
         { type: 'tool-batch-complete', ts: 3 },
         { type: 'text-append', content: 'Failed.', iteration: 0, ts: 4 },

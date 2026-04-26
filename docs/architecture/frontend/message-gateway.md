@@ -236,21 +236,21 @@ The gateway merges consecutive same-type content into single UI containers. Diff
 Backend sends:
   toolCallsStart (read_file)       ─┐
   toolCallsEnd                      │ These merge into
-  toolCallsStart (apply_code_edit) ─┘ [Used 2 tools]
+  toolCallsStart (edit_file) ─┘ [Used 2 tools]
   diffListChanged                   → [Modified Files 1 pending]
   toolCallsEnd
   toolCallsStart (read_file)       ─┐ These merge into
   toolCallsEnd                      │ [Used 2 tools]
-  toolCallsStart (apply_code_edit) ─┘
+  toolCallsStart (edit_file) ─┘
   diffListChanged                   → [Modified Files 1 pending]
   toolCallsEnd
   toolCallsStart (read_file)        → [Used 1 tool]
   toolCallsEnd
 
 UI displays:
-  [Used 2 tools] read_file, apply_code_edit
+  [Used 2 tools] read_file, edit_file
   [Modified Files] wow.rb
-  [Used 2 tools] read_file, apply_code_edit
+  [Used 2 tools] read_file, edit_file
   [Modified Files] wow.rb
   [Used 1 tool] read_file
 ```
@@ -259,7 +259,7 @@ UI displays:
 
 **Backend (chatProvider.ts):**
 - Accumulates tools across iterations until a file modification happens
-- When `apply_code_edit` succeeds in auto mode, closes the current tool batch
+- When `edit_file` succeeds in auto mode, closes the current tool batch
 - Sends `toolCallsEnd` followed by `diffListChanged`
 - Next iteration starts a fresh tool batch
 

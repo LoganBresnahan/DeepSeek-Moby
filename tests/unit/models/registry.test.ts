@@ -14,11 +14,13 @@ import {
 
 describe('model registry', () => {
   describe('MODEL_REGISTRY', () => {
-    it('registers deepseek-chat with native tool calling and no shell protocol', () => {
+    it('registers deepseek-chat with native tool calling and native-tool shell protocol', () => {
       const caps = MODEL_REGISTRY['deepseek-chat'];
       expect(caps.toolCalling).toBe('native');
       expect(caps.reasoningTokens).toBe('none');
-      expect(caps.shellProtocol).toBe('none');
+      // Phase 3.75 — V3 chat opted into the run_shell tool path. R1 stays
+      // on 'xml-shell'; native-tool models flip to 'native-tool'.
+      expect(caps.shellProtocol).toBe('native-tool');
       expect(caps.supportsTemperature).toBe(true);
       expect(caps.maxOutputTokens).toBe(8192);
       expect(caps.maxTokensConfigKey).toBe('maxTokensChatModel');
