@@ -69,6 +69,8 @@ describe('model registry', () => {
       expect(caps.reasoningEffort).toBe('high');
       // Phase 3.5 — V4-thinking uses the minimal prompt template.
       expect(caps.promptStyle).toBe('minimal');
+      // Phase 4.5 — opted into the streaming-tool-calls pipeline.
+      expect(caps.streamingToolCalls).toBe(true);
     });
 
     it('registers V4-pro-thinking identically to flash-thinking but with max reasoning effort default', () => {
@@ -79,6 +81,18 @@ describe('model registry', () => {
       expect(caps.reasoningEffort).toBe('max'); // pro defaults to max
       expect(caps.promptStyle).toBe('minimal');
       expect(caps.supportsTemperature).toBe(false);
+      // Phase 4.5 — opted into the streaming-tool-calls pipeline.
+      expect(caps.streamingToolCalls).toBe(true);
+    });
+
+    it('enables streamingToolCalls on V4 non-thinking entries (all native-tool models use single pipeline)', () => {
+      expect(MODEL_REGISTRY['deepseek-v4-flash'].streamingToolCalls).toBe(true);
+      expect(MODEL_REGISTRY['deepseek-v4-pro'].streamingToolCalls).toBe(true);
+    });
+
+    it('enables streamingToolCalls on V3 chat (R1 stays xml-shell, no tools to stream)', () => {
+      expect(MODEL_REGISTRY['deepseek-chat'].streamingToolCalls).toBe(true);
+      expect(MODEL_REGISTRY['deepseek-reasoner'].streamingToolCalls).toBeUndefined();
     });
   });
 

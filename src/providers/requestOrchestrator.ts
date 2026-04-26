@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { DeepSeekClient, Message as ApiMessage } from '../deepseekClient';
+import { DeepSeekClient, Message as ApiMessage, ToolCall } from '../deepseekClient';
 import { getCapabilities, PromptStyle } from '../models/registry';
 import { StatusBar } from '../views/statusBar';
 import { ConversationManager } from '../events';
@@ -794,29 +794,53 @@ export class RequestOrchestrator {
 
       const contextMessages: ApiMessage[] = contextResult.messages as ApiMessage[];
 
-      // Tool calling loop (only for non-reasoner models)
-      let streamingSystemPrompt = systemPrompt;
-      if (!isReasonerModel) {
-        const { toolMessages, limitReached, budgetExceeded, allToolDetails: toolDetails } = await this.runToolLoop(
-          contextMessages, systemPrompt, signal,
-          contextResult.tokenCount, contextResult.budget
+      // ── Pipeline selection ────────────────────────────────────────────
+      // Three paths today:
+      //   1. `streamingToolCalls: true`  — single streaming pipeline that
+      //      emits content + reasoning + tool_calls in parallel and dispatches
+      //      tools inline (Phase 4.5). Replaces the runToolLoop + streamAndIterate
+      //      split for V4-thinking, V4 non-thinking, and any custom model
+      //      that opts in.
+      //   2. `!isReasonerModel` (chat model, flag off) — legacy path:
+      //      `runToolLoop` runs a non-streaming probe to collect tool messages,
+      //      then `streamAndIterate` streams the final no-tools answer.
+      //   3. R1 reasoner — `streamAndIterate` directly (no tool loop; R1's
+      //      `<shell>` XML transport is parsed inline during streaming).
+      const caps = getCapabilities(model);
+
+      if (caps.streamingToolCalls) {
+        const { allToolDetails: toolDetails } = await this.runStreamingToolCallsLoop(
+          contextMessages, systemPrompt, signal, streamState, contextResult.budget
         );
         toolCallsForHistory = toolDetails;
-        contextMessages.push(...toolMessages);
+        // No streamAndIterate fallthrough — the streaming loop already emitted
+        // everything (content + reasoning + tool dispatches) and ran to
+        // `finish_reason: 'stop'`. The "exploration phase complete" prompt
+        // amendment is also dropped: there's no separate exploration phase.
+      } else {
+        let streamingSystemPrompt = systemPrompt;
+        if (!isReasonerModel) {
+          const { toolMessages, limitReached, budgetExceeded, allToolDetails: toolDetails } = await this.runToolLoop(
+            contextMessages, systemPrompt, signal,
+            contextResult.tokenCount, contextResult.budget
+          );
+          toolCallsForHistory = toolDetails;
+          contextMessages.push(...toolMessages);
 
-        if (toolMessages.length > 0) {
-          const limitWarning = (limitReached || budgetExceeded)
-            ? `\n\nNOTE: The tool calling limit was reached. Summarize what you were able to accomplish and explain what remains to be done.`
-            : '';
-          streamingSystemPrompt = systemPrompt + `\n\nIMPORTANT: The tool exploration phase is now complete. You have already gathered the necessary information using tools.\nNow provide your final response based on what you learned. Do NOT attempt to use any more tools or output any tool-calling markup - just provide your answer directly in plain text.${limitWarning}`;
+          if (toolMessages.length > 0) {
+            const limitWarning = (limitReached || budgetExceeded)
+              ? `\n\nNOTE: The tool calling limit was reached. Summarize what you were able to accomplish and explain what remains to be done.`
+              : '';
+            streamingSystemPrompt = systemPrompt + `\n\nIMPORTANT: The tool exploration phase is now complete. You have already gathered the necessary information using tools.\nNow provide your final response based on what you learned. Do NOT attempt to use any more tools or output any tool-calling markup - just provide your answer directly in plain text.${limitWarning}`;
+          }
         }
-      }
 
-      // Run streaming + shell iteration loop (mutates streamState in-place)
-      await this.streamAndIterate(
-        contextMessages, streamingSystemPrompt, signal, message, isReasonerModel,
-        streamState, contextResult.budget
-      );
+        // Run streaming + shell iteration loop (mutates streamState in-place).
+        await this.streamAndIterate(
+          contextMessages, streamingSystemPrompt, signal, message, isReasonerModel,
+          streamState, contextResult.budget
+        );
+      }
 
       // Flush and reset the content buffer before finalizing
       if (this.contentBuffer) {
@@ -2450,6 +2474,777 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
     }
   }
 
+  // ── Private: Tool Dispatch ──
+
+  /**
+   * Execute a single tool call and return the model-facing result string,
+   * plus signals for the caller's batch lifecycle. Phase 4.5 — extracted from
+   * `runToolLoop`'s inline dispatch so the upcoming streaming-tool-calls loop
+   * can call the same code without duplicating ~370 lines of branching.
+   *
+   * Per-tool behavior:
+   *   - `web_search`  — routed through `WebSearchManager.searchByQuery`.
+   *   - `read`        — tracked via `FileContextManager.trackReadFile`.
+   *   - `edit_file`   — synthesizes SEARCH/REPLACE blocks, then routes to
+   *                     `DiffManager` per current edit mode (ask waits for
+   *                     approval, auto applies directly, manual opens diff).
+   *   - `write_file`  — same mode triage, calls `createFileCapability` in auto.
+   *   - `run_shell`   — full R1-parity pipeline: `parseShellCommands`,
+   *                     long-running guard, `CommandApprovalManager`, file
+   *                     watcher with absolute-path ground truth (ADR 0004).
+   *   - `delete_file` / `delete_directory` — register pending deletion in
+   *                     ask/manual, direct capability call in auto.
+   *   - everything else (read-only ops) — passed through to
+   *                     `executeToolCall` from `workspaceTools.ts`.
+   *
+   * Return shape:
+   *   - `result`      — content for the `tool` role message in the next
+   *                     request. May be an error string starting with
+   *                     "Error:" — caller treats that as a failed call.
+   *   - `fileModified` — this call modified files; caller folds this into
+   *                     its `fileModifiedInBatch` accumulator and emits
+   *                     `diffManager.emitAutoAppliedChanges()` once the
+   *                     batch closes.
+   *   - `closesBatch` — ask-mode approval closed the tool batch. Caller
+   *                     should fire `_onToolCallsEnd` and reset its local
+   *                     batch state. (We don't fire it here because the
+   *                     batch state — `toolContainerStarted`,
+   *                     `batchToolDetails` — lives in the caller's loop.)
+   */
+  private async dispatchToolCall(
+    toolCall: ToolCall,
+    signal: AbortSignal,
+  ): Promise<{ result: string; fileModified: boolean; closesBatch: boolean }> {
+    let fileModified = false;
+    let closesBatch = false;
+
+    // ── Initial result: web_search routes through WebSearchManager,
+    // everything else flows through workspaceTools.executeToolCall.
+    let result: string;
+    if (toolCall.function.name === 'web_search') {
+      try {
+        const args = JSON.parse(toolCall.function.arguments);
+        result = await this.webSearchManager.searchByQuery(args.query || '');
+      } catch (e: any) {
+        result = `Error: Failed to execute web search — ${e.message}`;
+      }
+    } else {
+      result = await executeToolCall(toolCall);
+    }
+
+    const success = !result.startsWith('Error:');
+    logger.toolResult(toolCall.function.name, success);
+
+    if (!success) {
+      return { result, fileModified, closesBatch };
+    }
+
+    // ── Per-tool special handling. Each branch may overwrite `result` with
+    // the actual outcome (ask-mode approval text, auto-apply success/failure,
+    // shell stdout/stderr, etc.) and toggle the lifecycle flags.
+
+    if (toolCall.function.name === 'read') {
+      try {
+        logger.info(`[RequestOrchestrator] Tool arguments raw: ${toolCall.function.arguments}`);
+        const args = JSON.parse(toolCall.function.arguments);
+        logger.info(`[RequestOrchestrator] Parsed args: ${JSON.stringify(args)}`);
+        if (args.file_path) {
+          this.fileContextManager.trackReadFile(args.file_path);
+        } else {
+          logger.warn(`[RequestOrchestrator] read tool called but no file_path in args`);
+        }
+      } catch (e) {
+        logger.error(`[RequestOrchestrator] Failed to parse tool arguments: ${e}`);
+      }
+    }
+
+    if (toolCall.function.name === 'edit_file') {
+      try {
+        logger.info(`[RequestOrchestrator] edit_file tool called - args: ${toolCall.function.arguments}`);
+        const args = JSON.parse(toolCall.function.arguments);
+        logger.info(`[RequestOrchestrator] Parsed edit_file args: ${JSON.stringify(args)}`);
+        if (args.file) {
+          this.fileContextManager.trackReadFile(args.file);
+
+          // Build SEARCH/REPLACE block string from the structured `edits`
+          // array. The DiffEngine downstream still parses this format, so
+          // synthesizing it here keeps that infrastructure unchanged
+          // while the model-facing schema is structured (no free-form
+          // code that the engine had to guess about).
+          const editsArray = Array.isArray(args.edits) ? args.edits as Array<{ search?: string; replace?: string }> : null;
+          const code = editsArray
+            ? editsArray.map(e =>
+                `<<<<<<< SEARCH\n${e.search ?? ''}\n=======\n${e.replace ?? ''}\n>>>>>>> REPLACE`
+              ).join('\n\n')
+            : '';
+
+          if (!editsArray || editsArray.length === 0) {
+            result = `edit_file failed for ${args.file}: missing or empty 'edits' array. Resend the call with at least one {search, replace} pair, or use write_file for a full-file rewrite.`;
+          } else if (code) {
+            if (this.diffManager.currentEditMode === 'ask') {
+              logger.info(`[RequestOrchestrator] Triggering blocking diff for edit_file in ask mode`);
+              const codeWithHeader = `# File: ${args.file}\n${code}`;
+              const language = args.language || 'plaintext';
+              await this.diffManager.handleAskModeDiff(codeWithHeader, language);
+
+              // Wait for user approval before continuing tool loop
+              const approvalResults = await this.diffManager.waitForPendingApprovals();
+              if (approvalResults.length > 0) {
+                const r = approvalResults[0];
+                if (r.approved) {
+                  const wsFolder = vscode.workspace.workspaceFolders?.[0];
+                  const absPath = wsFolder ? vscode.Uri.joinPath(wsFolder.uri, args.file).fsPath : undefined;
+                  result = `Code edit applied to ${args.file}. User accepted the changes.` +
+                    (absPath ? formatFilesAffected([{ absolutePath: absPath, relativePath: args.file, action: 'modified' }]) : '');
+                } else {
+                  result = `Code edit rejected for ${args.file}. User rejected the changes. Please try a different approach.`;
+                }
+              }
+              closesBatch = true;
+            } else if (this.diffManager.currentEditMode === 'auto') {
+              logger.info(`[RequestOrchestrator] Auto-applying code edit for: ${args.file}`);
+              const applied = await this.diffManager.applyCodeDirectlyForAutoMode(args.file, code, args.description, true);
+              if (applied) {
+                fileModified = true;
+                const wsFolder = vscode.workspace.workspaceFolders?.[0];
+                const absPath = wsFolder ? vscode.Uri.joinPath(wsFolder.uri, args.file).fsPath : undefined;
+                result = `Code edit applied to ${args.file}.` +
+                  (absPath ? formatFilesAffected([{ absolutePath: absPath, relativePath: args.file, action: 'modified' }]) : '');
+              } else {
+                // Auto-apply failed — either stale content or the search
+                // text didn't match the current file. The model needs
+                // both signals: re-read, and double-check the search
+                // text matches verbatim.
+                result = `edit_file failed for ${args.file}: one or more SEARCH snippets did not match the current file (the file may have changed since you last read it, or the SEARCH text is not verbatim). Re-read the file, then resend with SEARCH text that quotes the current contents exactly.`;
+              }
+            } else if (this.diffManager.currentEditMode === 'manual') {
+              logger.info(`[RequestOrchestrator] Opening diff for manual review: ${args.file}`);
+              const codeWithHeader = `# File: ${args.file}\n${code}`;
+              const language = args.language || 'plaintext';
+              await this.diffManager.showDiff(codeWithHeader, language);
+            }
+          }
+        } else {
+          logger.warn(`[RequestOrchestrator] edit_file called but no file in args`);
+        }
+      } catch (e) {
+        logger.error(`[RequestOrchestrator] Failed to parse edit_file arguments: ${e}`);
+      }
+    }
+
+    if (toolCall.function.name === 'write_file') {
+      try {
+        const args = JSON.parse(toolCall.function.arguments);
+        if (!args.path || typeof args.content !== 'string') {
+          result = `Error: write_file requires "path" and "content" arguments`;
+        } else {
+          const editMode = this.diffManager.currentEditMode;
+          if (editMode === 'ask' || editMode === 'manual') {
+            logger.info(`[RequestOrchestrator] write_file (${editMode}) — routing through diff approval for ${args.path}`);
+            const codeWithHeader = `# File: ${args.path}\n${args.content}`;
+            const language = args.language || 'plaintext';
+            if (editMode === 'ask') {
+              await this.diffManager.handleAskModeDiff(codeWithHeader, language);
+              const approvalResults = await this.diffManager.waitForPendingApprovals();
+              const approved = approvalResults[0]?.approved ?? false;
+              if (approved) {
+                this.fileContextManager.trackReadFile(args.path);
+                const wsFolder = vscode.workspace.workspaceFolders?.[0];
+                const absPath = wsFolder ? vscode.Uri.joinPath(wsFolder.uri, args.path).fsPath : undefined;
+                result = `Created file ${args.path}. User accepted the changes.` +
+                  (absPath ? formatFilesAffected([{ absolutePath: absPath, relativePath: args.path, action: 'created' }]) : '');
+              } else {
+                result = `Create file rejected for ${args.path}. User rejected the creation.`;
+              }
+              closesBatch = true;
+            } else {
+              // manual — open diff, no blocking approval
+              await this.diffManager.showDiff(codeWithHeader, language);
+              result = `Opened diff for ${args.path}. User will apply manually.`;
+            }
+          } else {
+            // auto mode — call capability directly
+            const capResult = await createFileCapability(args.path, args.content);
+            if (capResult.status === 'success') {
+              this.fileContextManager.trackReadFile(args.path);
+              this.diffManager.registerToolCreatedFile(args.path, args.description || 'Created by write_file');
+              fileModified = true;
+              result = `Created file ${args.path}.` + formatFilesAffected(capResult.filesAffected);
+            } else {
+              result = `Error: ${capResult.error}`;
+            }
+          }
+        }
+      } catch (e: any) {
+        logger.error(`[RequestOrchestrator] Failed to handle write_file: ${e.message ?? e}`);
+        result = `Error: Failed to process write_file — ${e.message ?? e}`;
+      }
+    }
+
+    if (toolCall.function.name === 'run_shell') {
+      try {
+        const args = JSON.parse(toolCall.function.arguments);
+        const commandStr = typeof args.command === 'string' ? args.command : '';
+        if (!commandStr.trim()) {
+          result = `Error: run_shell requires a non-empty "command" argument.`;
+        } else {
+          // Reuse the same parser the <shell> path uses — keeps long-running
+          // rejection, heredoc handling, and ShellCommand shape consistent.
+          const parsed = parseShellCommands(`<shell>${commandStr}</shell>`);
+          if (parsed.length === 0) {
+            result = `Error: run_shell could not parse the command "${commandStr.substring(0, 80)}".`;
+          } else if (isLongRunningCommand(parsed[0].command)) {
+            // Same policy as R1's path: refuse rather than execute and hang.
+            result = `Skipped long-running command "${parsed[0].command}". This command starts a server, watch mode, or REPL that wouldn't return on its own. Ask the user to run it manually.`;
+            this._onShellExecuting.fire({ commands: [{ command: parsed[0].command, description: 'Skipped (long-running)' }] });
+            this._onShellResults.fire({ results: [{ command: parsed[0].command, output: result, success: true }] });
+          } else {
+            const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+            const workspacePath = workspaceFolder?.uri.fsPath ?? process.cwd();
+
+            // Approval flow — identical decision tree to the R1 inline path.
+            const allowAllCommands = vscode.workspace.getConfiguration('moby').get<boolean>('allowAllShellCommands') ?? false;
+            let approvedCommand: ShellCommand | null = null;
+            let blockedResult: ShellResult | null = null;
+
+            if (allowAllCommands || !this.commandApprovalManager) {
+              approvedCommand = { ...parsed[0], approvalStatus: 'auto' };
+            } else {
+              const decision = this.commandApprovalManager.checkCommand(parsed[0].command);
+              if (decision === 'allowed') {
+                approvedCommand = { ...parsed[0], approvalStatus: 'auto' };
+              } else {
+                const userApproval = await this.commandApprovalManager.requestApproval(parsed[0].command);
+                if (userApproval.decision === 'allowed') {
+                  approvedCommand = { ...parsed[0], approvalStatus: 'user-allowed' };
+                } else {
+                  blockedResult = {
+                    command: parsed[0].command,
+                    output: `Command rejected by user: ${parsed[0].command}`,
+                    success: false,
+                    executionTimeMs: 0,
+                    approvalStatus: 'user-blocked'
+                  };
+                }
+              }
+            }
+
+            // Notify the frontend before execution so the shell dropdown
+            // appears with the running command.
+            const preview = parsed[0].command.length > 50
+              ? parsed[0].command.substring(0, 50) + '...'
+              : parsed[0].command;
+            this._onShellExecuting.fire({ commands: [{ command: parsed[0].command, description: preview }] });
+
+            // File watcher — captures modified/deleted paths so the tool
+            // result can list absolute paths (ADR 0004).
+            const modifiedFiles = new Set<string>();
+            const deletedFiles = new Set<string>();
+            let shellFileWatcher: vscode.FileSystemWatcher | null = null;
+            try {
+              shellFileWatcher = vscode.workspace.createFileSystemWatcher(
+                new vscode.RelativePattern(workspacePath, '**/*')
+              );
+              const trackChange = (uri: vscode.Uri) => {
+                const rel = vscode.workspace.asRelativePath(uri, false);
+                if (!shouldIgnoreWatcherPath(rel)) modifiedFiles.add(rel);
+              };
+              shellFileWatcher.onDidChange(trackChange);
+              shellFileWatcher.onDidCreate(trackChange);
+              shellFileWatcher.onDidDelete((uri: vscode.Uri) => {
+                const rel = vscode.workspace.asRelativePath(uri, false);
+                if (!shouldIgnoreWatcherPath(rel)) {
+                  deletedFiles.add(rel);
+                  modifiedFiles.delete(rel);
+                }
+              });
+            } catch {
+              shellFileWatcher = null;
+            }
+
+            let executedResults: ShellResult[] = [];
+            if (approvedCommand) {
+              executedResults = await executeShellCommands([approvedCommand], workspacePath, { allowAllCommands, signal });
+            }
+
+            // Drain watcher events that arrived during execution.
+            if (shellFileWatcher) {
+              await new Promise(resolve => setTimeout(resolve, 100));
+              shellFileWatcher.dispose();
+              if (modifiedFiles.size > 0) {
+                this.diffManager.registerShellModifiedFiles([...modifiedFiles]);
+              }
+              if (deletedFiles.size > 0) {
+                this.diffManager.registerShellDeletedFiles([...deletedFiles]);
+              }
+            }
+
+            const allResults = blockedResult ? [blockedResult, ...executedResults] : executedResults;
+
+            this._onShellResults.fire({
+              results: allResults.map(r => ({
+                command: r.command,
+                output: r.output.substring(0, 500) + (r.output.length > 500 ? '...' : ''),
+                success: r.success
+              }))
+            });
+
+            // Format with absolute-path ground truth so the model sees
+            // the same shape as R1's <shell> results.
+            result = formatShellResultsForContext(allResults, {
+              modifiedFiles: [...modifiedFiles],
+              deletedFiles: [...deletedFiles],
+              workspacePath,
+            });
+            if (modifiedFiles.size > 0 || deletedFiles.size > 0) {
+              fileModified = true;
+            }
+          }
+        }
+      } catch (e: any) {
+        logger.error(`[RequestOrchestrator] run_shell failed: ${e.message ?? e}`);
+        result = `Error: run_shell failed — ${e.message ?? e}`;
+      }
+    }
+
+    if (toolCall.function.name === 'delete_file') {
+      try {
+        const args = JSON.parse(toolCall.function.arguments);
+        if (!args.path) {
+          result = `Error: delete_file requires a "path" argument`;
+        } else {
+          const editMode = this.diffManager.currentEditMode;
+          if (editMode === 'ask' || editMode === 'manual') {
+            const diffId = this.diffManager.registerPendingDeletion(args.path);
+            const approvalResults = await this.diffManager.waitForPendingApprovals();
+            const approved = approvalResults.find(r => r.diffId === diffId)?.approved ?? false;
+            if (approved) {
+              fileModified = true;
+              const wsFolder = vscode.workspace.workspaceFolders?.[0];
+              const absPath = wsFolder ? vscode.Uri.joinPath(wsFolder.uri, args.path).fsPath : undefined;
+              result = `Deleted file ${args.path}. User accepted the deletion.` +
+                (absPath ? formatFilesAffected([{ absolutePath: absPath, relativePath: args.path, action: 'deleted' }]) : '');
+            } else {
+              result = `Delete file rejected for ${args.path}. User declined the deletion.`;
+            }
+            closesBatch = true;
+          } else {
+            // auto mode — direct capability call
+            const capResult = await deleteFileCapability(args.path);
+            if (capResult.status === 'success') {
+              this.diffManager.registerToolDeletedFile(args.path);
+              fileModified = true;
+              result = `Deleted file ${args.path}.` + formatFilesAffected(capResult.filesAffected);
+            } else {
+              result = `Error: ${capResult.error}`;
+            }
+          }
+        }
+      } catch (e: any) {
+        logger.error(`[RequestOrchestrator] Failed to handle delete_file: ${e.message ?? e}`);
+        result = `Error: Failed to process delete_file — ${e.message ?? e}`;
+      }
+    }
+
+    if (toolCall.function.name === 'delete_directory') {
+      try {
+        const args = JSON.parse(toolCall.function.arguments);
+        if (!args.path) {
+          result = `Error: delete_directory requires a "path" argument`;
+        } else {
+          const recursive = args.recursive === 'true';
+          const editMode = this.diffManager.currentEditMode;
+          if (editMode === 'ask' || editMode === 'manual') {
+            const diffId = this.diffManager.registerPendingDirectoryDeletion(args.path, recursive);
+            const approvalResults = await this.diffManager.waitForPendingApprovals();
+            const approvalOutcome = approvalResults.find(r => r.diffId === diffId);
+            const approved = approvalOutcome?.approved ?? false;
+            if (approved) {
+              fileModified = true;
+              const wsFolder = vscode.workspace.workspaceFolders?.[0];
+              const absPath = wsFolder ? vscode.Uri.joinPath(wsFolder.uri, args.path).fsPath : undefined;
+              result = `Deleted directory ${args.path}${recursive ? ' (recursive)' : ''}. User accepted the deletion.` +
+                (absPath ? formatFilesAffected([{ absolutePath: absPath, relativePath: args.path, action: 'deleted' }]) : '');
+            } else {
+              // Distinguish user reject vs capability failure so the model
+              // gets a useful error (e.g. "directory not empty, try recursive=true").
+              result = `Delete directory rejected for ${args.path}. User declined the deletion (or the directory was not empty and recursive=false).`;
+            }
+            closesBatch = true;
+          } else {
+            // auto mode — direct capability call via DiffManager wrapper
+            // so the Modified Files dropdown updates on success.
+            const outcome = await this.diffManager.deleteDirectoryDirect(args.path, recursive);
+            if (outcome.status === 'applied') {
+              fileModified = true;
+              const wsFolder = vscode.workspace.workspaceFolders?.[0];
+              const absPath = wsFolder ? vscode.Uri.joinPath(wsFolder.uri, args.path).fsPath : undefined;
+              result = `Deleted directory ${args.path}${recursive ? ' (recursive)' : ''}.` +
+                (absPath ? formatFilesAffected([{ absolutePath: absPath, relativePath: args.path, action: 'deleted' }]) : '');
+            } else {
+              // Surface the capability-level error (e.g. "not empty").
+              result = `Error: Failed to delete directory ${args.path}. ${recursive ? '' : 'Set recursive="true" if the directory is not empty.'}`;
+            }
+          }
+        }
+      } catch (e: any) {
+        logger.error(`[RequestOrchestrator] Failed to handle delete_directory: ${e.message ?? e}`);
+        result = `Error: Failed to process delete_directory — ${e.message ?? e}`;
+      }
+    }
+
+    return { result, fileModified, closesBatch };
+  }
+
+  // ── Private: Streaming Tool-Calls Loop (Phase 4.5) ──
+
+  /**
+   * Unified streaming pipeline for native-tool models with
+   * `streamingToolCalls: true`. Replaces the today's `runToolLoop`
+   * (non-streaming probe) + `streamAndIterate` (no-tools final summary)
+   * split with a single streamed loop:
+   *
+   *   while (more turns):
+   *     stream content + reasoning + tool_calls deltas in parallel
+   *     if finish_reason === 'tool_calls':
+   *       dispatch each tool, append tool messages, continue
+   *     else (finish_reason === 'stop'):
+   *       break
+   *
+   * Why this exists: today V4-thinking does most of its reasoning inside
+   * the non-streaming `chat()` calls in `runToolLoop`. The reasoning
+   * arrives fully formed but we never feed it to the UI's
+   * `_onStreamReasoning` channel, so users see no thinking text on tool
+   * turns. Streaming the tool-decision phase fixes that and also removes
+   * the duplicate-generation cost on no-tool turns (today: a full reply
+   * is generated twice — once non-streaming with tools attached, then
+   * again streamed without tools).
+   *
+   * Mutates `state` in place with the same fields `streamAndIterate` does
+   * so `handleMessage`'s post-processing (cleanResponse, onEndResponse,
+   * saveToHistory) is identical regardless of which loop ran.
+   */
+  private async runStreamingToolCallsLoop(
+    contextMessages: ApiMessage[],
+    systemPrompt: string,
+    signal: AbortSignal,
+    state: {
+      accumulatedResponse: string;
+      fullResponse: string;
+      fullReasoning: string;
+      reasoningIterations: string[];
+      currentIterationReasoning: string;
+      contentIterations: string[];
+      currentIterationContent: string;
+      shellResultsForHistory: ShellResult[];
+      shellCreatedFiles: boolean;
+      shellDeletedFiles: boolean;
+    },
+    contextBudgetTokens: number,
+  ): Promise<{ allToolDetails: Array<{ name: string; detail: string; status: string }>; limitReached: boolean; budgetExceeded: boolean }> {
+    const config = vscode.workspace.getConfiguration('moby');
+    const configuredLimit = config.get<number>('maxToolCalls') ?? 25;
+    const maxIterations = configuredLimit >= 100 ? Infinity : configuredLimit;
+    let iterations = 0;
+
+    const budgetLimit = contextBudgetTokens;
+    let accumulatedTokens = 0;
+    let budgetExceeded = false;
+
+    const allToolDetails: Array<{ name: string; detail: string; status: string }> = [];
+    let batchToolDetails: Array<{ name: string; detail: string; status: string }> = [];
+    let toolContainerStarted = false;
+    let globalToolIndex = 0;
+    let fileModifiedInBatch = false;
+
+    // Working messages — start from the caller's context, append assistant +
+    // tool turns as we iterate. The caller's `contextMessages` is not mutated.
+    const currentMessages: ApiMessage[] = [...contextMessages];
+
+    while (iterations < maxIterations) {
+      iterations++;
+
+      if (signal.aborted) break;
+
+      // Soft-stop on context budget pressure (parity with runToolLoop).
+      if (budgetLimit > 0) {
+        const baseTokens = this.deepSeekClient.estimateTokens(JSON.stringify(currentMessages));
+        if (baseTokens + accumulatedTokens > budgetLimit * 0.95) {
+          logger.warn(
+            `[StreamingToolCalls] Loop stopped: approaching budget ` +
+            `(${(baseTokens + accumulatedTokens).toLocaleString()}/${budgetLimit.toLocaleString()} tokens, ` +
+            `${iterations - 1} iterations completed)`
+          );
+          budgetExceeded = true;
+          break;
+        }
+      }
+
+      // Build tools array — same composition as runToolLoop.
+      const wsState = await this.webSearchManager.getSettings();
+      const includeWebSearch = wsState.mode === 'auto' && wsState.configured;
+      const includeRunShell = getCapabilities(this.deepSeekClient.getModel()).shellProtocol === 'native-tool';
+      const tools = [
+        ...workspaceTools,
+        applyCodeEditTool,
+        createFileTool,
+        deleteFileTool,
+        deleteDirectoryTool,
+        ...(includeRunShell ? [runShellTool] : []),
+        ...(includeWebSearch ? [webSearchTool] : [])
+      ];
+
+      logger.info(`[StreamingToolCalls] Iteration ${iterations}, messages=${currentMessages.length}, tools=${tools.length}`);
+
+      // Emit per-iteration tracer event (parity with streamAndIterate).
+      this._onIterationStart.fire({ iteration: iterations });
+
+      const iterStartTime = performance.now();
+      let firstReasoningTime: number | null = null;
+      let firstContentTime: number | null = null;
+
+      // Reset per-iteration accumulators on the shared state object.
+      state.currentIterationContent = '';
+      state.currentIterationReasoning = '';
+
+      // Mark the batch position at the start of this iteration so we can
+      // tell which tools were pre-announced via the streaming callback
+      // (between this point and the post-stream enrichment).
+      const iterationStartBatchSize = batchToolDetails.length;
+
+      // ── The stream ────────────────────────────────────────────────────
+      // streamChat fires onToken/onReasoning live (this is the whole point
+      // of Phase 4.5 — V4-thinking's reasoning surfaces during the tool-
+      // decision phase, not after) and accumulates `delta.tool_calls` into
+      // `response.tool_calls`. Returns when the API emits [DONE] or the
+      // stream ends naturally with `finish_reason: 'stop' | 'tool_calls'`.
+      //
+      // `onToolCallStreaming` fires the moment a new tool's metadata
+      // (id + name) arrives in the stream, well before its argument deltas
+      // finish accumulating. We push a placeholder with name-only detail
+      // and fire the batch-start (or update) event so the UI shows
+      // "preparing write_file" instead of a silent gap. Args fill in once
+      // the stream resolves.
+      const response = await this.deepSeekClient.streamChat(
+        currentMessages,
+        (token) => {
+          if (firstContentTime === null) {
+            firstContentTime = performance.now();
+            const wait = Math.round(firstContentTime - iterStartTime);
+            logger.info(`[StreamingToolCalls] First content token after ${wait}ms (iter ${iterations})`);
+          }
+          state.accumulatedResponse += token;
+          state.fullResponse += token;
+          state.currentIterationContent += token;
+          this._onStreamToken.fire({ token });
+          // Live code-block detection (used by ask/auto edit modes).
+          this.diffManager.handleCodeBlockDetection(state.accumulatedResponse);
+        },
+        systemPrompt,
+        (reasoningToken) => {
+          if (firstReasoningTime === null) {
+            firstReasoningTime = performance.now();
+            const wait = Math.round(firstReasoningTime - iterStartTime);
+            logger.info(`[StreamingToolCalls] First reasoning token after ${wait}ms (iter ${iterations})`);
+          }
+          state.fullReasoning += reasoningToken;
+          state.currentIterationReasoning += reasoningToken;
+          this._onStreamReasoning.fire({ token: reasoningToken });
+        },
+        {
+          tools,
+          signal,
+          onToolCallStreaming: (toolCall) => {
+            const name = toolCall.function.name;
+            logger.info(`[StreamingToolCalls] Pre-announce tool: ${name} (id=${toolCall.id}) — args still streaming`);
+            const placeholder = { name, detail: name, status: 'pending' as const };
+            batchToolDetails.push(placeholder);
+            allToolDetails.push(placeholder);
+            // Deep-clone the snapshot — handlers that capture this list
+            // would otherwise see post-mutation state once we enrich
+            // detail strings after the stream resolves.
+            const snapshot = batchToolDetails.map(t => ({ ...t }));
+            if (!toolContainerStarted) {
+              this._onToolCallsStart.fire({ tools: snapshot });
+              toolContainerStarted = true;
+            } else {
+              this._onToolCallsUpdate.fire({ tools: snapshot });
+            }
+          },
+        }
+      );
+
+      // Per-iteration history (used by the chat replay UI).
+      if (state.currentIterationReasoning) {
+        state.reasoningIterations.push(state.currentIterationReasoning);
+      }
+      if (state.currentIterationContent) {
+        state.contentIterations.push(state.currentIterationContent);
+      }
+
+      const toolCalls = response.tool_calls ?? [];
+
+      // Terminal turn — model produced its final answer. Loop ends.
+      if (response.finish_reason !== 'tool_calls' || toolCalls.length === 0) {
+        logger.info(`[StreamingToolCalls] Iteration ${iterations} terminal (finish_reason=${response.finish_reason ?? 'unknown'}, tool_calls=${toolCalls.length})`);
+        break;
+      }
+
+      logger.info(`[StreamingToolCalls] Iteration ${iterations} produced ${toolCalls.length} tool call(s)`);
+
+      // Build enriched detail strings now that argument deltas have fully
+      // accumulated (during streaming we only had the tool name).
+      const enrichedDetails = toolCalls.map(tc => {
+        const name = tc.function.name;
+        let args: Record<string, string> = {};
+        try { args = JSON.parse(tc.function.arguments); } catch { /* ignore */ }
+        let detail = name;
+        if (name === 'read_file' && args.path) detail = `read: ${args.path}`;
+        else if (name === 'find_files' && args.pattern) detail = `find: ${args.pattern}`;
+        else if (name === 'grep' && args.query) detail = `grep: "${args.query}"`;
+        else if (name === 'list_directory') detail = `list: ${args.path || '.'}`;
+        else if (name === 'file_metadata' && args.path) detail = `metadata: ${args.path}`;
+        else if (name === 'web_search' && args.query) detail = `search web: "${args.query}"`;
+        else if (name === 'edit_file' && args.file) detail = `edit: ${args.file}`;
+        else if (name === 'write_file' && args.path) detail = `write: ${args.path}`;
+        else if (name === 'delete_file' && args.path) detail = `delete: ${args.path}`;
+        else if (name === 'delete_directory' && args.path) detail = `delete: ${args.path}${args.recursive === 'true' ? ' (recursive)' : ''}`;
+        else if (name === 'run_shell' && args.command) detail = `run: ${args.command.length > 50 ? args.command.substring(0, 50) + '...' : args.command}`;
+        return { name, detail };
+      });
+
+      // Reconcile pre-announced placeholders (from `onToolCallStreaming`) with
+      // the resolved tool list. Common case: streaming announced one
+      // placeholder per tool — we just enrich detail strings in place.
+      // Defensive fallback: if streaming missed any (shouldn't happen for
+      // streamingToolCalls models, but the API contract doesn't guarantee
+      // delta order), push the missing ones now.
+      const preAnnouncedCount = batchToolDetails.length - iterationStartBatchSize;
+      if (preAnnouncedCount < toolCalls.length) {
+        for (let i = preAnnouncedCount; i < toolCalls.length; i++) {
+          const tool = { ...enrichedDetails[i], status: 'pending' as const };
+          batchToolDetails.push(tool);
+          allToolDetails.push(tool);
+        }
+      }
+      // Enrich placeholder details for all tools added this iteration.
+      for (let i = 0; i < toolCalls.length; i++) {
+        const batchPos = iterationStartBatchSize + i;
+        const globalPos = allToolDetails.length - toolCalls.length + i;
+        batchToolDetails[batchPos].detail = enrichedDetails[i].detail;
+        allToolDetails[globalPos].detail = enrichedDetails[i].detail;
+      }
+      // Fire batch event with enriched details. Streaming callback fired
+      // start (or update) earlier with name-only details; this update
+      // surfaces the now-known specifics (paths, queries, etc.). Deep-
+      // clone so subsequent status mutations (running → done) don't leak
+      // backwards into the captured event payload.
+      const enrichedSnapshot = batchToolDetails.map(t => ({ ...t }));
+      if (!toolContainerStarted) {
+        // No streaming pre-announce happened (streaming callback never
+        // fired). Fall back to the legacy "fire start at end" pattern.
+        logger.info(`[StreamingToolCalls] Starting tool container with ${batchToolDetails.length} tool(s) (no streaming pre-announce)`);
+        this._onToolCallsStart.fire({ tools: enrichedSnapshot });
+        toolContainerStarted = true;
+      } else {
+        this._onToolCallsUpdate.fire({ tools: enrichedSnapshot });
+      }
+
+      // Append assistant turn. `reasoning_content` rides along when V4-
+      // thinking is active so the next request includes it (the wire-format
+      // serializer in DeepSeekClient gates outbound inclusion on the active
+      // model's `reasoningEcho === 'required'`).
+      currentMessages.push({
+        role: 'assistant',
+        content: response.content || '',
+        reasoning_content: response.reasoning_content,
+        tool_calls: toolCalls,
+      });
+
+      if (budgetLimit > 0) {
+        const assistantText = (response.content || '') + JSON.stringify(toolCalls);
+        accumulatedTokens += this.deepSeekClient.estimateTokens(assistantText);
+      }
+
+      const batchStartIndex = iterationStartBatchSize;
+
+      // Dispatch each tool call via the shared helper. Same UI status
+      // lifecycle as runToolLoop: pending → running → done/error.
+      for (let i = 0; i < toolCalls.length; i++) {
+        const toolCall = toolCalls[i];
+        const detail = enrichedDetails[i];
+        const globalIndex = globalToolIndex + i;
+        const batchIndex = batchStartIndex + i;
+
+        logger.toolCall(toolCall.function.name);
+
+        batchToolDetails[batchIndex].status = 'running';
+        allToolDetails[globalIndex].status = 'running';
+        this._onToolCallUpdate.fire({ index: batchIndex, status: 'running', detail: detail.detail });
+
+        const dispatch = await this.dispatchToolCall(toolCall, signal);
+        const result = dispatch.result;
+        const success = !result.startsWith('Error:');
+
+        if (dispatch.fileModified) fileModifiedInBatch = true;
+        if (dispatch.closesBatch && toolContainerStarted) {
+          this._onToolCallsEnd.fire();
+          toolContainerStarted = false;
+          batchToolDetails = [];
+        }
+
+        currentMessages.push({
+          role: 'tool',
+          content: result,
+          tool_call_id: toolCall.id,
+        });
+
+        if (budgetLimit > 0) {
+          accumulatedTokens += this.deepSeekClient.estimateTokens(result);
+        }
+
+        const finalStatus = success ? 'done' : 'error';
+        allToolDetails[globalIndex].status = finalStatus;
+        if (batchIndex < batchToolDetails.length) {
+          batchToolDetails[batchIndex].status = finalStatus;
+          this._onToolCallUpdate.fire({ index: batchIndex, status: finalStatus, detail: detail.detail });
+        }
+      }
+
+      globalToolIndex += toolCalls.length;
+
+      if (fileModifiedInBatch) {
+        this.diffManager.emitAutoAppliedChanges();
+        fileModifiedInBatch = false;
+      }
+
+      // Close the tool batch at the iteration boundary. Each streamChat
+      // call is one "decision point" — its tool calls (one or many parallel)
+      // belong in one dropdown; the next iteration's calls are a separate
+      // decision and should render as their own dropdown. Mirrors what
+      // `MessageTurnActor.startThinkingIteration` does for Modified Files
+      // (it nulls `_currentPendingGroup` so the next file modification
+      // opens a fresh group). Without this close, V4-thinking turns that
+      // run 10+ iterations all collapse into one giant "Used 11 tools"
+      // dropdown, hiding the thinking that happened between each decision.
+      if (toolContainerStarted) {
+        logger.info(`[StreamingToolCalls] Closing tool batch at iteration ${iterations} boundary (${batchToolDetails.length} tool(s))`);
+        this._onToolCallsEnd.fire();
+        toolContainerStarted = false;
+        batchToolDetails = [];
+      }
+    }
+
+    // Defensive — if the loop exited mid-batch (e.g. abort during dispatch),
+    // close it now. Normal exit already closed at the iteration boundary.
+    if (toolContainerStarted) {
+      this._onToolCallsEnd.fire();
+    }
+
+    const limitReached = iterations >= maxIterations && maxIterations !== Infinity;
+    return { allToolDetails, limitReached, budgetExceeded };
+  }
+
   // ── Private: Tool Loop ──
 
   private async runToolLoop(
@@ -2642,402 +3437,23 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
           detail: detail.detail
         });
 
-        // Execute tool — intercept web_search to route through WebSearchManager
-        let result: string;
-        if (toolCall.function.name === 'web_search') {
-          try {
-            const args = JSON.parse(toolCall.function.arguments);
-            result = await this.webSearchManager.searchByQuery(args.query || '');
-          } catch (e: any) {
-            result = `Error: Failed to execute web search — ${e.message}`;
-          }
-        } else {
-          result = await executeToolCall(toolCall);
-        }
+        // Phase 4.5 — dispatch the tool call. Helper handles all per-tool
+        // branches (web_search, read tracking, edit_file, write_file,
+        // run_shell, delete_file, delete_directory) and returns the
+        // model-facing result plus lifecycle flags. Caller still owns the
+        // tool-batch UI lifecycle (running→done status, container open/close)
+        // because that state is loop-local.
+        const dispatch = await this.dispatchToolCall(toolCall, signal);
+        const result = dispatch.result;
         const success = !result.startsWith('Error:');
-        logger.toolResult(toolCall.function.name, success);
-
-        // Track ALL read files for auto-diff and inference
-        if (toolCall.function.name === 'read' && success) {
-          try {
-            logger.info(`[RequestOrchestrator] Tool arguments raw: ${toolCall.function.arguments}`);
-            const args = JSON.parse(toolCall.function.arguments);
-            logger.info(`[RequestOrchestrator] Parsed args: ${JSON.stringify(args)}`);
-            if (args.file_path) {
-              this.fileContextManager.trackReadFile(args.file_path);
-            } else {
-              logger.warn(`[RequestOrchestrator] read tool called but no file_path in args`);
-            }
-          } catch (e) {
-            logger.error(`[RequestOrchestrator] Failed to parse tool arguments: ${e}`);
-          }
+        if (dispatch.fileModified) {
+          fileModifiedInBatch = true;
         }
-
-        // Track edit_file tool calls for file path extraction
-        if (toolCall.function.name === 'edit_file' && success) {
-          try {
-            logger.info(`[RequestOrchestrator] edit_file tool called - args: ${toolCall.function.arguments}`);
-            const args = JSON.parse(toolCall.function.arguments);
-            logger.info(`[RequestOrchestrator] Parsed edit_file args: ${JSON.stringify(args)}`);
-            if (args.file) {
-              this.fileContextManager.trackReadFile(args.file);
-
-              // Build SEARCH/REPLACE block string from the structured `edits`
-              // array. The DiffEngine downstream still parses this format, so
-              // synthesizing it here keeps that infrastructure unchanged
-              // while the model-facing schema is structured (no free-form
-              // code that the engine had to guess about).
-              const editsArray = Array.isArray(args.edits) ? args.edits as Array<{ search?: string; replace?: string }> : null;
-              const code = editsArray
-                ? editsArray.map(e =>
-                    `<<<<<<< SEARCH\n${e.search ?? ''}\n=======\n${e.replace ?? ''}\n>>>>>>> REPLACE`
-                  ).join('\n\n')
-                : '';
-
-              if (!editsArray || editsArray.length === 0) {
-                result = `edit_file failed for ${args.file}: missing or empty 'edits' array. Resend the call with at least one {search, replace} pair, or use write_file for a full-file rewrite.`;
-              } else if (code) {
-                if (this.diffManager.currentEditMode === 'ask') {
-                  logger.info(`[RequestOrchestrator] Triggering blocking diff for edit_file in ask mode`);
-                  const codeWithHeader = `# File: ${args.file}\n${code}`;
-                  const language = args.language || 'plaintext';
-                  await this.diffManager.handleAskModeDiff(codeWithHeader, language);
-
-                  // Wait for user approval before continuing tool loop
-                  const approvalResults = await this.diffManager.waitForPendingApprovals();
-                  if (approvalResults.length > 0) {
-                    const r = approvalResults[0];
-                    if (r.approved) {
-                      const wsFolder = vscode.workspace.workspaceFolders?.[0];
-                      const absPath = wsFolder ? vscode.Uri.joinPath(wsFolder.uri, args.file).fsPath : undefined;
-                      result = `Code edit applied to ${args.file}. User accepted the changes.` +
-                        (absPath ? formatFilesAffected([{ absolutePath: absPath, relativePath: args.file, action: 'modified' }]) : '');
-                    } else {
-                      result = `Code edit rejected for ${args.file}. User rejected the changes. Please try a different approach.`;
-                    }
-                  }
-
-                  // Close the current tool batch after approval so retries render in a fresh batch
-                  if (toolContainerStarted) {
-                    this._onToolCallsEnd.fire();
-                    toolContainerStarted = false;
-                    logger.info(`[Frontend] Sent toolCallsEnd (ask mode approval, closing batch after iteration ${iterations})`);
-                    batchToolDetails = [];
-                  }
-                } else if (this.diffManager.currentEditMode === 'auto') {
-                  logger.info(`[RequestOrchestrator] Auto-applying code edit for: ${args.file}`);
-                  const applied = await this.diffManager.applyCodeDirectlyForAutoMode(args.file, code, args.description, true);
-                  if (applied) {
-                    fileModifiedInBatch = true;
-                    const wsFolder = vscode.workspace.workspaceFolders?.[0];
-                    const absPath = wsFolder ? vscode.Uri.joinPath(wsFolder.uri, args.file).fsPath : undefined;
-                    result = `Code edit applied to ${args.file}.` +
-                      (absPath ? formatFilesAffected([{ absolutePath: absPath, relativePath: args.file, action: 'modified' }]) : '');
-                  } else {
-                    // Auto-apply failed — either stale content or the search
-                    // text didn't match the current file. The model needs
-                    // both signals: re-read, and double-check the search
-                    // text matches verbatim.
-                    result = `edit_file failed for ${args.file}: one or more SEARCH snippets did not match the current file (the file may have changed since you last read it, or the SEARCH text is not verbatim). Re-read the file, then resend with SEARCH text that quotes the current contents exactly.`;
-                  }
-                } else if (this.diffManager.currentEditMode === 'manual') {
-                  logger.info(`[RequestOrchestrator] Opening diff for manual review: ${args.file}`);
-                  const codeWithHeader = `# File: ${args.file}\n${code}`;
-                  const language = args.language || 'plaintext';
-                  await this.diffManager.showDiff(codeWithHeader, language);
-                }
-              }
-            } else {
-              logger.warn(`[RequestOrchestrator] edit_file called but no file in args`);
-            }
-          } catch (e) {
-            logger.error(`[RequestOrchestrator] Failed to parse edit_file arguments: ${e}`);
-          }
-        }
-
-        // Handle write_file: approval (ask) or direct capability call (auto).
-        if (toolCall.function.name === 'write_file' && success) {
-          try {
-            const args = JSON.parse(toolCall.function.arguments);
-            if (!args.path || typeof args.content !== 'string') {
-              result = `Error: write_file requires "path" and "content" arguments`;
-            } else {
-              const editMode = this.diffManager.currentEditMode;
-              if (editMode === 'ask' || editMode === 'manual') {
-                logger.info(`[RequestOrchestrator] write_file (${editMode}) — routing through diff approval for ${args.path}`);
-                const codeWithHeader = `# File: ${args.path}\n${args.content}`;
-                const language = args.language || 'plaintext';
-                if (editMode === 'ask') {
-                  await this.diffManager.handleAskModeDiff(codeWithHeader, language);
-                  const approvalResults = await this.diffManager.waitForPendingApprovals();
-                  const approved = approvalResults[0]?.approved ?? false;
-                  if (approved) {
-                    this.fileContextManager.trackReadFile(args.path);
-                    const wsFolder = vscode.workspace.workspaceFolders?.[0];
-                    const absPath = wsFolder ? vscode.Uri.joinPath(wsFolder.uri, args.path).fsPath : undefined;
-                    result = `Created file ${args.path}. User accepted the changes.` +
-                      (absPath ? formatFilesAffected([{ absolutePath: absPath, relativePath: args.path, action: 'created' }]) : '');
-                  } else {
-                    result = `Create file rejected for ${args.path}. User rejected the creation.`;
-                  }
-                  if (toolContainerStarted) {
-                    this._onToolCallsEnd.fire();
-                    toolContainerStarted = false;
-                    batchToolDetails = [];
-                  }
-                } else {
-                  // manual — open diff, no blocking approval
-                  await this.diffManager.showDiff(codeWithHeader, language);
-                  result = `Opened diff for ${args.path}. User will apply manually.`;
-                }
-              } else {
-                // auto mode — call capability directly
-                const capResult = await createFileCapability(args.path, args.content);
-                if (capResult.status === 'success') {
-                  this.fileContextManager.trackReadFile(args.path);
-                  this.diffManager.registerToolCreatedFile(args.path, args.description || 'Created by write_file');
-                  fileModifiedInBatch = true;
-                  result = `Created file ${args.path}.` + formatFilesAffected(capResult.filesAffected);
-                } else {
-                  result = `Error: ${capResult.error}`;
-                }
-              }
-            }
-          } catch (e: any) {
-            logger.error(`[RequestOrchestrator] Failed to handle write_file: ${e.message ?? e}`);
-            result = `Error: Failed to process write_file — ${e.message ?? e}`;
-          }
-        }
-
-        // Handle run_shell — native-tool path mirrors R1's <shell> pipeline.
-        // Same approval flow, same long-running detection, same file-watcher
-        // diff with absolute-path ground truth (ADR 0004 B-pattern). Result
-        // string replaces the `executeToolCall` acknowledgment so the model
-        // sees actual stdout/stderr.
-        if (toolCall.function.name === 'run_shell' && success) {
-          try {
-            const args = JSON.parse(toolCall.function.arguments);
-            const commandStr = typeof args.command === 'string' ? args.command : '';
-            if (!commandStr.trim()) {
-              result = `Error: run_shell requires a non-empty "command" argument.`;
-            } else {
-              // Reuse the same parser the <shell> path uses — keeps long-running
-              // rejection, heredoc handling, and ShellCommand shape consistent.
-              const parsed = parseShellCommands(`<shell>${commandStr}</shell>`);
-              if (parsed.length === 0) {
-                result = `Error: run_shell could not parse the command "${commandStr.substring(0, 80)}".`;
-              } else if (isLongRunningCommand(parsed[0].command)) {
-                // Same policy as R1's path: refuse rather than execute and hang.
-                result = `Skipped long-running command "${parsed[0].command}". This command starts a server, watch mode, or REPL that wouldn't return on its own. Ask the user to run it manually.`;
-                this._onShellExecuting.fire({ commands: [{ command: parsed[0].command, description: 'Skipped (long-running)' }] });
-                this._onShellResults.fire({ results: [{ command: parsed[0].command, output: result, success: true }] });
-              } else {
-                const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-                const workspacePath = workspaceFolder?.uri.fsPath ?? process.cwd();
-
-                // Approval flow — identical decision tree to the R1 inline path.
-                const allowAllCommands = vscode.workspace.getConfiguration('moby').get<boolean>('allowAllShellCommands') ?? false;
-                let approvedCommand: ShellCommand | null = null;
-                let blockedResult: ShellResult | null = null;
-
-                if (allowAllCommands || !this.commandApprovalManager) {
-                  approvedCommand = { ...parsed[0], approvalStatus: 'auto' };
-                } else {
-                  const decision = this.commandApprovalManager.checkCommand(parsed[0].command);
-                  if (decision === 'allowed') {
-                    approvedCommand = { ...parsed[0], approvalStatus: 'auto' };
-                  } else {
-                    const userApproval = await this.commandApprovalManager.requestApproval(parsed[0].command);
-                    if (userApproval.decision === 'allowed') {
-                      approvedCommand = { ...parsed[0], approvalStatus: 'user-allowed' };
-                    } else {
-                      blockedResult = {
-                        command: parsed[0].command,
-                        output: `Command rejected by user: ${parsed[0].command}`,
-                        success: false,
-                        executionTimeMs: 0,
-                        approvalStatus: 'user-blocked'
-                      };
-                    }
-                  }
-                }
-
-                // Notify the frontend before execution so the shell dropdown
-                // appears with the running command.
-                const preview = parsed[0].command.length > 50
-                  ? parsed[0].command.substring(0, 50) + '...'
-                  : parsed[0].command;
-                this._onShellExecuting.fire({ commands: [{ command: parsed[0].command, description: preview }] });
-
-                // File watcher — captures modified/deleted paths so the tool
-                // result can list absolute paths (ADR 0004).
-                const modifiedFiles = new Set<string>();
-                const deletedFiles = new Set<string>();
-                let shellFileWatcher: vscode.FileSystemWatcher | null = null;
-                try {
-                  shellFileWatcher = vscode.workspace.createFileSystemWatcher(
-                    new vscode.RelativePattern(workspacePath, '**/*')
-                  );
-                  const trackChange = (uri: vscode.Uri) => {
-                    const rel = vscode.workspace.asRelativePath(uri, false);
-                    if (!shouldIgnoreWatcherPath(rel)) modifiedFiles.add(rel);
-                  };
-                  shellFileWatcher.onDidChange(trackChange);
-                  shellFileWatcher.onDidCreate(trackChange);
-                  shellFileWatcher.onDidDelete((uri: vscode.Uri) => {
-                    const rel = vscode.workspace.asRelativePath(uri, false);
-                    if (!shouldIgnoreWatcherPath(rel)) {
-                      deletedFiles.add(rel);
-                      modifiedFiles.delete(rel);
-                    }
-                  });
-                } catch {
-                  shellFileWatcher = null;
-                }
-
-                let executedResults: ShellResult[] = [];
-                if (approvedCommand) {
-                  executedResults = await executeShellCommands([approvedCommand], workspacePath, { allowAllCommands, signal });
-                }
-
-                // Drain watcher events that arrived during execution.
-                if (shellFileWatcher) {
-                  await new Promise(resolve => setTimeout(resolve, 100));
-                  shellFileWatcher.dispose();
-                  if (modifiedFiles.size > 0) {
-                    this.diffManager.registerShellModifiedFiles([...modifiedFiles]);
-                  }
-                  if (deletedFiles.size > 0) {
-                    this.diffManager.registerShellDeletedFiles([...deletedFiles]);
-                  }
-                }
-
-                const allResults = blockedResult ? [blockedResult, ...executedResults] : executedResults;
-
-                this._onShellResults.fire({
-                  results: allResults.map(r => ({
-                    command: r.command,
-                    output: r.output.substring(0, 500) + (r.output.length > 500 ? '...' : ''),
-                    success: r.success
-                  }))
-                });
-
-                // Format with absolute-path ground truth so the model sees
-                // the same shape as R1's <shell> results.
-                result = formatShellResultsForContext(allResults, {
-                  modifiedFiles: [...modifiedFiles],
-                  deletedFiles: [...deletedFiles],
-                  workspacePath,
-                });
-                if (modifiedFiles.size > 0 || deletedFiles.size > 0) {
-                  fileModifiedInBatch = true;
-                }
-              }
-            }
-          } catch (e: any) {
-            logger.error(`[RequestOrchestrator] run_shell failed: ${e.message ?? e}`);
-            result = `Error: run_shell failed — ${e.message ?? e}`;
-          }
-        }
-
-        // Handle delete_file. Auto mode: direct capability call. Ask/manual:
-        // register a pending deletion so it appears as a row in the Pending
-        // Changes dropdown alongside edits — matches the review-everything-
-        // in-one-place mental model users have from R1.
-        if (toolCall.function.name === 'delete_file' && success) {
-          try {
-            const args = JSON.parse(toolCall.function.arguments);
-            if (!args.path) {
-              result = `Error: delete_file requires a "path" argument`;
-            } else {
-              const editMode = this.diffManager.currentEditMode;
-              if (editMode === 'ask' || editMode === 'manual') {
-                const diffId = this.diffManager.registerPendingDeletion(args.path);
-                const approvalResults = await this.diffManager.waitForPendingApprovals();
-                const approved = approvalResults.find(r => r.diffId === diffId)?.approved ?? false;
-                if (approved) {
-                  fileModifiedInBatch = true;
-                  const wsFolder = vscode.workspace.workspaceFolders?.[0];
-                  const absPath = wsFolder ? vscode.Uri.joinPath(wsFolder.uri, args.path).fsPath : undefined;
-                  result = `Deleted file ${args.path}. User accepted the deletion.` +
-                    (absPath ? formatFilesAffected([{ absolutePath: absPath, relativePath: args.path, action: 'deleted' }]) : '');
-                } else {
-                  result = `Delete file rejected for ${args.path}. User declined the deletion.`;
-                }
-                if (toolContainerStarted) {
-                  this._onToolCallsEnd.fire();
-                  toolContainerStarted = false;
-                  batchToolDetails = [];
-                }
-              } else {
-                // auto mode — direct capability call
-                const capResult = await deleteFileCapability(args.path);
-                if (capResult.status === 'success') {
-                  this.diffManager.registerToolDeletedFile(args.path);
-                  fileModifiedInBatch = true;
-                  result = `Deleted file ${args.path}.` + formatFilesAffected(capResult.filesAffected);
-                } else {
-                  result = `Error: ${capResult.error}`;
-                }
-              }
-            }
-          } catch (e: any) {
-            logger.error(`[RequestOrchestrator] Failed to handle delete_file: ${e.message ?? e}`);
-            result = `Error: Failed to process delete_file — ${e.message ?? e}`;
-          }
-        }
-
-        // Handle delete_directory. Mirrors delete_file's modes, plus a
-        // recursive flag for populated directories.
-        if (toolCall.function.name === 'delete_directory' && success) {
-          try {
-            const args = JSON.parse(toolCall.function.arguments);
-            if (!args.path) {
-              result = `Error: delete_directory requires a "path" argument`;
-            } else {
-              const recursive = args.recursive === 'true';
-              const editMode = this.diffManager.currentEditMode;
-              if (editMode === 'ask' || editMode === 'manual') {
-                const diffId = this.diffManager.registerPendingDirectoryDeletion(args.path, recursive);
-                const approvalResults = await this.diffManager.waitForPendingApprovals();
-                const approvalOutcome = approvalResults.find(r => r.diffId === diffId);
-                const approved = approvalOutcome?.approved ?? false;
-                if (approved) {
-                  fileModifiedInBatch = true;
-                  const wsFolder = vscode.workspace.workspaceFolders?.[0];
-                  const absPath = wsFolder ? vscode.Uri.joinPath(wsFolder.uri, args.path).fsPath : undefined;
-                  result = `Deleted directory ${args.path}${recursive ? ' (recursive)' : ''}. User accepted the deletion.` +
-                    (absPath ? formatFilesAffected([{ absolutePath: absPath, relativePath: args.path, action: 'deleted' }]) : '');
-                } else {
-                  // Distinguish user reject vs capability failure so the model
-                  // gets a useful error (e.g. "directory not empty, try recursive=true").
-                  result = `Delete directory rejected for ${args.path}. User declined the deletion (or the directory was not empty and recursive=false).`;
-                }
-                if (toolContainerStarted) {
-                  this._onToolCallsEnd.fire();
-                  toolContainerStarted = false;
-                  batchToolDetails = [];
-                }
-              } else {
-                // auto mode — direct capability call via DiffManager wrapper
-                // so the Modified Files dropdown updates on success.
-                const outcome = await this.diffManager.deleteDirectoryDirect(args.path, recursive);
-                if (outcome.status === 'applied') {
-                  fileModifiedInBatch = true;
-                  const wsFolder = vscode.workspace.workspaceFolders?.[0];
-                  const absPath = wsFolder ? vscode.Uri.joinPath(wsFolder.uri, args.path).fsPath : undefined;
-                  result = `Deleted directory ${args.path}${recursive ? ' (recursive)' : ''}.` +
-                    (absPath ? formatFilesAffected([{ absolutePath: absPath, relativePath: args.path, action: 'deleted' }]) : '');
-                } else {
-                  // Surface the capability-level error (e.g. "not empty").
-                  result = `Error: Failed to delete directory ${args.path}. ${recursive ? '' : 'Set recursive="true" if the directory is not empty.'}`;
-                }
-              }
-            }
-          } catch (e: any) {
-            logger.error(`[RequestOrchestrator] Failed to handle delete_directory: ${e.message ?? e}`);
-            result = `Error: Failed to process delete_directory — ${e.message ?? e}`;
-          }
+        if (dispatch.closesBatch && toolContainerStarted) {
+          this._onToolCallsEnd.fire();
+          toolContainerStarted = false;
+          logger.info(`[Frontend] Sent toolCallsEnd (ask mode approval, closing batch after iteration ${iterations})`);
+          batchToolDetails = [];
         }
 
         // Add tool result to messages
@@ -3078,9 +3494,21 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
         this.diffManager.emitAutoAppliedChanges();
         fileModifiedInBatch = false;
       }
+
+      // Close the tool batch at the iteration boundary. Mirrors
+      // runStreamingToolCallsLoop — each non-streaming chat() call is one
+      // "decision point" whose tools belong in one dropdown. Without this close,
+      // every iteration collapses into one giant "Used N tools" batch.
+      if (toolContainerStarted) {
+        logger.info(`[ToolLoop] Closing tool batch at iteration ${iterations} boundary (${batchToolDetails.length} tool(s))`);
+        this._onToolCallsEnd.fire();
+        toolContainerStarted = false;
+        batchToolDetails = [];
+      }
     }
 
-    // Close any remaining open batch at the end of the loop
+    // Defensive — if the loop exited mid-batch (e.g. abort during dispatch),
+    // close it now. Normal exit already closed at the iteration boundary.
     if (toolContainerStarted) {
       this._onToolCallsEnd.fire();
       logger.info(`[Frontend] Sent toolCallsEnd (end of tool loop)`);

@@ -89,6 +89,16 @@ export interface ChatOptions {
   temperature?: number;
   maxTokens?: number;
   signal?: AbortSignal;
+  /**
+   * Phase 4.5 — fired the moment a tool call's metadata (`id` + `function.name`)
+   * arrives in the stream, well before its argument deltas finish accumulating.
+   * The callback gets a partially-filled ToolCall: `id` and `function.name` are
+   * populated, `function.arguments` is empty (still streaming). Used by the
+   * orchestrator to render the tool name immediately so users see "the model
+   * committed to write_file" instead of staring at a silent gap between
+   * reasoning and tool dispatch.
+   */
+  onToolCallStreaming?: (toolCall: ToolCall) => void;
 }
 
 export class DeepSeekClient {
@@ -656,10 +666,23 @@ export class DeepSeekClient {
                       acc = { id: '', type: 'function', name: '', argumentsStr: '' };
                       toolCallAcc.set(idx, acc);
                     }
+                    const hadIdAndName = !!(acc.id && acc.name);
                     if (tcDelta.id) acc.id = tcDelta.id;
                     if (tcDelta.function?.name) acc.name = tcDelta.function.name;
                     if (typeof tcDelta.function?.arguments === 'string') {
                       acc.argumentsStr += tcDelta.function.arguments;
+                    }
+                    // Fire onToolCallStreaming once per index, the first
+                    // moment we have BOTH id and name. Args may still be
+                    // empty — the orchestrator uses this to render the
+                    // tool name immediately rather than waiting for the
+                    // full stream to resolve.
+                    if (!hadIdAndName && acc.id && acc.name && options?.onToolCallStreaming) {
+                      options.onToolCallStreaming({
+                        id: acc.id,
+                        type: acc.type,
+                        function: { name: acc.name, arguments: '' },
+                      });
                     }
                   }
                 }

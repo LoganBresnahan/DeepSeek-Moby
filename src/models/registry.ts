@@ -126,6 +126,7 @@ export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
     apiEndpoint: 'https://api.deepseek.com',
     tokenizer: 'deepseek-v3',
     requestFormat: 'openai',
+    streamingToolCalls: true,
   },
   'deepseek-reasoner': {
     toolCalling: 'none',
@@ -162,6 +163,7 @@ export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
     apiEndpoint: 'https://api.deepseek.com',
     tokenizer: 'deepseek-v3',          // V4 uses same vocab + new specials; see plan
     requestFormat: 'openai',
+    streamingToolCalls: true,
   },
   'deepseek-v4-flash-thinking': {
     toolCalling: 'native',
@@ -180,6 +182,10 @@ export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
     reasoningEffort: 'high',
     reasoningEcho: 'required',
     promptStyle: 'minimal',
+    // Phase 4.5 — single streaming pipeline replaces the chat() probe +
+    // streamChat() summary split. Surfaces reasoning_content live during
+    // tool decisions instead of dropping it on the floor.
+    streamingToolCalls: true,
   },
   'deepseek-v4-pro': {
     toolCalling: 'native',
@@ -194,6 +200,7 @@ export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
     apiEndpoint: 'https://api.deepseek.com',
     tokenizer: 'deepseek-v3',
     requestFormat: 'openai',
+    streamingToolCalls: true,
   },
   'deepseek-v4-pro-thinking': {
     toolCalling: 'native',
@@ -212,6 +219,10 @@ export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
     reasoningEffort: 'max',            // pro defaults to max — paying for quality
     reasoningEcho: 'required',
     promptStyle: 'minimal',
+    // Phase 4.5 — same as flash-thinking. Pro pays a higher rate per
+    // token, so visible reasoning during tool decisions is even more
+    // valuable here (the user can see what they're paying for).
+    streamingToolCalls: true,
   },
 };
 

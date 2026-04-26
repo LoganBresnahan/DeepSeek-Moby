@@ -1925,4 +1925,434 @@ describe('RequestOrchestrator', () => {
       cam.dispose();
     });
   });
+
+  // ── Phase 4.5: streaming-tool-calls loop ──
+  //
+  // Native-tool models with `streamingToolCalls: true` skip the
+  // runToolLoop + streamAndIterate split and route through a single
+  // streaming pipeline. The pipeline emits content + reasoning_content
+  // + tool_calls deltas in parallel and dispatches tools inline until
+  // `finish_reason: 'stop'`. These tests pin the contract.
+  //
+  // We register a custom model with `streamingToolCalls: true` per-test
+  // and point `mockClient.getModel()` at it so the orchestrator's branch
+  // selects the new path. Cleanup happens in afterEach via the shared
+  // `__resetCustomModelsForTests` hook.
+  describe('handleMessage - streaming tool calls (Phase 4.5)', () => {
+    const STREAMING_MODEL_ID = 'test-streaming-tool-model';
+    let registry: typeof import('../../../src/models/registry');
+
+    beforeEach(async () => {
+      registry = await import('../../../src/models/registry');
+      registry.registerCustomModels([{
+        id: STREAMING_MODEL_ID,
+        name: 'Test Streaming Tool Model',
+        toolCalling: 'native',
+        reasoningTokens: 'inline',
+        editProtocol: ['native-tool', 'search-replace'],
+        shellProtocol: 'native-tool',
+        supportsTemperature: false,
+        maxOutputTokens: 8192,
+        maxTokensConfigKey: 'maxTokensTestStreaming',
+        streaming: true,
+        apiEndpoint: 'http://test.local',
+        apiKey: 'test',
+        requestFormat: 'openai',
+        streamingToolCalls: true,
+        sendThinkingParam: true,
+        reasoningEcho: 'required',
+      }]);
+      mockClient.getModel.mockReturnValue(STREAMING_MODEL_ID);
+    });
+
+    afterEach(() => {
+      registry.__resetCustomModelsForTests();
+    });
+
+    it('streams content + reasoning live and exits on finish_reason="stop"', async () => {
+      // Single iteration — no tool calls, just content and reasoning.
+      mockClient.streamChat.mockImplementationOnce(async (
+        _messages: any,
+        onToken: (t: string) => void,
+        _sys: string,
+        onReasoning?: (t: string) => void,
+      ) => {
+        onReasoning?.('Thinking about this...');
+        onToken('The answer ');
+        onToken('is 42.');
+        return {
+          content: 'The answer is 42.',
+          reasoning_content: 'Thinking about this...',
+          finish_reason: 'stop',
+        };
+      });
+
+      const tokens: string[] = [];
+      const reasoningTokens: string[] = [];
+      orchestrator.onStreamToken(e => tokens.push(e.token));
+      orchestrator.onStreamReasoning(e => reasoningTokens.push(e.token));
+
+      await orchestrator.handleMessage('Hi', 'session-1', async () => '', undefined);
+
+      expect(tokens).toEqual(['The answer ', 'is 42.']);
+      expect(reasoningTokens).toEqual(['Thinking about this...']);
+      // streamChat should have been called exactly once — no tool re-entry.
+      expect(mockClient.streamChat).toHaveBeenCalledTimes(1);
+      // chat() — the legacy non-streaming probe — must NOT be called.
+      expect(mockClient.chat).not.toHaveBeenCalled();
+    });
+
+    it('dispatches tool_calls via the shared helper and re-enters the loop', async () => {
+      let call = 0;
+      mockClient.streamChat.mockImplementation(async (
+        _messages: any,
+        onToken: (t: string) => void,
+      ) => {
+        call++;
+        if (call === 1) {
+          onToken('Let me check that file.');
+          return {
+            content: 'Let me check that file.',
+            tool_calls: [{
+              id: 'call_1', type: 'function' as const,
+              function: { name: 'read_file', arguments: '{"path":"src/foo.ts"}' }
+            }],
+            finish_reason: 'tool_calls',
+          };
+        }
+        // Post-tool: model writes the final answer.
+        onToken('Found it.');
+        return { content: 'Found it.', finish_reason: 'stop' };
+      });
+
+      await orchestrator.handleMessage('Read src/foo.ts', 'session-1', async () => '', undefined);
+
+      // Two streamChat calls: one for the tool decision, one for the final answer.
+      expect(mockClient.streamChat).toHaveBeenCalledTimes(2);
+      // Tool batch lifecycle fired in order.
+      expect(mockClient.chat).not.toHaveBeenCalled();
+    });
+
+    it('reasoning_content surfaces during the tool-decision phase (the whole point of 4.5)', async () => {
+      let call = 0;
+      mockClient.streamChat.mockImplementation(async (
+        _messages: any,
+        onToken: (t: string) => void,
+        _sys: string,
+        onReasoning?: (t: string) => void,
+      ) => {
+        call++;
+        if (call === 1) {
+          // Reasoning streams BEFORE the tool call decision is known to the UI.
+          onReasoning?.('I should read the file first.');
+          onToken('Reading.');
+          return {
+            content: 'Reading.',
+            reasoning_content: 'I should read the file first.',
+            tool_calls: [{
+              id: 'c1', type: 'function' as const,
+              function: { name: 'read_file', arguments: '{"path":"a.ts"}' }
+            }],
+            finish_reason: 'tool_calls',
+          };
+        }
+        onToken('Done.');
+        return { content: 'Done.', finish_reason: 'stop' };
+      });
+
+      const reasoningTokens: string[] = [];
+      orchestrator.onStreamReasoning(e => reasoningTokens.push(e.token));
+
+      await orchestrator.handleMessage('Hi', 'session-1', async () => '', undefined);
+
+      // Reasoning was surfaced live during the tool turn — before today's
+      // streamAndIterate would have been reached.
+      expect(reasoningTokens).toEqual(['I should read the file first.']);
+    });
+
+    it('emits tool batch UI events (start, per-call running/done, end)', async () => {
+      let call = 0;
+      mockClient.streamChat.mockImplementation(async (
+        _messages: any,
+        onToken: (t: string) => void,
+      ) => {
+        call++;
+        if (call === 1) {
+          onToken('Reading.');
+          return {
+            content: 'Reading.',
+            tool_calls: [{
+              id: 'c1', type: 'function' as const,
+              function: { name: 'read_file', arguments: '{"path":"x.ts"}' }
+            }],
+            finish_reason: 'tool_calls',
+          };
+        }
+        onToken('Done.');
+        return { content: 'Done.', finish_reason: 'stop' };
+      });
+
+      const startEvents: Array<{ tools: ToolDetail[] }> = [];
+      const updateEvents: ToolCallUpdateEvent[] = [];
+      const endEvents: void[] = [];
+      orchestrator.onToolCallsStart(e => startEvents.push(e));
+      orchestrator.onToolCallUpdate(e => updateEvents.push(e));
+      orchestrator.onToolCallsEnd(() => endEvents.push(undefined));
+
+      await orchestrator.handleMessage('Read x.ts', 'session-1', async () => '', undefined);
+
+      expect(startEvents).toHaveLength(1);
+      expect(startEvents[0].tools[0].name).toBe('read_file');
+      expect(startEvents[0].tools[0].detail).toBe('read: x.ts');
+      // Per-call updates: running first, then a terminal status (done in
+      // production, error here because the test workspace path doesn't
+      // exist on disk so readFile fails — but the lifecycle is the same).
+      const statuses = updateEvents.map(e => e.status);
+      expect(statuses[0]).toBe('running');
+      expect(statuses).toContain(statuses.includes('done') ? 'done' : 'error');
+      expect(endEvents).toHaveLength(1);
+    });
+
+    it('pre-announces tool calls via onToolCallStreaming so the UI shows the tool name before the stream resolves', async () => {
+      // The whole point of the option-1 fix: when the model commits to a
+      // tool call (id + function.name arrive in the stream), the orchestrator
+      // fires onToolCallsStart immediately with name-only detail. After the
+      // stream fully resolves and arguments have accumulated, an update
+      // fires with enriched detail (e.g. `write: a.ts` instead of
+      // `write_file`). Closes the silent gap users saw between reasoning
+      // ending and tool dispatch beginning.
+      let call = 0;
+      mockClient.streamChat.mockImplementation(async (
+        _messages: any,
+        onToken: (t: string) => void,
+        _systemPrompt: string,
+        _onReasoning?: (t: string) => void,
+        options?: any
+      ) => {
+        call++;
+        if (call === 1) {
+          onToken('Reading.');
+          // Simulate the mid-stream metadata delta that streamChat would
+          // dispatch via onToolCallStreaming when the model first commits
+          // to the tool call. Args are still empty at this point — they
+          // stream as later deltas.
+          options?.onToolCallStreaming?.({
+            id: 'call_w', type: 'function',
+            function: { name: 'write_file', arguments: '' },
+          });
+          // Then the stream "resolves" — args have fully accumulated.
+          return {
+            content: 'Reading.',
+            tool_calls: [{
+              id: 'call_w', type: 'function',
+              function: { name: 'write_file', arguments: '{"path":"a.ts","content":"x"}' }
+            }],
+            finish_reason: 'tool_calls',
+          };
+        }
+        onToken('Done.');
+        return { content: 'Done.', finish_reason: 'stop' };
+      });
+
+      const startEvents: Array<{ tools: ToolDetail[] }> = [];
+      const updateBatchEvents: Array<{ tools: ToolDetail[] }> = [];
+      orchestrator.onToolCallsStart(e => startEvents.push(e));
+      orchestrator.onToolCallsUpdate(e => updateBatchEvents.push(e));
+
+      await orchestrator.handleMessage('Hi', 'session-1', async () => '', undefined);
+
+      // Start fired exactly once with name-only detail (the streaming
+      // callback's payload).
+      expect(startEvents).toHaveLength(1);
+      expect(startEvents[0].tools[0].name).toBe('write_file');
+      expect(startEvents[0].tools[0].detail).toBe('write_file');
+
+      // After the stream resolved with full args, an update fired with
+      // enriched detail (`write: a.ts`). Find that specific event.
+      const enriched = updateBatchEvents.find(e =>
+        e.tools.length === 1 && e.tools[0].detail === 'write: a.ts'
+      );
+      expect(enriched).toBeDefined();
+    });
+
+    it('falls back to firing onToolCallsStart at end of stream when streaming callback never fires', async () => {
+      // Defensive: if the model returns tool_calls without streaming any
+      // metadata deltas first (shouldn't happen on the wire, but the API
+      // contract doesn't guarantee delta order), we still need to render
+      // the batch. The post-stream code detects toolContainerStarted=false
+      // and fires start as a fallback.
+      let call = 0;
+      mockClient.streamChat.mockImplementation(async (
+        _messages: any,
+        onToken: (t: string) => void,
+        _systemPrompt: string,
+        _onReasoning?: (t: string) => void,
+        _options?: any
+      ) => {
+        call++;
+        if (call === 1) {
+          onToken('Reading.');
+          // Note: NOT calling onToolCallStreaming. Exercises fallback.
+          return {
+            content: 'Reading.',
+            tool_calls: [{
+              id: 'c1', type: 'function',
+              function: { name: 'read_file', arguments: '{"path":"x.ts"}' }
+            }],
+            finish_reason: 'tool_calls',
+          };
+        }
+        onToken('Done.');
+        return { content: 'Done.', finish_reason: 'stop' };
+      });
+
+      const startEvents: Array<{ tools: ToolDetail[] }> = [];
+      orchestrator.onToolCallsStart(e => startEvents.push(e));
+
+      await orchestrator.handleMessage('Read x.ts', 'session-1', async () => '', undefined);
+
+      // Start still fired exactly once — fallback detail is enriched
+      // (no streaming pre-announce, so the post-stream code computes it).
+      expect(startEvents).toHaveLength(1);
+      expect(startEvents[0].tools[0].detail).toBe('read: x.ts');
+    });
+
+    it('caps iterations at moby.maxToolCalls and bails the loop', async () => {
+      configStore.set('maxToolCalls', 2);
+      // Model keeps emitting tool calls — would loop forever without the cap.
+      mockClient.streamChat.mockImplementation(async (
+        _messages: any,
+        onToken: (t: string) => void,
+      ) => {
+        onToken('thinking...');
+        return {
+          content: 'thinking...',
+          tool_calls: [{
+            id: `c-${Math.random().toString(36).slice(2, 8)}`,
+            type: 'function' as const,
+            function: { name: 'read_file', arguments: '{"path":"x.ts"}' }
+          }],
+          finish_reason: 'tool_calls',
+        };
+      });
+
+      await orchestrator.handleMessage('Loop', 'session-1', async () => '', undefined);
+
+      // Capped at 2 — no third call.
+      expect(mockClient.streamChat).toHaveBeenCalledTimes(2);
+    });
+
+    it('appends assistant turn with reasoning_content and tool_calls before tool messages', async () => {
+      // Inspect what gets passed to the SECOND streamChat call. The first
+      // call's response should have been appended as an assistant turn
+      // (with reasoning_content + tool_calls), followed by the tool result
+      // message.
+      let call = 0;
+      let secondCallMessages: any[] | undefined;
+      mockClient.streamChat.mockImplementation(async (
+        messages: any[],
+        onToken: (t: string) => void,
+      ) => {
+        call++;
+        if (call === 1) {
+          onToken('Will check.');
+          return {
+            content: 'Will check.',
+            reasoning_content: 'reasoning text',
+            tool_calls: [{
+              id: 'c1', type: 'function' as const,
+              function: { name: 'read_file', arguments: '{"path":"a.ts"}' }
+            }],
+            finish_reason: 'tool_calls',
+          };
+        }
+        secondCallMessages = messages;
+        onToken('Done.');
+        return { content: 'Done.', finish_reason: 'stop' };
+      });
+
+      await orchestrator.handleMessage('Hi', 'session-1', async () => '', undefined);
+
+      expect(secondCallMessages).toBeDefined();
+      // Last two messages should be: assistant-with-tool-call, tool-result.
+      const last = secondCallMessages!.at(-1);
+      const secondLast = secondCallMessages!.at(-2);
+      expect(secondLast.role).toBe('assistant');
+      expect(secondLast.content).toBe('Will check.');
+      expect(secondLast.reasoning_content).toBe('reasoning text');
+      expect(secondLast.tool_calls).toEqual([{
+        id: 'c1', type: 'function',
+        function: { name: 'read_file', arguments: '{"path":"a.ts"}' }
+      }]);
+      expect(last.role).toBe('tool');
+      expect(last.tool_call_id).toBe('c1');
+    });
+
+    it('does NOT amend the system prompt with "exploration phase complete" (Phase 4.5 drop)', async () => {
+      let capturedSystemPrompt: string | undefined;
+      mockClient.streamChat.mockImplementation(async (
+        _messages: any,
+        onToken: (t: string) => void,
+        systemPrompt?: string,
+      ) => {
+        capturedSystemPrompt = systemPrompt;
+        onToken('Done.');
+        return { content: 'Done.', finish_reason: 'stop' };
+      });
+
+      await orchestrator.handleMessage('Hi', 'session-1', async () => '', undefined);
+
+      expect(capturedSystemPrompt).toBeDefined();
+      // The legacy amendment must NOT be present.
+      expect(capturedSystemPrompt).not.toMatch(/exploration phase is now complete/i);
+    });
+
+    it('does NOT call the legacy non-streaming chat() probe', async () => {
+      mockClient.streamChat.mockImplementationOnce(async (
+        _messages: any,
+        onToken: (t: string) => void,
+      ) => {
+        onToken('Hi.');
+        return { content: 'Hi.', finish_reason: 'stop' };
+      });
+
+      await orchestrator.handleMessage('Hi', 'session-1', async () => '', undefined);
+
+      // The whole point of Phase 4.5: no duplicate generation, no legacy probe.
+      expect(mockClient.chat).not.toHaveBeenCalled();
+    });
+
+    it('honors abort signal between iterations', async () => {
+      let call = 0;
+      mockClient.streamChat.mockImplementation(async (
+        _messages: any,
+        onToken: (t: string) => void,
+      ) => {
+        call++;
+        if (call === 1) {
+          onToken('Reading.');
+          // Abort before the next iteration starts.
+          orchestrator.stopGeneration();
+          return {
+            content: 'Reading.',
+            tool_calls: [{
+              id: 'c1', type: 'function' as const,
+              function: { name: 'read_file', arguments: '{"path":"x.ts"}' }
+            }],
+            finish_reason: 'tool_calls',
+          };
+        }
+        // Should never reach here — abort kicks in first.
+        onToken('SHOULD_NOT_REACH');
+        return { content: 'SHOULD_NOT_REACH', finish_reason: 'stop' };
+      });
+
+      await orchestrator.handleMessage('Hi', 'session-1', async () => '', undefined);
+
+      // The post-dispatch iteration should have bailed on signal.aborted.
+      // Only the first streamChat call (and its single tool dispatch) ran.
+      const calls = mockClient.streamChat.mock.calls.length;
+      expect(calls).toBe(1);
+    });
+  });
 });
