@@ -75,6 +75,19 @@ export default defineConfig({
       ]
     },
 
+    // The suite has ~2000 tests across ~60 files. The pre-existing OOM
+    // (CLAUDE.md) traced back to `vi.resetModules()` being called in a
+    // global per-test `beforeEach` hook, which churned ~2000 module
+    // graphs through v8 and left uncollected contexts behind. With that
+    // hook removed (see tests/setup.ts), the default heap is sufficient
+    // again. Knobs we keep:
+    //   - `pool: 'forks'` (process-isolated) over 'threads' so v8 fully
+    //     releases memory between files.
+    //   - `isolate: true` re-inits the module graph per file so module
+    //     singletons (Logger, TraceCollector, etc.) don't accumulate.
+    pool: 'forks',
+    isolate: true,
+
     // Snapshot settings
     snapshotFormat: {
       printBasicPrototype: false

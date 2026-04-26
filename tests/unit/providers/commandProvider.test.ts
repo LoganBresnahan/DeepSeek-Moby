@@ -133,7 +133,13 @@ describe('CommandProvider', () => {
   // ── switchModel ──
 
   describe('switchModel', () => {
-    it('should toggle from deepseek-chat to deepseek-reasoner', async () => {
+    // switchModel cycles through `getRegisteredModelIds()` in declaration
+    // order. As of the V4 launch the built-in order is:
+    //   deepseek-chat → deepseek-reasoner → deepseek-v4-flash →
+    //   deepseek-v4-flash-thinking → deepseek-v4-pro → deepseek-v4-pro-thinking
+    // and then wraps back to deepseek-chat. The cases below pin the head, an
+    // interior step, and the wrap.
+    it('cycles from deepseek-chat to deepseek-reasoner (next in registration order)', async () => {
       configStore.set('model', 'deepseek-chat');
       await provider.switchModel();
 
@@ -144,16 +150,24 @@ describe('CommandProvider', () => {
       );
     });
 
-    it('should toggle from deepseek-reasoner to deepseek-chat', async () => {
+    it('cycles from deepseek-reasoner to the first V4 entry', async () => {
       configStore.set('model', 'deepseek-reasoner');
+      await provider.switchModel();
+
+      expect(mockClient.setModel).toHaveBeenCalledWith('deepseek-v4-flash');
+      expect(mockStatusBar.updateModel).toHaveBeenCalledWith('deepseek-v4-flash');
+    });
+
+    it('wraps from the last registered model back to deepseek-chat', async () => {
+      configStore.set('model', 'deepseek-v4-pro-thinking');
       await provider.switchModel();
 
       expect(mockClient.setModel).toHaveBeenCalledWith('deepseek-chat');
       expect(mockStatusBar.updateModel).toHaveBeenCalledWith('deepseek-chat');
     });
 
-    it('should default to toggling to deepseek-reasoner when model is deepseek-chat', async () => {
-      // No config override — defaults to 'deepseek-chat'
+    it('defaults to deepseek-chat when no config is set, then advances to deepseek-reasoner', async () => {
+      // No config override — defaults to 'deepseek-chat' (DEFAULT_MODEL_ID)
       await provider.switchModel();
       expect(mockClient.setModel).toHaveBeenCalledWith('deepseek-reasoner');
     });

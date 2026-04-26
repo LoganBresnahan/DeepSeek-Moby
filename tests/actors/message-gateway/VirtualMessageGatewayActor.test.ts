@@ -477,25 +477,43 @@ describe('VirtualMessageGatewayActor', () => {
   });
 
   describe('generationStopped', () => {
-    it('cleans up streaming state', () => {
+    it('ends the streaming UI state', () => {
+      // Post-ADR-0003 contract: handleGenerationStopped only flips the
+      // streaming UI back (stop → send button). The marker text and
+      // turn finalization come through the regular endResponse flow
+      // from the extension, so the gateway does NOT reset _phase or
+      // _currentTurnId here. See VirtualMessageGatewayActor.handleGenerationStopped
+      // for the rationale.
       dispatchMessage({ type: 'startResponse', messageId: 'msg-1' });
       dispatchMessage({ type: 'streamToken', token: 'Partial...' });
       dispatchMessage({ type: 'generationStopped' });
 
       expect(mockActors.streaming.endStream).toHaveBeenCalled();
-      expect(mockActors.virtualList.endStreamingTurn).toHaveBeenCalled();
-      expect(gateway.phase).toBe('idle');
-      expect(gateway.currentTurnId).toBe(null);
     });
   });
 
+  // ADR 0003 Phase 3: history restore is driven by the structural
+  // `turnEvents` array authored extension-side. The webview projects
+  // those events through TurnProjector.projectFull and renders the
+  // resulting view segments. The legacy fragment fields
+  // (`reasoning_iterations`, `shellResults`, `contentIterations`,
+  // `toolCalls`, `filesModified`) are no longer read.
   describe('loadHistory restore', () => {
     it('restores a simple user + assistant conversation', () => {
       dispatchMessage({
         type: 'loadHistory',
         history: [
           { role: 'user', content: 'Hello', timestamp: 1000 },
-          { role: 'assistant', content: 'Hi there!', model: 'deepseek-chat', timestamp: 2000 }
+          {
+            role: 'assistant',
+            content: 'Hi there!',
+            model: 'deepseek-chat',
+            timestamp: 2000,
+            turnEvents: [
+              { type: 'text-append', content: 'Hi there!', iteration: 0, ts: 2000 },
+              { type: 'text-finalize', iteration: 0, ts: 2001 }
+            ]
+          }
         ]
       });
 
@@ -507,6 +525,10 @@ describe('VirtualMessageGatewayActor', () => {
     });
 
     it('restores Reasoner conversation with interleaved thinking + shell', () => {
+      // Default mock session model is 'deepseek-chat'. The renderSegment text
+      // branch only strips <shell> tags when model === 'deepseek-reasoner';
+      // since we're not exercising that branch here, the chat-model default
+      // is fine.
       dispatchMessage({
         type: 'loadHistory',
         history: [
@@ -515,10 +537,23 @@ describe('VirtualMessageGatewayActor', () => {
             role: 'assistant',
             content: 'Here are the results.',
             model: 'deepseek-reasoner',
-            reasoning_iterations: ['Let me think...', 'Now I understand.'],
-            shellResults: [{ command: 'ls -la', output: 'file1.txt', success: true }],
-            contentIterations: ['Let me check', 'Here are the results.'],
-            timestamp: 2000
+            timestamp: 2000,
+            turnEvents: [
+              // Iteration 0: think → text → shell
+              { type: 'thinking-start', iteration: 0, ts: 2000 },
+              { type: 'thinking-content', content: 'Let me think...', iteration: 0, ts: 2001 },
+              { type: 'thinking-complete', iteration: 0, ts: 2002 },
+              { type: 'text-append', content: 'Let me check', iteration: 0, ts: 2003 },
+              { type: 'shell-start', id: 'sh-1', commands: [{ command: 'ls -la' }], iteration: 0, ts: 2004 },
+              { type: 'shell-complete', id: 'sh-1', results: [{ output: 'file1.txt', success: true }], ts: 2005 },
+              { type: 'iteration-end', iteration: 0, ts: 2006 },
+              // Iteration 1: think → text
+              { type: 'thinking-start', iteration: 1, ts: 2007 },
+              { type: 'thinking-content', content: 'Now I understand.', iteration: 1, ts: 2008 },
+              { type: 'thinking-complete', iteration: 1, ts: 2009 },
+              { type: 'text-append', content: 'Here are the results.', iteration: 1, ts: 2010 },
+              { type: 'text-finalize', iteration: 1, ts: 2011 }
+            ]
           }
         ]
       });
@@ -554,12 +589,19 @@ describe('VirtualMessageGatewayActor', () => {
             role: 'assistant',
             content: 'Fixed it.',
             model: 'deepseek-chat',
-            toolCalls: [
-              { name: 'read_file', detail: 'src/app.ts', status: 'done' },
-              { name: 'edit_file', detail: 'fixing bug', status: 'done' }
-            ],
-            filesModified: ['src/app.ts'],
-            timestamp: 2000
+            timestamp: 2000,
+            turnEvents: [
+              { type: 'tool-batch-start', tools: [
+                { name: 'read_file', detail: 'src/app.ts' },
+                { name: 'edit_file', detail: 'fixing bug' }
+              ], ts: 2000 },
+              { type: 'tool-update', index: 0, status: 'done', ts: 2001 },
+              { type: 'tool-update', index: 1, status: 'done', ts: 2002 },
+              { type: 'tool-batch-complete', ts: 2003 },
+              { type: 'file-modified', path: 'src/app.ts', status: 'applied', ts: 2004 },
+              { type: 'text-append', content: 'Fixed it.', iteration: 0, ts: 2005 },
+              { type: 'text-finalize', iteration: 0, ts: 2006 }
+            ]
           }
         ]
       });
@@ -576,7 +618,8 @@ describe('VirtualMessageGatewayActor', () => {
       // File modifications rendered
       expect(mockActors.virtualList.addPendingFile).toHaveBeenCalledWith('turn-2', {
         filePath: 'src/app.ts',
-        status: 'applied'
+        status: 'applied',
+        editMode: undefined
       });
 
       // Text content rendered
@@ -590,10 +633,9 @@ describe('VirtualMessageGatewayActor', () => {
       expect(fileCall).toBeLessThan(textCall);
     });
 
-    it('restores Reasoner with files after shells (CQRS: content grouped by iteration)', () => {
-      // 2 reasoning iterations, 1 shell (after first), 2 content iterations
-      // CQRS order: thinking[0] → content[0] → shell → thinking[1] → content[1] → files
-      // Content is grouped by iteration, files come after all iterations
+    it('restores Reasoner with files after shells', () => {
+      // Iteration 0: thinking → text → shell
+      // Iteration 1: thinking → text → file-modified
       dispatchMessage({
         type: 'loadHistory',
         history: [
@@ -602,11 +644,22 @@ describe('VirtualMessageGatewayActor', () => {
             role: 'assistant',
             content: 'Added animals.',
             model: 'deepseek-reasoner',
-            reasoning_iterations: ['Checking file...', 'Now editing...'],
-            shellResults: [{ command: 'cat test.txt', output: 'contents', success: true }],
-            contentIterations: ['Let me check first', 'Added animals.'],
-            filesModified: ['test.txt'],
-            timestamp: 2000
+            timestamp: 2000,
+            turnEvents: [
+              { type: 'thinking-start', iteration: 0, ts: 2000 },
+              { type: 'thinking-content', content: 'Checking file...', iteration: 0, ts: 2001 },
+              { type: 'thinking-complete', iteration: 0, ts: 2002 },
+              { type: 'text-append', content: 'Let me check first', iteration: 0, ts: 2003 },
+              { type: 'shell-start', id: 'sh-1', commands: [{ command: 'cat test.txt' }], iteration: 0, ts: 2004 },
+              { type: 'shell-complete', id: 'sh-1', results: [{ output: 'contents', success: true }], ts: 2005 },
+              { type: 'iteration-end', iteration: 0, ts: 2006 },
+              { type: 'thinking-start', iteration: 1, ts: 2007 },
+              { type: 'thinking-content', content: 'Now editing...', iteration: 1, ts: 2008 },
+              { type: 'thinking-complete', iteration: 1, ts: 2009 },
+              { type: 'text-append', content: 'Added animals.', iteration: 1, ts: 2010 },
+              { type: 'file-modified', path: 'test.txt', status: 'applied', ts: 2011 },
+              { type: 'text-finalize', iteration: 1, ts: 2012 }
+            ]
           }
         ]
       });
@@ -614,32 +667,42 @@ describe('VirtualMessageGatewayActor', () => {
       // Files rendered
       expect(mockActors.virtualList.addPendingFile).toHaveBeenCalledWith('turn-2', {
         filePath: 'test.txt',
-        status: 'applied'
+        status: 'applied',
+        editMode: undefined
       });
 
-      // Order: shell before files (content is grouped by iteration, may come before files)
+      // Order: shell before files
       const shellCall = mockActors.virtualList.createShellSegment.mock.invocationCallOrder[0];
       const fileCall = mockActors.virtualList.addPendingFile.mock.invocationCallOrder[0];
       expect(shellCall).toBeLessThan(fileCall);
     });
 
-    it('falls back to full content when contentIterations is missing (legacy data)', () => {
+    it('renders nothing for assistant turns missing turnEvents (no legacy fallback)', () => {
+      // The previous fragment-reconstruction fallback was deleted in ADR 0003
+      // Phase 3. An assistant row without `turnEvents` produces an empty
+      // turn shell — no text, no thinking, no shell, no tools.
       dispatchMessage({
         type: 'loadHistory',
         history: [
           { role: 'user', content: 'Hello', timestamp: 1000 },
           {
             role: 'assistant',
-            content: 'Full accumulated text',
+            content: 'Full accumulated text',  // legacy field — must NOT be read
             model: 'deepseek-reasoner',
-            reasoning_iterations: ['Thinking...'],
             timestamp: 2000
           }
         ]
       });
 
-      // Should fall back to m.content since no contentIterations
-      expect(mockActors.virtualList.addTextSegment).toHaveBeenCalledWith('turn-2', 'Full accumulated text');
+      // The user turn IS rendered (turn-1) — that's the addTextSegment we expect.
+      // The assistant turn (turn-2) has no events to project, so no
+      // assistant-side addTextSegment call is made.
+      expect(mockActors.virtualList.addTextSegment).toHaveBeenCalledTimes(1);
+      expect(mockActors.virtualList.addTextSegment).toHaveBeenCalledWith('turn-1', 'Hello');
+      expect(mockActors.virtualList.addTextSegment).not.toHaveBeenCalledWith(
+        'turn-2',
+        expect.stringContaining('Full accumulated text')
+      );
     });
 
     it('handles empty history gracefully', () => {
