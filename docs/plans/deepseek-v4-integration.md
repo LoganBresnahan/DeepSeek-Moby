@@ -378,6 +378,124 @@ After Phase 3.75: V4 / V3-chat / native-tool custom models can run tests, build 
 
 After Phase 4: full UX for swapping between high and max effort per model.
 
+### Phase 4.5 — Streaming tool calls (~6-8 hours)
+
+**Motivation.** Three independent problems collapse into one fix.
+
+1. **Visible thinking text.** V4-thinking does most of its reasoning inside `runToolLoop`'s non-streaming `chat()` calls. The `reasoning_content` arrives fully formed in each response, but we only stash it on the assistant message for the `reasoningEcho` round-trip — we never feed it to the UI's `_onStreamReasoning` channel. Users see `reasoning_chunks=0` in the streaming-phase logs because by the time `streamChat()` runs (the final-summary phase), the model has already finished thinking. Other tools that target V4 (opencode, etc.) show thinking text because they stream the tool-decision phase too.
+2. **Duplicate generation.** Today's flow makes the model produce a full reply twice on no-tool turns — once in `runToolLoop`'s non-streaming probe (with full tool defs in the prompt, ~2,368 tokens), then again in the streaming `streamChat()` (without tools, ~743 tokens). On a 3-minute generation that's the heaviest fraction of total wall-clock — paid silently, then paid again visibly. Documented in [docs/plans/deepseek-v4-integration.md] earlier sections.
+3. **Two pipelines, two prompts, two sets of bugs.** `runToolLoop` and `streamAndIterate` each have their own catch paths, abort handling, history saves, and system-prompt amendments. The "exploration phase is now complete" amendment is a workaround for the split that wouldn't exist if there were one pipeline.
+
+**Decision.** Add `streamingToolCalls: boolean` capability axis. When `true`, the orchestrator routes the model through a **single streaming pipeline** that emits content + reasoning_content + tool_calls deltas in parallel, accumulates them, and re-enters with executed tool results until `finish_reason: 'stop'`. When `false` (default), today's `runToolLoop` + `streamAndIterate` split runs unchanged.
+
+**Rollout sequence (canary → fleet).**
+
+| Order | Models | Default for the flag |
+|---|---|---|
+| Canary | `deepseek-v4-flash-thinking` | `true` on landing — most-used V4 thinking variant, fastest cost feedback. |
+| Wave 2 | `deepseek-v4-pro-thinking` | `true` once canary holds for ~24 hours of real use. |
+| Wave 3 | `deepseek-v4-flash`, `deepseek-v4-pro` | `true` after waves 1+2 stable — these benefit from the duplicate-generation fix even without thinking. |
+| Wave 4 | `deepseek-chat` (V3) | `true` after V4 fleet stable. V3's tool calling is mature; expected smooth. |
+| Reserved | `deepseek-reasoner` (R1) | **stays `false` permanently**. R1's path is `xml-shell`, not native tools. |
+| Custom models | per-entry opt-in | Default `false` for backward compat. Templates added to the quickPick set the flag for known-compatible providers. |
+
+The capability flag is the only gating mechanism. `MODEL_REGISTRY` ships `streamingToolCalls: false` for everything in this PR; the canary flip happens in a separate small PR after the infrastructure has been validated end-to-end on a manually-flagged build.
+
+**Tool-calls delta accumulation.** OpenAI-compat APIs stream tool calls as `delta.tool_calls` arrays where each entry carries an `index`:
+
+```jsonc
+// First chunk introducing the tool call:
+{ "delta": { "tool_calls": [{
+  "index": 0,
+  "id": "call_abc123",
+  "type": "function",
+  "function": { "name": "edit_file", "arguments": "" }
+}]}}
+
+// Subsequent chunks extending the arguments:
+{ "delta": { "tool_calls": [{ "index": 0, "function": { "arguments": "{\"file\":" }}]}}
+{ "delta": { "tool_calls": [{ "index": 0, "function": { "arguments": "\"src/foo" }}]}}
+{ "delta": { "tool_calls": [{ "index": 0, "function": { "arguments": ".ts\"...}" }}]}}
+
+// Final chunk:
+{ "delta": {}, "finish_reason": "tool_calls" }
+```
+
+We accumulate per-`index` until `finish_reason: 'tool_calls'`, then `JSON.parse` the assembled arguments. Arguments are invalid mid-stream — never parse before the finish-reason boundary. Multiple tool calls per turn arrive interleaved by index (call 0's args might land before call 1's `id`); the accumulator must tolerate any arrival order.
+
+**Unified streaming loop shape.**
+
+```ts
+while (iterations < maxIterations && !signal.aborted) {
+  iterations++;
+  const result = await streamChat(currentMessages, systemPrompt, {
+    onContent:   (token) => /* fire _onStreamToken */,
+    onReasoning: (token) => /* fire _onStreamReasoning — V4 thinking text now visible */,
+    // tool_calls delta accumulation handled internally by streamChat
+    tools: includeTools(caps),
+    signal,
+  });
+
+  if (result.finish_reason === 'tool_calls' && result.tool_calls?.length) {
+    // Execute each tool call (existing edit_file / write_file / delete_file
+    // / run_shell / web_search dispatch logic moves into a shared helper).
+    const toolResults = await executeToolCalls(result.tool_calls, ...);
+    currentMessages.push(
+      { role: 'assistant', content: result.content, reasoning_content: result.reasoning_content, tool_calls: result.tool_calls },
+      ...toolResults.map(tr => ({ role: 'tool', tool_call_id: tr.id, content: tr.content }))
+    );
+    continue;
+  }
+
+  // finish_reason === 'stop' — turn done.
+  break;
+}
+```
+
+Single iteration cursor, single abort path, single history save, single system prompt. `runToolLoop` and `streamAndIterate` cease to exist for `streamingToolCalls: true` models.
+
+**streamChat changes.** Today's `streamChat` handles `delta.content` and `delta.reasoning_content`. Phase 4.5 adds:
+
+1. New optional `tools` argument (currently `streamChat` doesn't accept tools — it's the no-tools final-summary path). When present, included in the request body.
+2. Per-index tool-call accumulator built up across deltas. Returned in `ChatResponse.tool_calls` shaped identically to today's non-streaming `chat()` result.
+3. `finish_reason` exposed on `ChatResponse` so the caller can branch on `'tool_calls'` vs `'stop'`.
+
+The `serializeMessagesForRequest` echo logic stays unchanged — it already handles `reasoning_content` and `tool_calls` correctly because the in-memory `Message` shape is the same.
+
+**Special-handler relocation.** Today the post-tool-call dispatch for `edit_file`, `write_file`, `delete_file`, `run_shell`, and `web_search` lives inline in `runToolLoop` (around [requestOrchestrator.ts:2676-3000](../../src/providers/requestOrchestrator.ts#L2676)). For Phase 4.5 those move into a shared `executeToolCall(toolCall, context): Promise<ToolExecutionResult>` helper that both pipelines call. Extracting first lands as a refactor under `streamingToolCalls: false` (no behavior change), then the streaming pipeline's loop just calls the same helper. Lower-risk than rewriting in place.
+
+**System-prompt updates.** When `streamingToolCalls: true`:
+
+- Drop the "exploration phase is now complete" amendment ([requestOrchestrator.ts:807](../../src/providers/requestOrchestrator.ts#L807)) — there's no separate exploration phase anymore. The model writes prose and emits tool calls in a single streamed turn.
+- Both standard and minimal prompt variants are otherwise unchanged. The unified-pipeline architecture is invisible to the model itself.
+
+**Risks and mitigation.**
+
+- **Tool-call argument JSON invalid mid-stream.** Never parse before `finish_reason: 'tool_calls'`. Mitigation: explicit assertion in the accumulator that we only call `JSON.parse` once, at the boundary.
+- **Per-index accumulator bugs.** Easiest failure mode in this class of refactor — multiple tool calls arrive interleaved, accumulator drops one. Mitigation: unit-test the accumulator against fixture SSE streams (synthetic, derived from real V4 traces) before wiring into the orchestrator. Test cases: single tool call split across N deltas; two parallel tool calls with interleaved deltas; tool call with empty arguments object.
+- **Abort signal mid-stream after partial tool call.** Need to handle the case where `signal.aborted` triggers between `onContent` deltas and `finish_reason`. Mitigation: discard partial tool calls on abort (don't attempt to execute), surface the same `*[User interrupted]*` marker as today.
+- **History serialization differs from non-streaming response.** `chat()` returns a complete `tool_calls` array as a single field; streamed accumulator builds the same shape. Both must produce identical wire-format messages on the next request — otherwise the V4-thinking `reasoningEcho` will reject. Mitigation: shared serializer (already true via `serializeMessagesForRequest`), validate identity in a unit test that round-trips a fixture through both paths.
+- **Re-entry on tool result.** After tool execution, we restart `streamChat` with appended tool-result messages. The model then emits more deltas. Mitigation: same accumulator, same loop body. The transition is a `continue` in the while loop; nothing reset between iterations.
+
+**What we are NOT doing in Phase 4.5.**
+
+- **Persistent shell sessions inside `run_shell`.** Each call still spawns a fresh shell.
+- **Streaming shell output back to the model.** Shell command output captures fully before the next `streamChat` iteration starts. Live streaming of long-running output is its own design problem.
+- **Removing `runToolLoop` / `streamAndIterate`.** They stay for any model with `streamingToolCalls: false`. Eventually-removable but not in this phase.
+- **Changing R1's path.** R1 is `shellProtocol: 'xml-shell'` and doesn't enter `runToolLoop` to begin with — Phase 4.5 doesn't touch its path at all.
+
+**Manual test backlog (post-canary):**
+
+- T1: V4-flash-thinking turn that needs to think — verify `reasoning_chunks > 0` in the `[ApiCall]` log line and visible thinking text appears in the UI's thinking dropdown during the tool-decision phase, not just at the end.
+- T2: V4-flash-thinking turn that calls multiple tools in one batch — verify all tool calls accumulate correctly and execute (no missing or merged calls).
+- T3: V4-flash-thinking turn that calls a tool, gets a result, then thinks again, then writes a final answer — verify the multi-iteration loop closes cleanly with `finish_reason: 'stop'` and a single history-save.
+- T4: User aborts mid-streaming-tool-call (presses stop before `finish_reason: 'tool_calls'`) — verify partial tool call is discarded, `*[User interrupted]*` marker appears, no half-executed tool.
+- T5: Switch back to V3 (`streamingToolCalls: false`) — verify the old `runToolLoop` + `streamAndIterate` path still works unchanged.
+- T6: V4-flash-thinking turn that hits the `reasoningEcho: 'required'` constraint — verify the next request includes `reasoning_content` on the assistant-with-tool-calls history entry (no 400 from the API).
+- T7: Compare wall-clock time on a creation-heavy turn ("build me a sudoku game") between `streamingToolCalls: true` and the prior baseline — expect ~30-50% reduction on no-tool turns and roughly even on tool-heavy ones.
+
+After Phase 4.5: V4-thinking shows visible streaming reasoning during tool decisions, the chat()/streamChat() duality is gone for native-tool models, and the duplicate-generation cost on no-tool turns goes away. R1 path unchanged.
+
 ### Phase 5 — Polish (~1 hour)
 
 - Update [docs/guides/custom-models.md](../guides/custom-models.md) field reference with the three new optional axes.

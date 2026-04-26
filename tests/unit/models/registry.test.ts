@@ -35,6 +35,51 @@ describe('model registry', () => {
       expect(caps.maxOutputTokens).toBe(65536);
       expect(caps.maxTokensConfigKey).toBe('maxTokensReasonerModel');
     });
+
+    // V4 family regression locks. Each upstream V4 model has TWO entries —
+    // one without thinking and one with — so the cost/quality decision is
+    // made at model-pick time. Capability bits drive whether downstream
+    // code attaches `thinking`/`reasoning_effort`, echoes reasoning_content
+    // back, or selects the minimal vs standard prompt template.
+    it('registers V4 non-thinking entries with native tool calling, no thinking flags', () => {
+      for (const id of ['deepseek-v4-flash', 'deepseek-v4-pro']) {
+        const caps = MODEL_REGISTRY[id];
+        expect(caps).toBeDefined();
+        expect(caps.toolCalling).toBe('native');
+        expect(caps.reasoningTokens).toBe('none');
+        expect(caps.shellProtocol).toBe('native-tool');
+        expect(caps.supportsTemperature).toBe(true);
+        expect(caps.maxOutputTokensCap).toBe(384000);
+        expect(caps.sendThinkingParam).toBeUndefined();
+        expect(caps.reasoningEcho).toBeUndefined();
+      }
+    });
+
+    it('registers V4-flash-thinking with thinking flags + minimal promptStyle + high reasoning effort', () => {
+      const caps = MODEL_REGISTRY['deepseek-v4-flash-thinking'];
+      expect(caps).toBeDefined();
+      expect(caps.toolCalling).toBe('native');
+      expect(caps.reasoningTokens).toBe('inline');
+      expect(caps.shellProtocol).toBe('native-tool');
+      // Thinking mode rejects sampling params.
+      expect(caps.supportsTemperature).toBe(false);
+      // Wire-format flags driven by the V4-thinking transform.
+      expect(caps.sendThinkingParam).toBe(true);
+      expect(caps.reasoningEcho).toBe('required');
+      expect(caps.reasoningEffort).toBe('high');
+      // Phase 3.5 — V4-thinking uses the minimal prompt template.
+      expect(caps.promptStyle).toBe('minimal');
+    });
+
+    it('registers V4-pro-thinking identically to flash-thinking but with max reasoning effort default', () => {
+      const caps = MODEL_REGISTRY['deepseek-v4-pro-thinking'];
+      expect(caps).toBeDefined();
+      expect(caps.sendThinkingParam).toBe(true);
+      expect(caps.reasoningEcho).toBe('required');
+      expect(caps.reasoningEffort).toBe('max'); // pro defaults to max
+      expect(caps.promptStyle).toBe('minimal');
+      expect(caps.supportsTemperature).toBe(false);
+    });
   });
 
   describe('getCapabilities', () => {

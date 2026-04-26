@@ -195,4 +195,70 @@ describe('StatusPanelShadowActor', () => {
       expect(element.shadowRoot?.innerHTML).toBe('');
     });
   });
+
+  // Phase 3.5 regression locks: the activity-label / activity-streaming
+  // subscriptions are how the orchestrator surfaces "what is the model
+  // doing right now?" to the UI. Two distinct issues we hit on the way
+  // in:
+  //   1. The publication keys ('activity.streaming' / 'activity.label')
+  //      had to be declared in the actor's publications map. Missing
+  //      declarations meant publishDirect silently dropped the broadcast.
+  //   2. setActivity null/string semantics — setting null must clear the
+  //      label AND restore the message slot's visibility.
+  describe('Activity indicator (Phase 3.5)', () => {
+    beforeEach(() => {
+      actor = new StatusPanelShadowActor(manager, element, 'moby.png', mockVscode);
+    });
+
+    it('shows activity label when activity.label publishes a string', () => {
+      manager.publishDirect('activity.label', 'Writing src/foo.ts');
+      const label = element.shadowRoot?.querySelector('.activity-text');
+      expect(label?.textContent).toBe('Writing src/foo.ts');
+      expect(label?.classList.contains('visible')).toBe(true);
+    });
+
+    it('hides activity label when activity.label publishes null', () => {
+      manager.publishDirect('activity.label', 'Working');
+      manager.publishDirect('activity.label', null);
+      const label = element.shadowRoot?.querySelector('.activity-text');
+      expect(label?.textContent).toBe('');
+      expect(label?.classList.contains('visible')).toBe(false);
+    });
+
+    it('suppresses the messages slot while an activity label is showing', () => {
+      manager.publishDirect('activity.label', 'Working');
+      const messages = element.shadowRoot?.querySelector('.messages');
+      expect(messages?.classList.contains('suppressed')).toBe(true);
+    });
+
+    it('restores messages slot visibility when activity is cleared', () => {
+      manager.publishDirect('activity.label', 'Working');
+      manager.publishDirect('activity.label', null);
+      const messages = element.shadowRoot?.querySelector('.messages');
+      expect(messages?.classList.contains('suppressed')).toBe(false);
+    });
+
+    it('adds activity-active + spurt-blue when streaming flag is set true', () => {
+      manager.publishDirect('activity.streaming', true);
+      const moby = element.shadowRoot?.querySelector('.moby');
+      expect(moby?.classList.contains('activity-active')).toBe(true);
+      expect(moby?.classList.contains('spurt-blue')).toBe(true);
+    });
+
+    it('removes activity-active when streaming flag is set false', () => {
+      manager.publishDirect('activity.streaming', true);
+      manager.publishDirect('activity.streaming', false);
+      const moby = element.shadowRoot?.querySelector('.moby');
+      expect(moby?.classList.contains('activity-active')).toBe(false);
+    });
+
+    it('overrides yellow/red spurts with blue when streaming starts', () => {
+      // Simulate a warning/error spurt already in progress, then a stream begins.
+      const moby = element.shadowRoot?.querySelector('.moby') as HTMLElement;
+      moby.classList.add('spurt-yellow');
+      manager.publishDirect('activity.streaming', true);
+      expect(moby.classList.contains('spurt-yellow')).toBe(false);
+      expect(moby.classList.contains('spurt-blue')).toBe(true);
+    });
+  });
 });

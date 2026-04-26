@@ -70,6 +70,10 @@ export interface ChatResponse {
   content: string;
   reasoning_content?: string;
   tool_calls?: ToolCall[];
+  /** API's `finish_reason`. Surfaced so streaming callers can branch on
+   *  `'tool_calls'` (execute and continue the loop) vs `'stop'` (turn done).
+   *  Phase 4.5 — only meaningful for the streaming-tool-calls path. */
+  finish_reason?: string;
   usage?: {
     prompt_tokens: number;
     completion_tokens: number;
@@ -476,6 +480,15 @@ export class DeepSeekClient {
         requestBody.response_format = { type: 'json_object' };
       }
 
+      // Phase 4.5 — streaming with tools. When the active model has
+      // `streamingToolCalls: true`, the orchestrator passes its tools array
+      // here and streams the model's tool-call deltas back. Tool definitions
+      // are only included when both `tools` is non-empty AND the model
+      // supports native tool calling (the orchestrator gates the latter).
+      if (options?.tools && options.tools.length > 0 && caps.toolCalling === 'native') {
+        requestBody.tools = options.tools;
+      }
+
       // V4-thinking transforms (strip suffix, inject thinking + reasoning_effort,
       // drop unsupported sampling params). No-op for any model without
       // `sendThinkingParam`.
@@ -510,6 +523,30 @@ export class DeepSeekClient {
       let reasoningChunks = 0;
       let contentChunks = 0;
 
+      // Phase 4.5 — per-index tool-call accumulator. Each delta arrives with
+      // `index`, optional `id`/`type`/`function.name` (typically only on the
+      // first delta for a given index), and an incremental `function.arguments`
+      // string that concatenates across deltas. We tolerate any arrival order
+      // and only `JSON.parse` arguments at the end (mid-stream args are usually
+      // invalid JSON). Multiple parallel tool calls are interleaved by index.
+      const toolCallAcc = new Map<number, {
+        id: string;
+        type: 'function';
+        name: string;
+        argumentsStr: string;
+      }>();
+
+      const finalizeToolCalls = (): ToolCall[] | undefined => {
+        if (toolCallAcc.size === 0) return undefined;
+        // Sort by index so emitted ToolCalls match wire order.
+        const ordered = [...toolCallAcc.entries()].sort((a, b) => a[0] - b[0]);
+        return ordered.map(([, acc]) => ({
+          id: acc.id,
+          type: acc.type,
+          function: { name: acc.name, arguments: acc.argumentsStr },
+        }));
+      };
+
       const result = await new Promise<ChatResponse>((resolve, reject) => {
         let fullResponse = '';
         let fullReasoning = '';
@@ -530,11 +567,13 @@ export class DeepSeekClient {
         const resetInactivityTimer = () => {
           clearInactivityTimer();
           inactivityTimer = setTimeout(() => {
-            if (!resolved && (fullResponse || fullReasoning)) {
+            if (!resolved && (fullResponse || fullReasoning || toolCallAcc.size > 0)) {
               resolved = true;
               resolve({
                 content: fullResponse,
                 reasoning_content: fullReasoning || undefined,
+                tool_calls: finalizeToolCalls(),
+                finish_reason: finishReason,
                 usage: usage || {
                   prompt_tokens: this.estimateTokens(JSON.stringify(requestMessages)),
                   completion_tokens: this.estimateTokens(fullResponse),
@@ -565,6 +604,8 @@ export class DeepSeekClient {
                   resolve({
                     content: fullResponse,
                     reasoning_content: fullReasoning || undefined,
+                    tool_calls: finalizeToolCalls(),
+                    finish_reason: finishReason,
                     usage: usage || {
                       prompt_tokens: this.estimateTokens(JSON.stringify(requestMessages)),
                       completion_tokens: this.estimateTokens(fullResponse),
@@ -580,11 +621,13 @@ export class DeepSeekClient {
                 const choice = parsed.choices[0];
                 const delta = choice?.delta;
 
-                // Handle reasoning content (for deepseek-reasoner / V4-thinking)
-                if (delta?.reasoning_content && onReasoning) {
+                // Handle reasoning content (for deepseek-reasoner / V4-thinking).
+                // Always accumulate; the streaming callback is optional UI plumbing
+                // but the assembled result must include everything the model emitted.
+                if (delta?.reasoning_content) {
                   fullReasoning += delta.reasoning_content;
                   reasoningChunks++;
-                  onReasoning(delta.reasoning_content);
+                  if (onReasoning) onReasoning(delta.reasoning_content);
                 }
 
                 // Handle regular content
@@ -592,6 +635,33 @@ export class DeepSeekClient {
                   fullResponse += delta.content;
                   contentChunks++;
                   onToken(delta.content);
+                }
+
+                // Phase 4.5 — accumulate tool-call deltas per-index. The
+                // first delta for a given index typically carries
+                // id/type/function.name; subsequent deltas only extend
+                // function.arguments. We never `JSON.parse` here — mid-
+                // stream args are usually invalid; the caller parses once
+                // we hand back the assembled ToolCall[].
+                if (Array.isArray(delta?.tool_calls)) {
+                  for (const tcDelta of delta.tool_calls as Array<{
+                    index?: number;
+                    id?: string;
+                    type?: string;
+                    function?: { name?: string; arguments?: string };
+                  }>) {
+                    const idx = tcDelta.index ?? 0;
+                    let acc = toolCallAcc.get(idx);
+                    if (!acc) {
+                      acc = { id: '', type: 'function', name: '', argumentsStr: '' };
+                      toolCallAcc.set(idx, acc);
+                    }
+                    if (tcDelta.id) acc.id = tcDelta.id;
+                    if (tcDelta.function?.name) acc.name = tcDelta.function.name;
+                    if (typeof tcDelta.function?.arguments === 'string') {
+                      acc.argumentsStr += tcDelta.function.arguments;
+                    }
+                  }
                 }
 
                 if (choice?.finish_reason) {
@@ -622,10 +692,12 @@ export class DeepSeekClient {
           if (!resolved) {
             resolved = true;
             clearInactivityTimer();
-            if (fullResponse || fullReasoning) {
+            if (fullResponse || fullReasoning || toolCallAcc.size > 0) {
               resolve({
                 content: fullResponse,
                 reasoning_content: fullReasoning || undefined,
+                tool_calls: finalizeToolCalls(),
+                finish_reason: finishReason,
                 usage: usage || {
                   prompt_tokens: this.estimateTokens(JSON.stringify(requestMessages)),
                   completion_tokens: this.estimateTokens(fullResponse),

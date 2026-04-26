@@ -401,3 +401,88 @@ describe('ChatProvider event wiring contract', () => {
     expect(cp._summarizing).toBe(false);
   });
 });
+
+// Phase 4 — sendModelList decorates each registered model entry with
+// `reasoningEffort` (effective value: per-model override > registry
+// default). The model selector's pill renderer uses presence of
+// `reasoningEffortDefault` to decide whether to render pills, and
+// `reasoningEffort` to mark the active one.
+describe('ChatProvider.sendModelList — Phase 4 reasoning-effort decoration', () => {
+  const sendModelList = (ChatProvider.prototype as any).sendModelList;
+
+  it('attaches reasoningEffort to thinking-capable models (override beats default)', async () => {
+    const postMessage = vi.fn();
+    const cp: any = {
+      _view: { webview: { postMessage } },
+      deepSeekClient: { hasPerModelKey: vi.fn(async () => false) }
+    };
+
+    // Simulate the moby.modelOptions config returning an explicit override.
+    const vscode = await import('vscode');
+    (vscode.workspace.getConfiguration as any).mockReturnValueOnce({
+      get: vi.fn((key: string) => key === 'modelOptions'
+        ? { 'deepseek-v4-flash-thinking': { reasoningEffort: 'max' } }
+        : undefined)
+    });
+
+    await sendModelList.call(cp);
+
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'modelListUpdated',
+      models: expect.any(Array)
+    }));
+    const models = postMessage.mock.calls[0][0].models as Array<any>;
+    const flashThinking = models.find(m => m.id === 'deepseek-v4-flash-thinking');
+    expect(flashThinking).toBeDefined();
+    expect(flashThinking.reasoningEffortDefault).toBe('high'); // registry default
+    expect(flashThinking.reasoningEffort).toBe('max');           // override wins
+  });
+
+  it('falls back to the registry default when no per-model override is configured', async () => {
+    const postMessage = vi.fn();
+    const cp: any = {
+      _view: { webview: { postMessage } },
+      deepSeekClient: { hasPerModelKey: vi.fn(async () => false) }
+    };
+
+    const vscode = await import('vscode');
+    (vscode.workspace.getConfiguration as any).mockReturnValueOnce({
+      get: vi.fn(() => undefined) // no modelOptions set
+    });
+
+    await sendModelList.call(cp);
+
+    const models = postMessage.mock.calls[0][0].models as Array<any>;
+    const proThinking = models.find(m => m.id === 'deepseek-v4-pro-thinking');
+    // Pro defaults to 'max' in the registry — confirm that's what gets sent.
+    expect(proThinking.reasoningEffortDefault).toBe('max');
+    expect(proThinking.reasoningEffort).toBe('max');
+  });
+
+  it('omits reasoningEffort from non-thinking models', async () => {
+    const postMessage = vi.fn();
+    const cp: any = {
+      _view: { webview: { postMessage } },
+      deepSeekClient: { hasPerModelKey: vi.fn(async () => false) }
+    };
+
+    const vscode = await import('vscode');
+    (vscode.workspace.getConfiguration as any).mockReturnValueOnce({
+      get: vi.fn(() => undefined)
+    });
+
+    await sendModelList.call(cp);
+
+    const models = postMessage.mock.calls[0][0].models as Array<any>;
+    const v3Chat = models.find(m => m.id === 'deepseek-chat');
+    // V3 chat is non-thinking — no default, no effective effort.
+    expect(v3Chat.reasoningEffortDefault).toBeUndefined();
+    expect(v3Chat.reasoningEffort).toBeUndefined();
+  });
+
+  it('does not post when _view is null (webview not yet resolved)', async () => {
+    const cp: any = { _view: null };
+    // No throw, no post.
+    await expect(sendModelList.call(cp)).resolves.toBeUndefined();
+  });
+});

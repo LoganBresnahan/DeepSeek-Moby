@@ -291,6 +291,49 @@ const x = 42;
       expect(result.content).toContain('CHANGED');
     });
 
+    // Regression: when applyChanges falls through Strategy 0 (no SR blocks
+    // matched), it strips a leading `# File:` header from cleanCode before
+    // running Strategy 1. Confirms the header line itself never appears
+    // in the resulting content even when the line-overlap branch fires.
+    it('strips the `# File:` header line from the resulting content on whole-file replace', () => {
+      // Use very high line overlap so shouldReplaceWholeFile's overlap branch fires,
+      // and prepend a `# File:` header that should be stripped from the output.
+      const lines = Array.from({ length: 15 }, (_, i) =>
+        `const variable${i} = "value${i}"; // long enough line for the overlap heuristic`
+      );
+      const original = lines.join('\n');
+      const modified = lines.map((l, i) =>
+        i === 5 ? l.replace('value5', 'CHANGED') : l
+      );
+      const newCode = '# File: foo.ts\n' + modified.join('\n');
+
+      const result = engine.applyChanges(original, newCode);
+
+      expect(result.success).toBe(true);
+      expect(result.content).not.toMatch(/^#\s*File:/m);
+      expect(result.content).toContain('CHANGED');
+    });
+
+    // Regression: when SR markers are present but the search text doesn't
+    // match the original, the strategy must NOT silently fall back to the
+    // old destructive line-diff merge (success=true, both kept). The
+    // contract is now success=false with an explicit message that names
+    // the SEARCH/REPLACE format.
+    it('returns success=false with SR-format hint when search text is not in original', () => {
+      const original = 'one\ntwo\nthree';
+      const newCode = `<<<<<<< SEARCH
+nonexistent line
+=======
+replacement
+>>>>>>> REPLACE`;
+
+      const result = engine.applyChanges(original, newCode);
+
+      expect(result.success).toBe(false);
+      expect(result.content).toBe(original); // file untouched
+      expect(result.message).toMatch(/SEARCH\/REPLACE/);
+    });
+
     it('filters out blocks where both search and replace are empty', () => {
       const original = 'const x = 1;';
       const newCode = `<<<<<<< SEARCH

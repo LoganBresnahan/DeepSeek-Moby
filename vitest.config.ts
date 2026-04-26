@@ -49,13 +49,29 @@ export default defineConfig({
     ],
 
     // Coverage
+    // Measures both extension-side (`src/`) and webview (`media/`)
+    // since each has unit tests under `tests/unit/`. CLI variant: `npm run
+    // test:unit:coverage`. Reports go to `coverage/` (lcov for CI, html for
+    // local browsing, text for quick stdout review).
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html', 'lcov'],
-      include: ['media/**/*.ts'],
+      include: ['src/**/*.ts', 'media/**/*.ts'],
       exclude: [
-        'media/**/*.test.ts',
-        'media/**/*.d.ts'
+        '**/*.test.ts',
+        '**/*.d.ts',
+        // Type-only / static / barrel files where coverage is meaningless.
+        'src/types.ts',
+        'src/extension-api.ts',
+        'src/events/EventTypes.ts',
+        'src/clients/searxngTemplates.ts',
+        'src/clients/webSearchProvider.ts',
+        'src/**/types.ts',
+        'src/tracing/index.ts',
+        'src/events/index.ts',
+        'media/**/shadowStyles.ts',
+        'media/**/styles.ts',
+        'media/**/styles/index.ts'
       ]
     },
 

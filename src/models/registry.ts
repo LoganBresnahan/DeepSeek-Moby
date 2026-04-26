@@ -97,6 +97,20 @@ export interface ModelCapabilities {
    *  See [docs/plans/deepseek-v4-integration.md] Phase 3.5 for the
    *  content split and empirical comparison protocol. */
   promptStyle?: PromptStyle;
+
+  /** Phase 4.5 — when `true`, the orchestrator routes tool-calling turns
+   *  through a single streaming pipeline that accumulates `delta.tool_calls`
+   *  chunks alongside content + reasoning_content. Replaces the
+   *  `runToolLoop` (non-streaming) + `streamAndIterate` (streaming) split
+   *  for this model. When `false`, the existing two-phase path runs.
+   *
+   *  Default: `false` everywhere. Canary flip on V4-flash-thinking lands
+   *  in a separate small PR after the infrastructure validates end-to-end.
+   *  R1 (`shellProtocol: 'xml-shell'`) never sets this — its path doesn't
+   *  use `runToolLoop` to begin with.
+   *
+   *  See [docs/plans/deepseek-v4-integration.md] Phase 4.5. */
+  streamingToolCalls?: boolean;
 }
 
 export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
@@ -344,6 +358,9 @@ export function validateCustomModelEntry(entry: unknown): { ok: true } | { ok: f
   }
   if (e.promptStyle !== undefined && e.promptStyle !== 'minimal' && e.promptStyle !== 'standard') {
     return { ok: false, error: 'promptStyle must be "minimal" or "standard" if provided' };
+  }
+  if (e.streamingToolCalls !== undefined && typeof e.streamingToolCalls !== 'boolean') {
+    return { ok: false, error: 'streamingToolCalls must be boolean if provided' };
   }
   return { ok: true };
 }

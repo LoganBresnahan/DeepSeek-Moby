@@ -960,6 +960,80 @@ describe('RequestOrchestrator', () => {
     });
   });
 
+  // ── Tool-loop budget exhaustion ──
+
+  describe('handleMessage - tool budget exhaustion', () => {
+    it('caps tool iterations at moby.maxToolCalls and falls through to streaming', async () => {
+      // Configure a tight tool-call cap. moby.maxToolCalls === 100 means
+      // "no limit" (Infinity), so 2 actually constrains.
+      configStore.set('maxToolCalls', 2);
+
+      // Each chat() call returns a tool call — with no terminator, the loop
+      // would run forever without the cap.
+      mockClient.chat.mockImplementation(async () => ({
+        content: '',
+        tool_calls: [{
+          id: `tc-${Math.random().toString(36).slice(2, 7)}`,
+          type: 'function' as const,
+          function: { name: 'read_file', arguments: '{"path":"src/index.ts"}' }
+        }]
+      }));
+
+      await orchestrator.handleMessage('Read everything', null, async () => '', undefined);
+
+      // chat() should be called exactly maxToolCalls times — once per iteration —
+      // before the loop bails and hands off to streamChat for the final answer.
+      expect(mockClient.chat).toHaveBeenCalledTimes(2);
+      expect(mockClient.streamChat).toHaveBeenCalledTimes(1);
+    });
+
+    it('appends the "tool calling limit reached" warning to the streaming system prompt', async () => {
+      configStore.set('maxToolCalls', 1);
+      mockClient.chat.mockImplementation(async () => ({
+        content: '',
+        tool_calls: [{
+          id: 'tc-1',
+          type: 'function' as const,
+          function: { name: 'read_file', arguments: '{"path":"src/x.ts"}' }
+        }]
+      }));
+
+      await orchestrator.handleMessage('Read', null, async () => '', undefined);
+
+      // streamChat is called with (messages, onToken, systemPrompt, onReasoning, options).
+      const streamCall = mockClient.streamChat.mock.calls.at(-1);
+      const systemPrompt = streamCall?.[2] as string | undefined;
+      expect(systemPrompt).toMatch(/tool calling limit was reached/i);
+      // And the standard "exploration phase complete" hand-off line is still there —
+      // budget exhaustion appends to it, doesn't replace it.
+      expect(systemPrompt).toMatch(/tool exploration phase is now complete/i);
+    });
+
+    it('does NOT add the limit warning when the tool loop ended naturally', async () => {
+      configStore.set('maxToolCalls', 5);
+      let callCount = 0;
+      mockClient.chat.mockImplementation(async () => {
+        callCount++;
+        if (callCount === 1) {
+          return {
+            content: '',
+            tool_calls: [{
+              id: 'tc-1', type: 'function' as const,
+              function: { name: 'read_file', arguments: '{"path":"src/x.ts"}' }
+            }]
+          };
+        }
+        // Natural end — no more tool_calls.
+        return { content: 'done', tool_calls: null };
+      });
+
+      await orchestrator.handleMessage('Read', null, async () => '', undefined);
+
+      const systemPrompt = mockClient.streamChat.mock.calls.at(-1)?.[2] as string | undefined;
+      expect(systemPrompt).not.toMatch(/tool calling limit was reached/i);
+    });
+  });
+
   // ── Proactive Context Compression ──
 
   describe('handleMessage - proactive context compression', () => {
@@ -1574,6 +1648,52 @@ describe('RequestOrchestrator', () => {
 
       expect(recorder.peekCurrent()).toBeNull();
       expect(recorder.peekLastCompleted()).not.toBeNull();
+    });
+
+    // Regression guard: before the API-error finalization fix, the catch
+    // path did NOT write a finalization row, so ConversationManager
+    // hydration synthesized a `shutdown-interrupted` event and the user
+    // saw "*[Interrupted by shutdown — partial response restored]*" on a
+    // turn that actually died to a backend error. The fix writes a
+    // proper finalization with a `*[API error: ...]*` marker and
+    // status='interrupted'.
+    it('finalizes the assistant_message with *[API error: ...]* marker on backend errors', async () => {
+      mockClient.streamChat.mockImplementation(async (
+        _messages: any,
+        onToken: (token: string) => void,
+      ) => {
+        onToken('halfway there');
+        throw new Error('HTTP 500: upstream is on fire');
+      });
+
+      await orchestrator.handleMessage('Hello', 'session-1', async () => '', undefined);
+
+      const calls = mockConversation.recordAssistantMessage.mock.calls;
+      // Find the finalization call (status: 'interrupted').
+      const finalization = calls.find(c =>
+        c[7] && typeof c[7] === 'object' && c[7].status === 'interrupted'
+      );
+      expect(finalization).toBeDefined();
+      const savedText = finalization![1] as string;
+      expect(savedText).toMatch(/\*\[API error: .+\]\*/);
+      expect(savedText).toContain('upstream is on fire');
+      // Partial content is preserved alongside the marker.
+      expect(savedText).toContain('halfway there');
+      // And it is NOT the misleading shutdown marker.
+      expect(savedText).not.toMatch(/Interrupted by shutdown/i);
+    });
+
+    it('writes only the *[API error: ...]* marker when no partial content streamed', async () => {
+      mockClient.streamChat.mockRejectedValue(new Error('connection refused'));
+
+      await orchestrator.handleMessage('Hello', 'session-1', async () => '', undefined);
+
+      const calls = mockConversation.recordAssistantMessage.mock.calls;
+      const finalization = calls.find(c =>
+        c[7] && typeof c[7] === 'object' && c[7].status === 'interrupted'
+      );
+      expect(finalization).toBeDefined();
+      expect(finalization![1]).toBe('*[API error: connection refused]*');
     });
 
     it('abort path on Chat-model turn drains without a phantom iteration-end(0)', async () => {
