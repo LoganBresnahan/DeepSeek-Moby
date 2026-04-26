@@ -90,7 +90,13 @@ If you want Moby to reach multiple hosted providers (Anthropic, OpenAI, Together
 | `toolCalling` | `"native"` \| `"none"` | Does the model support OpenAI-format function calling? Chat-style models → `"native"`. Pure reasoning models (R1-style) → `"none"`. |
 | `reasoningTokens` | `"inline"` \| `"none"` | Does the API return a separate `reasoning_content` channel (R1, QwQ)? Most models → `"none"`. |
 | `editProtocol` | `["native-tool"]` \| `["search-replace"]` \| `["native-tool", "search-replace"]` | How the model is expected to express file edits. Tool-calling models → `["native-tool"]`. |
-| `shellProtocol` | `"xml-shell"` \| `"none"` | R1's `<shell>…</shell>` fallback. Almost always `"none"` for custom models. |
+| `shellProtocol` | `"xml-shell"` \| `"native-tool"` \| `"none"` | How the model expresses shell commands. R1 uses `"xml-shell"` (`<shell>…</shell>` tags in content). Native-tool models use `"native-tool"` (a `run_shell` tool in the tools array). Almost always `"native-tool"` for custom models with `toolCalling: "native"`. |
+| `sendThinkingParam` | boolean | Inject `{"thinking": {"type": "enabled"}}` into the request. Only needed for V4-thinking variants. Defaults to `false`. |
+| `reasoningEffort` | `"high"` \| `"max"` | Default reasoning effort for thinking-capable models. User override via `moby.modelOptions.<id>.reasoningEffort`. Only meaningful when `sendThinkingParam` is `true`. |
+| `reasoningEcho` | `"required"` \| `"optional"` \| `"none"` | Whether `reasoning_content` must be echoed back in subsequent requests after tool calls. V4-thinking requires `"required"` or the API 400s. Defaults to `"none"`. |
+| `promptStyle` | `"minimal"` \| `"standard"` | System-prompt flavor. `"minimal"` drops the reference-vs-edit decision tree and most numbered rules — calibrated for thinking-style models that infer intent. `"standard"` (default) is the full prompt for V3 / non-thinking / custom models. |
+| `streamingToolCalls` | boolean | Route through a single streaming pipeline that accumulates `delta.tool_calls` alongside content. Eliminates duplicate generation on no-tool turns. Set `true` for all native-tool models unless your runner has buggy SSE tool-call streaming. Defaults to `false`. |
+| `maxOutputTokensCap` | number (optional) | Upper bound for the per-model maxTokens slider. When absent, the slider max falls back to `maxOutputTokens` (V3 behavior where default and cap coincide). V4 sets this to 384000 to match the real API cap. |
 | `supportsTemperature` | boolean | Whether to send `temperature` in the request. Reasoning models often reject it. |
 | `maxOutputTokens` | number | Hard cap on completion tokens. Match what the model actually supports. |
 | `maxTokensConfigKey` | string | A unique VS Code setting name for the per-model max-tokens override (e.g. `"maxTokensCustomQwen"`). Invented per-entry. |

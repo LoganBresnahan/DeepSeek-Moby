@@ -255,6 +255,174 @@ Scenarios that have been implemented but not yet exercised in a VS Code dev host
 
 ---
 
+## M15–M20. V4 `run_shell` native-tool path (Phase 3.75)
+
+These exercise the `run_shell` tool for native-tool-calling models (V4, V3 Chat, custom). All tests use a V4 model (flash or flash-thinking) with `shellProtocol: 'native-tool'`.
+
+### M15. V4 model runs tests via `run_shell`
+
+**Setup:** A workspace with a project that has tests (any language — Ruby rspec, Python pytest, Node mocha).
+
+**Steps:**
+1. Send: "Run the tests and tell me if they pass."
+2. Verify model calls `run_shell` with the correct test command.
+3. Command appears in the approval UI (ask mode) or executes automatically (auto mode).
+4. Test output flows back into the conversation.
+5. Model interprets the results and reports pass/fail.
+
+**Pass criteria:** `run_shell` dispatches through the existing approval + execution pipeline; test output is visible in the shell-results dropdown.
+
+### M16. Long-running command detection
+
+**Steps:**
+1. Send: "Start the dev server with `npm run dev`."
+2. Model calls `run_shell` with the dev-server command.
+3. Extension rejects it via `LONG_RUNNING_PATTERNS`.
+4. Model receives the rejection as a tool result and tells the user to run it manually.
+
+**Pass criteria:** `npm run dev`, `flask run`, `python -m http.server`, etc. are all caught. Short commands (tests, builds) still execute.
+
+### M17. `allowAllShellCommands` bypass
+
+**Setup:** Set `moby.allowAllShellCommands: true`.
+
+**Steps:**
+1. Send a prompt requiring shell execution on a V4 model.
+2. Model calls `run_shell`.
+3. No approval prompt — command executes immediately.
+4. Set `moby.allowAllShellCommands: false` → next `run_shell` triggers approval again.
+
+**Pass criteria:** Bypass works identically for native-tool path and R1's `<shell>` path.
+
+### M18. File-watcher diff with absolute paths (ADR 0004)
+
+**Steps:**
+1. Ask V4 to `mkdir tmp && echo "hello" > tmp/test.txt` via `run_shell`.
+2. Check the tool result returned to the model — it must include `--- Files touched by this command (absolute paths) ---`.
+3. Paths are absolute (e.g. `/home/user/project/tmp/test.txt`), not relative.
+
+**Pass criteria:** ADR 0004 B-pattern preserved for native-tool shell path.
+
+### M19. Interrupt during shell execution
+
+**Steps:**
+1. On a V4 model, trigger a `run_shell` with `sleep 30 && echo done`.
+2. Click Stop during the sleep.
+3. Turn ends cleanly with `*[User interrupted]*` marker.
+4. No partial shell output leaks into subsequent turns.
+
+**Pass criteria:** Abort during `run_shell` cancels cleanly — same path R1 uses.
+
+### M20. Custom model gets `run_shell` automatically
+
+**Setup:** Add a custom model with `toolCalling: 'native'` and `shellProtocol: 'native-tool'` (e.g., the Ollama Qwen template with `shellProtocol` changed from `"none"` to `"native-tool"`).
+
+**Steps:**
+1. Select the custom model.
+2. Send a prompt that requires a shell command.
+3. Verify the model's tools array includes `run_shell`.
+
+**Pass criteria:** `run_shell` appears automatically for any model with `shellProtocol: 'native-tool'`.
+
+---
+
+## M21–M27. V4 streaming tool calls (Phase 4.5)
+
+### M21. Visible reasoning during tool decisions
+
+**Steps:**
+1. Send a creation-heavy prompt on V4-flash-thinking: "Build me a small web app."
+2. Watch the thinking dropdown during the first iteration.
+3. Reasoning text appears **before** the tool call resolves — not just at the end.
+4. Check `[ApiCall]` log line: `reasoning_chunks > 0`.
+
+**Pass criteria:** Thinking text streams live during the tool-decision phase (the whole point of Phase 4.5).
+
+### M22. Multi-tool batch in one iteration
+
+**Steps:**
+1. Prompt V4-flash-thinking to perform multiple reads in one turn: "Read package.json and tsconfig.json."
+2. Verify both `read_file` calls appear as separate tools in the same batch dropdown.
+3. Both execute and return results correctly (no missing or merged calls).
+
+**Pass criteria:** Multi-tool batches accumulate and dispatch correctly from streaming deltas.
+
+### M23. Multi-iteration tool loop closes cleanly
+
+**Steps:**
+1. Send a prompt that requires multiple iterations: "Create a Python script, test it, fix any errors."
+2. Verify the loop runs multiple iterations (visible as separate tool batch dropdowns).
+3. Final iteration ends with `finish_reason: 'stop'` and a single history-save.
+
+**Pass criteria:** Multi-iteration streaming loop terminates cleanly without orphaned batches.
+
+### M24. Abort mid-streaming-tool-call
+
+**Steps:**
+1. Start a turn on V4-flash-thinking that will produce a tool call (e.g., building a large file).
+2. Click Stop before the tool call's arguments finish streaming (`finish_reason: 'tool_calls'` hasn't been emitted yet).
+3. Verify `*[User interrupted]*` marker appears.
+4. No half-executed tool (partial arguments are discarded).
+
+**Pass criteria:** Partial tool calls are discarded on abort; no half-baked file writes.
+
+### M25. V3 regression (legacy path still works)
+
+**Steps:**
+1. Temporarily set `streamingToolCalls: false` on `deepseek-chat` in the registry.
+2. Send a prompt that requires tool calls.
+3. Verify the legacy `runToolLoop` + `streamAndIterate` path still works.
+4. Restore `streamingToolCalls: true`.
+
+**Pass criteria:** Legacy path still functional for models that don't opt into streaming.
+
+### M26. `reasoningEcho` round-trip (no 400s)
+
+**Steps:**
+1. Start a multi-turn conversation on V4-flash-thinking with tool calls.
+2. Send a second message that triggers more tools.
+3. Check logs — no `400` errors mentioning `reasoning_content must be passed back`.
+4. Verify the request body includes `reasoning_content` on prior assistant-with-tool-calls messages.
+
+**Pass criteria:** `reasoningEcho: 'required'` constraint satisfied across multi-turn tool loops.
+
+### M27. Wall-clock reduction on no-tool turns
+
+**Steps:**
+1. Send a simple question on V4-flash: "What is 2+2?"
+2. Check the `[ApiCall]` log — only one `streamChat` call, no `chat()` probe.
+3. Compare wall-clock time against the pre-Phase-4.5 baseline (should be ~30–50% faster on no-tool turns).
+
+**Pass criteria:** No duplicate generation on no-tool turns; single `streamChat` call.
+
+---
+
+## M28–M29. V4 end-to-end scenarios (Phase 5)
+
+### M28. V4-flash plain chat (non-thinking, no tools)
+
+**Steps:**
+1. Select `deepseek-v4-flash`.
+2. Send a simple question: "Explain the visitor pattern in 2 sentences."
+3. Verify streaming response, no tool calls, clean finish.
+
+**Pass criteria:** V4 non-thinking works as a drop-in replacement for V3 Chat.
+
+### M29. V4-pro-thinking multi-turn with tools
+
+**Steps:**
+1. Select `deepseek-v4-pro-thinking`.
+2. Send: "Create a markdown file README.md with a project overview, then add a LICENSE file."
+3. Verify multiple tool calls across iterations, reasoning streams live, edits apply.
+4. Verify `reasoningEffort: max` is active (check log for `reasoning_effort=max`).
+5. Switch to `high` via the model-selector pills → next request uses `reasoning_effort=high`.
+
+**Pass criteria:** Pro-thinking end-to-end with max effort, tool loops, and effort toggle.
+
+---
+
+---
+
 ## Scroll investigation (not yet a test, still an audit item)
 
 See the scroll-audit findings in conversation history. Top suspect is that any mouse movement during streaming breaks auto-scroll (via [ScrollActor.ts:309-324](../../media/actors/scroll/ScrollActor.ts#L309-L324)), and when combined with a large content jump (code block landing), the user can end up >100px from the bottom with `_userScrolled=true`, locking out automatic re-engagement.
