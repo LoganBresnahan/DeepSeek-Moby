@@ -36,23 +36,14 @@ describe('model registry', () => {
       expect(caps.maxTokensConfigKey).toBe('maxTokensReasonerModel');
     });
 
-    // V4 family regression locks. Each upstream V4 model has TWO entries —
-    // one without thinking and one with — so the cost/quality decision is
-    // made at model-pick time. Capability bits drive whether downstream
-    // code attaches `thinking`/`reasoning_effort`, echoes reasoning_content
-    // back, or selects the minimal vs standard prompt template.
-    it('registers V4 non-thinking entries with native tool calling, no thinking flags', () => {
-      for (const id of ['deepseek-v4-flash', 'deepseek-v4-pro']) {
-        const caps = MODEL_REGISTRY[id];
-        expect(caps).toBeDefined();
-        expect(caps.toolCalling).toBe('native');
-        expect(caps.reasoningTokens).toBe('none');
-        expect(caps.shellProtocol).toBe('native-tool');
-        expect(caps.supportsTemperature).toBe(true);
-        expect(caps.maxOutputTokensCap).toBe(384000);
-        expect(caps.sendThinkingParam).toBeUndefined();
-        expect(caps.reasoningEcho).toBeUndefined();
-      }
+    // V4 family regression locks. V4 always reasons — the upstream model
+    // emits `reasoning_content` regardless of the `thinking` flag, so a
+    // separate non-thinking SKU was misleading and 400'd on iter 2 when we
+    // didn't echo it back. Lineup is now flash-thinking + pro-thinking only;
+    // the "(Thinking)" qualifier is dropped from display labels.
+    it('does not register V4 non-thinking entries (dropped — V4 always reasons)', () => {
+      expect(MODEL_REGISTRY['deepseek-v4-flash']).toBeUndefined();
+      expect(MODEL_REGISTRY['deepseek-v4-pro']).toBeUndefined();
     });
 
     it('registers V4-flash-thinking with thinking flags + minimal promptStyle + high reasoning effort', () => {
@@ -85,13 +76,8 @@ describe('model registry', () => {
       expect(caps.streamingToolCalls).toBe(true);
     });
 
-    it('enables streamingToolCalls on V4 non-thinking entries (all native-tool models use single pipeline)', () => {
-      expect(MODEL_REGISTRY['deepseek-v4-flash'].streamingToolCalls).toBe(true);
-      expect(MODEL_REGISTRY['deepseek-v4-pro'].streamingToolCalls).toBe(true);
-    });
-
-    it('enables streamingToolCalls on V3 chat (R1 stays xml-shell, no tools to stream)', () => {
-      expect(MODEL_REGISTRY['deepseek-chat'].streamingToolCalls).toBe(true);
+    it('keeps streamingToolCalls off on V3 chat (interleaved content+tool_calls cause render-order issues; retiring 2026-07-24)', () => {
+      expect(MODEL_REGISTRY['deepseek-chat'].streamingToolCalls).toBe(false);
       expect(MODEL_REGISTRY['deepseek-reasoner'].streamingToolCalls).toBeUndefined();
     });
   });

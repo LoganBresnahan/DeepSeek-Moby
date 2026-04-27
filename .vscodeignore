@@ -20,7 +20,10 @@ yarn.lock
 .gitignore
 .yarnrc
 REMINDER.md
+PLAN.md
+CLAUDE.md
 out/**
+coverage/**
 
 # === Documentation (not needed at runtime) ===
 docs/**

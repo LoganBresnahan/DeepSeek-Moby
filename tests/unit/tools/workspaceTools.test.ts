@@ -51,7 +51,9 @@ vi.mock('path', async () => {
     ...posix,
     default: posix,
     join: (...args: string[]) => posix.join(...args),
+    resolve: (...args: string[]) => posix.resolve(...args),
     relative: (from: string, to: string) => posix.relative(from, to),
+    isAbsolute: (p: string) => posix.isAbsolute(p),
     extname: (p: string) => posix.extname(p)
   };
 });
@@ -349,6 +351,30 @@ describe('workspaceTools', () => {
       }));
       expect(result).toContain('Error: Cannot read files outside the workspace');
     });
+
+    it('accepts absolute paths inside the workspace (V4 emits absolute paths)', async () => {
+      // Pre-fix bug: path.join('/workspace', '/workspace/src/x.ts') →
+      // '/workspace/workspace/src/x.ts' (POSIX path.join doesn't reset on
+      // absolute second arg). path.resolve does, so this now reads correctly.
+      mockFs.existsSync.mockReturnValue(true);
+      mockFs.statSync.mockReturnValue({
+        isDirectory: () => false, isFile: () => true, size: 100, mtime: new Date()
+      } as any);
+      mockFs.readFileSync.mockReturnValue('content');
+
+      const result = await executeToolCall(makeToolCall('read_file', {
+        path: '/workspace/src/x.ts'
+      }));
+      expect(result).not.toContain('Error');
+      expect(result).toContain('content');
+    });
+
+    it('rejects absolute paths outside the workspace', async () => {
+      const result = await executeToolCall(makeToolCall('read_file', {
+        path: '/etc/passwd'
+      }));
+      expect(result).toContain('Error: Cannot read files outside the workspace');
+    });
   });
 
   // ── searchFiles ──────────────────────────────────────────────────
@@ -431,6 +457,25 @@ describe('workspaceTools', () => {
 
     it('prevents listing directories outside the workspace', async () => {
       const result = await executeToolCall(makeToolCall('list_directory', { path: '../../' }));
+      expect(result).toContain('Error: Cannot list directories outside the workspace');
+    });
+
+    it('accepts absolute paths inside the workspace', async () => {
+      mockFs.readdirSync.mockReturnValue(['src']);
+      mockFs.existsSync.mockReturnValue(true);
+      mockFs.statSync.mockReturnValue({
+        isDirectory: () => true, isFile: () => false, size: 0, mtime: new Date()
+      } as any);
+
+      const result = await executeToolCall(makeToolCall('list_directory', {
+        path: '/workspace'
+      }));
+      expect(result).not.toContain('Error');
+      expect(result).toContain('Directory:');
+    });
+
+    it('rejects absolute paths outside the workspace', async () => {
+      const result = await executeToolCall(makeToolCall('list_directory', { path: '/etc' }));
       expect(result).toContain('Error: Cannot list directories outside the workspace');
     });
 

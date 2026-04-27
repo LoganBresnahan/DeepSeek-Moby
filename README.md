@@ -35,23 +35,22 @@
 
 ## Features
 
-### Six Models, One Interface
+### Four Models, One Interface
 
 Pick the model that fits the task — or register your own (see [Custom Models](#custom-models)).
 
 | Model | Best For | Context | Max Output |
 |-------|----------|---------|------------|
-| **DeepSeek V4 Pro (Thinking)** *(default)* | Hardest problems — agentic work, multi-step reasoning, large refactors | 1M tokens | 384K tokens |
-| **DeepSeek V4 Pro** | Fast high-quality answers without the thinking overhead | 1M tokens | 384K tokens |
-| **DeepSeek V4 Flash (Thinking)** | Cheap reasoning — exploration, planning, lightweight agentic tasks | 1M tokens | 384K tokens |
-| **DeepSeek V4 Flash** | Cheapest fast tier — quick answers, code generation | 1M tokens | 384K tokens |
-| **DeepSeek Chat (V3)** *(retiring 2026-07-24)* | Legacy — auto-routes to V4 until retirement | 128K tokens | 8K tokens |
+| **DeepSeek V4 Pro** *(default)* | Hardest problems — agentic work, multi-step reasoning, large refactors | 1M tokens | 384K tokens |
+| **DeepSeek V4 Flash** | Cheap reasoning — exploration, planning, lightweight agentic tasks | 1M tokens | 384K tokens |
+| **DeepSeek Chat (V3)** *(retiring 2026-07-24)* | Legacy non-reasoning fast tier | 128K tokens | 8K tokens |
 | **DeepSeek Reasoner (R1)** *(retiring 2026-07-24)* | Legacy chain-of-thought + shell-driven agentic work | 128K tokens | 64K tokens |
 
-- **V4 family + V3 Chat** use streaming native tool calls — file reads, searches, code edits, and shell commands dispatch inline as the model emits them, with reasoning tokens streaming live during tool decisions on the `-thinking` variants
+- **V4 Pro / V4 Flash** stream native tool calls — file reads, searches, code edits, and shell commands dispatch inline as the model emits them, with reasoning tokens streaming live during tool decisions
+- **V3 Chat** uses native tool calls without inline reasoning — fast and cheap, no thinking overhead
 - **R1** uses inline `<shell>...</shell>` tags — `cat`, `grep`, `sed`, heredocs — with full terminal access
 - Switching models automatically creates a new session (no mixed-model conversations)
-- Reasoning tokens display in expandable "Thinking" dropdowns so you can follow the model's logic
+- Reasoning tokens (V4 Pro / V4 Flash / R1) display in expandable "Thinking" dropdowns so you can follow the model's logic
 
 ### Three Edit Modes
 
@@ -240,19 +239,17 @@ Click the Moby icon in the sidebar activity bar, type a message, and press Enter
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `moby.model` | `deepseek-v4-pro-thinking` | Active model. Built-ins: `deepseek-v4-pro-thinking`, `deepseek-v4-pro`, `deepseek-v4-flash-thinking`, `deepseek-v4-flash`, `deepseek-chat` (retiring 2026-07-24), `deepseek-reasoner` (retiring 2026-07-24). Also accepts any custom model `id`. |
+| `moby.model` | `deepseek-v4-pro-thinking` | Active model. Built-ins: `deepseek-v4-pro-thinking`, `deepseek-v4-flash-thinking`, `deepseek-chat` (retiring 2026-07-24), `deepseek-reasoner` (retiring 2026-07-24). Also accepts any custom model `id`. |
 | `moby.customModels` | `[]` | Array of custom OpenAI-compatible models to register alongside the built-ins. See [Custom Models](#custom-models). |
-| `moby.modelOptions` | `{}` | Per-model options keyed by model id. Currently supports `reasoningEffort` (`high` or `max`) for V4 thinking models. |
-| `moby.temperature` | `0.7` | Creativity (0-2). Non-thinking models only — thinking models reject temperature. |
+| `moby.modelOptions` | `{}` | Per-model options keyed by model id. Currently supports `reasoningEffort` (`high` or `max`) for V4 models. |
+| `moby.temperature` | `0.7` | Creativity (0-2). V3 chat only — V4 and R1 reject temperature. |
 
 **Token / iteration limits**
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `moby.maxTokensV4ProThinking` | `65536` | Max output tokens for V4 Pro Thinking. API cap: 384,000. |
-| `moby.maxTokensV4Pro` | `32768` | Max output tokens for V4 Pro. API cap: 384,000. |
-| `moby.maxTokensV4FlashThinking` | `65536` | Max output tokens for V4 Flash Thinking. API cap: 384,000. |
-| `moby.maxTokensV4Flash` | `32768` | Max output tokens for V4 Flash. API cap: 384,000. |
+| `moby.maxTokensV4ProThinking` | `65536` | Max output tokens for V4 Pro. API cap: 384,000. |
+| `moby.maxTokensV4FlashThinking` | `65536` | Max output tokens for V4 Flash. API cap: 384,000. |
 | `moby.maxTokensChatModel` | `8192` | Max output tokens for Chat (V3). Range: 256-8,192. |
 | `moby.maxTokensReasonerModel` | `65536` | Max output tokens for Reasoner (R1). Range: 256-65,536. |
 | `moby.maxToolCalls` | `100` | Tool call iteration limit (native-tool models). 100 = no limit. |

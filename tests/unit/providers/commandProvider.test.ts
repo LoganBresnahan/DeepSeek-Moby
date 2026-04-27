@@ -134,11 +134,9 @@ describe('CommandProvider', () => {
 
   describe('switchModel', () => {
     // switchModel cycles through `getRegisteredModelIds()` in declaration
-    // order. As of the V4 launch the built-in order is:
-    //   deepseek-chat → deepseek-reasoner → deepseek-v4-flash →
-    //   deepseek-v4-flash-thinking → deepseek-v4-pro → deepseek-v4-pro-thinking
-    // and then wraps back to deepseek-chat. The cases below pin the head, an
-    // interior step, and the wrap.
+    // order. Built-in order:
+    //   deepseek-chat → deepseek-reasoner → deepseek-v4-flash-thinking →
+    //   deepseek-v4-pro-thinking → wraps to deepseek-chat
     it('cycles from deepseek-chat to deepseek-reasoner (next in registration order)', async () => {
       configStore.set('model', 'deepseek-chat');
       await provider.switchModel();
@@ -150,12 +148,12 @@ describe('CommandProvider', () => {
       );
     });
 
-    it('cycles from deepseek-reasoner to the first V4 entry', async () => {
+    it('cycles from deepseek-reasoner to the first V4 entry (flash-thinking)', async () => {
       configStore.set('model', 'deepseek-reasoner');
       await provider.switchModel();
 
-      expect(mockClient.setModel).toHaveBeenCalledWith('deepseek-v4-flash');
-      expect(mockStatusBar.updateModel).toHaveBeenCalledWith('deepseek-v4-flash');
+      expect(mockClient.setModel).toHaveBeenCalledWith('deepseek-v4-flash-thinking');
+      expect(mockStatusBar.updateModel).toHaveBeenCalledWith('deepseek-v4-flash-thinking');
     });
 
     it('wraps from the last registered model back to deepseek-chat', async () => {
@@ -166,8 +164,9 @@ describe('CommandProvider', () => {
       expect(mockStatusBar.updateModel).toHaveBeenCalledWith('deepseek-chat');
     });
 
-    it('defaults to deepseek-v4-pro-thinking when no config is set, then advances to deepseek-chat', async () => {
-      // No config override — defaults to 'deepseek-v4-pro-thinking' (DEFAULT_MODEL_ID)
+    it('defaults to deepseek-v4-pro-thinking when no config is set, then wraps to deepseek-chat', async () => {
+      // No config override — defaults to 'deepseek-v4-pro-thinking' (DEFAULT_MODEL_ID).
+      // It's the last entry in registration order, so the cycle wraps to deepseek-chat.
       await provider.switchModel();
       expect(mockClient.setModel).toHaveBeenCalledWith('deepseek-chat');
     });

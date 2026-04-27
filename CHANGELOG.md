@@ -4,16 +4,18 @@
 
 ### Models
 
-- DeepSeek V4 family — `deepseek-v4-flash`, `deepseek-v4-flash-thinking`, `deepseek-v4-pro`, `deepseek-v4-pro-thinking` — registered with full capability metadata (1M-token context, 384K-token output cap, native tool calling, inline reasoning on `-thinking` variants)
+- DeepSeek V4 — `deepseek-v4-flash-thinking` and `deepseek-v4-pro-thinking` — registered with full capability metadata (1M-token context, 384K-token output cap, native tool calling, inline reasoning, streaming-tool-calls pipeline)
 - Default model is now `deepseek-v4-pro-thinking` — most capable native-tool + inline-reasoning + shell-access tier
+- Display labels drop the "(Thinking)" qualifier (`DeepSeek V4 Pro` / `DeepSeek V4 Flash`) — V4 always reasons, the distinction was misleading and the non-thinking SKUs 400'd on iter 2 when the API expected `reasoning_content` to be echoed back
 - DeepSeek V3 (`deepseek-chat`) and R1 (`deepseek-reasoner`) remain available, flagged as retiring 2026-07-24
-- Per-model `reasoningEffort` override (`high` / `max`) via `moby.modelOptions` for V4 thinking variants
-- `thinking: { type: 'enabled' }` request param + `reasoning_content` echoing on tool turns for V4 thinking compliance
+- Per-model `reasoningEffort` override (`high` / `max`) via `moby.modelOptions` for V4 entries
+- `thinking: { type: 'enabled' }` request param + `reasoning_content` echoing on tool turns for V4 compliance
 
 ### Streaming Pipeline (Phase 4.5)
 
-- Single streaming pipeline for all native-tool models: content + reasoning + tool_calls deltas surface in parallel, tools dispatch inline as they arrive, no separate non-streaming probe
-- Replaces the runToolLoop + streamAndIterate split for any model with `streamingToolCalls: true` (all built-in DeepSeek models flipped to streaming in Phase 5)
+- Single streaming pipeline for the V4 family: content + reasoning + tool_calls deltas surface in parallel, tools dispatch inline as they arrive, no separate non-streaming probe
+- Replaces the runToolLoop + streamAndIterate split for any model with `streamingToolCalls: true` — all V4 entries opt in
+- V3 chat (`deepseek-chat`) stays on the legacy split. V3 interleaves `delta.content` and `delta.tool_calls` in the same SSE stream, which can render text segments out of order relative to tool dropdowns. V3 retires 2026-07-24, so the fix would land on a sunsetting model — punting in favor of V4
 - Reasoning tokens stream live during tool decisions on `-thinking` variants — visible work instead of silent gaps
 - Pre-announce on tool-call metadata (id + name) so the user sees `write_file` immediately rather than waiting for argument streaming to complete
 - Iteration-boundary tool-batch close mirrors the Modified Files dropdown — back-to-back tool calls collapse into one batch, breaks across iterations split into separate dropdowns
@@ -106,3 +108,4 @@
 - WSL2 file watcher may miss deletion events from chained shell commands (B25)
 - Cross-platform coverage is incomplete — primary development is on Linux/WSL2; macOS and native Windows paths have had limited manual exercise
 - Real R1 trace fixtures for regression testing are still synthetic (parked follow-up)
+- V3 chat may occasionally render text segments out of order relative to tool dropdowns when content and tool_calls interleave mid-stream. V3 stays on the legacy non-streaming tool path to avoid this; V4 family uses the streaming pipeline and is unaffected

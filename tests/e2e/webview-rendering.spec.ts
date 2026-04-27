@@ -706,7 +706,9 @@ test.describe('2H. Dropdown Design', () => {
       if (!turn) return false;
       const pc = turn.querySelector('.pending-container');
       const sr = (pc as HTMLElement)?.shadowRoot;
-      return !!sr?.querySelector('.count-error');
+      // .count-rejected = user-rejected (red); .count-error = failed-to-apply (also red).
+      // Both render with the same red styling but track distinct user intents.
+      return !!sr?.querySelector('.count-rejected');
     });
     expect(hasRedCount).toBe(true);
   });
@@ -729,7 +731,7 @@ test.describe('2H. Dropdown Design', () => {
       const sr = (pc as HTMLElement)?.shadowRoot;
       return {
         green: !!sr?.querySelector('.count-applied'),
-        red: !!sr?.querySelector('.count-error'),
+        red: !!sr?.querySelector('.count-rejected'),
       };
     });
     expect(counts.green).toBe(true);

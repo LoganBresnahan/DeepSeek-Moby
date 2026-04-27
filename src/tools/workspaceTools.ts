@@ -8,6 +8,26 @@ import { Tool, ToolCall } from '../deepseekClient';
  * Workspace tools that allow the LLM to explore and read files in the codebase.
  */
 
+/**
+ * Resolve a model-supplied path against the workspace, allowing both
+ * relative paths ("src/index.ts") and absolute paths inside the workspace
+ * ("/home/user/proj/src/index.ts"). Returns null when the resolved path
+ * escapes the workspace boundary.
+ *
+ * `path.join` was the previous approach but it doesn't reset on absolute
+ * second args (`path.join('/a', '/a')` → `/a/a`), which broke V4's
+ * absolute-path callers. `path.resolve` resets correctly; `path.relative`
+ * then catches escapes via `..` prefix or unrelated drive root.
+ */
+function resolveWorkspacePath(workspacePath: string, userPath: string): string | null {
+  const fullPath = path.resolve(workspacePath, userPath);
+  const rel = path.relative(workspacePath, fullPath);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    return null;
+  }
+  return fullPath;
+}
+
 // Tool definitions for the DeepSeek API
 export const workspaceTools: Tool[] = [
   {
@@ -385,10 +405,8 @@ async function readFile(
   startLine?: string,
   endLine?: string
 ): Promise<string> {
-  const fullPath = path.join(workspacePath, filePath);
-
-  // Security check: ensure path is within workspace
-  if (!fullPath.startsWith(workspacePath)) {
+  const fullPath = resolveWorkspacePath(workspacePath, filePath);
+  if (!fullPath) {
     return 'Error: Cannot read files outside the workspace';
   }
 
@@ -542,10 +560,8 @@ async function listDirectory(
   dirPath: string,
   recursive: boolean
 ): Promise<string> {
-  const fullPath = path.join(workspacePath, dirPath);
-
-  // Security check
-  if (!fullPath.startsWith(workspacePath)) {
+  const fullPath = resolveWorkspacePath(workspacePath, dirPath);
+  if (!fullPath) {
     return 'Error: Cannot list directories outside the workspace';
   }
 
@@ -612,9 +628,8 @@ async function getFileInfo(
   workspacePath: string,
   filePath: string
 ): Promise<string> {
-  const fullPath = path.join(workspacePath, filePath);
-
-  if (!fullPath.startsWith(workspacePath)) {
+  const fullPath = resolveWorkspacePath(workspacePath, filePath);
+  if (!fullPath) {
     return 'Error: Cannot access files outside the workspace';
   }
 

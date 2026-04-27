@@ -497,7 +497,7 @@ describe('DeepSeekClient — non-streaming', () => {
     });
 
     it('respects the V4 cap when user requests up to 384k', async () => {
-      mockConfigValues.set('model', 'deepseek-v4-flash');
+      mockConfigValues.set('model', 'deepseek-v4-flash-thinking');
       mockSecrets.get.mockResolvedValue('test-key');
       stubChatResponse();
       const client = new DeepSeekClient(createContext());
@@ -523,9 +523,11 @@ describe('DeepSeekClient — non-streaming', () => {
       mockSecrets.get.mockResolvedValue('test-key');
       stubChatResponse();
       const client = new DeepSeekClient(createContext());
-      client.setModel('deepseek-v4-flash');
+      client.setModel('deepseek-v4-flash-thinking');
 
       await client.chat([{ role: 'user', content: 'hi' }]);
+      // setModel preserves the full id; wire serializer strips the -thinking
+      // suffix before sending upstream.
       expect(lastRequestBody().model).toBe('deepseek-v4-flash');
     });
   });

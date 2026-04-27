@@ -46,13 +46,11 @@
           "default": "deepseek-v4-pro-thinking",
           "examples": [
             "deepseek-v4-pro-thinking",
-            "deepseek-v4-pro",
             "deepseek-v4-flash-thinking",
-            "deepseek-v4-flash",
             "deepseek-chat",
             "deepseek-reasoner"
           ],
-          "markdownDescription": "Which model to use. Built-ins: `deepseek-v4-pro-thinking`, `deepseek-v4-pro`, `deepseek-v4-flash-thinking`, `deepseek-v4-flash`, `deepseek-chat` (retiring 2026-07-24), `deepseek-reasoner` (retiring 2026-07-24). Also accepts any `id` declared in `#moby.customModels#`."
+          "markdownDescription": "Which model to use. Built-ins: `deepseek-v4-pro-thinking`, `deepseek-v4-flash-thinking`, `deepseek-chat` (retiring 2026-07-24), `deepseek-reasoner` (retiring 2026-07-24). Also accepts any `id` declared in `#moby.customModels#`."
         },
         "moby.customModels": {
           "type": "array",
@@ -311,26 +309,12 @@
           "maximum": 65536,
           "description": "[Reasoner model only — retiring 2026-07-24] Maximum output tokens per response. Max: 65,536"
         },
-        "moby.maxTokensV4Flash": {
-          "type": "number",
-          "default": 32768,
-          "minimum": 256,
-          "maximum": 384000,
-          "description": "[DeepSeek V4 Flash] Maximum output tokens per response. Default: 32,768 (practical); API cap: 384,000."
-        },
         "moby.maxTokensV4FlashThinking": {
           "type": "number",
           "default": 65536,
           "minimum": 256,
           "maximum": 384000,
           "description": "[DeepSeek V4 Flash (Thinking)] Maximum output tokens per response. Default: 65,536; API cap: 384,000."
-        },
-        "moby.maxTokensV4Pro": {
-          "type": "number",
-          "default": 32768,
-          "minimum": 256,
-          "maximum": 384000,
-          "description": "[DeepSeek V4 Pro] Maximum output tokens per response. Default: 32,768 (practical); API cap: 384,000."
         },
         "moby.maxTokensV4ProThinking": {
           "type": "number",

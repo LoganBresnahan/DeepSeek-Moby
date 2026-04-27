@@ -126,7 +126,13 @@ export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
     apiEndpoint: 'https://api.deepseek.com',
     tokenizer: 'deepseek-v3',
     requestFormat: 'openai',
-    streamingToolCalls: true,
+    // V3 chat interleaves delta.content and delta.tool_calls in the same SSE
+    // stream. The streaming pipeline can render text segments and tool dropdowns
+    // out of order when chunk delivery isn't deterministic. V3 retires
+    // 2026-07-24 — keeping it on the legacy runToolLoop + streamAndIterate
+    // split avoids the ordering issue without backporting a fix to a sunsetting
+    // model. V4 family has no such issue (separate reasoning channel).
+    streamingToolCalls: false,
   },
   'deepseek-reasoner': {
     toolCalling: 'none',
@@ -150,21 +156,6 @@ export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
   // decision at model-pick time (same pattern as chat vs reasoner today)
   // and avoids dynamic capability resolution mid-session.
 
-  'deepseek-v4-flash': {
-    toolCalling: 'native',
-    reasoningTokens: 'none',
-    editProtocol: ['native-tool', 'search-replace'],
-    shellProtocol: 'native-tool',
-    supportsTemperature: true,
-    maxOutputTokens: 32768,           // practical default
-    maxOutputTokensCap: 384000,       // real API cap
-    maxTokensConfigKey: 'maxTokensV4Flash',
-    streaming: true,
-    apiEndpoint: 'https://api.deepseek.com',
-    tokenizer: 'deepseek-v3',          // V4 uses same vocab + new specials; see plan
-    requestFormat: 'openai',
-    streamingToolCalls: true,
-  },
   'deepseek-v4-flash-thinking': {
     toolCalling: 'native',
     reasoningTokens: 'inline',
@@ -185,21 +176,6 @@ export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
     // Phase 4.5 — single streaming pipeline replaces the chat() probe +
     // streamChat() summary split. Surfaces reasoning_content live during
     // tool decisions instead of dropping it on the floor.
-    streamingToolCalls: true,
-  },
-  'deepseek-v4-pro': {
-    toolCalling: 'native',
-    reasoningTokens: 'none',
-    editProtocol: ['native-tool', 'search-replace'],
-    shellProtocol: 'native-tool',
-    supportsTemperature: true,
-    maxOutputTokens: 32768,
-    maxOutputTokensCap: 384000,
-    maxTokensConfigKey: 'maxTokensV4Pro',
-    streaming: true,
-    apiEndpoint: 'https://api.deepseek.com',
-    tokenizer: 'deepseek-v3',
-    requestFormat: 'openai',
     streamingToolCalls: true,
   },
   'deepseek-v4-pro-thinking': {
@@ -300,11 +276,13 @@ const BUILTIN_DISPLAY_NAMES: Record<string, string> = {
   // V3 models — retiring 2026-07-24, hint in the label so users start migrating.
   'deepseek-chat': 'DeepSeek Chat (V3 — retiring Jul 2026)',
   'deepseek-reasoner': 'DeepSeek Reasoner (R1 — retiring Jul 2026)',
-  // V4 preview models.
-  'deepseek-v4-flash': 'DeepSeek V4 Flash',
-  'deepseek-v4-flash-thinking': 'DeepSeek V4 Flash (Thinking)',
-  'deepseek-v4-pro': 'DeepSeek V4 Pro',
-  'deepseek-v4-pro-thinking': 'DeepSeek V4 Pro (Thinking)',
+  // V4 thinking models. The "-thinking" id suffix is preserved for wire-format
+  // compatibility (drives `thinking: { type: 'enabled' }` + reasoning_effort).
+  // Display labels drop the "(Thinking)" qualifier — V4 always reasons; the
+  // distinction was misleading (non-thinking variants emitted reasoning_content
+  // anyway and 400'd on iter 2 when we didn't echo it back).
+  'deepseek-v4-flash-thinking': 'DeepSeek V4 Flash',
+  'deepseek-v4-pro-thinking': 'DeepSeek V4 Pro',
 };
 
 /**
