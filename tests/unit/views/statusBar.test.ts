@@ -158,13 +158,13 @@ describe('StatusBar', () => {
       expect(tooltip).toContain('Total Messages: 42');
     });
 
-    it('falls back to "deepseek-chat" when no model configured', async () => {
+    it('falls back to "deepseek-v4-pro-thinking" when no model configured', async () => {
       mockConfigValues.set('model', undefined);
       statusBar = new StatusBar(mockClient, mockConversationManager);
 
       await statusBar.update();
 
-      expect(mockStatusBarItem.text).toContain('deepseek-chat');
+      expect(mockStatusBarItem.text).toContain('deepseek-v4-pro-thinking');
     });
   });
 

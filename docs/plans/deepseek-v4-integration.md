@@ -1,6 +1,6 @@
 # DeepSeek V4 integration
 
-**Status:** Implemented — 2026-04-26. Phases 1–4.5 complete; Phase 5 polish in progress.
+**Status:** Implemented — 2026-04-26. All phases complete.
 
 ## Context
 

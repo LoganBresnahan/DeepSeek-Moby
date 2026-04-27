@@ -34,7 +34,7 @@ vi.mock('vscode', async (importOriginal) => {
       getConfiguration: vi.fn(() => ({
         get: vi.fn((key: string, defaultValue?: any) => {
           if (configStore.has(key)) return configStore.get(key);
-          const defaults: Record<string, any> = { 'model': 'deepseek-chat' };
+          const defaults: Record<string, any> = { 'model': 'deepseek-v4-pro-thinking' };
           return defaults[key] ?? defaultValue;
         }),
         update: vi.fn(async (key: string, value: any) => {
@@ -166,10 +166,10 @@ describe('CommandProvider', () => {
       expect(mockStatusBar.updateModel).toHaveBeenCalledWith('deepseek-chat');
     });
 
-    it('defaults to deepseek-chat when no config is set, then advances to deepseek-reasoner', async () => {
-      // No config override — defaults to 'deepseek-chat' (DEFAULT_MODEL_ID)
+    it('defaults to deepseek-v4-pro-thinking when no config is set, then advances to deepseek-chat', async () => {
+      // No config override — defaults to 'deepseek-v4-pro-thinking' (DEFAULT_MODEL_ID)
       await provider.switchModel();
-      expect(mockClient.setModel).toHaveBeenCalledWith('deepseek-reasoner');
+      expect(mockClient.setModel).toHaveBeenCalledWith('deepseek-chat');
     });
   });
 

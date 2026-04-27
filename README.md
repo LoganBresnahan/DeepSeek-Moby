@@ -7,6 +7,10 @@
 <h2 align="center">v0.1.0 Pre-Release</h2>
 
 <p align="center">
+  <sub><em>This is a pre-release build. Core functionality has been validated on the maintainer's primary development environment, but coverage across the full matrix of operating systems, VS Code versions, shell environments, and model configurations remains incomplete. Expect rough edges. Bug reports and reproduction steps are welcome via the <a href="https://github.com/LoganBresnahan/DeepSeek-Moby/issues">issue tracker</a>.</em></sub>
+</p>
+
+<p align="center">
   <strong>An AI coding assistant for VS Code, powered by DeepSeek.</strong>
   <br />
   Chat, edit, search, execute — all from your editor.
@@ -23,28 +27,31 @@
 
 ---
 
-<!-- TODO: Replace with actual demo video -->
 <p align="center">
-  <em>[Demo video placeholder — coming soon]</em>
+  <img src="https://raw.githubusercontent.com/LoganBresnahan/DeepSeek-Moby/main/media/deepseek-moby-preview.gif" alt="DeepSeek Moby demo" width="800" />
 </p>
 
 ---
 
 ## Features
 
-### Two Models, One Interface
+### Six Models, One Interface
 
-Switch between DeepSeek's models based on your task:
+Pick the model that fits the task — or register your own (see [Custom Models](#custom-models)).
 
 | Model | Best For | Context | Max Output |
 |-------|----------|---------|------------|
-| **DeepSeek Chat (V3)** | Fast answers, tool use, code generation | 128K tokens | 8K tokens |
-| **DeepSeek Reasoner (R1)** | Complex problems, chain-of-thought reasoning | 128K tokens | 64K tokens |
+| **DeepSeek V4 Pro (Thinking)** *(default)* | Hardest problems — agentic work, multi-step reasoning, large refactors | 1M tokens | 384K tokens |
+| **DeepSeek V4 Pro** | Fast high-quality answers without the thinking overhead | 1M tokens | 384K tokens |
+| **DeepSeek V4 Flash (Thinking)** | Cheap reasoning — exploration, planning, lightweight agentic tasks | 1M tokens | 384K tokens |
+| **DeepSeek V4 Flash** | Cheapest fast tier — quick answers, code generation | 1M tokens | 384K tokens |
+| **DeepSeek Chat (V3)** *(retiring 2026-07-24)* | Legacy — auto-routes to V4 until retirement | 128K tokens | 8K tokens |
+| **DeepSeek Reasoner (R1)** *(retiring 2026-07-24)* | Legacy chain-of-thought + shell-driven agentic work | 128K tokens | 64K tokens |
 
-- **Chat (V3)** uses structured tool calls — file reads, searches, code edits — orchestrated by the API
-- **Reasoner (R1)** uses shell commands — `cat`, `grep`, `sed`, heredocs — with full terminal access
+- **V4 family + V3 Chat** use streaming native tool calls — file reads, searches, code edits, and shell commands dispatch inline as the model emits them, with reasoning tokens streaming live during tool decisions on the `-thinking` variants
+- **R1** uses inline `<shell>...</shell>` tags — `cat`, `grep`, `sed`, heredocs — with full terminal access
 - Switching models automatically creates a new session (no mixed-model conversations)
-- Reasoning tokens are displayed in expandable "Thinking" dropdowns so you can follow the model's logic
+- Reasoning tokens display in expandable "Thinking" dropdowns so you can follow the model's logic
 
 ### Three Edit Modes
 
@@ -56,15 +63,33 @@ Control how code changes are applied to your files:
 
 All edits use a precise SEARCH/REPLACE format with multi-strategy matching (exact, fuzzy whitespace, patch-based, location-based fallback).
 
-### Web Search (Tavily)
+### Web Search (Tavily or SearXNG)
 
-Real-time web search integrated into the conversation:
+Real-time web search integrated into the conversation. Pick a backend via `moby.webSearch.provider`:
+
+- **Tavily** *(default)* — hosted, paid; requires an API key from [tavily.com](https://tavily.com) (free tier available). Set via the **Set Tavily API Key** command.
+- **SearXNG** — self-hosted metasearch, free, no API key. Point `moby.webSearch.searxng.endpoint` at a running instance (e.g. `http://localhost:8080`); the instance must have the JSON format enabled. Configure engines via `moby.webSearch.searxng.engines`. Use the **Set SearXNG Endpoint** command for the URL.
+
+Modes (`moby.webSearchMode`):
 
 - **Off** — Disabled
 - **Auto** — The model decides when to search (recommended)
-- **Forced** — Every request includes a web search
-- Results cached in-memory with configurable duration
-- Requires a [Tavily API key](https://tavily.com) (free tier available)
+- **Manual** — Search only when the user toggles it on
+
+Results cache in-memory with configurable duration. Tavily depth is selectable (`basic` / `advanced`); per-prompt search count is capped via `moby.tavilySearchesPerPrompt`.
+
+### Custom Models
+
+Register any OpenAI-compatible endpoint as a first-class model alongside the DeepSeek built-ins:
+
+- **Local runners** — Ollama, LM Studio, llama.cpp Server, vLLM
+- **Hosted APIs** — OpenAI, Groq, Moonshot/Kimi, OpenRouter, Together, Fireworks, or any service that speaks the OpenAI Chat Completions wire format
+- Use the **Add Custom Model** command (or edit `moby.customModels` directly) to declare an entry with `id`, `apiEndpoint`, `apiKey`, capability flags (`toolCalling`, `reasoningTokens`, `editProtocol`, `shellProtocol`), and per-model token limits
+- Per-model API keys via **Set Custom Model API Key** (encrypted in SecretStorage), or omit `apiKey` to fall back to the global `moby.apiKey`
+- Capability flags decide which protocols the model supports — native tool calling, SEARCH/REPLACE-only edits, R1-style `<shell>` tags, or any combination
+- Custom models appear in the model selector below the built-ins; the "Switch Model" command cycles through all registered models
+
+See [docs/guides/custom-models.md](docs/guides/custom-models.md) for end-to-end examples (Ollama, LM Studio, OpenAI, Groq, Kimi, llama.cpp).
 
 ### Shell Command Security
 
@@ -173,13 +198,13 @@ The entire chat UI is built with Shadow DOM encapsulation:
 ### 1. Install
 
 **From VSIX:**
-1. Download the `.vsix` file from [Releases](https://github.com/LoganBresnahan/deepseek-vscode-extension/releases)
+1. Download the `.vsix` file from [Releases](https://github.com/LoganBresnahan/DeepSeek-Moby/releases)
 2. In VS Code: Extensions view &rarr; `...` menu &rarr; "Install from VSIX..."
 
 **From Source:**
 ```bash
-git clone https://github.com/LoganBresnahan/deepseek-vscode-extension.git
-cd deepseek-vscode-extension
+git clone https://github.com/LoganBresnahan/DeepSeek-Moby.git
+cd DeepSeek-Moby
 npm install
 npm run package
 # Press F5 to debug, or install the generated .vsix
@@ -211,21 +236,57 @@ Click the Moby icon in the sidebar activity bar, type a message, and press Enter
 
 ## Configuration
 
+**Model selection**
+
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `moby.model` | `deepseek-chat` | Active model: `deepseek-chat` (V3) or `deepseek-reasoner` (R1) |
-| `moby.temperature` | `0.7` | Creativity (0-2). Chat model only — Reasoner uses fixed temperature |
-| `moby.maxTokensChatModel` | `8192` | Max output tokens for Chat (V3). Range: 256-8,192 |
-| `moby.maxTokensReasonerModel` | `65536` | Max output tokens for Reasoner (R1). Range: 256-65,536 |
-| `moby.maxToolCalls` | `100` | Tool call iteration limit (Chat model). 100 = no limit |
-| `moby.maxShellIterations` | `100` | Shell command iteration limit (Reasoner). 100 = no limit |
-| `moby.editMode` | `manual` | How code changes apply: `manual`, `ask`, or `auto` |
-| `moby.webSearchMode` | `auto` | Web search: `off`, `manual` (forced), or `auto` |
-| `moby.tavilySearchDepth` | `basic` | Search depth: `basic` (1 credit) or `advanced` (2 credits) |
-| `moby.allowAllShellCommands` | `false` | Bypass command approval system |
-| `moby.logLevel` | `WARN` | Extension log level: `DEBUG`, `INFO`, `WARN`, `ERROR`, `OFF` |
-| `moby.tracing.enabled` | `true` | Enable trace collection for debugging |
-| `moby.devMode` | `false` | Enable developer tools (inspector panel) |
+| `moby.model` | `deepseek-v4-pro-thinking` | Active model. Built-ins: `deepseek-v4-pro-thinking`, `deepseek-v4-pro`, `deepseek-v4-flash-thinking`, `deepseek-v4-flash`, `deepseek-chat` (retiring 2026-07-24), `deepseek-reasoner` (retiring 2026-07-24). Also accepts any custom model `id`. |
+| `moby.customModels` | `[]` | Array of custom OpenAI-compatible models to register alongside the built-ins. See [Custom Models](#custom-models). |
+| `moby.modelOptions` | `{}` | Per-model options keyed by model id. Currently supports `reasoningEffort` (`high` or `max`) for V4 thinking models. |
+| `moby.temperature` | `0.7` | Creativity (0-2). Non-thinking models only — thinking models reject temperature. |
+
+**Token / iteration limits**
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `moby.maxTokensV4ProThinking` | `65536` | Max output tokens for V4 Pro Thinking. API cap: 384,000. |
+| `moby.maxTokensV4Pro` | `32768` | Max output tokens for V4 Pro. API cap: 384,000. |
+| `moby.maxTokensV4FlashThinking` | `65536` | Max output tokens for V4 Flash Thinking. API cap: 384,000. |
+| `moby.maxTokensV4Flash` | `32768` | Max output tokens for V4 Flash. API cap: 384,000. |
+| `moby.maxTokensChatModel` | `8192` | Max output tokens for Chat (V3). Range: 256-8,192. |
+| `moby.maxTokensReasonerModel` | `65536` | Max output tokens for Reasoner (R1). Range: 256-65,536. |
+| `moby.maxToolCalls` | `100` | Tool call iteration limit (native-tool models). 100 = no limit. |
+| `moby.maxShellIterations` | `100` | Shell command iteration limit (Reasoner). 100 = no limit. |
+| `moby.maxFileEditLoops` | `100` | Continuations after R1 produces file edits. 100 = no limit. |
+
+**Editing & shell**
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `moby.editMode` | `manual` | How code changes apply: `manual`, `ask`, or `auto`. |
+| `moby.allowAllShellCommands` | `false` | Bypass command approval system. Disables the safety blocklist. |
+
+**Web search**
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `moby.webSearchMode` | `auto` | `off`, `manual` (user toggle only), or `auto` (LLM decides). |
+| `moby.webSearch.provider` | `tavily` | Backend: `tavily` (hosted, paid) or `searxng` (self-hosted, free). |
+| `moby.webSearch.searxng.endpoint` | `""` | Base URL of your SearXNG instance (e.g. `http://localhost:8080`). |
+| `moby.webSearch.searxng.engines` | `["google","bing","duckduckgo"]` | SearXNG engines to query. Empty = instance default. |
+| `moby.tavilySearchDepth` | `basic` | Tavily depth: `basic` (1 credit) or `advanced` (2 credits). |
+| `moby.tavilySearchesPerPrompt` | `1` | Max Tavily searches per prompt request. |
+
+**UI & observability**
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `moby.showStatusBar` | `true` | Show status bar with token usage. |
+| `moby.autoSaveHistory` | `true` | Automatically save chat history. |
+| `moby.logLevel` | `WARN` | Extension log level: `DEBUG`, `INFO`, `WARN`, `ERROR`, `OFF`. |
+| `moby.webviewLogLevel` | `WARN` | Webview console log level: `DEBUG`, `INFO`, `WARN`, `ERROR`. |
+| `moby.tracing.enabled` | `true` | Enable trace collection for debugging. |
+| `moby.devMode` | `false` | Enable developer tools (inspector panel). |
 
 ---
 
@@ -237,22 +298,30 @@ Open the Command Palette (`Ctrl+Shift+P`) and search "Moby":
 |---------|-------------|
 | **Open Chat** | Open the chat sidebar |
 | **New Chat** | Start a fresh conversation |
-| **Switch Model** | Toggle between Chat (V3) and Reasoner (R1) |
+| **Switch Model** | Cycle through registered models (built-ins + custom) |
 | **Set API Key** | Configure your DeepSeek API key |
-| **Set Tavily API Key** | Configure web search API key |
+| **Set Tavily API Key** | Configure Tavily web search API key |
+| **Set SearXNG Endpoint** | Configure the URL of your SearXNG instance |
+| **Add Custom Model** | Walk through registering an OpenAI-compatible custom model |
+| **Set Custom Model API Key** | Store an API key for a registered custom model (encrypted) |
+| **Clear Custom Model API Key** | Remove a stored custom-model API key |
 | **Show Chat History** | Browse, search, and manage past conversations |
 | **Export All Chat History** | Export all sessions as JSON, Markdown, or text |
 | **Import Chat History** | Load sessions from a JSON file |
 | **Clear All Chat History** | Delete all saved conversations |
 | **Export Current Session** | Export the active session |
 | **Command Rules** | View and edit shell command approval rules |
+| **Accept Changes** | Accept the active diff (also bound to the diff toolbar) |
+| **Reject Changes** | Reject the active diff |
+| **Show Pending Diffs** | Quick pick for pending code changes (`Ctrl+Shift+D`) |
 | **Statistics** | View token usage and API call stats |
 | **Show Log** | Open the extension output channel |
 | **Export Logs** | Export logs and traces for bug reports |
-| **Show Pending Diffs** | Quick pick for pending code changes (`Ctrl+Shift+D`) |
+| **Export Turn as JSON (Debug)** | Snapshot the live event stream for the current turn (devMode) |
+| **Export Session (Test Fixture)** | Export a session as a fixture file for tests |
 | **Start Drawing Server** | Launch the drawing pad server |
 | **Stop Drawing Server** | Shut down the drawing server |
-| **Manage Encryption Key** | View or regenerate the database encryption key |
+| **Manage Database Encryption Key** | View or regenerate the database encryption key |
 
 ---
 
@@ -316,9 +385,9 @@ For contributors, see the full architecture documentation in `docs/architecture/
 
 Planned features for future releases:
 
-- **Custom model endpoints** — Connect to local models (Ollama, LM Studio) or any OpenAI-compatible API
 - **Sub-agent parallelization** — Multiple LLM calls running concurrently for complex tasks
 - **Plugin system** — Extensible tool definitions for domain-specific workflows
+- **Per-turn lazy event load** — On-demand hydration of large session histories (deferred until real usage surfaces the need)
 
 ---
 

@@ -351,7 +351,13 @@ async function setApiKey(context: vscode.ExtensionContext): Promise<void> {
   if (!input.trim()) {
     // Empty input — remove the key
     await context.secrets.delete('moby.apiKey');
-    vscode.window.showInformationMessage('DeepSeek API key removed.');
+    if (process.env.DEEPSEEK_API_KEY) {
+      vscode.window.showWarningMessage(
+        'DeepSeek secret cleared, but the DEEPSEEK_API_KEY environment variable is still set and will continue to satisfy the API key check. Unset it from your shell (and restart VS Code) to fully remove the key.'
+      );
+    } else {
+      vscode.window.showInformationMessage('DeepSeek API key removed.');
+    }
   } else {
     await context.secrets.store('moby.apiKey', input.trim());
     vscode.window.showInformationMessage('DeepSeek API key saved securely.');
@@ -713,7 +719,13 @@ async function setTavilyApiKey(context: vscode.ExtensionContext): Promise<void> 
   if (!input.trim()) {
     // Empty input — remove the key
     await context.secrets.delete('moby.tavilyApiKey');
-    vscode.window.showInformationMessage('Tavily API key removed.');
+    if (process.env.TAVILY_API_KEY) {
+      vscode.window.showWarningMessage(
+        'Tavily secret cleared, but the TAVILY_API_KEY environment variable is still set and will continue to satisfy the API key check. Unset it from your shell (and restart VS Code) to fully remove the key.'
+      );
+    } else {
+      vscode.window.showInformationMessage('Tavily API key removed.');
+    }
   } else {
     await context.secrets.store('moby.tavilyApiKey', input.trim());
     vscode.window.showInformationMessage('Tavily API key saved securely.');

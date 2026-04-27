@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // The default __mocks__/vscode.ts EventEmitter uses vi.fn() stubs that don't
 // wire event→fire. We need real subscriptions for testing event-driven classes.
@@ -87,6 +87,7 @@ vi.mock('../../../src/tools/reasonerShellExecutor', async (importOriginal) => {
 });
 
 import { RequestOrchestrator } from '../../../src/providers/requestOrchestrator';
+import { __resetCustomModelsForTests, __setCustomModelForTests } from '../../../src/models/registry';
 import { executeShellCommands } from '../../../src/tools/reasonerShellExecutor';
 import type {
   StartResponseEvent,
@@ -245,6 +246,27 @@ describe('RequestOrchestrator', () => {
     mockWebSearch = createMockWebSearchManager();
     mockFileContext = createMockFileContextManager();
 
+    // Phase 5 flipped every built-in model to streamingToolCalls: true. Most
+    // tests in this file pin contracts of the legacy runToolLoop +
+    // streamAndIterate split (still live for custom OpenAI-compat models that
+    // don't opt into streaming). Override 'deepseek-chat' with the legacy
+    // capability shape so those tests exercise the legacy path. The Phase 4.5
+    // describe at line ~1941 swaps in a streaming model id for its scope.
+    __setCustomModelForTests('deepseek-chat', {
+      toolCalling: 'native',
+      reasoningTokens: 'none',
+      editProtocol: ['native-tool', 'search-replace'],
+      shellProtocol: 'native-tool',
+      supportsTemperature: true,
+      maxOutputTokens: 8192,
+      maxTokensConfigKey: 'maxTokensChatModel',
+      streaming: true,
+      apiEndpoint: 'https://api.deepseek.com',
+      tokenizer: 'deepseek-v3',
+      requestFormat: 'openai',
+      streamingToolCalls: false,
+    });
+
     orchestrator = new RequestOrchestrator(
       mockClient as any,
       mockConversation as any,
@@ -275,6 +297,7 @@ describe('RequestOrchestrator', () => {
     orchestrator?.dispose();
     extraOrchestrators.forEach(o => { try { o.dispose(); } catch { /* ignore */ } });
     extraOrchestrators.length = 0;
+    __resetCustomModelsForTests();
   });
 
   // ── Session Management ──

@@ -9,7 +9,7 @@
  * emission pipeline, persistence layer, or hydration query will surface here.
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 const { WorkingEventEmitter } = vi.hoisted(() => ({
   WorkingEventEmitter: class WorkingEventEmitter {
@@ -74,6 +74,7 @@ import { runMigrations } from '../../../src/events/migrations';
 import { EventStore } from '../../../src/events/EventStore';
 import { ConversationManager } from '../../../src/events/ConversationManager';
 import { RequestOrchestrator } from '../../../src/providers/requestOrchestrator';
+import { __resetCustomModelsForTests, __setCustomModelForTests } from '../../../src/models/registry';
 
 describe('Phase 3 Fidelity: live events == hydrated events round-trip', () => {
   const SESSION_ID = 'session-1';
@@ -87,6 +88,24 @@ describe('Phase 3 Fidelity: live events == hydrated events round-trip', () => {
   let mockConversation: any;
 
   beforeEach(() => {
+    // Phase 5 flipped 'deepseek-chat' to streamingToolCalls: true. The fidelity
+    // contract is shape-agnostic but the multi-turn test depends on the legacy
+    // runToolLoop event emission cadence. Override capabilities to legacy shape.
+    __setCustomModelForTests('deepseek-chat', {
+      toolCalling: 'native',
+      reasoningTokens: 'none',
+      editProtocol: ['native-tool', 'search-replace'],
+      shellProtocol: 'native-tool',
+      supportsTemperature: true,
+      maxOutputTokens: 8192,
+      maxTokensConfigKey: 'maxTokensChatModel',
+      streaming: true,
+      apiEndpoint: 'https://api.deepseek.com',
+      tokenizer: 'deepseek-v3',
+      requestFormat: 'openai',
+      streamingToolCalls: false,
+    });
+
     db = new Database(':memory:');
     runMigrations(db);
     db.prepare('INSERT INTO sessions (id, title, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run(SESSION_ID, 'Test', 'deepseek-chat', 1000, 1000);
@@ -182,6 +201,11 @@ describe('Phase 3 Fidelity: live events == hydrated events round-trip', () => {
       mockWebSearch as any, mockFileContext as any, undefined,
       { getActiveContent: () => '' } as any,
     );
+  });
+
+  afterEach(() => {
+    orchestrator?.dispose();
+    __resetCustomModelsForTests();
   });
 
   it('live structural events match hydrated turnEvents for a simple chat turn', async () => {

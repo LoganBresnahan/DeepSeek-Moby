@@ -408,6 +408,16 @@ These exercise the `run_shell` tool for native-tool-calling models (V4, V3 Chat,
 
 **Pass criteria:** V4 non-thinking works as a drop-in replacement for V3 Chat.
 
+### M28a. V4-flash-thinking single turn (no tools)
+
+**Steps:**
+1. Select `deepseek-v4-flash-thinking`.
+2. Send a read-only question: "What does the visitor pattern optimize for?"
+3. Verify reasoning content streams in the thinking dropdown during the response.
+4. Verify final answer appears, no tool calls made, no 400 errors.
+
+**Pass criteria:** Single-turn thinking mode works without tool involvement.
+
 ### M29. V4-pro-thinking multi-turn with tools
 
 **Steps:**

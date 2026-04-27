@@ -41,6 +41,11 @@ playwright-report/
 *.tmp
 *.temp
 .cache/
+.tmp/
+
+# Compiled vitest config (source is vitest.config.ts)
+vitest.config.js
+vitest.config.js.map
 
 # Anthropic
 .claude/*

@@ -43,16 +43,16 @@
       "properties": {
         "moby.model": {
           "type": "string",
-          "default": "deepseek-chat",
+          "default": "deepseek-v4-pro-thinking",
           "examples": [
-            "deepseek-chat",
-            "deepseek-reasoner",
-            "deepseek-v4-flash",
-            "deepseek-v4-flash-thinking",
+            "deepseek-v4-pro-thinking",
             "deepseek-v4-pro",
-            "deepseek-v4-pro-thinking"
+            "deepseek-v4-flash-thinking",
+            "deepseek-v4-flash",
+            "deepseek-chat",
+            "deepseek-reasoner"
           ],
-          "markdownDescription": "Which model to use. Built-ins: `deepseek-chat`, `deepseek-reasoner` (both retiring 2026-07-24), `deepseek-v4-flash`, `deepseek-v4-flash-thinking`, `deepseek-v4-pro`, `deepseek-v4-pro-thinking`. Also accepts any `id` declared in `#moby.customModels#`."
+          "markdownDescription": "Which model to use. Built-ins: `deepseek-v4-pro-thinking`, `deepseek-v4-pro`, `deepseek-v4-flash-thinking`, `deepseek-v4-flash`, `deepseek-chat` (retiring 2026-07-24), `deepseek-reasoner` (retiring 2026-07-24). Also accepts any `id` declared in `#moby.customModels#`."
         },
         "moby.customModels": {
           "type": "array",
@@ -777,11 +777,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/deepseek-ai/deepseek-vscode.git"
+    "url": "https://github.com/LoganBresnahan/DeepSeek-Moby.git"
   },
-  "license": "MIT",
+  "license": "AGPL-3.0",
   "bugs": {
-    "url": "https://github.com/deepseek-ai/deepseek-vscode/issues"
+    "url": "https://github.com/LoganBresnahan/DeepSeek-Moby/issues"
   },
-  "homepage": "https://github.com/deepseek-ai/deepseek-vscode#readme"
+  "homepage": "https://github.com/LoganBresnahan/DeepSeek-Moby#readme"
 }

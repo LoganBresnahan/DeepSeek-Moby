@@ -234,7 +234,7 @@ describe('model registry', () => {
 
     it('tokenizer is optional — unknown models get undefined (estimation fallback)', () => {
       const unknown = getCapabilities('some-unknown-model');
-      // Falls back to DEFAULT_MODEL_ID which is deepseek-chat, so has tokenizer.
+      // Falls back to DEFAULT_MODEL_ID which is deepseek-v4-pro-thinking, so has tokenizer.
       // But the field itself is optional for custom registrations.
       expect(unknown.tokenizer).toBe('deepseek-v3'); // inherited from fallback
     });

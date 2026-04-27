@@ -226,11 +226,11 @@ export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
   },
 };
 
-export const DEFAULT_MODEL_ID = 'deepseek-chat';
+export const DEFAULT_MODEL_ID = 'deepseek-v4-pro-thinking';
 
 // Fallback for unknown model IDs (e.g., stale config, future custom entries
-// not yet registered). Chat-shape is the safer default — models generally
-// support tool calling more often than inline reasoning channels.
+// not yet registered). V4-pro-thinking is the most capable default — native
+// tool calling + inline reasoning + shell access + 1M-token context.
 const FALLBACK_CAPABILITIES: ModelCapabilities = MODEL_REGISTRY[DEFAULT_MODEL_ID];
 
 /**
@@ -406,6 +406,16 @@ export function registerCustomModels(rawEntries: unknown[]): LoadResult {
 export function __resetCustomModelsForTests(): void {
   CUSTOM_MODELS.clear();
   CUSTOM_MODEL_NAMES.clear();
+}
+
+/**
+ * Visible for tests. Bypasses built-in conflict validation so a test can
+ * override a built-in model's capabilities (e.g. flip `streamingToolCalls`
+ * off on `deepseek-chat` to exercise the legacy `runToolLoop` path).
+ */
+export function __setCustomModelForTests(id: string, caps: ModelCapabilities, name?: string): void {
+  CUSTOM_MODELS.set(id, caps);
+  if (name) CUSTOM_MODEL_NAMES.set(id, name);
 }
 
 /**
