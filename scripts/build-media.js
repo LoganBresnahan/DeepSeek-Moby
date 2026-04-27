@@ -119,6 +119,10 @@ const assets = fs.readdirSync(mediaDir).filter(f => {
   if (fs.statSync(fullPath).isDirectory()) return false;
   // Skip TypeScript files (they get bundled)
   if (f.endsWith('.ts')) return false;
+  // Skip large preview/demo media — README references them via raw.githubusercontent
+  // URLs, so they don't need to ship in the VSIX.
+  if (f.endsWith('.gif')) return false;
+  if (f.endsWith('.mp4')) return false;
   return true;
 });
 

@@ -48,6 +48,12 @@ dist/media/dev/**
 dist/media/history.*
 dist/assets/tokenizer.json.br
 
+# === Large preview/demo media (README loads via raw.githubusercontent URLs) ===
+dist/media/*.gif
+dist/media/*.mp4
+media/*.gif
+media/*.mp4
+
 # === Node modules: exclude all except native addon ===
 # diff, uuid, deepseek-moby-wasm are bundled by webpack into dist/extension.js
 # Only @signalapp/sqlcipher needs to ship (native N-API addon with prebuilds)
