@@ -22,10 +22,19 @@ jobs:
         run: npm ci
 
       - name: Build
-        run: npm run compile
+        run: npm run compile && npm run build:media
 
-      - name: Run tests
+      - name: Run unit tests
         run: npm run test:unit
+
+      - name: Run actor tests
+        run: npm run test:actors
+
+      - name: Run event tests
+        run: npm run test:events
+
+      - name: Run integration tests
+        run: npm run test:integration
 
   publish:
     needs: test
@@ -74,7 +83,10 @@ jobs:
           ls "$PREBUILDS"
 
       - name: Package platform-specific VSIX
-        run: vsce package --target ${{ matrix.target }}
+        # --pre-release must match the flag passed to `vsce publish` below.
+        # vsce v3+ enforces this: publishing a non-pre-release VSIX with the
+        # --pre-release flag will error out.
+        run: vsce package --target ${{ matrix.target }} --pre-release
 
       - name: Upload VSIX artifact
         uses: actions/upload-artifact@v4
@@ -89,20 +101,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20.x'
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build production bundle
-        run: npm run package
 
       - name: Install vsce
         run: npm install -g @vscode/vsce
@@ -114,15 +116,39 @@ jobs:
           merge-multiple: true
 
       - name: Publish all platforms to Marketplace (pre-release)
+        # Don't abort the loop on a single platform failure — partial publishes
+        # still ship the platforms that worked. The summary at the end lists
+        # any failures so a maintainer can republish them manually (see
+        # release.yml comment block at top of this job).
         run: |
+          set +e
+          FAILED=()
           for vsix in *.vsix; do
-            echo "Publishing $vsix..."
-            vsce publish --packagePath "$vsix" --pre-release
+            echo "::group::Publishing $vsix"
+            if vsce publish --packagePath "$vsix" --pre-release; then
+              echo "✓ $vsix published"
+            else
+              echo "✗ $vsix FAILED"
+              FAILED+=("$vsix")
+            fi
+            echo "::endgroup::"
           done
+          if [ ${#FAILED[@]} -gt 0 ]; then
+            echo "::error::Failed to publish: ${FAILED[*]}"
+            echo "Failed VSIXes are still attached to the GitHub Release."
+            echo "Retry locally with:"
+            echo "  gh release download <tag> --pattern '<failed-vsix-name>'"
+            echo "  vsce publish --packagePath '<failed-vsix-name>' --pre-release"
+            exit 1
+          fi
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
 
       - name: Create GitHub Release
+        # Always run, even if marketplace publish partially failed — the VSIXes
+        # are attached so users can install missing platforms manually and
+        # maintainers can retry the failed marketplace publishes.
+        if: always()
         uses: softprops/action-gh-release@v2
         with:
           files: '*.vsix'
