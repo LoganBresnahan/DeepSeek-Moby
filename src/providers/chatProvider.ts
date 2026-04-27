@@ -929,6 +929,12 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         // Webview ready - send calibration data and request immediate trace sync
         case 'webviewReady':
           this.sendTraceCalibration();
+          // Send the registered-model list unconditionally on webview ready.
+          // Previously sendModelList was only called from loadCurrentSessionHistory,
+          // which early-returns when there's no current session — leaving fresh
+          // installs (or sessions opened before the user has sent anything) with
+          // the webview's hardcoded V3+R1 fallback list, missing V4 entries.
+          this.sendModelList();
           break;
 
         // Drawing server control

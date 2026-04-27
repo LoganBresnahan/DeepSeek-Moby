@@ -2,7 +2,7 @@
   "name": "deepseek-moby",
   "displayName": "DeepSeek Moby",
   "description": "AI coding assistant for VS Code, powered by DeepSeek",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "LoganBresnahan",
   "engines": {
     "vscode": "^1.85.0"

@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.2] - 2026-04-27 (Pre-Release)
+
+### Fixed
+
+- **Model selector dropdown showed only V3 + R1 on fresh installs.** `sendModelList()` was only called from `loadCurrentSessionHistory()`, which early-returns when there's no active session — so the webview kept its hardcoded V3+R1 fallback list, and V4 entries from `moby.customModels` never reached the UI. Now fires on `webviewReady` regardless of session state.
+
+## [0.1.1] - 2026-04-27 (Pre-Release)
+
+### Fixed
+
+- **Extension hung in "Activating..." with no logs after 0.1.0 install.** `node_modules/node-gyp-build` was excluded from the VSIX by `.vscodeignore`, but `@signalapp/sqlcipher`'s entry module requires it at load time to locate the prebuild. Result: silent `Cannot find module 'node-gyp-build'` thrown before the extension's logger could initialize. `.vscodeignore` now whitelists `node_modules/node-gyp-build/**` alongside `@signalapp/**`.
+- **`list_directory`, `read_file`, `file_metadata` failed on absolute paths inside the workspace.** `path.join(workspacePath, '/abs/path')` produced `/workspace/abs/path` (POSIX `path.join` doesn't reset on absolute second args). V4 emits absolute paths often; tools returned `Error: Directory not found` 50%+ of the time. Switched to `path.resolve` + `path.relative` boundary check so absolute-paths-inside-workspace resolve correctly while traversal escapes still get blocked.
+- **VSIX shipped a 10 MB README preview gif and stale compiled `vitest.config.js`.** Added `dist/media/*.gif` and `dist/media/*.mp4` to `.vscodeignore`; build script no longer copies preview media into `dist/`. VSIX size dropped 18.97 MB → 8.95 MB.
+
 ## [0.1.0] - 2026-04-27 (Pre-Release)
 
 ### Models
