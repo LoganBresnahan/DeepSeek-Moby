@@ -2,7 +2,7 @@
   "name": "deepseek-moby",
   "displayName": "DeepSeek Moby",
   "description": "AI coding assistant for VS Code, powered by DeepSeek",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "LoganBresnahan",
   "engines": {
     "vscode": "^1.85.0"
@@ -63,7 +63,9 @@
                 "name": "Qwen 2.5 Coder 7B (Ollama)",
                 "toolCalling": "native",
                 "reasoningTokens": "none",
-                "editProtocol": ["native-tool"],
+                "editProtocol": [
+                  "native-tool"
+                ],
                 "shellProtocol": "none",
                 "supportsTemperature": true,
                 "maxOutputTokens": 8192,
@@ -80,7 +82,9 @@
                 "name": "LM Studio (Local)",
                 "toolCalling": "native",
                 "reasoningTokens": "none",
-                "editProtocol": ["native-tool"],
+                "editProtocol": [
+                  "native-tool"
+                ],
                 "shellProtocol": "none",
                 "supportsTemperature": true,
                 "maxOutputTokens": 4096,
@@ -97,7 +101,9 @@
                 "name": "llama.cpp Server",
                 "toolCalling": "none",
                 "reasoningTokens": "none",
-                "editProtocol": ["search-replace"],
+                "editProtocol": [
+                  "search-replace"
+                ],
                 "shellProtocol": "xml-shell",
                 "supportsTemperature": true,
                 "maxOutputTokens": 4096,
@@ -114,7 +120,9 @@
                 "name": "OpenAI GPT-4o mini",
                 "toolCalling": "native",
                 "reasoningTokens": "none",
-                "editProtocol": ["native-tool"],
+                "editProtocol": [
+                  "native-tool"
+                ],
                 "shellProtocol": "none",
                 "supportsTemperature": true,
                 "maxOutputTokens": 16384,
@@ -130,7 +138,9 @@
                 "name": "Kimi (Moonshot)",
                 "toolCalling": "native",
                 "reasoningTokens": "none",
-                "editProtocol": ["native-tool"],
+                "editProtocol": [
+                  "native-tool"
+                ],
                 "shellProtocol": "none",
                 "supportsTemperature": true,
                 "maxOutputTokens": 32768,
@@ -146,7 +156,9 @@
                 "name": "Llama 3.3 70B (Groq)",
                 "toolCalling": "native",
                 "reasoningTokens": "none",
-                "editProtocol": ["native-tool"],
+                "editProtocol": [
+                  "native-tool"
+                ],
                 "shellProtocol": "none",
                 "supportsTemperature": true,
                 "maxOutputTokens": 32768,
@@ -184,7 +196,10 @@
               },
               "toolCalling": {
                 "type": "string",
-                "enum": ["native", "none"],
+                "enum": [
+                  "native",
+                  "none"
+                ],
                 "enumDescriptions": [
                   "Model supports OpenAI-format function_calling (tool_calls / tool_use blocks returned in the API response).",
                   "No native tool support. Model must express actions via inline text protocols (see editProtocol / shellProtocol)."
@@ -193,7 +208,10 @@
               },
               "reasoningTokens": {
                 "type": "string",
-                "enum": ["inline", "none"],
+                "enum": [
+                  "inline",
+                  "none"
+                ],
                 "enumDescriptions": [
                   "Model emits a separate reasoning_content channel in the stream (R1-style chain-of-thought).",
                   "No separate reasoning channel. Thinking, if any, is inline in the content stream."
@@ -204,7 +222,10 @@
                 "type": "array",
                 "items": {
                   "type": "string",
-                  "enum": ["native-tool", "search-replace"],
+                  "enum": [
+                    "native-tool",
+                    "search-replace"
+                  ],
                   "enumDescriptions": [
                     "Edits expressed via apply_code_edit / create_file / delete_file tool calls. Requires toolCalling: \"native\".",
                     "Edits expressed as SEARCH/REPLACE blocks in the model's text response. Works for models without native tool calling."
@@ -214,7 +235,10 @@
               },
               "shellProtocol": {
                 "type": "string",
-                "enum": ["xml-shell", "none"],
+                "enum": [
+                  "xml-shell",
+                  "none"
+                ],
                 "enumDescriptions": [
                   "R1-style <shell>...</shell> tags in the model's text response. Needed for agentic work when toolCalling is \"none\".",
                   "No inline shell protocol. Model can't run commands unless it has native tool calling."
@@ -248,7 +272,9 @@
               },
               "tokenizer": {
                 "type": "string",
-                "enum": ["deepseek-v3"],
+                "enum": [
+                  "deepseek-v3"
+                ],
                 "enumDescriptions": [
                   "DeepSeek V3 / R1 tokenizer (bundled). Exact counting via WASM."
                 ],
@@ -256,7 +282,9 @@
               },
               "requestFormat": {
                 "type": "string",
-                "enum": ["openai"],
+                "enum": [
+                  "openai"
+                ],
                 "enumDescriptions": [
                   "Standard OpenAI chat-completions wire format. Works for Ollama, LM Studio, OpenAI, Moonshot, Groq, LiteLLM, etc."
                 ],

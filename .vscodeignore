@@ -54,8 +54,12 @@ dist/media/*.mp4
 media/*.gif
 media/*.mp4
 
-# === Node modules: exclude all except native addon ===
+# === Node modules: exclude all except native addon + its runtime deps ===
 # diff, uuid, deepseek-moby-wasm are bundled by webpack into dist/extension.js
-# Only @signalapp/sqlcipher needs to ship (native N-API addon with prebuilds)
+# @signalapp/sqlcipher ships unbundled (native N-API addon with prebuilds).
+# node-gyp-build is required at runtime by sqlcipher's index.cjs to locate
+# the prebuild — without it, require('@signalapp/sqlcipher') throws
+# `Cannot find module 'node-gyp-build'` and activation hangs/fails silently.
 node_modules/**
 !node_modules/@signalapp/**
+!node_modules/node-gyp-build/**
