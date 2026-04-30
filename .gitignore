@@ -33,6 +33,7 @@ coverage/
 # VS Code test binaries (downloaded by @vscode/test-electron)
 .vscode-test/
 
+
 # Playwright
 test-results/
 playwright-report/

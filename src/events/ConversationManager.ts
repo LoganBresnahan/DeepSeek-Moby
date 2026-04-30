@@ -12,10 +12,10 @@
 
 import * as vscode from 'vscode';
 import * as path from 'path';
-import * as fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 
 import { Database } from './SqlJsWrapper';
+import { openDbWithRecovery } from './dbRecovery';
 import { runMigrations } from './migrations';
 import { EventStore } from './EventStore';
 import { SnapshotManager, SummarizerFn } from './SnapshotManager';
@@ -134,8 +134,11 @@ export class ConversationManager {
     const dbPath = this.options?.dbPath ??
       path.join(this.context.globalStorageUri.fsPath, 'moby.db');
 
-    // Initialize database (synchronous — native SQLCipher, no WASM)
-    this.db = new Database(dbPath, this.options?.encryptionKey);
+    // Initialize database (synchronous — native SQLCipher, no WASM).
+    // openDbWithRecovery quarantines obviously-garbage files (<4KB partial
+    // inits) so a crashed first-activation can recover; larger undecryptable
+    // files throw with a hint pointing at Manage Database Encryption Key.
+    this.db = openDbWithRecovery(dbPath, this.options?.encryptionKey);
 
     // Run migrations — single source of truth for all schema
     runMigrations(this.db);
