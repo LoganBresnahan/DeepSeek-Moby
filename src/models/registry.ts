@@ -111,6 +111,12 @@ export interface ModelCapabilities {
    *
    *  See [docs/plans/deepseek-v4-integration.md] Phase 4.5. */
   streamingToolCalls?: boolean;
+
+  /** Whether the LSP-backed navigation tools (`outline`, `get_symbol_source`)
+   *  are exposed to this model. Defaults to false. Native-tool models can
+   *  use them; R1 (`xml-shell` transport) cannot. Custom models opt in per
+   *  registry entry. See [docs/plans/lsp-integration.md]. */
+  lspTools?: boolean;
 }
 
 export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
@@ -133,6 +139,7 @@ export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
     // split avoids the ordering issue without backporting a fix to a sunsetting
     // model. V4 family has no such issue (separate reasoning channel).
     streamingToolCalls: false,
+    lspTools: true,
   },
   'deepseek-reasoner': {
     toolCalling: 'none',
@@ -177,6 +184,7 @@ export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
     // streamChat() summary split. Surfaces reasoning_content live during
     // tool decisions instead of dropping it on the floor.
     streamingToolCalls: true,
+    lspTools: true,
   },
   'deepseek-v4-pro-thinking': {
     toolCalling: 'native',
@@ -199,6 +207,7 @@ export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
     // token, so visible reasoning during tool decisions is even more
     // valuable here (the user can see what they're paying for).
     streamingToolCalls: true,
+    lspTools: true,
   },
 };
 
@@ -350,6 +359,9 @@ export function validateCustomModelEntry(entry: unknown): { ok: true } | { ok: f
   }
   if (e.streamingToolCalls !== undefined && typeof e.streamingToolCalls !== 'boolean') {
     return { ok: false, error: 'streamingToolCalls must be boolean if provided' };
+  }
+  if (e.lspTools !== undefined && typeof e.lspTools !== 'boolean') {
+    return { ok: false, error: 'lspTools must be boolean if provided' };
   }
   return { ok: true };
 }

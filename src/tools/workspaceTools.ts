@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as cp from 'child_process';
 import { Tool, ToolCall } from '../deepseekClient';
+import { executeLspTool } from './lspTools';
 
 /**
  * Workspace tools that allow the LLM to explore and read files in the codebase.
@@ -350,6 +351,10 @@ export async function executeToolCall(toolCall: ToolCall): Promise<string> {
   }
 
   const workspacePath = workspaceFolder.uri.fsPath;
+
+  // LSP tools dispatch first — returns null if the tool name isn't ours.
+  const lspResult = await executeLspTool(workspacePath, toolCall);
+  if (lspResult !== null) return lspResult;
 
   try {
     switch (functionName) {

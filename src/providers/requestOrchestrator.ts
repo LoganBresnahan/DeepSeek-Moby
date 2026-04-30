@@ -6,6 +6,7 @@ import { ConversationManager } from '../events';
 import { logger } from '../utils/logger';
 import { tracer } from '../tracing';
 import { workspaceTools, applyCodeEditTool, createFileTool, deleteFileTool, deleteDirectoryTool, runShellTool, webSearchTool, executeToolCall } from '../tools/workspaceTools';
+import { lspTools } from '../tools/lspTools';
 import { createFile as createFileCapability, deleteFile as deleteFileCapability } from '../capabilities/files';
 import { formatFilesAffected } from '../capabilities/types';
 import { parseDSMLToolCalls, stripDSML } from '../utils/dsmlParser';
@@ -1152,11 +1153,13 @@ export class RequestOrchestrator {
     // ── 2. Model-specific capabilities ──
     const wsState = await this.webSearchManager.getSettings();
     const webSearchAutoAvailable = wsState.mode === 'auto' && wsState.configured;
-    const runShellAvailable = getCapabilities(this.deepSeekClient.getModel()).shellProtocol === 'native-tool';
+    const promptCaps = getCapabilities(this.deepSeekClient.getModel());
+    const runShellAvailable = promptCaps.shellProtocol === 'native-tool';
+    const lspToolsAvailable = promptCaps.lspTools === true;
     if (isReasonerModel) {
       systemPrompt += getReasonerShellPrompt({ webSearchAvailable: webSearchAutoAvailable });
     } else {
-      systemPrompt += buildToolGuidance(promptStyle, webSearchAutoAvailable, runShellAvailable);
+      systemPrompt += buildToolGuidance(promptStyle, webSearchAutoAvailable, runShellAvailable, lspToolsAvailable);
     }
 
     // ── 3. Edit format (compact) ──
@@ -2983,7 +2986,9 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
       // Build tools array — same composition as runToolLoop.
       const wsState = await this.webSearchManager.getSettings();
       const includeWebSearch = wsState.mode === 'auto' && wsState.configured;
-      const includeRunShell = getCapabilities(this.deepSeekClient.getModel()).shellProtocol === 'native-tool';
+      const streamingCaps = getCapabilities(this.deepSeekClient.getModel());
+      const includeRunShell = streamingCaps.shellProtocol === 'native-tool';
+      const includeLspTools = streamingCaps.lspTools === true;
       const tools = [
         ...workspaceTools,
         applyCodeEditTool,
@@ -2991,6 +2996,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
         deleteFileTool,
         deleteDirectoryTool,
         ...(includeRunShell ? [runShellTool] : []),
+        ...(includeLspTools ? lspTools : []),
         ...(includeWebSearch ? [webSearchTool] : [])
       ];
 
@@ -3303,7 +3309,9 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
       // tools array and the existing parser owns its dispatch.
       const toolLoopWsState = await this.webSearchManager.getSettings();
       const includeWebSearch = toolLoopWsState.mode === 'auto' && toolLoopWsState.configured;
-      const includeRunShell = getCapabilities(this.deepSeekClient.getModel()).shellProtocol === 'native-tool';
+      const toolLoopCaps = getCapabilities(this.deepSeekClient.getModel());
+      const includeRunShell = toolLoopCaps.shellProtocol === 'native-tool';
+      const includeLspTools = toolLoopCaps.lspTools === true;
       const tools = [
         ...workspaceTools,
         applyCodeEditTool,
@@ -3311,6 +3319,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
         deleteFileTool,
         deleteDirectoryTool,
         ...(includeRunShell ? [runShellTool] : []),
+        ...(includeLspTools ? lspTools : []),
         ...(includeWebSearch ? [webSearchTool] : [])
       ];
 
@@ -3553,7 +3562,8 @@ function buildIdentityAndGate(promptStyle: PromptStyle): string {
 function buildToolGuidance(
   promptStyle: PromptStyle,
   webSearchAutoAvailable: boolean,
-  runShellAvailable: boolean
+  runShellAvailable: boolean,
+  lspToolsAvailable: boolean
 ): string {
   const webSearchLine = webSearchAutoAvailable
     ? '- web_search: Search the web for current information\n'
@@ -3564,10 +3574,16 @@ function buildToolGuidance(
   const runShellLine = runShellAvailable
     ? '- run_shell: Run a shell command in the workspace (tests, builds, git, installs, etc.). Long-running commands like servers and watch modes are refused.\n'
     : '';
+  // LSP Phase 1 — single-file outline + symbol-source. Conditional because
+  // R1 / non-LSP custom models don't get the dispatch.
+  const lspToolsLines = lspToolsAvailable
+    ? '- outline: List the symbols in a file (functions, classes, methods) without reading the body — cheap orientation for large files.\n' +
+      '- get_symbol_source: Read just one symbol\'s body from a file when you only need that part.\n'
+    : '';
   if (promptStyle === 'minimal') {
-    return renderMinimalToolGuidance(webSearchLine, runShellLine);
+    return renderMinimalToolGuidance(webSearchLine, runShellLine, lspToolsLines);
   }
-  return renderStandardToolGuidance(webSearchLine, runShellLine);
+  return renderStandardToolGuidance(webSearchLine, runShellLine, lspToolsLines);
 }
 
 // ── Minimal variant — V4-thinking ─────────────────────────────────────
@@ -3585,7 +3601,7 @@ When the user asks a question, answer the question. Use file-modification tools 
 
 Reading files is cheap; editing files is consequential. Read whatever you need to answer accurately, but only modify files when the user has asked for a change.\n`;
 
-function renderMinimalToolGuidance(webSearchLine: string, runShellLine: string): string {
+function renderMinimalToolGuidance(webSearchLine: string, runShellLine: string, lspToolsLines: string): string {
   return `
 Tools available for codebase exploration:
 - read_file: Read file contents
@@ -3593,7 +3609,7 @@ Tools available for codebase exploration:
 - grep: Search file contents for text or patterns
 - list_directory: See directory structure
 - file_metadata: Get a file's size, type, and a content preview
-${webSearchLine}
+${lspToolsLines}${webSearchLine}
 Tools available for workspace modification:
 - edit_file: Patch specific sections of an existing file (search/replace pairs)
 - write_file: Create a new file or overwrite an existing one entirely
@@ -3618,7 +3634,7 @@ Match your response to the user's intent. The distinction between "show me" and 
 
 When the user's phrasing is ambiguous, lean toward prose + markdown. Ask a clarifying question rather than creating files the user didn't ask for.\n`;
 
-function renderStandardToolGuidance(webSearchLine: string, runShellLine: string): string {
+function renderStandardToolGuidance(webSearchLine: string, runShellLine: string, lspToolsLines: string): string {
   // The "use the dedicated tool first" guidance below only matters when
   // run_shell is present — otherwise there's no shell-as-fallback to
   // disambiguate against. Conditional addition keeps the prompt compact
@@ -3633,7 +3649,7 @@ You have tools to explore the codebase:
 - grep: Search for text/patterns in file contents
 - list_directory: See directory structure
 - file_metadata: Get a file's size, type, and a short content preview
-${webSearchLine}
+${lspToolsLines}${webSearchLine}
 Use tools to understand the code before responding. Read relevant files first, then provide accurate answers.
 
 You have tools to modify the workspace:
