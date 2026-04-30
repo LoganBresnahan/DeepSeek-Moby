@@ -176,6 +176,75 @@ describe('MessageTurnActor', () => {
       const content = queryInShadow(containers[0], '.content');
       expect(content?.textContent).toContain('Lazy created');
     });
+
+    // ── HTML escape (purple-anchor regression) ─────────────────────────
+    // V4-thinking sometimes emits raw HTML in prose. Without escaping,
+    // `<a href>...</a>` rendered as real anchors → blue underline styling
+    // → "purple highlighting" bug. formatContent must neutralize HTML in
+    // prose while preserving fenced code blocks intact.
+
+    it('escapes raw <a> tags emitted in assistant prose', () => {
+      actor.reset();
+      actor.bind({ turnId: 'turn-esc-a', role: 'assistant', timestamp: Date.now() });
+      actor.createTextSegment('Visit <a href="">How it works:</a> for details');
+      actor.endStreaming();
+
+      const containers = findContainers('text');
+      const content = queryInShadow(containers[0], '.content');
+      // No real anchor element should be created.
+      expect(content?.querySelector('a')).toBeNull();
+      // Raw text should appear as plain prose with the tag visible.
+      expect(content?.textContent).toContain('<a href="">How it works:</a>');
+    });
+
+    it('escapes <u>/<font>/<script> tags in prose', () => {
+      actor.reset();
+      actor.bind({ turnId: 'turn-esc-tags', role: 'assistant', timestamp: Date.now() });
+      actor.createTextSegment('plain <u>under</u> and <font color="red">red</font> and <script>alert(1)</script>');
+      actor.endStreaming();
+
+      const containers = findContainers('text');
+      const content = queryInShadow(containers[0], '.content');
+      expect(content?.querySelector('u')).toBeNull();
+      expect(content?.querySelector('font')).toBeNull();
+      expect(content?.querySelector('script')).toBeNull();
+      expect(content?.textContent).toContain('<u>under</u>');
+      expect(content?.textContent).toContain('<script>alert(1)</script>');
+    });
+
+    it('preserves markdown bold/italic/inline-code while escaping prose', () => {
+      actor.reset();
+      actor.bind({ turnId: 'turn-md', role: 'assistant', timestamp: Date.now() });
+      actor.createTextSegment('a **bold** and *italic* and `code` plus <a>raw</a>');
+      actor.endStreaming();
+
+      const containers = findContainers('text');
+      const content = queryInShadow(containers[0], '.content');
+      // Markdown still becomes proper elements.
+      expect(content?.querySelector('strong')?.textContent).toBe('bold');
+      expect(content?.querySelector('em')?.textContent).toBe('italic');
+      expect(content?.querySelector('code.inline-code')?.textContent).toBe('code');
+      // Raw <a> tag stays as text.
+      expect(content?.querySelector('a')).toBeNull();
+      expect(content?.textContent).toContain('<a>raw</a>');
+    });
+
+    it('preserves fenced code blocks across the escape pass', () => {
+      actor.reset();
+      actor.bind({ turnId: 'turn-fence', role: 'assistant', timestamp: Date.now() });
+      const md = 'before <a>raw</a>\n\n```bash\nls -la\n```\n\nafter';
+      actor.createTextSegment(md);
+      actor.endStreaming();
+
+      const containers = findContainers('text');
+      const content = queryInShadow(containers[0], '.content');
+      // Code block rendered as a real .code-block.
+      expect(content?.querySelector('.code-block')).not.toBeNull();
+      expect(content?.textContent).toContain('ls -la');
+      // Prose anchor stays escaped.
+      expect(content?.querySelector('a')).toBeNull();
+      expect(content?.textContent).toContain('<a>raw</a>');
+    });
   });
 
   // ============================================

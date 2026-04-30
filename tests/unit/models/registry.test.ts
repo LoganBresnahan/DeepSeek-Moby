@@ -213,16 +213,20 @@ describe('model registry', () => {
   });
 
   describe('tokenizer', () => {
-    it('deepseek models declare the deepseek-v3 tokenizer (for exact WASM counting)', () => {
+    it('V3 models declare the deepseek-v3 tokenizer (for exact WASM counting)', () => {
       expect(MODEL_REGISTRY['deepseek-chat'].tokenizer).toBe('deepseek-v3');
       expect(MODEL_REGISTRY['deepseek-reasoner'].tokenizer).toBe('deepseek-v3');
     });
 
-    it('tokenizer is optional — unknown models get undefined (estimation fallback)', () => {
+    it('V4 models declare the deepseek-v4 tokenizer (V3 vocab plus added specials)', () => {
+      expect(MODEL_REGISTRY['deepseek-v4-flash-thinking'].tokenizer).toBe('deepseek-v4');
+      expect(MODEL_REGISTRY['deepseek-v4-pro-thinking'].tokenizer).toBe('deepseek-v4');
+    });
+
+    it('tokenizer is optional — unknown models inherit from the default fallback', () => {
       const unknown = getCapabilities('some-unknown-model');
-      // Falls back to DEFAULT_MODEL_ID which is deepseek-v4-pro-thinking, so has tokenizer.
-      // But the field itself is optional for custom registrations.
-      expect(unknown.tokenizer).toBe('deepseek-v3'); // inherited from fallback
+      // Falls back to DEFAULT_MODEL_ID (deepseek-v4-pro-thinking).
+      expect(unknown.tokenizer).toBe('deepseek-v4');
     });
   });
 

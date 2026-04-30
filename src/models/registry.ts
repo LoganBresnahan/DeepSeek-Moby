@@ -65,8 +65,15 @@ export interface ModelCapabilities {
    * every possible tokenizer vocab. For users who need exact counts on
    * a custom model, they can point the field at a vocab we ship that
    * closely matches their model's tokenizer.
+   *
+   * V4 shares V3's BPE base (same 128K vocab, same merges, same
+   * pre-tokenizer/decoder/normalizer) but adds ~465 new special tokens
+   * (`<think>`, `</think>`, `｜DSML｜`, file/repo markers, multimodal
+   * placeholders). V3 vocab counts V4 user-text correctly but
+   * under-tokenizes V4-emitted special tokens — pick `'deepseek-v4'`
+   * for V4 entries to get exact counts on those.
    */
-  tokenizer?: 'deepseek-v3';
+  tokenizer?: 'deepseek-v3' | 'deepseek-v4';
   requestFormat: RequestFormat;
 
   // ── V4-era axes (see docs/plans/deepseek-v4-integration.md) ─────────
@@ -174,7 +181,7 @@ export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
     maxTokensConfigKey: 'maxTokensV4FlashThinking',
     streaming: true,
     apiEndpoint: 'https://api.deepseek.com',
-    tokenizer: 'deepseek-v3',
+    tokenizer: 'deepseek-v4',
     requestFormat: 'openai',
     sendThinkingParam: true,
     reasoningEffort: 'high',
@@ -197,7 +204,7 @@ export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
     maxTokensConfigKey: 'maxTokensV4ProThinking',
     streaming: true,
     apiEndpoint: 'https://api.deepseek.com',
-    tokenizer: 'deepseek-v3',
+    tokenizer: 'deepseek-v4',
     requestFormat: 'openai',
     sendThinkingParam: true,
     reasoningEffort: 'max',            // pro defaults to max — paying for quality
@@ -337,7 +344,7 @@ export function validateCustomModelEntry(entry: unknown): { ok: true } | { ok: f
   if (typeof e.streaming !== 'boolean') return { ok: false, error: 'streaming must be boolean' };
   if (typeof e.apiEndpoint !== 'string' || !e.apiEndpoint) return { ok: false, error: 'missing apiEndpoint' };
   if (e.apiKey !== undefined && typeof e.apiKey !== 'string') return { ok: false, error: 'apiKey must be a string if provided' };
-  if (e.tokenizer !== undefined && e.tokenizer !== 'deepseek-v3') return { ok: false, error: 'tokenizer must be "deepseek-v3" or omitted' };
+  if (e.tokenizer !== undefined && e.tokenizer !== 'deepseek-v3' && e.tokenizer !== 'deepseek-v4') return { ok: false, error: 'tokenizer must be "deepseek-v3", "deepseek-v4", or omitted' };
   if (e.requestFormat !== 'openai') return { ok: false, error: 'requestFormat must be "openai"' };
   // V4-era axes (all optional). Validate shapes when present.
   if (e.maxOutputTokensCap !== undefined) {

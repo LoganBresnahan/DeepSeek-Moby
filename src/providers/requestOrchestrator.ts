@@ -2967,6 +2967,13 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
     while (iterations < maxIterations) {
       iterations++;
 
+      // Push the current iteration to the logger so per-API-call summary
+      // lines (`[ApiCall] iter=N`) report the right number. Without this,
+      // the deepseek-client read `logger.getCurrentIteration()` which only
+      // R1's shell loop pushes to — so streaming-tool-calls iterations
+      // always logged as iter=1.
+      logger.setIteration(iterations);
+
       if (signal.aborted) break;
 
       // Soft-stop on context budget pressure (parity with runToolLoop).
@@ -3285,6 +3292,11 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
     while (iterations < maxIterations) {
       iterations++;
 
+      // Push iteration to logger for [ApiCall] summary line — parity with
+      // streamAndIterateWithToolCalls. Without this, runToolLoop's chat()
+      // calls logged iter=1 forever.
+      logger.setIteration(iterations);
+
       // Check if aborted
       if (signal.aborted) {
         break;
@@ -3574,11 +3586,15 @@ function buildToolGuidance(
   const runShellLine = runShellAvailable
     ? '- run_shell: Run a shell command in the workspace (tests, builds, git, installs, etc.). Long-running commands like servers and watch modes are refused.\n'
     : '';
-  // LSP Phase 1 — single-file outline + symbol-source. Conditional because
-  // R1 / non-LSP custom models don't get the dispatch.
+  // LSP Phase 1+2 — single-file structural reads + workspace/cross-file
+  // queries. Conditional because R1 / non-LSP custom models don't get the
+  // dispatch.
   const lspToolsLines = lspToolsAvailable
     ? '- outline: List the symbols in a file (functions, classes, methods) without reading the body — cheap orientation for large files.\n' +
-      '- get_symbol_source: Read just one symbol\'s body from a file when you only need that part.\n'
+      '- get_symbol_source: Read just one symbol\'s body from a file when you only need that part.\n' +
+      '- find_symbol: Workspace-wide search for a symbol by name. Use when you know the name but not the file.\n' +
+      '- find_definition: Jump from a symbol reference to its declaration. Provide a file + line, or file + symbol name.\n' +
+      '- find_references: List every place a symbol is used. More accurate than grep — handles dynamic dispatch and ignores comments.\n'
     : '';
   if (promptStyle === 'minimal') {
     return renderMinimalToolGuidance(webSearchLine, runShellLine, lspToolsLines);

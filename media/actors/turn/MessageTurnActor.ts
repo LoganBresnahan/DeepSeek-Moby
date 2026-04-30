@@ -2022,7 +2022,22 @@ export class MessageTurnActor extends InterleavedShadowActor {
 
     // Fenced code blocks (complete only) — fence-length-aware (CommonMark spec)
     const blocks = extractCodeBlocks(content);
-    let result = content;
+
+    // Two-pass strategy: replace each fenced block with a placeholder using
+    // private-use-area unicode chars (which survive escapeHtml unchanged),
+    // then escape HTML across the prose, then run markdown inline
+    // transforms, then swap the rendered code-block HTML back in.
+    //
+    // Why escape: V4-thinking (and other models) sometimes emit raw HTML
+    // tags in their prose — `<a href>...</a>`, `<u>`, etc. — which leak
+    // straight into the DOM as real elements when not escaped. The
+    // formatContent pipeline only knows fenced blocks, inline code, bold,
+    // and italic; everything else used to ride through verbatim. Escaping
+    // the prose locks the model out of injecting arbitrary HTML.
+    const renderedBlocks: string[] = [];
+    const PLACEHOLDER_OPEN = '';
+    const PLACEHOLDER_CLOSE = '';
+    let withPlaceholders = content;
 
     // Replace from last to first to preserve string indices
     for (let bi = blocks.length - 1; bi >= 0; bi--) {
@@ -2055,8 +2070,16 @@ export class MessageTurnActor extends InterleavedShadowActor {
       const escapedPreview = this.escapeHtml(preview);
 
       const html = `<div class="code-block entering${expandedClass}" data-lang="${language}" data-edit-mode="${this._editMode}"><div class="code-header"><span class="code-toggle">▶</span><span class="code-lang">${language}</span><span class="code-preview">${escapedPreview}</span><div class="code-actions"><button class="code-action-btn diff-btn">Diff</button><button class="code-action-btn apply-btn">Apply</button><button class="code-action-btn copy-btn">Copy</button></div></div><div class="code-body"><pre><code class="language-${language}">${highlightedCode}</code></pre></div></div>`;
-      result = result.substring(0, block.startIndex) + html + result.substring(block.endIndex);
+      renderedBlocks[bi] = html;
+      withPlaceholders =
+        withPlaceholders.substring(0, block.startIndex) +
+        `${PLACEHOLDER_OPEN}${bi}${PLACEHOLDER_CLOSE}` +
+        withPlaceholders.substring(block.endIndex);
     }
+
+    // Escape HTML on the prose. Code blocks are placeholders; markdown
+    // delimiters (backticks, asterisks, newlines) survive the escape.
+    let result = this.escapeHtml(withPlaceholders);
 
     // Always strip any trailing unclosed fence from rendered output. The
     // unified activity line already signals "Writing X..." / "Creating X..."
@@ -2078,6 +2101,14 @@ export class MessageTurnActor extends InterleavedShadowActor {
     // Line breaks (collapse 3+ consecutive newlines to 2)
     result = result.replace(/\n{3,}/g, '\n\n');
     result = result.replace(/\n/g, '<br>');
+
+    // Restore rendered code blocks. Use a function replacer to avoid
+    // `$&` / `$1` interpretation in the substitution string when the
+    // generated HTML contains `$` characters.
+    result = result.replace(
+      new RegExp(`${PLACEHOLDER_OPEN}(\\d+)${PLACEHOLDER_CLOSE}`, 'g'),
+      (_match, idx) => renderedBlocks[Number(idx)] ?? ''
+    );
 
     // Remove <br> tags after code blocks (prevents extra whitespace between code and text)
     result = result.replace(/<\/div>(<br>)+/g, '</div>');

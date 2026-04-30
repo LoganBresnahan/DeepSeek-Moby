@@ -1,13 +1,11 @@
 /**
- * LSP-backed navigation tools (Phase 1: outline + get_symbol_source).
+ * LSP-backed navigation tools.
  *
- * Both tools delegate to VS Code's `executeDocumentSymbolProvider` command,
- * which proxies to whatever language server is registered for the file's
- * language. No custom indexer; no daemon. The LSP is already running for
- * any language the user has installed.
- *
- * Phase 1 scope is single-file only — no `find_definition`, `find_references`,
- * or workspace-wide `find_symbol`. See [docs/plans/lsp-integration.md].
+ * Phase 1: `outline`, `get_symbol_source` — single-file structural reads.
+ * Phase 2: `find_symbol`, `find_definition`, `find_references` — workspace-
+ * wide and cross-file queries via VS Code's command proxies. All tools call
+ * the language server registered for the file's language; no custom indexer,
+ * no daemon, no embeddings. See [docs/plans/lsp-integration.md].
  */
 
 import * as vscode from 'vscode';
@@ -69,8 +67,111 @@ export const getSymbolSourceTool: Tool = {
   }
 };
 
+export const findSymbolTool: Tool = {
+  type: 'function',
+  function: {
+    name: 'find_symbol',
+    description:
+      'Search the entire workspace for symbols (functions, classes, methods) matching a name, using the language server. ' +
+      'Use this when you know what you\'re looking for but not where it lives. ' +
+      'More precise than grep for symbol names because it understands declarations vs references vs comments. ' +
+      'Returns up to 20 matches by default (raise via maxResults).',
+    parameters: {
+      type: 'object',
+      properties: {
+        name: {
+          type: 'string',
+          description: 'The symbol name (or substring) to search for. Most LSPs support partial / fuzzy matching.'
+        },
+        maxResults: {
+          type: 'string',
+          description: 'Maximum number of results (default 20). Stringified integer.'
+        }
+      },
+      required: ['name']
+    }
+  }
+};
+
+export const findDefinitionTool: Tool = {
+  type: 'function',
+  function: {
+    name: 'find_definition',
+    description:
+      'Find where a symbol is defined, given a position in a file. ' +
+      'Provide either `line` (1-indexed; column is auto-resolved to the first non-whitespace char) ' +
+      'or `symbol` (a name to locate within the file via document symbols). ' +
+      'Use this to follow a call to its declaration without grep, including across files and through interfaces.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'Relative path to the file from the workspace root.'
+        },
+        line: {
+          type: 'string',
+          description: 'Line number where the symbol is referenced (1-indexed). Stringified integer. Provide this OR `symbol`.'
+        },
+        symbol: {
+          type: 'string',
+          description: 'Symbol name to locate inside the file (an alternative to providing a line). Useful when you have a name from outline.'
+        },
+        maxResults: {
+          type: 'string',
+          description: 'Maximum number of definition locations (default 20). Stringified integer.'
+        }
+      },
+      required: ['path']
+    }
+  }
+};
+
+export const findReferencesTool: Tool = {
+  type: 'function',
+  function: {
+    name: 'find_references',
+    description:
+      'Find all references to a symbol given a position in a file. ' +
+      'Provide either `line` (1-indexed) or `symbol` (a name in the file). ' +
+      'More accurate than grep — handles dynamic dispatch, interface implementations, and avoids matches in comments / similar names. ' +
+      'Returns up to 20 matches by default (raise via maxResults).',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'Relative path to the file from the workspace root where the symbol is declared/used.'
+        },
+        line: {
+          type: 'string',
+          description: 'Line number anchoring the symbol (1-indexed). Stringified integer. Provide this OR `symbol`.'
+        },
+        symbol: {
+          type: 'string',
+          description: 'Symbol name to locate inside the file (alternative to `line`).'
+        },
+        maxResults: {
+          type: 'string',
+          description: 'Maximum number of reference locations (default 20). Stringified integer.'
+        }
+      },
+      required: ['path']
+    }
+  }
+};
+
 /** Bundle of LSP tools that get conditionally attached to the request. */
-export const lspTools: Tool[] = [outlineTool, getSymbolSourceTool];
+export const lspTools: Tool[] = [
+  outlineTool,
+  getSymbolSourceTool,
+  findSymbolTool,
+  findDefinitionTool,
+  findReferencesTool
+];
+
+const DEFAULT_MAX_RESULTS = 20;
+const MAX_RESULTS_CAP = 100;
 
 /**
  * Map VS Code's SymbolKind enum (numeric) to a short readable label.
@@ -250,6 +351,240 @@ async function getSymbolSource(
   return sections.join('\n\n');
 }
 
+// ── Phase 2 helpers — cross-file / workspace queries ──────────────────────
+
+interface LocationLike {
+  uri: { fsPath: string };
+  range: { start: { line: number; character: number }; end: { line: number; character: number } };
+}
+
+interface LocationLinkLike {
+  targetUri: { fsPath: string };
+  targetRange: { start: { line: number; character: number }; end: { line: number; character: number } };
+}
+
+interface SymbolInformationLike {
+  name: string;
+  kind: number;
+  location: { uri: { fsPath: string }; range: { start: { line: number; character: number }; end?: { line: number; character: number } } };
+  containerName?: string;
+}
+
+function normalizeLocation(loc: LocationLike | LocationLinkLike): LocationLike {
+  if ('targetUri' in loc) {
+    return { uri: loc.targetUri, range: loc.targetRange };
+  }
+  return loc;
+}
+
+function parseMaxResults(arg: string | undefined): number {
+  if (!arg) return DEFAULT_MAX_RESULTS;
+  const n = parseInt(arg, 10);
+  if (Number.isNaN(n) || n < 1) return DEFAULT_MAX_RESULTS;
+  return Math.min(n, MAX_RESULTS_CAP);
+}
+
+/** Resolve `(file, line)` or `(file, symbol)` to a concrete LSP position. */
+async function resolvePosition(
+  workspacePath: string,
+  relPath: string,
+  line: string | undefined,
+  symbolName: string | undefined
+): Promise<{ uri: vscode.Uri; line: number; character: number } | { error: string }> {
+  const abs = resolveWorkspacePath(workspacePath, relPath);
+  if (!abs) return { error: 'Cannot read files outside the workspace' };
+  const uri = vscode.Uri.file(abs);
+
+  // Symbol takes precedence — it's a more precise anchor than a bare line.
+  if (symbolName) {
+    let symbols: DocumentSymbolLike[] | null;
+    try {
+      symbols = await fetchDocumentSymbols(uri);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return { error: `LSP request failed for ${relPath}: ${msg}` };
+    }
+    if (!symbols || symbols.length === 0) {
+      return { error: `No symbols found in ${relPath} (LSP may be unavailable for this language)` };
+    }
+    const matches = findSymbols(symbols, symbolName);
+    if (matches.length === 0) {
+      return { error: `No symbol named "${symbolName}" in ${relPath}` };
+    }
+    return {
+      uri,
+      line: matches[0].range.start.line,
+      character: matches[0].range.start.character
+    };
+  }
+
+  if (line !== undefined && line !== '') {
+    const lineNum = parseInt(line, 10);
+    if (Number.isNaN(lineNum) || lineNum < 1) {
+      return { error: `Invalid line number "${line}" — must be a positive integer (1-indexed)` };
+    }
+    let doc: vscode.TextDocument;
+    try {
+      doc = await vscode.workspace.openTextDocument(uri);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return { error: `Cannot open ${relPath}: ${msg}` };
+    }
+    const allLines = doc.getText().split('\n');
+    const lineIdx = lineNum - 1;
+    if (lineIdx >= allLines.length) {
+      return { error: `Line ${lineNum} exceeds file length (${allLines.length} lines)` };
+    }
+    const lineText = allLines[lineIdx];
+    const charIdx = lineText.search(/\S/);
+    return { uri, line: lineIdx, character: charIdx >= 0 ? charIdx : 0 };
+  }
+
+  return { error: 'Must provide either "line" or "symbol" to anchor the position' };
+}
+
+/** Open each unique fsPath once, return map fsPath → split-by-line. */
+async function loadDocLines(items: { uri: { fsPath: string } }[]): Promise<Map<string, string[]>> {
+  const cache = new Map<string, string[]>();
+  for (const item of items) {
+    const fsPath = item.uri.fsPath;
+    if (cache.has(fsPath)) continue;
+    try {
+      const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(fsPath));
+      cache.set(fsPath, doc.getText().split('\n'));
+    } catch {
+      cache.set(fsPath, []);
+    }
+  }
+  return cache;
+}
+
+function formatLocationsWithSnippets(
+  items: LocationLike[],
+  docLines: Map<string, string[]>,
+  label: string,
+  truncatedFrom: number | null
+): string {
+  const header = truncatedFrom !== null
+    ? `${label} (${items.length} of ${truncatedFrom}):`
+    : `${label} (${items.length}):`;
+  const lines: string[] = [header];
+  for (const item of items) {
+    const fsPath = item.uri.fsPath;
+    const lineIdx = item.range.start.line;
+    const oneLine = lineIdx + 1;
+    const fileLines = docLines.get(fsPath) ?? [];
+    const snippet = fileLines[lineIdx]?.trim() ?? '';
+    lines.push(`  ${fsPath}:${oneLine}: ${snippet}`);
+  }
+  if (truncatedFrom !== null) {
+    lines.push(`  ... ${truncatedFrom - items.length} more truncated. Narrow your query (or raise maxResults) for the rest.`);
+  }
+  return lines.join('\n');
+}
+
+async function findSymbol(query: string, maxResults: string | undefined): Promise<string> {
+  let result: SymbolInformationLike[] | undefined;
+  try {
+    result = await vscode.commands.executeCommand<SymbolInformationLike[] | undefined>(
+      'vscode.executeWorkspaceSymbolProvider',
+      query
+    );
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return `Error: LSP request failed: ${msg}`;
+  }
+
+  if (!result || result.length === 0) {
+    return `No workspace symbols match "${query}". The language server may still be indexing, or no servers are installed for the relevant languages.`;
+  }
+
+  const limit = parseMaxResults(maxResults);
+  const truncated = result.length > limit;
+  const items = result.slice(0, limit);
+
+  const lines: string[] = [
+    truncated
+      ? `Workspace symbols matching "${query}" (${items.length} of ${result.length}):`
+      : `Workspace symbols matching "${query}" (${items.length}):`
+  ];
+  for (const sym of items) {
+    const oneLine = sym.location.range.start.line + 1;
+    const container = sym.containerName ? ` in ${sym.containerName}` : '';
+    lines.push(`  ${sym.location.uri.fsPath}:${oneLine} (${kindLabel(sym.kind)}) ${sym.name}${container}`);
+  }
+  if (truncated) {
+    lines.push(`  ... ${result.length - limit} more truncated. Narrow query (or raise maxResults).`);
+  }
+  return lines.join('\n');
+}
+
+async function findDefinition(
+  workspacePath: string,
+  relPath: string,
+  line: string | undefined,
+  symbolName: string | undefined,
+  maxResults: string | undefined
+): Promise<string> {
+  const resolved = await resolvePosition(workspacePath, relPath, line, symbolName);
+  if ('error' in resolved) return `Error: ${resolved.error}`;
+
+  let raw: (LocationLike | LocationLinkLike)[] | undefined;
+  try {
+    raw = await vscode.commands.executeCommand<(LocationLike | LocationLinkLike)[] | undefined>(
+      'vscode.executeDefinitionProvider',
+      resolved.uri,
+      new vscode.Position(resolved.line, resolved.character)
+    );
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return `Error: LSP request failed: ${msg}`;
+  }
+
+  if (!raw || raw.length === 0) {
+    return `No definitions found for position ${relPath}:${resolved.line + 1}. The language server may not be installed for this file's language.`;
+  }
+
+  const limit = parseMaxResults(maxResults);
+  const truncated = raw.length > limit;
+  const normalized = raw.slice(0, limit).map(normalizeLocation);
+  const docLines = await loadDocLines(normalized);
+  return formatLocationsWithSnippets(normalized, docLines, 'Definitions', truncated ? raw.length : null);
+}
+
+async function findReferences(
+  workspacePath: string,
+  relPath: string,
+  line: string | undefined,
+  symbolName: string | undefined,
+  maxResults: string | undefined
+): Promise<string> {
+  const resolved = await resolvePosition(workspacePath, relPath, line, symbolName);
+  if ('error' in resolved) return `Error: ${resolved.error}`;
+
+  let raw: LocationLike[] | undefined;
+  try {
+    raw = await vscode.commands.executeCommand<LocationLike[] | undefined>(
+      'vscode.executeReferenceProvider',
+      resolved.uri,
+      new vscode.Position(resolved.line, resolved.character)
+    );
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return `Error: LSP request failed: ${msg}`;
+  }
+
+  if (!raw || raw.length === 0) {
+    return `No references found for position ${relPath}:${resolved.line + 1}. The language server may not be installed for this file's language.`;
+  }
+
+  const limit = parseMaxResults(maxResults);
+  const truncated = raw.length > limit;
+  const items = raw.slice(0, limit);
+  const docLines = await loadDocLines(items);
+  return formatLocationsWithSnippets(items, docLines, 'References', truncated ? raw.length : null);
+}
+
 /**
  * Dispatch an LSP tool call. Returns null if the tool name isn't handled
  * here, so the parent dispatcher (workspaceTools.executeToolCall) knows to
@@ -260,7 +595,13 @@ export async function executeLspTool(
   toolCall: ToolCall
 ): Promise<string | null> {
   const name = toolCall.function.name;
-  if (name !== 'outline' && name !== 'get_symbol_source') return null;
+  const isLspTool =
+    name === 'outline' ||
+    name === 'get_symbol_source' ||
+    name === 'find_symbol' ||
+    name === 'find_definition' ||
+    name === 'find_references';
+  if (!isLspTool) return null;
 
   let args: Record<string, string>;
   try {
@@ -269,12 +610,24 @@ export async function executeLspTool(
     return `Error: Invalid arguments - ${e instanceof Error ? e.message : String(e)}`;
   }
 
-  if (!args.path) return 'Error: Missing required argument "path"';
-
-  if (name === 'outline') {
-    return outline(workspacePath, args.path);
+  if (name === 'find_symbol') {
+    if (!args.name) return 'Error: Missing required argument "name"';
+    return findSymbol(args.name, args.maxResults);
   }
 
-  if (!args.symbol) return 'Error: Missing required argument "symbol"';
-  return getSymbolSource(workspacePath, args.path, args.symbol);
+  if (!args.path) return 'Error: Missing required argument "path"';
+
+  switch (name) {
+    case 'outline':
+      return outline(workspacePath, args.path);
+    case 'get_symbol_source':
+      if (!args.symbol) return 'Error: Missing required argument "symbol"';
+      return getSymbolSource(workspacePath, args.path, args.symbol);
+    case 'find_definition':
+      return findDefinition(workspacePath, args.path, args.line, args.symbol, args.maxResults);
+    case 'find_references':
+      return findReferences(workspacePath, args.path, args.line, args.symbol, args.maxResults);
+  }
+
+  return null;
 }
