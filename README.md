@@ -192,6 +192,17 @@ The entire chat UI is built with Shadow DOM encapsulation:
 - **Git** — Required for shell command execution on Windows. [Git for Windows](https://git-scm.com/download/win) includes Git Bash, which provides the POSIX-compatible shell needed to run AI-generated commands (heredocs, grep, pipes, etc.). On Linux/macOS, the system shell is used automatically.
 - **DeepSeek API Key** — From [platform.deepseek.com](https://platform.deepseek.com)
 
+## Help & Troubleshooting
+
+Hit a snag? Common issues and recovery guides:
+
+- **[Database recovery](docs/guides/database-recovery.md)** — If Moby fails to start with a `SQLITE_NOTADB` error or shows "file is not a database", the encrypted history file may be corrupt or the encryption key has changed (Keychain wipe, OS reinstall, etc.). Moby auto-recovers from small partial-init files but refuses to discard larger files that may contain real history. The guide walks through both scenarios with diagrams.
+- **[Custom models](docs/guides/custom-models.md)** — Setting up Ollama, LM Studio, llama.cpp, or hosted OpenAI-compatible endpoints.
+- **[Logging and tracing](docs/guides/logging-and-tracing.md)** — How to surface logs when filing a bug or debugging behavior.
+- **[Shell execution](docs/guides/shell-execution.md)** — How approval flows work and how to allow/block specific commands.
+
+For bugs not covered above, run `Moby: Show Logs` from the Command Palette, then file an issue with the relevant snippet.
+
 ## Getting Started
 
 ### 1. Install
