@@ -627,7 +627,11 @@ export class VirtualListActor extends EventStateActor {
       log.debug(`startToolBatch: actor bound, delegating to MessageTurnActor`);
       bound.actor.startToolBatch(tools);
     } else {
-      log.warn(`startToolBatch: actor NOT bound for ${turnId} - batch will be stored but not rendered`);
+      // Expected during load-history / session-restore: off-screen turns
+      // exist in `_turnMap` but their MessageTurnActor binds only when
+      // they scroll into the viewport. Stored batches replay then via the
+      // contentOrder loop at bind-time. Not a bug — keep at debug.
+      log.debug(`startToolBatch: actor not yet bound for ${turnId} - stored, will render at bind`);
     }
 
     return batchId;
@@ -734,7 +738,9 @@ export class VirtualListActor extends EventStateActor {
       segment.actorSegmentId = actorSegmentId;
       log.debug(`createShellSegment: actor segment ID = ${actorSegmentId}`);
     } else {
-      log.warn(`createShellSegment: actor NOT bound for ${turnId} - segment will be stored but not rendered`);
+      // Same deferred-render pattern as startToolBatch — bind-time replay
+      // re-creates this segment when the turn scrolls into view.
+      log.debug(`createShellSegment: actor not yet bound for ${turnId} - stored, will render at bind`);
     }
 
     return segmentId;

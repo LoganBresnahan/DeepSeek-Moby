@@ -445,7 +445,7 @@ describe('FileContextManager', () => {
       expect(result).toBe('');
     });
 
-    it('should include file info and content', async () => {
+    it('returns only the orientation header (no body, no related files, no cursor, no selection)', async () => {
       (vscode.window as any).activeTextEditor = {
         document: {
           fileName: '/workspace/src/main.ts',
@@ -467,15 +467,19 @@ describe('FileContextManager', () => {
       expect(result).toContain('Full Path: /workspace/src/main.ts');
       expect(result).toContain('Language: typescript');
       expect(result).toContain('Total Lines: 1');
-      expect(result).toContain('Cursor at line 1');
-      expect(result).toContain('--- FULL FILE CONTENT ---');
-      expect(result).toContain('const x = 1;');
-      expect(result).toContain('--- END FILE CONTENT ---');
+
+      // 0.3.0: file body, related-files block, cursor line, and inline
+      // selection text were all removed. Tool surface covers them.
+      expect(result).not.toContain('--- FULL FILE CONTENT ---');
+      expect(result).not.toContain('--- RELATED FILES IN WORKSPACE ---');
+      expect(result).not.toContain('const x = 1;');
+      expect(result).not.toContain('Cursor at line');
+      expect(result).not.toContain('Selected code');
 
       (vscode.window as any).activeTextEditor = undefined;
     });
 
-    it('should include selection info when text is selected', async () => {
+    it('returns the same orientation header regardless of selection state', async () => {
       (vscode.window as any).activeTextEditor = {
         document: {
           fileName: '/workspace/src/main.ts',
@@ -493,20 +497,18 @@ describe('FileContextManager', () => {
       };
 
       const result = await manager.getEditorContext();
-      expect(result).toContain('Selected code (lines 1-2)');
-      expect(result).toContain('selected text');
+      // No selection content leaks into the prompt — Ctrl+A / large
+      // selections cannot blow up the system prompt.
+      expect(result).not.toContain('Selected code');
+      expect(result).not.toContain('selected text');
+      expect(result).not.toContain('--- FULL FILE CONTENT ---');
 
       (vscode.window as any).activeTextEditor = undefined;
     });
 
-    it('should include related files when found', async () => {
+    it('does not spawn `find`/`rg`/`grep` subprocesses (related-files removed)', async () => {
       const cp = await import('child_process');
-      (cp.spawnSync as any).mockReturnValue({
-        stdout: './src/main.test.ts\n./src/mainHelper.ts\n',
-        stderr: '',
-        status: 0,
-        error: null,
-      });
+      (cp.spawnSync as any).mockClear();
 
       (vscode.window as any).activeTextEditor = {
         document: {
@@ -524,37 +526,10 @@ describe('FileContextManager', () => {
         },
       };
 
-      const result = await manager.getEditorContext();
-      expect(result).toContain('--- RELATED FILES IN WORKSPACE ---');
+      await manager.getEditorContext();
+      expect(cp.spawnSync).not.toHaveBeenCalled();
 
       (vscode.window as any).activeTextEditor = undefined;
-      (cp.spawnSync as any).mockReturnValue({ stdout: '', stderr: '', status: 0, error: null });
-    });
-
-    it('should handle findRelatedFiles returning empty gracefully', async () => {
-      (vscode.workspace.getWorkspaceFolder as any).mockReturnValue(undefined);
-
-      (vscode.window as any).activeTextEditor = {
-        document: {
-          fileName: '/workspace/src/main.ts',
-          languageId: 'typescript',
-          getText: vi.fn(() => 'code'),
-          lineCount: 1,
-          uri: { toString: () => 'file:///workspace/src/main.ts' },
-        },
-        selection: {
-          isEmpty: true,
-          active: { line: 0 },
-          start: { line: 0 },
-          end: { line: 0 },
-        },
-      };
-
-      const result = await manager.getEditorContext();
-      expect(result).not.toContain('--- RELATED FILES IN WORKSPACE ---');
-
-      (vscode.window as any).activeTextEditor = undefined;
-      (vscode.workspace.getWorkspaceFolder as any).mockReturnValue({ uri: { fsPath: '/workspace' } });
     });
   });
 

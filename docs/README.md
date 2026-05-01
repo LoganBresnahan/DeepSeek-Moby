@@ -24,6 +24,7 @@
 - [Chat Streaming](architecture/integration/chat-streaming.md) - Full streaming flow
 - [Message Bridge](architecture/integration/message-bridge.md) - postMessage protocol
 - [Diff Engine](architecture/integration/diff-engine.md) - Edit modes, diff lifecycle
+- [LSP Integration](architecture/integration/lsp-integration.md) - Language-server-backed nav tools, per-language availability, timeout safety
 
 ### Reference
 

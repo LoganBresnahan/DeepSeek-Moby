@@ -12,6 +12,18 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 
 import { Tool, ToolCall } from '../deepseekClient';
+import { LspAvailability } from '../services/lspAvailability';
+import { withLspTimeout, LspTimeoutError } from '../utils/lspTimeout';
+
+/** Per-call timeout for LSP `executeCommand` proxies. A misbehaving language
+ *  server (cold rust-analyzer, deadlocked Pylance) would otherwise hang the
+ *  request indefinitely. 5s matches the documented behaviour in
+ *  [docs/plans/lsp-integration.md] §Risks. */
+const LSP_TOOL_TIMEOUT_MS = 5_000;
+
+const LSP_TIMEOUT_MESSAGE =
+  'Error: LSP request timed out after 5s. The language server may be cold-starting, ' +
+  'indexing, or hung. Try again in a few seconds, or fall back to grep + read_file for this query.';
 
 /** Minimal shape we depend on. VS Code's DocumentSymbol type matches. */
 interface DocumentSymbolLike {
@@ -253,12 +265,29 @@ function collectAllNames(symbols: DocumentSymbolLike[]): string[] {
 }
 
 async function fetchDocumentSymbols(uri: vscode.Uri): Promise<DocumentSymbolLike[] | null> {
-  const result = await vscode.commands.executeCommand<DocumentSymbolLike[] | undefined>(
-    'vscode.executeDocumentSymbolProvider',
-    uri
+  const result = await withLspTimeout(
+    vscode.commands.executeCommand<DocumentSymbolLike[] | undefined>(
+      'vscode.executeDocumentSymbolProvider',
+      uri
+    ),
+    LSP_TOOL_TIMEOUT_MS
   );
   if (!result) return null;
   return result;
+}
+
+/**
+ * Resolve a file's languageId by opening the document. Used to feed
+ * `LspAvailability.reportToolResult` after a tool call so the per-language
+ * map self-corrects from real observations.
+ */
+async function getLanguageId(uri: vscode.Uri): Promise<string> {
+  try {
+    const doc = await vscode.workspace.openTextDocument(uri);
+    return doc.languageId || '';
+  } catch {
+    return '';
+  }
 }
 
 async function outline(workspacePath: string, relPath: string): Promise<string> {
@@ -270,8 +299,22 @@ async function outline(workspacePath: string, relPath: string): Promise<string> 
   try {
     symbols = await fetchDocumentSymbols(uri);
   } catch (e) {
+    if (e instanceof LspTimeoutError) return LSP_TIMEOUT_MESSAGE;
     const msg = e instanceof Error ? e.message : String(e);
     return `Error: LSP request failed for ${relPath}: ${msg}`;
+  }
+
+  // Adaptive correction — feed back per-language availability based on
+  // what we just observed. Empty results downgrade only after the
+  // service's consecutive-empty threshold so a single stub file doesn't
+  // poison the language.
+  const langId = await getLanguageId(uri);
+  if (langId) {
+    LspAvailability.getInstance().reportToolResult(
+      langId,
+      Array.isArray(symbols) && symbols.length > 0,
+      uri.fsPath
+    );
   }
 
   if (!symbols || symbols.length === 0) {
@@ -301,8 +344,18 @@ async function getSymbolSource(
   try {
     symbols = await fetchDocumentSymbols(uri);
   } catch (e) {
+    if (e instanceof LspTimeoutError) return LSP_TIMEOUT_MESSAGE;
     const msg = e instanceof Error ? e.message : String(e);
     return `Error: LSP request failed for ${relPath}: ${msg}`;
+  }
+
+  const langId = await getLanguageId(uri);
+  if (langId) {
+    LspAvailability.getInstance().reportToolResult(
+      langId,
+      Array.isArray(symbols) && symbols.length > 0,
+      uri.fsPath
+    );
   }
 
   if (!symbols || symbols.length === 0) {
@@ -401,6 +454,9 @@ async function resolvePosition(
     try {
       symbols = await fetchDocumentSymbols(uri);
     } catch (e) {
+      if (e instanceof LspTimeoutError) {
+        return { error: `LSP request timed out resolving "${symbolName}" in ${relPath}. Try again or pass an explicit line.` };
+      }
       const msg = e instanceof Error ? e.message : String(e);
       return { error: `LSP request failed for ${relPath}: ${msg}` };
     }
@@ -486,11 +542,15 @@ function formatLocationsWithSnippets(
 async function findSymbol(query: string, maxResults: string | undefined): Promise<string> {
   let result: SymbolInformationLike[] | undefined;
   try {
-    result = await vscode.commands.executeCommand<SymbolInformationLike[] | undefined>(
-      'vscode.executeWorkspaceSymbolProvider',
-      query
+    result = await withLspTimeout(
+      vscode.commands.executeCommand<SymbolInformationLike[] | undefined>(
+        'vscode.executeWorkspaceSymbolProvider',
+        query
+      ),
+      LSP_TOOL_TIMEOUT_MS
     );
   } catch (e) {
+    if (e instanceof LspTimeoutError) return LSP_TIMEOUT_MESSAGE;
     const msg = e instanceof Error ? e.message : String(e);
     return `Error: LSP request failed: ${msg}`;
   }
@@ -531,14 +591,27 @@ async function findDefinition(
 
   let raw: (LocationLike | LocationLinkLike)[] | undefined;
   try {
-    raw = await vscode.commands.executeCommand<(LocationLike | LocationLinkLike)[] | undefined>(
-      'vscode.executeDefinitionProvider',
-      resolved.uri,
-      new vscode.Position(resolved.line, resolved.character)
+    raw = await withLspTimeout(
+      vscode.commands.executeCommand<(LocationLike | LocationLinkLike)[] | undefined>(
+        'vscode.executeDefinitionProvider',
+        resolved.uri,
+        new vscode.Position(resolved.line, resolved.character)
+      ),
+      LSP_TOOL_TIMEOUT_MS
     );
   } catch (e) {
+    if (e instanceof LspTimeoutError) return LSP_TIMEOUT_MESSAGE;
     const msg = e instanceof Error ? e.message : String(e);
     return `Error: LSP request failed: ${msg}`;
+  }
+
+  const langId = await getLanguageId(resolved.uri);
+  if (langId) {
+    LspAvailability.getInstance().reportToolResult(
+      langId,
+      Array.isArray(raw) && raw.length > 0,
+      resolved.uri.fsPath
+    );
   }
 
   if (!raw || raw.length === 0) {
@@ -564,14 +637,27 @@ async function findReferences(
 
   let raw: LocationLike[] | undefined;
   try {
-    raw = await vscode.commands.executeCommand<LocationLike[] | undefined>(
-      'vscode.executeReferenceProvider',
-      resolved.uri,
-      new vscode.Position(resolved.line, resolved.character)
+    raw = await withLspTimeout(
+      vscode.commands.executeCommand<LocationLike[] | undefined>(
+        'vscode.executeReferenceProvider',
+        resolved.uri,
+        new vscode.Position(resolved.line, resolved.character)
+      ),
+      LSP_TOOL_TIMEOUT_MS
     );
   } catch (e) {
+    if (e instanceof LspTimeoutError) return LSP_TIMEOUT_MESSAGE;
     const msg = e instanceof Error ? e.message : String(e);
     return `Error: LSP request failed: ${msg}`;
+  }
+
+  const langId = await getLanguageId(resolved.uri);
+  if (langId) {
+    LspAvailability.getInstance().reportToolResult(
+      langId,
+      Array.isArray(raw) && raw.length > 0,
+      resolved.uri.fsPath
+    );
   }
 
   if (!raw || raw.length === 0) {

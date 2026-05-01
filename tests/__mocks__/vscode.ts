@@ -62,6 +62,9 @@ export const workspace = {
     readDirectory: vi.fn()
   },
   openTextDocument: vi.fn(),
+  findFiles: vi.fn().mockResolvedValue([]),
+  onDidOpenTextDocument: vi.fn(() => mockDisposable),
+  onDidChangeWorkspaceFolders: vi.fn(() => mockDisposable),
   applyEdit: vi.fn(),
   createFileSystemWatcher: vi.fn(() => ({
     onDidChange: vi.fn(),
@@ -190,6 +193,12 @@ export const languages = {
     clear: vi.fn(),
     dispose: vi.fn()
   }))
+};
+
+export const extensions = {
+  all: [] as any[],
+  getExtension: vi.fn(),
+  onDidChange: vi.fn(() => mockDisposable)
 };
 
 export const env = {

@@ -105,6 +105,10 @@ export class ToolbarShadowActor extends ShadowActor {
   private _planEnabled = false;
   private _streaming = false;
   private _currentModel = 'deepseek-reasoner';
+  /** modelId → supportsManualMode flag, populated from `model.list`
+   *  publishes. When the current model isn't in the map yet (race during
+   *  startup), default to `true` to match the legacy behavior. */
+  private _supportsManualByModel = new Map<string, boolean>();
 
   // Handlers
   private _onEditModeChange: EditModeHandler | null = null;
@@ -134,6 +138,7 @@ export class ToolbarShadowActor extends ShadowActor {
         'plans.activeCount': (value: unknown) => this.handlePlanCountChange(value as number),
         'files.selectedCount': (value: unknown) => this.handleFilesSelectedChange(value as number),
         'session.model': (value: unknown) => this.handleModelChange(value as string),
+        'model.list': (value: unknown) => this.handleModelList(value),
         'input.value': (value: unknown) => this.handleInputValueChange(typeof value === 'string' ? value : '')
       }
     });
@@ -211,11 +216,14 @@ export class ToolbarShadowActor extends ShadowActor {
   }
 
   private handleEditModeClick(): void {
-    const isChat = this._currentModel === 'deepseek-chat';
-    // Chat model skips Manual — only Ask and Auto are meaningful
-    const availableModes = isChat
-      ? EDIT_MODES.filter(m => m !== 'manual')
-      : EDIT_MODES;
+    // Native-tool models (V3 chat, V4 family, native-tool customs) bypass
+    // the text channel for edits — Apply button never fires. Skip Manual
+    // from the cycle for them. Default to true for unknown models so the
+    // cycle behaves the same way it did before this flag was plumbed.
+    const supportsManual = this._supportsManualByModel.get(this._currentModel) ?? true;
+    const availableModes = supportsManual
+      ? EDIT_MODES
+      : EDIT_MODES.filter(m => m !== 'manual');
 
     const currentIndex = availableModes.indexOf(this._editMode);
     const nextIndex = (currentIndex + 1) % availableModes.length;
@@ -231,8 +239,30 @@ export class ToolbarShadowActor extends ShadowActor {
 
   private handleModelChange(model: string): void {
     this._currentModel = model;
-    // If switching to Chat while in Manual mode, auto-switch to Ask
-    if (model === 'deepseek-chat' && this._editMode === 'manual') {
+    // If switching to a native-tool model while in Manual mode, auto-switch
+    // to Ask — the model won't emit the SEARCH/REPLACE blocks Manual needs.
+    const supportsManual = this._supportsManualByModel.get(model) ?? true;
+    if (!supportsManual && this._editMode === 'manual') {
+      this._editMode = 'ask';
+      this.updateEditModeDisplay();
+      this._onEditModeChange?.('ask');
+      this._vscode?.postMessage({ type: 'setEditMode', mode: 'ask' });
+      this.publish({ 'toolbar.editMode': 'ask' });
+    }
+  }
+
+  private handleModelList(value: unknown): void {
+    if (!Array.isArray(value)) return;
+    this._supportsManualByModel.clear();
+    for (const m of value as Array<{ id?: unknown; supportsManualMode?: unknown }>) {
+      if (typeof m?.id === 'string' && typeof m.supportsManualMode === 'boolean') {
+        this._supportsManualByModel.set(m.id, m.supportsManualMode);
+      }
+    }
+    // If the current model just got resolved as native-tool while we're
+    // sitting in Manual, fix it up the same way handleModelChange would.
+    const supportsManual = this._supportsManualByModel.get(this._currentModel) ?? true;
+    if (!supportsManual && this._editMode === 'manual') {
       this._editMode = 'ask';
       this.updateEditModeDisplay();
       this._onEditModeChange?.('ask');

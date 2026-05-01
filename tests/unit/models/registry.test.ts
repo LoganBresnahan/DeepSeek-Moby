@@ -154,59 +154,54 @@ describe('model registry', () => {
 
     beforeEach(() => __resetCustomModelsForTests());
 
-    it('blocks manual for built-in Chat (primary edit protocol is native-tool)', () => {
-      // deepseek-chat declares ['native-tool', 'search-replace']
+    it('blocks manual for built-in Chat (toolCalling: native)', () => {
       expect(supportsManualMode('deepseek-chat')).toBe(false);
     });
 
-    it('allows manual for built-in R1 (search-replace only)', () => {
+    it('allows manual for built-in R1 (toolCalling: none)', () => {
       expect(supportsManualMode('deepseek-reasoner')).toBe(true);
     });
 
-    it('blocks manual when editProtocol[0] is native-tool', () => {
+    it('blocks manual for built-in V4 entries (toolCalling: native)', () => {
+      expect(supportsManualMode('deepseek-v4-flash-thinking')).toBe(false);
+      expect(supportsManualMode('deepseek-v4-pro-thinking')).toBe(false);
+    });
+
+    it('blocks manual when toolCalling is native (edit protocol does not matter)', () => {
       registerCustomModels([{
-        id: 'custom-native-only',
+        ...baseEntry,
+        id: 'custom-native',
         editProtocol: ['native-tool'],
         toolCalling: 'native' as const,
-        ...baseEntry
       }]);
-      expect(supportsManualMode('custom-native-only')).toBe(false);
+      expect(supportsManualMode('custom-native')).toBe(false);
     });
 
-    it('allows manual when editProtocol[0] is search-replace', () => {
+    it('allows manual when toolCalling is none (regardless of editProtocol)', () => {
       registerCustomModels([{
-        id: 'custom-sr-only',
+        ...baseEntry,
+        id: 'custom-shell-only',
         editProtocol: ['search-replace'],
-        ...baseEntry
+        toolCalling: 'none' as const,
       }]);
-      expect(supportsManualMode('custom-sr-only')).toBe(true);
+      expect(supportsManualMode('custom-shell-only')).toBe(true);
     });
 
-    it('blocks manual when both are listed with native-tool first', () => {
+    it('blocks manual on a hybrid native+sr model when toolCalling is native', () => {
       registerCustomModels([{
-        id: 'custom-native-first',
+        ...baseEntry,
+        id: 'custom-native-hybrid',
         editProtocol: ['native-tool', 'search-replace'],
         toolCalling: 'native' as const,
-        ...baseEntry
       }]);
-      expect(supportsManualMode('custom-native-first')).toBe(false);
-    });
-
-    it('allows manual when both are listed with search-replace first', () => {
-      registerCustomModels([{
-        id: 'custom-sr-first',
-        editProtocol: ['search-replace', 'native-tool'],
-        toolCalling: 'native' as const,
-        ...baseEntry
-      }]);
-      expect(supportsManualMode('custom-sr-first')).toBe(true);
+      expect(supportsManualMode('custom-native-hybrid')).toBe(false);
     });
 
     it('allows manual when editProtocol is empty (reference-code-only model)', () => {
       registerCustomModels([{
+        ...baseEntry,
         id: 'custom-reference-only',
         editProtocol: [],
-        ...baseEntry
       }]);
       expect(supportsManualMode('custom-reference-only')).toBe(true);
     });

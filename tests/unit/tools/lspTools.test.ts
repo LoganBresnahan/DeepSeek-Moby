@@ -8,10 +8,11 @@
  * gave us, formatted for the model."
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as vscode from 'vscode';
 
 import { executeLspTool } from '../../../src/tools/lspTools';
+import { LspAvailability } from '../../../src/services/lspAvailability';
 
 const WORKSPACE = '/workspace';
 
@@ -505,5 +506,303 @@ describe('executeLspTool — find_references', () => {
       makeCall('find_references', { path: 'src/foo.ts', line: '1' })
     );
     expect(result).toMatch(/No references found/);
+  });
+});
+
+// ── Timeout safety tests ─────────────────────────────────────────────────
+//
+// A misbehaving LSP (cold rust-analyzer, deadlocked Pylance, hung indexer)
+// must not stall the request indefinitely. Every executeCommand call into
+// the LSP is wrapped with `withLspTimeout` (5s). On timeout the tool
+// surfaces a descriptive error so the model can fall back to grep/read_file.
+
+describe('executeLspTool — timeout safety', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Make every LSP executeCommand call hang forever — exercises the timer. */
+  function makeAllCommandsHang() {
+    (vscode.commands.executeCommand as any).mockImplementation(
+      () => new Promise(() => { /* never resolves */ })
+    );
+  }
+
+  it('outline: surfaces a timeout error when documentSymbolProvider hangs', async () => {
+    makeAllCommandsHang();
+    const promise = executeLspTool(WORKSPACE, makeCall('outline', { path: 'src/foo.ts' }));
+    await vi.advanceTimersByTimeAsync(5_001);
+    const result = await promise;
+    expect(result).toMatch(/LSP request timed out after 5s/);
+    expect(result).toMatch(/grep \+ read_file/);
+  });
+
+  it('get_symbol_source: surfaces a timeout error when documentSymbolProvider hangs', async () => {
+    makeAllCommandsHang();
+    const promise = executeLspTool(
+      WORKSPACE,
+      makeCall('get_symbol_source', { path: 'src/foo.ts', symbol: 'handleClick' })
+    );
+    await vi.advanceTimersByTimeAsync(5_001);
+    const result = await promise;
+    expect(result).toMatch(/LSP request timed out after 5s/);
+  });
+
+  it('find_symbol: surfaces a timeout error when workspaceSymbolProvider hangs', async () => {
+    makeAllCommandsHang();
+    const promise = executeLspTool(WORKSPACE, makeCall('find_symbol', { name: 'handleClick' }));
+    await vi.advanceTimersByTimeAsync(5_001);
+    const result = await promise;
+    expect(result).toMatch(/LSP request timed out after 5s/);
+  });
+
+  it('find_definition: surfaces a timeout error when definitionProvider hangs', async () => {
+    // resolvePosition uses the line path → openTextDocument is called, then
+    // executeDefinitionProvider hangs. Mock openTextDocument to succeed
+    // synchronously so we can isolate the LSP-side hang.
+    (vscode.workspace.openTextDocument as any).mockImplementation(async () => ({
+      getText: () => '  validateToken(req);'
+    }));
+    (vscode.commands.executeCommand as any).mockImplementation(
+      (cmd: string) => {
+        if (cmd === 'vscode.executeDefinitionProvider') return new Promise(() => {});
+        return undefined;
+      }
+    );
+
+    const promise = executeLspTool(
+      WORKSPACE,
+      makeCall('find_definition', { path: 'src/foo.ts', line: '1' })
+    );
+    await vi.advanceTimersByTimeAsync(5_001);
+    const result = await promise;
+    expect(result).toMatch(/LSP request timed out after 5s/);
+  });
+
+  it('find_references: surfaces a timeout error when referenceProvider hangs', async () => {
+    (vscode.workspace.openTextDocument as any).mockImplementation(async () => ({
+      getText: () => '  validateToken(req);'
+    }));
+    (vscode.commands.executeCommand as any).mockImplementation(
+      (cmd: string) => {
+        if (cmd === 'vscode.executeReferenceProvider') return new Promise(() => {});
+        return undefined;
+      }
+    );
+
+    const promise = executeLspTool(
+      WORKSPACE,
+      makeCall('find_references', { path: 'src/foo.ts', line: '1' })
+    );
+    await vi.advanceTimersByTimeAsync(5_001);
+    const result = await promise;
+    expect(result).toMatch(/LSP request timed out after 5s/);
+  });
+
+  it('find_definition (symbol path): surfaces a distinct error when documentSymbolProvider hangs during position resolution', async () => {
+    (vscode.commands.executeCommand as any).mockImplementation(
+      (cmd: string) => {
+        if (cmd === 'vscode.executeDocumentSymbolProvider') return new Promise(() => {});
+        return undefined;
+      }
+    );
+
+    const promise = executeLspTool(
+      WORKSPACE,
+      makeCall('find_definition', { path: 'src/foo.ts', symbol: 'handleClick' })
+    );
+    await vi.advanceTimersByTimeAsync(5_001);
+    const result = await promise;
+    // Position-resolution timeout has its own message — it suggests passing a line as a workaround.
+    expect(result).toMatch(/timed out resolving "handleClick"/);
+    expect(result).toMatch(/pass an explicit line/);
+  });
+
+  it('outline: distinguishes a non-timeout LSP error from a timeout', async () => {
+    (vscode.commands.executeCommand as any).mockImplementation(async () => {
+      throw new Error('rust-analyzer: provider crashed');
+    });
+    const result = await executeLspTool(WORKSPACE, makeCall('outline', { path: 'src/foo.rs' }));
+    expect(result).toMatch(/LSP request failed/);
+    expect(result).toMatch(/rust-analyzer: provider crashed/);
+    expect(result).not.toMatch(/timed out/);
+  });
+});
+
+// ── Adaptive availability feedback ───────────────────────────────────────
+//
+// Tools call `LspAvailability.reportToolResult` after every LSP query so
+// the per-language map self-corrects from real observations. These tests
+// pin the contract: success upgrades, failures don't poison on a single
+// stub file (handled by the service's threshold), and the right languageId
+// is fed in.
+
+describe('executeLspTool — adaptive availability feedback', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    LspAvailability.getInstance().invalidate();
+    (vscode.workspace.openTextDocument as any).mockImplementation(async () => ({
+      languageId: 'ruby',
+      getText: () => 'class Foo; end\n'
+    }));
+  });
+
+  it('outline: reports tool-success with the file languageId on non-empty symbols', async () => {
+    const reportSpy = vi.spyOn(LspAvailability.getInstance(), 'reportToolResult');
+    mockSymbolsResponse([
+      { name: 'Foo', kind: vscode.SymbolKind.Class, range: range(0, 0, 0, 14) }
+    ]);
+
+    await executeLspTool(WORKSPACE, makeCall('outline', { path: 'src/foo.rb' }));
+
+    expect(reportSpy).toHaveBeenCalledWith('ruby', true, expect.stringContaining('foo.rb'));
+    reportSpy.mockRestore();
+  });
+
+  it('outline: reports tool-failure when LSP returns empty array', async () => {
+    const reportSpy = vi.spyOn(LspAvailability.getInstance(), 'reportToolResult');
+    mockSymbolsResponse([]);
+
+    await executeLspTool(WORKSPACE, makeCall('outline', { path: 'src/foo.rb' }));
+
+    expect(reportSpy).toHaveBeenCalledWith('ruby', false, expect.stringContaining('foo.rb'));
+    reportSpy.mockRestore();
+  });
+
+  it('does NOT call reportToolResult when LSP throws (avoids feedback poisoning on transient errors)', async () => {
+    const reportSpy = vi.spyOn(LspAvailability.getInstance(), 'reportToolResult');
+    (vscode.commands.executeCommand as any).mockRejectedValue(new Error('bang'));
+
+    const result = await executeLspTool(WORKSPACE, makeCall('outline', { path: 'src/foo.rb' }));
+    expect(result).toMatch(/LSP request failed/);
+    expect(reportSpy).not.toHaveBeenCalled();
+    reportSpy.mockRestore();
+  });
+
+  it('find_definition: reports tool-success on non-empty results', async () => {
+    const reportSpy = vi.spyOn(LspAvailability.getInstance(), 'reportToolResult');
+    mockCommands({
+      'vscode.executeDefinitionProvider': () => ([
+        loc('/workspace/src/foo.rb', 5, 0)
+      ])
+    });
+    (vscode.workspace.openTextDocument as any).mockImplementation(async () => ({
+      languageId: 'ruby',
+      getText: () => 'def foo\n  1\nend\n'
+    }));
+
+    await executeLspTool(
+      WORKSPACE,
+      makeCall('find_definition', { path: 'src/foo.rb', line: '1' })
+    );
+
+    expect(reportSpy).toHaveBeenCalledWith('ruby', true, expect.stringContaining('foo.rb'));
+    reportSpy.mockRestore();
+  });
+});
+
+// ── maxResults edge cases ────────────────────────────────────────────────
+
+describe('executeLspTool — maxResults edge cases', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('falls back to default 20 when maxResults is non-numeric', async () => {
+    const many = Array.from({ length: 30 }, (_, i) => ({
+      name: 'foo',
+      kind: vscode.SymbolKind.Function,
+      location: { uri: { fsPath: `/workspace/file-${i}.ts` }, range: { start: { line: 0, character: 0 } } }
+    }));
+    mockCommands({ 'vscode.executeWorkspaceSymbolProvider': () => many });
+
+    const result = await executeLspTool(
+      WORKSPACE,
+      makeCall('find_symbol', { name: 'foo', maxResults: 'not-a-number' })
+    );
+    expect(result).toContain('(20 of 30)');
+  });
+
+  it('falls back to default 20 when maxResults is 0 or negative', async () => {
+    const many = Array.from({ length: 30 }, (_, i) => ({
+      name: 'foo',
+      kind: vscode.SymbolKind.Function,
+      location: { uri: { fsPath: `/workspace/file-${i}.ts` }, range: { start: { line: 0, character: 0 } } }
+    }));
+    mockCommands({ 'vscode.executeWorkspaceSymbolProvider': () => many });
+
+    const result = await executeLspTool(
+      WORKSPACE,
+      makeCall('find_symbol', { name: 'foo', maxResults: '-5' })
+    );
+    expect(result).toContain('(20 of 30)');
+  });
+
+  it('caps maxResults at MAX_RESULTS_CAP (100) even if a much larger value is passed', async () => {
+    const many = Array.from({ length: 200 }, (_, i) => ({
+      name: 'foo',
+      kind: vscode.SymbolKind.Function,
+      location: { uri: { fsPath: `/workspace/file-${i}.ts` }, range: { start: { line: 0, character: 0 } } }
+    }));
+    mockCommands({ 'vscode.executeWorkspaceSymbolProvider': () => many });
+
+    const result = await executeLspTool(
+      WORKSPACE,
+      makeCall('find_symbol', { name: 'foo', maxResults: '500' })
+    );
+    expect(result).toContain('(100 of 200)');
+  });
+});
+
+// ── find_references missing-coverage gap-fillers ─────────────────────────
+
+describe('executeLspTool — find_references additional shapes', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('resolves position by symbol name (not just line)', async () => {
+    mockCommands({
+      'vscode.executeDocumentSymbolProvider': () => ([
+        { name: 'validateToken', kind: vscode.SymbolKind.Function, range: range(10, 0, 20, 1) }
+      ]),
+      'vscode.executeReferenceProvider': () => ([
+        loc('/workspace/src/api.ts', 5, 0)
+      ])
+    });
+    (vscode.workspace.openTextDocument as any).mockImplementation(async () => ({
+      getText: () => 'line0\nline1\nline2\nline3\nline4\nvalidateToken()\n'
+    }));
+
+    const result = await executeLspTool(
+      WORKSPACE,
+      makeCall('find_references', { path: 'src/middleware.ts', symbol: 'validateToken' })
+    );
+
+    expect(result).toContain('References (1):');
+    expect(result).toContain('/workspace/src/api.ts:6: validateToken()');
+  });
+});
+
+describe('executeLspTool — find_definition position resolution edge cases', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('returns error when line exceeds file length', async () => {
+    (vscode.workspace.openTextDocument as any).mockImplementation(async () => ({
+      getText: () => 'one\ntwo\nthree' // 3 lines
+    }));
+
+    const result = await executeLspTool(
+      WORKSPACE,
+      makeCall('find_definition', { path: 'src/short.ts', line: '99' })
+    );
+    expect(result).toMatch(/Line 99 exceeds file length/);
   });
 });

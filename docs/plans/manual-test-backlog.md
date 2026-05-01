@@ -431,6 +431,62 @@ These exercise the `run_shell` tool for native-tool-calling models (V4, V3 Chat,
 
 ---
 
+## M30. LSP per-language availability + reactive recovery (P0)
+
+**Why this matters:** Phase 4 of [docs/plans/partial/lsp-integration.md](partial/lsp-integration.md) shipped a per-language `LspAvailability` service that gates the LSP tools (`outline`, `get_symbol_source`, `find_symbol`, `find_definition`, `find_references`) and feeds the system prompt's *"LSP works for: X. No LSP for: Y."* declaration. Five real-world recovery paths need eyeballing in a dev host because mocks can't reproduce cold rust-analyzer / language-server-not-installed scenarios.
+
+**Setup:**
+- Open a polyglot workspace with at least one language whose LSP is installed and one whose isn't (e.g. a Rails repo with `.rb` + `.ts`, or any project plus a Ruby file when `shopify.ruby-lsp` is uninstalled).
+- Tail the *DeepSeek Moby* output channel — all LspAvailability log lines are prefixed `[LspAvailability]`.
+
+**Steps:**
+
+1. **Cold-start discovery.** Reload the window. Within ~30s of activation, look for:
+   ```
+   [LspAvailability] Discovery complete in <ms> — available=[…] unavailable=[…] untested=[…]
+   ```
+   The list should match what's actually installed (TypeScript almost always available; Ruby/Elixir/Rust depend on installed extensions + tools).
+
+2. **Cold-LSP retry.** If a language's LSP boots slowly (rust-analyzer, gopls), the initial probe times out and reports unavailable. ~30s later you should see:
+   ```
+   [LspAvailability] Retrying probe for rust (…)
+   [LspAvailability] rust now available after retry
+   ```
+   Send an LSP-aware question afterwards (e.g. *"outline src/main.rs"*) and verify the model uses `outline` rather than falling back to grep.
+
+3. **Editor-focus retry.** With ruby still marked unavailable (e.g. ruby-lsp not yet installed), open a `.rb` file in the editor. Expect:
+   ```
+   [LspAvailability] ruby marked unavailable; editor focus triggers retry probe
+   [LspAvailability] Retrying probe for ruby (…)
+   [LspAvailability] ruby still unavailable after retry  (debug)
+   ```
+   Now install `shopify.ruby-lsp` (and its gem). Focus the `.rb` tab again. Within ~1s:
+   ```
+   [LspAvailability] ruby now available after retry  (info)
+   ```
+
+4. **System-prompt declaration updates per request.** With ruby in `available` after step 3, send any user message. In the request log (or via *Moby: Export Turn as JSON (Debug)*) confirm the system prompt contains `LSP works for: …, ruby` and the LSP tool definitions are attached. Without manually invalidating, edit the gem to break it and run *Moby: Refresh LSP Availability* — next request should drop ruby from `LSP works for:` and add it to `No LSP for:`.
+
+5. **Timeout safety.** Hardest to provoke deliberately, easiest to verify visually with a misbehaving LSP. If a tool call (`find_symbol`, `find_definition`, etc.) takes >5s to return, the tool result must be:
+   ```
+   Error: LSP request timed out after 5s. The language server may be cold-starting, indexing, or hung. Try again in a few seconds, or fall back to grep + read_file for this query.
+   ```
+   The chat must NOT hang waiting for the LSP — the request should complete with the timeout-error tool result and the model proceeds (typically by falling back to grep). Closest natural reproduction: open a fresh huge Rust workspace, immediately ask the model to `find_symbol "main"` while rust-analyzer is still indexing.
+
+**Pass criteria:**
+- Discovery log matches the actual installed LSP picture (no false positives, no false negatives).
+- Cold-LSP recovery happens within the 30s post-discovery retry OR on the next editor focus.
+- System prompt declaration tracks `LspAvailability.getDeclaredAvailability()` per request — visible in exported turn JSON.
+- A hung LSP returns a `timed out after 5s` error rather than stalling the chat indefinitely.
+- `Moby: Refresh LSP Availability` command flushes + re-discovers.
+
+**Failure modes to look for:**
+- Discovery silently lists `untested=[…]` languages forever — means findFiles missed their extensions or `openTextDocument` failed; check `PROBE_FILE_GLOB` in [src/services/lspAvailability.ts](../../src/services/lspAvailability.ts).
+- LSP tools advertised in the prompt for a language with no symbol provider — means `lspTools` capability is on but `available` list is wrong. Check `reportToolResult` is firing on every tool call.
+- Chat freezes on tool execution and only Stop button recovers — the timeout wrapper isn't engaging; verify [src/utils/lspTimeout.ts](../../src/utils/lspTimeout.ts) is imported by every `executeCommand` site.
+
+---
+
 ---
 
 ## Scroll investigation (not yet a test, still an audit item)

@@ -258,7 +258,16 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         }
       }
     });
-    this.settingsManager.onModelChanged(data => {
+    this.settingsManager.onModelChanged(async data => {
+      // Keep the WASM tokenizer in sync with the active model. Any settings
+      // path that changes model (manual settings.json edit, command, etc.)
+      // funnels through here — the explicit selectModel webview handler
+      // already does the same, this catches the rest.
+      try {
+        await TokenService.getInstance().selectModel(data.model);
+      } catch {
+        /* TokenService logs its own errors; don't block the UI update */
+      }
       this._view?.webview.postMessage({ type: 'modelChanged', model: data.model });
     });
     this.settingsManager.onSettingsReset(() => {

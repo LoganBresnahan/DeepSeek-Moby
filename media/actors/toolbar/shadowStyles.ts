@@ -140,19 +140,9 @@ export const toolbarShadowStyles = `
   opacity: 1;
 }
 
-/* Send button */
-.btn.send-btn {
-  background: var(--vscode-button-background);
-  color: var(--vscode-button-foreground);
-  border: none;
-  opacity: 1;
-  transition: background 0.18s ease, color 0.18s ease;
-}
-
-.btn.send-btn:hover {
-  background: var(--vscode-button-hoverBackground);
-}
-
+/* Send button — resting state inherits .btn translucent (transparent bg,
+ * opacity 0.7) so it looks the same as Plan/etc. when not sendable.
+ * The "primed" + ":disabled" overrides below carry the affordance. */
 .btn.send-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
@@ -164,6 +154,8 @@ export const toolbarShadowStyles = `
 .btn.send-btn.primed {
   background: var(--vscode-terminal-ansiGreen, #4eb14e);
   color: var(--vscode-editor-background, #1e1e1e);
+  border-color: var(--vscode-terminal-ansiGreen, #4eb14e);
+  opacity: 1;
 }
 
 .btn.send-btn.primed:hover {

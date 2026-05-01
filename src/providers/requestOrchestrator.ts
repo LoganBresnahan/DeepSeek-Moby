@@ -7,6 +7,7 @@ import { logger } from '../utils/logger';
 import { tracer } from '../tracing';
 import { workspaceTools, applyCodeEditTool, createFileTool, deleteFileTool, deleteDirectoryTool, runShellTool, webSearchTool, executeToolCall } from '../tools/workspaceTools';
 import { lspTools } from '../tools/lspTools';
+import { LspAvailability } from '../services/lspAvailability';
 import { createFile as createFileCapability, deleteFile as deleteFileCapability } from '../capabilities/files';
 import { formatFilesAffected } from '../capabilities/types';
 import { parseDSMLToolCalls, stripDSML } from '../utils/dsmlParser';
@@ -1155,11 +1156,22 @@ export class RequestOrchestrator {
     const webSearchAutoAvailable = wsState.mode === 'auto' && wsState.configured;
     const promptCaps = getCapabilities(this.deepSeekClient.getModel());
     const runShellAvailable = promptCaps.shellProtocol === 'native-tool';
-    const lspToolsAvailable = promptCaps.lspTools === true;
+    // Per-language LSP availability — phase 4. Empty `available` array
+    // means no language has a working LSP; we both exclude tools AND skip
+    // the prompt declaration. Non-empty arrays drive a declaration line
+    // in the prompt.
+    const lspDecl = LspAvailability.getInstance().getDeclaredAvailability();
+    const lspToolsAvailable = promptCaps.lspTools === true && lspDecl.available.length > 0;
     if (isReasonerModel) {
       systemPrompt += getReasonerShellPrompt({ webSearchAvailable: webSearchAutoAvailable });
     } else {
-      systemPrompt += buildToolGuidance(promptStyle, webSearchAutoAvailable, runShellAvailable, lspToolsAvailable);
+      systemPrompt += buildToolGuidance(
+        promptStyle,
+        webSearchAutoAvailable,
+        runShellAvailable,
+        lspToolsAvailable,
+        lspDecl
+      );
     }
 
     // ── 3. Edit format (compact) ──
@@ -2995,7 +3007,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
       const includeWebSearch = wsState.mode === 'auto' && wsState.configured;
       const streamingCaps = getCapabilities(this.deepSeekClient.getModel());
       const includeRunShell = streamingCaps.shellProtocol === 'native-tool';
-      const includeLspTools = streamingCaps.lspTools === true;
+      const includeLspTools = streamingCaps.lspTools === true && LspAvailability.getInstance().getDeclaredAvailability().available.length > 0;
       const tools = [
         ...workspaceTools,
         applyCodeEditTool,
@@ -3323,7 +3335,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
       const includeWebSearch = toolLoopWsState.mode === 'auto' && toolLoopWsState.configured;
       const toolLoopCaps = getCapabilities(this.deepSeekClient.getModel());
       const includeRunShell = toolLoopCaps.shellProtocol === 'native-tool';
-      const includeLspTools = toolLoopCaps.lspTools === true;
+      const includeLspTools = toolLoopCaps.lspTools === true && LspAvailability.getInstance().getDeclaredAvailability().available.length > 0;
       const tools = [
         ...workspaceTools,
         applyCodeEditTool,
@@ -3575,7 +3587,8 @@ function buildToolGuidance(
   promptStyle: PromptStyle,
   webSearchAutoAvailable: boolean,
   runShellAvailable: boolean,
-  lspToolsAvailable: boolean
+  lspToolsAvailable: boolean,
+  lspDecl?: { available: string[]; unavailable: string[]; untested: string[] }
 ): string {
   const webSearchLine = webSearchAutoAvailable
     ? '- web_search: Search the web for current information\n'
@@ -3586,9 +3599,10 @@ function buildToolGuidance(
   const runShellLine = runShellAvailable
     ? '- run_shell: Run a shell command in the workspace (tests, builds, git, installs, etc.). Long-running commands like servers and watch modes are refused.\n'
     : '';
-  // LSP Phase 1+2 — single-file structural reads + workspace/cross-file
-  // queries. Conditional because R1 / non-LSP custom models don't get the
-  // dispatch.
+  // LSP Phase 1+2 tools + Phase 4 per-language declaration. Tool list is
+  // gated on at-least-one-language having LSP. Declaration line below the
+  // tools tells the model which languages will respond and which won't,
+  // so it doesn't waste calls on languages without a server.
   const lspToolsLines = lspToolsAvailable
     ? '- outline: List the symbols in a file (functions, classes, methods) without reading the body — cheap orientation for large files.\n' +
       '- get_symbol_source: Read just one symbol\'s body from a file when you only need that part.\n' +
@@ -3596,10 +3610,35 @@ function buildToolGuidance(
       '- find_definition: Jump from a symbol reference to its declaration. Provide a file + line, or file + symbol name.\n' +
       '- find_references: List every place a symbol is used. More accurate than grep — handles dynamic dispatch and ignores comments.\n'
     : '';
+  const lspDeclarationLine = lspToolsAvailable && lspDecl
+    ? renderLspDeclaration(lspDecl)
+    : '';
   if (promptStyle === 'minimal') {
-    return renderMinimalToolGuidance(webSearchLine, runShellLine, lspToolsLines);
+    return renderMinimalToolGuidance(webSearchLine, runShellLine, lspToolsLines, lspDeclarationLine);
   }
-  return renderStandardToolGuidance(webSearchLine, runShellLine, lspToolsLines);
+  return renderStandardToolGuidance(webSearchLine, runShellLine, lspToolsLines, lspDeclarationLine);
+}
+
+/**
+ * Render the per-language LSP availability declaration. Tells the model
+ * which languages have a working language server and which don't, so it
+ * picks LSP tools only for languages that will respond. Empty string when
+ * we have no information yet (untested map) — model treats it as "try it,
+ * fall back if empty."
+ */
+function renderLspDeclaration(decl: { available: string[]; unavailable: string[]; untested: string[] }): string {
+  const parts: string[] = [];
+  if (decl.available.length > 0) {
+    parts.push(`LSP works for: ${decl.available.join(', ')}.`);
+  }
+  if (decl.unavailable.length > 0) {
+    parts.push(`No LSP for: ${decl.unavailable.join(', ')} — use grep + read_file for those.`);
+  }
+  if (decl.untested.length > 0) {
+    parts.push(`Untested: ${decl.untested.join(', ')} (try LSP first; fall back to grep on empty).`);
+  }
+  if (parts.length === 0) return '';
+  return parts.join(' ') + '\n';
 }
 
 // ── Minimal variant — V4-thinking ─────────────────────────────────────
@@ -3617,7 +3656,15 @@ When the user asks a question, answer the question. Use file-modification tools 
 
 Reading files is cheap; editing files is consequential. Read whatever you need to answer accurately, but only modify files when the user has asked for a change.\n`;
 
-function renderMinimalToolGuidance(webSearchLine: string, runShellLine: string, lspToolsLines: string): string {
+function renderMinimalToolGuidance(webSearchLine: string, runShellLine: string, lspToolsLines: string, lspDeclarationLine: string): string {
+  // When LSP is available, add a one-line directive so the model reaches for
+  // symbol-aware tools instead of grep on "where is X?" / "what calls Y?".
+  const lspRule = lspToolsLines
+    ? '3. For symbol questions ("where is X?", "what calls Y?", "what does Z do?"), prefer find_symbol / find_definition / find_references / get_symbol_source over grep + read_file. They understand declarations vs references and skip comments.\n'
+    : '';
+  // Phase 4 — per-language declaration sits right under the LSP tool list
+  // so the model sees both the menu and which languages will respond.
+  const lspBlock = lspToolsLines + (lspDeclarationLine ? `  ${lspDeclarationLine}` : '');
   return `
 Tools available for codebase exploration:
 - read_file: Read file contents
@@ -3625,7 +3672,7 @@ Tools available for codebase exploration:
 - grep: Search file contents for text or patterns
 - list_directory: See directory structure
 - file_metadata: Get a file's size, type, and a content preview
-${lspToolsLines}${webSearchLine}
+${lspBlock}${webSearchLine}
 Tools available for workspace modification:
 - edit_file: Patch specific sections of an existing file (search/replace pairs)
 - write_file: Create a new file or overwrite an existing one entirely
@@ -3634,7 +3681,8 @@ Tools available for workspace modification:
 ${runShellLine}
 Rules:
 1. Tool results include the absolute path of files touched — trust those paths over your own assumptions when they disagree.
-2. delete_file and delete_directory are terminal for that path in the turn. Once either succeeds, do not call delete_file/delete_directory on the same path again.\n`;
+2. delete_file and delete_directory are terminal for that path in the turn. Once either succeeds, do not call delete_file/delete_directory on the same path again.
+${lspRule}Output renders as markdown. Use markdown syntax (links, tables, lists), not raw HTML tags.\n`;
 }
 
 // ── Standard variant — V3 / R1 / V4-non-thinking / custom models ──────
@@ -3650,7 +3698,7 @@ Match your response to the user's intent. The distinction between "show me" and 
 
 When the user's phrasing is ambiguous, lean toward prose + markdown. Ask a clarifying question rather than creating files the user didn't ask for.\n`;
 
-function renderStandardToolGuidance(webSearchLine: string, runShellLine: string, lspToolsLines: string): string {
+function renderStandardToolGuidance(webSearchLine: string, runShellLine: string, lspToolsLines: string, lspDeclarationLine: string): string {
   // The "use the dedicated tool first" guidance below only matters when
   // run_shell is present — otherwise there's no shell-as-fallback to
   // disambiguate against. Conditional addition keeps the prompt compact
@@ -3658,6 +3706,15 @@ function renderStandardToolGuidance(webSearchLine: string, runShellLine: string,
   const shellRule = runShellLine
     ? '6. Use the dedicated tool when one exists — `read_file` not `cat`, `find_files` not `find`, `grep` not raw `grep`. Reach for `run_shell` when no dedicated tool fits (running tests, building, git operations, installing deps).\n'
     : '';
+  // LSP discovery rule — only when LSP tools are advertised. Pushes the
+  // model toward symbol-aware navigation instead of grep + read for
+  // questions like "where is X used?" / "what does Y do?".
+  const lspRule = lspToolsLines
+    ? '7. For symbol questions, prefer the LSP tools: `find_symbol` for "where does X exist?", `find_definition` to follow a reference to its declaration, `find_references` for "what uses Y?", `get_symbol_source` to read one function without reading the whole file, `outline` before reading any file >300 lines. They\'re more accurate than grep on names and cheaper than reading whole files.\n'
+    : '';
+  // Phase 4 — per-language declaration sits right under the LSP tool list
+  // so the model sees both the menu and which languages will respond.
+  const lspBlock = lspToolsLines + (lspDeclarationLine ? `  ${lspDeclarationLine}` : '');
   return `
 You have tools to explore the codebase:
 - read_file: Read file contents
@@ -3665,7 +3722,7 @@ You have tools to explore the codebase:
 - grep: Search for text/patterns in file contents
 - list_directory: See directory structure
 - file_metadata: Get a file's size, type, and a short content preview
-${lspToolsLines}${webSearchLine}
+${lspBlock}${webSearchLine}
 Use tools to understand the code before responding. Read relevant files first, then provide accurate answers.
 
 You have tools to modify the workspace:
@@ -3683,5 +3740,6 @@ Rules for file modifications:
    - edit_file fails if the \`search\` text doesn't match the file exactly. If you get that error, re-read the file and quote the current contents verbatim.
 4. delete_file and delete_directory are terminal for that path in the turn. Once either succeeds, do not call delete_file/delete_directory on the same path again. (write_file is fine — it'll just create a fresh file.)
 5. Use delete_file for files and delete_directory for directories. If you delete all files inside a directory and want to remove the now-empty directory too, call delete_directory on it (with recursive="false", the default). Set recursive="true" only when you explicitly want to delete a directory AND every file inside it in one operation.
-${shellRule}\n`;
+${shellRule}${lspRule}
+Output renders as markdown. Use markdown syntax (links, tables, lists), not raw HTML tags.\n`;
 }

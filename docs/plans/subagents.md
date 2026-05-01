@@ -232,7 +232,34 @@ The router is generic over roles — adding a new role is a new module + a regis
 
 **Acceptance:** user with Ollama running Qwen-14B-Coder configures `moby.subagents.search-digest = "qwen2.5-coder-14b-local"`, search digestion works at a quality bar comparable to V4-flash, no main-loop latency regression after warm-up.
 
-### Phase 4 — Optional MCP extraction (parked; revisit after Phase 3 lands)
+### Phase 4 — Per-turn tool subsetting (cross-cuts with context-cleanup)
+
+**Goal:** stop advertising every tool on every turn. The full tools array is ~1850 tokens regardless of what the user asked — `delete_file`, `run_shell`, `edit_file` schemas are dead weight on a "what does X do?" question.
+
+**Why this lives here:** the routing infrastructure that makes subagents work (intent classification before the main model runs) is the same infrastructure that decides which tools to advertise. A `tool-classify` role (already in Phase 2 above) can do double duty: classify the user's intent, then attach only the relevant tool subset to the main model's request.
+
+**Tool tiers:**
+
+| Tier | Tools | When attached |
+|---|---|---|
+| **Always** | `read_file`, `find_files`, `grep`, `list_directory`, `file_metadata` | Every turn (cheap; ~600 tokens) |
+| **LSP** | `outline`, `get_symbol_source`, `find_symbol`, `find_definition`, `find_references` | Already gated on `LspAvailability.getDeclaredAvailability().available.length > 0` |
+| **Modify** | `edit_file`, `write_file`, `delete_file`, `delete_directory` | Intent classifier flags edit-shaped ("update foo", "add X", "fix this", "refactor") |
+| **Shell** | `run_shell` | Intent classifier flags shell-shaped ("run tests", "build", "git status") OR explicit user mention |
+| **Web** | `web_search` (when not in manual mode) | Already conditional on `webSearchManager.isAvailable()` |
+
+**Token math:** typical "explain this" question on a workspace with TS LSP attached → ~600 (always) + ~600 (LSP) = ~1200 tokens. Was ~1850. Saves ~650 tokens per request, plus the corresponding system-prompt tool-guidance lines (which are already conditional on the rendered tool set, so they shrink for free).
+
+**Risk: misclassification suppresses a needed tool.** Mitigations:
+- Never suppress a tool the model has previously used in the same session — once `edit_file` is in play, it stays advertised through the rest of the turn.
+- The classifier output is a hint, not a hard gate. On classifier failure (timeout, unparseable response), default to the full tool set. Cost of extra tokens beats the cost of the model not having a tool it needed.
+- Classifier confidence below threshold → also default to full set. Better to spend 650 tokens than have the model fight a missing tool.
+
+**Acceptance:** simple "what is X?" questions show `tools_array≈1200` instead of `tools_array≈1850` in the Phase 1 instrumentation log; edit-shaped questions still get the full set; no observed regressions where the main model wants a suppressed tool.
+
+**Cross-reference:** this is also tracked in [context-cleanup.md → Phase 5](context-cleanup.md) as a context-spend lever; the design lives here because the routing primitives are shared.
+
+### Phase 5 — Optional MCP extraction (parked; revisit after Phase 3 lands)
 
 **Goal:** extract the subagent routing layer as an MCP server for cross-editor reuse.
 
@@ -245,7 +272,7 @@ The router is generic over roles — adding a new role is a new module + a regis
 - At least one external user request for a non-Moby integration of the same routing pattern.
 - A clear separation between "Moby-specific orchestrator integration" (stays in Moby) and "generic subagent routing" (extracts cleanly).
 
-If those conditions don't hold, Phase 4 stays parked indefinitely and that's fine — the Moby-internal version is providing the value.
+If those conditions don't hold, Phase 5 stays parked indefinitely and that's fine — the Moby-internal version is providing the value.
 
 ## What we are NOT doing in this plan
 
@@ -254,7 +281,7 @@ If those conditions don't hold, Phase 4 stays parked indefinitely and that's fin
 - **Multi-step planning via subagent.** Same reason — small models lose the thread on multi-iteration tool loops. Planning stays on main.
 - **Allowing the main model to choose to delegate.** Tool-routing first; the explicit `delegate_to_subagent` escape hatch can be added later if needed (see "Why tool-routing" above).
 - **Cross-turn subagent memory.** Subagents are stateless per call. If a sub needs context, it's passed in as part of the input. No subagent-level conversation history.
-- **A UI for monitoring subagent calls.** Useful for debugging, but a Phase 5+ concern. Subagent activity initially logs through the existing extension Logger and shows up in tool dropdowns just like any other tool result.
+- **A UI for monitoring subagent calls.** Useful for debugging, but a later concern. Subagent activity initially logs through the existing extension Logger and shows up in tool dropdowns just like any other tool result.
 - **Cost / quota tracking per role.** Cloud subagents incur API spend. Tracking this is a follow-up — first prove the spend is worth it.
 
 ## Risks and mitigation

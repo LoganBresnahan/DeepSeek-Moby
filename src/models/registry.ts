@@ -255,6 +255,12 @@ export interface RegisteredModelInfo {
    *  value (override > registry default) is sent as `reasoningEffort` below
    *  by `sendModelList()`. */
   reasoningEffortDefault?: ReasoningEffort;
+  /** Whether manual edit mode is meaningful for this model. Native-tool
+   *  models bypass the text channel for edits (they call `edit_file` /
+   *  `write_file`), so manual would render an Apply button on code blocks
+   *  the model never emits. The toolbar uses this to hide Manual from the
+   *  edit-mode cycle. Mirrors `supportsManualMode(id)`. */
+  supportsManualMode: boolean;
 }
 
 /**
@@ -272,6 +278,7 @@ export function getAllRegisteredModels(): RegisteredModelInfo[] {
       name: BUILTIN_DISPLAY_NAMES[id] ?? id,
       maxTokens: caps.maxOutputTokensCap ?? caps.maxOutputTokens,
       isCustom: false,
+      supportsManualMode: caps.toolCalling !== 'native',
       ...(caps.reasoningEffort !== undefined && { reasoningEffortDefault: caps.reasoningEffort }),
     });
   }
@@ -282,6 +289,7 @@ export function getAllRegisteredModels(): RegisteredModelInfo[] {
       name: CUSTOM_MODEL_NAMES.get(id) ?? id,
       maxTokens: caps.maxOutputTokensCap ?? caps.maxOutputTokens,
       isCustom: true,
+      supportsManualMode: caps.toolCalling !== 'native',
       ...(caps.reasoningEffort !== undefined && { reasoningEffortDefault: caps.reasoningEffort }),
     });
   }
@@ -432,18 +440,16 @@ export function isReasonerModel(modelId: string): boolean {
  * Whether manual edit mode is usable with the given model.
  *
  * Manual mode renders code blocks with an **Apply** button — which requires
- * the model to emit SEARCH/REPLACE blocks in its text response. Tool-calling
- * models bypass the text channel entirely, so manual mode would look like a
- * dead button.
+ * the model to emit SEARCH/REPLACE blocks in its text response. Native-tool
+ * models bypass the text channel for edits entirely (they call `edit_file`
+ * / `write_file`), so manual would render an Apply button on code blocks
+ * the model never emits.
  *
- * Rule: `editProtocol[0]` (the primary/preferred channel) decides. If it's
- * `search-replace`, manual works. If it's `native-tool`, tools will fire
- * first and manual is blocked. Empty array means the model can't edit at
- * all — manual is a reasonable default because the UX is just prose + code
- * references with no apply semantics.
+ * Rule: any model with `toolCalling: 'native'` is excluded — V3 chat, V4
+ * family, native-tool custom models. Models with `toolCalling: 'none'`
+ * (R1, custom shell-only models) keep manual mode.
  */
 export function supportsManualMode(modelId: string): boolean {
   const caps = getCapabilities(modelId);
-  if (caps.editProtocol.length === 0) return true;
-  return caps.editProtocol[0] === 'search-replace';
+  return caps.toolCalling !== 'native';
 }

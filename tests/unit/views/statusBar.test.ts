@@ -139,13 +139,15 @@ describe('StatusBar', () => {
   });
 
   describe('update()', () => {
-    it('fetches session stats and updates text', async () => {
+    it('fetches session stats and renders the minimal robot + tokens text', async () => {
       await statusBar.update();
 
       expect(mockConversationManager.getSessionStats).toHaveBeenCalled();
-      expect(mockStatusBarItem.text).toContain('DeepSeek Moby');
-      expect(mockStatusBarItem.text).toContain('deepseek-chat');
-      expect(mockStatusBarItem.text).toContain('12,345');
+      // 0.3.0: status bar text is `$(robot) <count> tk` — no model name, no
+      // "DeepSeek Moby" prefix. Branding lives in the tooltip.
+      expect(mockStatusBarItem.text).toBe('$(robot) 12,345 tk');
+      expect(mockStatusBarItem.text).not.toContain('DeepSeek Moby');
+      expect(mockStatusBarItem.text).not.toContain('deepseek-chat');
     });
 
     it('updates tooltip with detailed stats', async () => {
@@ -158,22 +160,26 @@ describe('StatusBar', () => {
       expect(tooltip).toContain('Total Messages: 42');
     });
 
-    it('falls back to "deepseek-v4-pro-thinking" when no model configured', async () => {
+    it('falls back to default model in the tooltip when no model configured', async () => {
       mockConfigValues.set('model', undefined);
       statusBar = new StatusBar(mockClient, mockConversationManager);
 
       await statusBar.update();
 
-      expect(mockStatusBarItem.text).toContain('deepseek-v4-pro-thinking');
+      // Default surfaces in the tooltip now (text is model-free).
+      expect(mockStatusBarItem.tooltip as string).toContain('deepseek-v4-pro-thinking');
     });
   });
 
   describe('updateModel()', () => {
-    it('changes the model text displayed', () => {
-      statusBar.updateModel('deepseek-reasoner');
+    it('refreshes via update() so tooltip tracks the new model', async () => {
+      mockConfigValues.set('model', 'deepseek-reasoner');
+      await statusBar.updateModel('deepseek-reasoner');
 
-      expect(mockStatusBarItem.text).toContain('deepseek-reasoner');
-      expect(mockStatusBarItem.text).toContain('DeepSeek Moby');
+      // Text remains the minimal `$(robot) ... tk` shape.
+      expect(mockStatusBarItem.text).toBe('$(robot) 12,345 tk');
+      // Tooltip carries the new model name.
+      expect(mockStatusBarItem.tooltip as string).toContain('deepseek-reasoner');
     });
   });
 

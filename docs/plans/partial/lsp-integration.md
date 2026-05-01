@@ -1,7 +1,7 @@
 # LSP integration for semantic code navigation
 
-**Status:** Not started — design draft.
-**Date:** 2026-04-29
+**Status:** Phase 1 + Phase 2 shipped 2026-04-30. Phase 3a (global probe) shipped but being superseded by Phase 4 (per-language availability service). Phase 4 in progress.
+**Date:** 2026-04-29 (original) / 2026-04-30 (Phase 3 update) / 2026-05-01 (Phase 4 added)
 
 ## Context
 
@@ -131,15 +131,191 @@ R1 is the explicit exclusion. R1 communicates with the workspace exclusively thr
 
 **Acceptance:** "where is X defined" / "what calls Y" become single-tool-call answers across the languages a typical user has installed.
 
-### Phase 3 — Telemetry + tuning (parked until usage data justifies it)
+### Phase 3 — Workspace probe + telemetry + tuning
 
-Once Phase 1+2 are in real use, instrument a few questions:
+**Status:** workspace probe shipped 2026-04-30. Telemetry/tuning items remain parked until real-world usage data justifies them.
 
-- How often does the model pick `read_file` when `get_symbol_source` would have been better? (Likely needs prompt tuning.)
-- How often does the model call `find_symbol` with a name that has 50+ matches? (Indicates the truncation cap is too generous or the model needs guidance to narrow.)
-- What's the cache-hit rate on document symbol provider calls? VS Code caches these but cross-call repeats are still expensive. If hit rate is low, we add a per-turn cache.
+#### 3a — Workspace LSP availability probe ✅ Shipped
 
-No code changes in Phase 3 by default — gate the work on observed problems.
+**Motivation.** Without a probe, LSP tools are advertised even on workspaces with no language server installed (e.g. a vanilla JS-only workspace running through TS-server, a markdown-only repo, a non-code workspace). The 5 LSP tool schemas add ~600 prompt tokens per request — wasted when the workspace can't deliver. Worse, the model wastes a tool call learning the LSP isn't available.
+
+**Implementation:** [src/services/lspProbe.ts](../../../src/services/lspProbe.ts) — singleton `LspProbe` class with cache + invalidation.
+
+- **Algorithm.** Single coarse global yes/no per workspace.
+  1. Build a candidate list of up to 3 source files. Prefer already-open documents whose `languageId` is in `SOURCE_LANGUAGE_IDS` (allowlist of ~50 known code languages — strict to avoid picking `.log`, `.md`, `.json` files that have no symbol provider). Fill with `vscode.workspace.findFiles(PROBE_FILE_GLOB, PROBE_EXCLUDE, MAX_PROBES * 2)`.
+  2. Probe each candidate via `vscode.commands.executeCommand('vscode.executeDocumentSymbolProvider', uri)` with a 1500ms timeout (per-candidate).
+  3. Bail on the first candidate returning a non-empty array → cache `true`.
+  4. All candidates empty → cache `false`. All errors → cache `true` (optimistic; tool-level failures handle per-language fallback gracefully).
+- **Glob coverage.** `PROBE_FILE_GLOB` covers ~60 source extensions across mainstream + long-tail languages: TS family (mts/cts/mjs/cjs), Python (+pyi), Rust, Go, Zig, Nim, Crystal, D, JVM (+kts/scala/sc/groovy/gradle), .NET (+fs/fsx/fsi/vb), C/C++ (+cc/cxx/hh/hxx), Objective-C, Swift, Dart, Vue/Svelte/Astro, Ruby (+erb), PHP/Perl, Erlang/Elixir, Haskell/OCaml/Clojure/Racket/Scheme/Lisp, Lua/R/Julia/MATLAB/Tcl/Elm/Haxe, Fortran/Ada, Solidity/Cairo, Shell/PowerShell, Proto/Thrift/GraphQL/Prisma, SQL/TOML/YAML.
+- **Exclude.** `node_modules`, `.git`, `dist`, `build`, `out`, `target`, `vendor`, `.next`, `.nuxt`, `.cache`, `.tox`, `.venv`, `venv`, `__pycache__`, `.idea`, `.vscode`.
+- **Cache invalidation.** `vscode.workspace.onDidChangeWorkspaceFolders` + `vscode.extensions.onDidChange` (catches LSP install/uninstall mid-session). Manual `invalidate()` available.
+- **Activation timing.** Probe kicks off via `warmUp()` immediately after `tokenService.initialize()` so the first request usually has a cached answer. Orchestrator reads cache via `getCached()`; `null` → optimistic include (avoid blocking first turn waiting for probe).
+- **Gating.** Both orchestrator paths (`streamAndIterateWithToolCalls`, `runToolLoop`) gate `includeLspTools` on `caps.lspTools === true && LspProbe.getInstance().getCached() !== false`. Same gate applied in `buildToolGuidance` so the prompt doesn't advertise tools we won't include.
+
+**Bug history.** Initial open-docs filter (`languageId !== 'plaintext'`) was too loose — it picked any non-plaintext file the user had open. Real-world session restored with a `.log` file open → probe selected it → 0 symbols → cached `false` for an entire workspace that had hundreds of TS files with a working LSP. Fix: replaced negative filter with `SOURCE_LANGUAGE_IDS` allowlist + multi-candidate probe so a non-code open doc no longer poisons the result.
+
+**Limitations and tightening backlog.**
+- **Coarse global yes/no.** A workspace mixing TS (LSP available) + Python (no Pylance) reports `true` because the TS file responds. Python-specific tool calls then return empty per-call (each tool surfaces its own "no LSP for this language" hint). Per-language refinement is possible but adds a `Map<languageId, boolean>` cache and probe-per-language complexity. Defer until mixed-LSP confusion shows up in real usage.
+- **`MAX_PROBES = 3` is a guess.** If real workspaces show probes still landing on duds (e.g. all 3 hits are stub files or generated code with no symbols, while the rest of the workspace has LSP), bump to 5 or 10. Trade-off: each probe spawns an LSP call up to 1500ms, so 10 candidates worst-case is ~15s — too slow for the activation hot path. **Tightening rule of thumb:** raise the cap if probe says `false` but a manual `find_symbol` later succeeds in the same workspace; lower it if the cap delays activation noticeably.
+- **Open-docs allowlist may need additions.** New languageId values (Mojo, Roc, Gleam, etc. as those mature) will get filtered out until we expand the set. Keeping in sync with `PROBE_FILE_GLOB` is a manual step.
+
+#### 3b — Telemetry + tuning (parked)
+
+Once Phase 1+2+3a are in real use, instrument these questions before adding more code:
+
+- **How often does the model pick `read_file` when `get_symbol_source` would have been better?** Look for turns where the model reads a file >300 lines and the question was "what does function X do" — it could have used `get_symbol_source` instead. Likely needs prompt tuning, not code changes.
+- **How often does `find_symbol` overflow the 20-result default cap?** If common, raise the default. If rare, leave alone.
+- **What's the cache-hit rate on document symbol provider calls?** VS Code caches these but cross-call repeats are still expensive. If real workspaces hit symbol provider many times per turn for the same file, add a per-turn LRU cache (~10 entries).
+- **Probe accuracy.** False negatives (probe says no LSP when it exists) and false positives (probe says yes but tools fail). Track via comparing probe result to actual tool-call success rates.
+
+No code changes in Phase 3b by default — gate on observed problems. The LSP-tool error messages already self-describe missing servers per language, so the Phase 1+2 floor is acceptable without these refinements.
+
+#### 3c — Per-language probe refinement (superseded by Phase 4)
+
+Original plan deferred per-language refinement until telemetry showed mixed-LSP confusion. Real-world usage surfaced the problem on day one: a Rails workspace's JS files responded to TS-server (built into VS Code) → global probe cached `true` → model called LSP tools on `.rb` files → empty results → wasted tool calls + model confusion. The "JS-always-true" pattern means the global probe is essentially "is this a code workspace?" which isn't useful gating. Phase 4 replaces it.
+
+### Phase 4 — Per-language availability service
+
+**Status:** In progress 2026-05-01.
+
+**Motivation.** The Phase 3a global probe lies in mixed-language workspaces. JS/TS workspaces always have LSP via the built-in TypeScript server, so any workspace containing JS reports `true` regardless of whether other languages have servers installed. Rails apps (JS configs + Ruby code), Django apps (build scripts + Python without Pylance), polyglot monorepos all hit this. Symptoms: model calls `find_symbol` on a Ruby file → empty result → wasted call → grep fallback the model could have done from the start.
+
+The right granularity is per-language. The model needs to know which languages will respond to LSP queries before making tool calls.
+
+**Decision.** Replace the global `LspProbe` with `LspAvailability`, a per-language availability service. System prompt declares which languages have LSP, which don't. Tool failures adaptively correct the map.
+
+#### Architecture
+
+```ts
+interface AvailabilityState {
+  available: boolean;
+  sampledFile: string;       // which file was probed (for debugging)
+  probedAt: number;          // unix ms
+  source: 'probe' | 'tool-failure' | 'tool-success' | 'extension-event';
+}
+
+class LspAvailability {
+  private map = new Map<string, AvailabilityState>();
+  private discoveryInFlight: Promise<void> | null = null;
+
+  // Singleton accessor (mirrors LspProbe).
+  static getInstance(): LspAvailability;
+
+  // Background scan: enumerates languages in workspace, probes one file per
+  // language, populates map. Idempotent — concurrent calls share the in-flight
+  // promise. Called at activation (after WARMUP_DELAY_MS) and on reactive
+  // invalidations.
+  async discoverWorkspace(): Promise<void>;
+
+  // Synchronous read for orchestrator hot path.
+  getDeclaredAvailability(): {
+    available: string[];   // languageIds with LSP confirmed working
+    unavailable: string[]; // languageIds confirmed without LSP
+    untested: string[];    // languageIds present in workspace but not yet probed
+  };
+
+  // Per-tool-call adaptive correction. LSP tools call this when their result
+  // is empty for a given languageId. Updates the map; future requests will
+  // see the corrected declaration.
+  reportToolResult(languageId: string, hadSymbols: boolean): void;
+
+  // Wires the reactive invalidators. Returns disposables for context.subscriptions.
+  registerInvalidators(): vscode.Disposable[];
+
+  // For debugging / tests.
+  getRawMap(): ReadonlyMap<string, AvailabilityState>;
+  invalidate(): void;  // drops cache; next discoverWorkspace re-probes everything
+}
+```
+
+#### Cadence
+
+| Trigger | What runs | Notes |
+|---|---|---|
+| Activation + 3s warmup | `discoverWorkspace()` in background | Existing `WARMUP_DELAY_MS` reused |
+| `vscode.extensions.onDidChange` | `invalidate()` + `discoverWorkspace()` | Catches LSP install/uninstall via marketplace |
+| `vscode.workspace.onDidChangeWorkspaceFolders` | `invalidate()` + `discoverWorkspace()` | Workspace folder add/remove |
+| LSP tool returns empty for language X | `reportToolResult(X, false)` | Inline, ~µs — adaptive correction |
+| LSP tool returns symbols for X marked unavailable | `reportToolResult(X, true)` | Inline upgrade |
+| Idle workspace | Nothing | No periodic timer — reactive triggers cover real cases |
+| (Optional, later) Manual command `Moby: Refresh LSP Availability` | `invalidate()` + `discoverWorkspace()` | For users who install LSP outside VS Code (`gem install solargraph`) |
+
+**Why no periodic timer:** the reactive triggers + adaptive correction cover all auto-discoverable cases. Periodic timer wastes idle workspace cycles re-probing stable answers. The one gap (LSP installed via shell mid-session) is solved by either the manual command or restarting Moby; neither warrants a timer firing every minute on every user's workspace.
+
+#### Discovery algorithm
+
+```
+discoverWorkspace():
+  1. Enumerate workspace languages via findFiles(PROBE_FILE_GLOB, PROBE_EXCLUDE, ~50)
+     → Map<languageId, sampleUri> (one representative file per languageId)
+     → languageId resolved via vscode.workspace.openTextDocument(uri).languageId
+        (falls back to extension→languageId table for cheap path)
+  2. For each languageId in parallel (with concurrency cap of 3):
+     - openTextDocument(sampleUri) → forces LSP load
+     - wait PROBE_PRE_DELAY_MS for provider registration
+     - executeDocumentSymbolProvider(uri) with PROBE_TIMEOUT_MS timeout
+     - record AvailabilityState { available: symbols.length > 0, ... }
+  3. Log: `[LspAvailability] {available: [ts, js], unavailable: [ruby, python]}`
+```
+
+Per-language probe latency: ~250-500ms warm, up to PROBE_TIMEOUT_MS cold. Concurrency cap of 3 means a 6-language workspace finishes in ~2 batches.
+
+#### System-prompt declaration
+
+When LSP tools are advertised (i.e. at least one available language), append:
+
+> *"LSP tools (find_symbol, find_definition, find_references, get_symbol_source, outline) are available for: TypeScript, JavaScript, Python.
+> Not available for: Ruby — fall back to grep + read_file for Ruby code.
+> Not yet tested: Go (try LSP first; fall back if it returns no results)."*
+
+Computed by `getDeclaredAvailability()` and rendered into both `renderMinimalToolGuidance` and `renderStandardToolGuidance`. Token cost: ~30-80 tokens depending on language count, replacing the current ad-hoc "fall back to grep" hint.
+
+When NO languages have LSP: skip the tool definitions AND the prompt declaration entirely (current behavior preserved).
+
+#### Tool-side adaptive correction
+
+Both `outline`/`get_symbol_source` (Phase 1) and `find_symbol`/`find_definition`/`find_references` (Phase 2) update on call:
+
+```ts
+const symbols = await fetchDocumentSymbols(uri);
+const languageId = doc.languageId;
+LspAvailability.getInstance().reportToolResult(languageId, Array.isArray(symbols) && symbols.length > 0);
+```
+
+Edge case: empty file or stub file genuinely has no symbols even with LSP. Don't downgrade on a single empty result — require N (≥2) consecutive empties before flipping `true → false`. Keep `false → true` flip immediate (one success proves LSP works).
+
+#### Migration from `LspProbe`
+
+- Delete [src/services/lspProbe.ts](../../../src/services/lspProbe.ts).
+- Replace orchestrator's `LspProbe.getInstance().getCached()` checks with `LspAvailability.getInstance().getDeclaredAvailability().available.length > 0`.
+- Replace prompt-builder's boolean `lspToolsAvailable` with the structured availability object so the renderer can list languages.
+- Update [src/extension.ts](../../../src/extension.ts) activation: swap `LspProbe.warmUp()` for `LspAvailability.discoverWorkspace()`.
+
+#### Non-goals for Phase 4
+
+- **Per-file overrides.** Probing different files of the same language to handle "this file's stub" vs "this file's real" cases. Future phase if observed.
+- **LSP feature-level granularity.** Some LSPs implement `documentSymbolProvider` but not `referenceProvider`. Today we treat language as binary. Future phase if a tool starts failing where another succeeds for the same language.
+- **Cross-workspace persistence.** Map is in-memory per session. Caching to disk would speed up cold start but add invalidation complexity. Defer.
+
+#### Risks
+
+- **First-request latency.** Discovery runs in background after warmup; orchestrator falls back to optimistic include if discovery hasn't completed. So first turn isn't blocked but its prompt may be missing the language declaration. Acceptable — second turn onwards has it.
+- **Stale "untested" entries.** Languages found via findFiles but never opened won't get probed proactively if they're rare. Tool calls against those go through the optimistic path. Adaptive correction picks up the truth on first usage.
+- **Concurrency cap tuning.** 3 concurrent probes balances speed vs LSP-server load. May need adjustment for huge polyglot monorepos.
+- **Extension changes that don't affect LSP.** `onDidChange` fires on any extension install/uninstall, not just LSP-providing ones. Cost of overrun: re-discovery once per extension change, ~1-3s background. Acceptable.
+
+#### Phase 4 work order
+
+1. Build `LspAvailability` skeleton — class, map, invalidators, log lines.
+2. Implement `discoverWorkspace` — enumerate languages, parallel probe with concurrency cap.
+3. Implement `getDeclaredAvailability` + `reportToolResult` (with consecutive-empty threshold).
+4. Wire activation hook (replaces `LspProbe.warmUp()`).
+5. Wire orchestrator gating (tool array + prompt builder).
+6. Wire prompt declaration rendering in both `renderMinimalToolGuidance` + `renderStandardToolGuidance`.
+7. Wire tool-side `reportToolResult` callbacks in `lspTools.ts`.
+8. Delete `lspProbe.ts` + remove obsolete tests.
+9. Add `LspAvailability` tests — unit tests for map management, discovery, adaptive correction.
+10. Manual-test backlog entry: rails workspace (JS+Ruby), polyglot monorepo, vanilla TS workspace, no-source workspace.
 
 ## What we are NOT doing in this plan
 

@@ -10,6 +10,7 @@ import { pickServiceLocation, resolveServiceUrl } from './utils/serviceLocation'
 import { logger } from './utils/logger';
 import { UnifiedLogExporter } from './logging/UnifiedLogExporter';
 import { TokenService } from './services/tokenService';
+import { LspAvailability } from './services/lspAvailability';
 import { DrawingServer } from './providers/drawingServer';
 import { registerCustomModels } from './models/registry';
 import * as crypto from 'crypto';
@@ -81,6 +82,27 @@ export async function activate(context: vscode.ExtensionContext) {
   const useWasm = tokenService.isReady;
   deepSeekClient = new DeepSeekClient(context, useWasm ? tokenService : undefined);
   logger.info(`[TokenService] Active: ${useWasm ? 'WASM (exact)' : 'Estimation (fallback)'}`);
+
+  // Switch the WASM vocab to match the restored active model. Without this,
+  // the default vocab loads at activation and stays active even when the
+  // restored model needs a different one (e.g. V4 on V3's vocab) — the
+  // selectModel webview message only fires on user dropdown clicks.
+  if (useWasm) {
+    try {
+      await tokenService.selectModel(deepSeekClient.getModel());
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`[TokenService] Failed to load vocab for restored model: ${msg}`);
+    }
+  }
+
+  // Kick off LSP per-language discovery in the background. Results are
+  // consulted by the orchestrator when building the tool array AND when
+  // injecting the per-language availability declaration into the system
+  // prompt. See [docs/plans/partial/lsp-integration.md] Phase 4.
+  const lspAvailability = LspAvailability.getInstance();
+  context.subscriptions.push(...lspAvailability.registerInvalidators());
+  lspAvailability.warmUp();
 
   // Initialize conversation manager (event sourcing) with encrypted DB
   const dbEncryptionKey = await getOrCreateEncryptionKey(context);
@@ -194,6 +216,21 @@ function registerCommands(context: vscode.ExtensionContext) {
 
     // Database encryption key
     { name: 'manageEncryptionKey', handler: () => manageEncryptionKey(context, conversationManager) },
+
+    // LSP availability — re-runs the per-language probe. For users who
+    // installed an LSP outside VS Code (e.g. `gem install solargraph`,
+    // `pip install python-lsp-server`) without restarting; the extension's
+    // automatic invalidators fire on marketplace events but not shell
+    // installs.
+    { name: 'refreshLspAvailability', handler: async () => {
+      LspAvailability.getInstance().invalidate();
+      await LspAvailability.getInstance().discoverWorkspace();
+      const decl = LspAvailability.getInstance().getDeclaredAvailability();
+      const summary =
+        `LSP available: ${decl.available.length ? decl.available.join(', ') : '(none)'}\n` +
+        `Unavailable: ${decl.unavailable.length ? decl.unavailable.join(', ') : '(none)'}`;
+      vscode.window.showInformationMessage(`Moby LSP refreshed.\n${summary}`);
+    }},
 
     // Diff editor toolbar actions. The editor/title menu passes the resource
     // URI as the first argument when the button is clicked — forward it so

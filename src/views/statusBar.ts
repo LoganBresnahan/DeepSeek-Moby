@@ -39,12 +39,13 @@ export class StatusBar {
     const stats = await this.conversationManager.getSessionStats();
     this.totalTokens = stats.totalTokens;
 
-    this.statusBarItem.text = `$(robot) DeepSeek Moby ${model} | $(pulse) ${this.totalTokens.toLocaleString()} tokens`;
+    this.statusBarItem.text = `$(robot) ${this.totalTokens.toLocaleString()} tk`;
     this.statusBarItem.tooltip = `DeepSeek Moby\nModel: ${model}\nTotal Tokens: ${this.totalTokens.toLocaleString()}\nTotal Sessions: ${stats.totalSessions}\nTotal Messages: ${stats.totalMessages}`;
   }
 
-  updateModel(model: string) {
-    this.statusBarItem.text = `$(robot) DeepSeek Moby ${model}`;
+  updateModel(_model: string) {
+    // Model name no longer in the status bar text — refresh tooltip via update().
+    void this.update();
   }
 
   async updateLastResponse() {

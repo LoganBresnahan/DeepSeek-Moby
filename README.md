@@ -4,7 +4,7 @@
 </p>
 
 <h1 align="center">DeepSeek Moby</h1>
-<h2 align="center">v0.1.2 Pre-Release</h2>
+<h2 align="center">v0.3.0 Pre-Release</h2>
 
 <p align="center">
   <sub><em>This is a pre-release build. Core functionality has been validated on the maintainer's primary development environment, but coverage across the full matrix of operating systems, VS Code versions, shell environments, and model configurations remains incomplete. Expect rough edges. Bug reports and reproduction steps are welcome via the <a href="https://github.com/LoganBresnahan/DeepSeek-Moby/issues">issue tracker</a>.</em></sub>
@@ -150,6 +150,19 @@ Manually curate which files the model sees:
 - Workspace search for finding files in large repos
 - Selected files injected as full content into the system prompt
 - Independent of the model's tool-based file reading
+
+### LSP-Backed Code Navigation
+
+The model navigates code by symbol, not just by line offset, using whatever language servers VS Code already runs:
+
+- **Five tools** — `outline` (file structure), `get_symbol_source` (read one function without the rest of the file), `find_symbol` (workspace-wide symbol search), `find_definition` and `find_references` (jump and call-graph queries)
+- **Per-language availability** — Moby probes each language in your workspace at activation, then declares in the system prompt which languages have working LSP and which don't (e.g., *"LSP works for: typescript, python. No LSP for: ruby — use grep + read_file for those."*) so the model picks the right tool the first time
+- **Reactive recovery** — cold-starting language servers (rust-analyzer, gopls, ruby-lsp) are re-probed automatically: 30s after activation, and again on tab focus when you fix a broken setup mid-session
+- **Timeout-safe** — every LSP call is bounded at 5s, so a hung or deadlocked server can't stall the chat
+- **Works with whatever you have installed** — no Moby-specific configuration; if VS Code's "Go to Definition" works on a file, so do these tools
+- **Refresh on demand** — *Moby: Refresh LSP Availability* command flushes the cache after you install a language server outside VS Code (e.g. `gem install`, `asdf install`)
+
+Available on V4 Pro/Flash (with and without thinking) and V3 Chat. R1 uses its shell-only transport and doesn't ship LSP tools.
 
 ### Context Window Management
 

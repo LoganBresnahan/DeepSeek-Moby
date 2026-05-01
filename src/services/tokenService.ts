@@ -89,8 +89,12 @@ export class TokenService implements TokenCounter {
     if (vocabName === this.activeVocab && this.tokenizers.has(vocabName)) {
       return true; // Already active and loaded
     }
+    const previous = this.activeVocab;
     this.activeVocab = vocabName;
     await this.loadVocab(vocabName);
+    if (previous !== vocabName) {
+      logger.info(`[TokenService] Switched active vocab "${previous}" → "${vocabName}" for model "${modelId}"`);
+    }
     return true;
   }
 
@@ -157,8 +161,8 @@ export class TokenService implements TokenCounter {
 
       const elapsed = performance.now() - start;
       logger.info(
-        `[TokenService] Initialized in ${elapsed.toFixed(0)}ms ` +
-        `(vocab: ${tokenizer.vocab_size()} tokens)`
+        `[TokenService] Loaded "${vocabName}" in ${elapsed.toFixed(0)}ms ` +
+        `(${tokenizer.vocab_size()} tokens)`
       );
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);

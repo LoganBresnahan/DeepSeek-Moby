@@ -7,8 +7,6 @@
  */
 
 import * as vscode from 'vscode';
-import * as cp from 'child_process';
-import * as path from 'path';
 import { logger } from '../utils/logger';
 import { tracer } from '../tracing';
 import { OpenFilesEvent, FileSearchResultsEvent, FileContentEvent } from './types';
@@ -358,140 +356,29 @@ export class FileContextManager {
   // ── Editor Context ──
 
   /**
-   * Get context about the currently active editor for system prompt injection.
-   * Includes file content, selection info, and related files in the workspace.
+   * Orientation header for the active editor — file path, language, total
+   * line count. Tells the model what file the user has focused; everything
+   * else (content, cursor, selection) is fetched on demand via `read_file`,
+   * `outline`, `find_symbol`, etc.
+   *
+   * History: 0.3.0 removed the FULL FILE CONTENT block and the related-
+   * files subprocess strategies. A subsequent trim removed the inline
+   * selection-text and cursor-line — both were Ctrl+A / large-selection
+   * blast-radius hazards, and the tool surface (read_file with line range,
+   * LSP nav) covers the same ground deterministically. See
+   * [docs/plans/context-cleanup.md] Phase 2.
    */
   async getEditorContext(): Promise<string> {
     const editor = vscode.window.activeTextEditor;
-    if (!editor) {
-      return '';
-    }
+    if (!editor) return '';
 
     const document = editor.document;
     const language = document.languageId;
     const fileName = document.fileName.split('/').pop() || 'unknown';
     const fullPath = document.fileName;
-    const selection = editor.selection;
-
-    // Include FULL file content so AI can make smart insertions
-    const fullContent = document.getText();
     const lineCount = document.lineCount;
 
-    let context = `Current File: ${fileName}\nFull Path: ${fullPath}\nLanguage: ${language}\nTotal Lines: ${lineCount}\n`;
-
-    // Add selection info if any
-    if (!selection.isEmpty) {
-      const selectedText = document.getText(selection);
-      context += `\nSelected code (lines ${selection.start.line + 1}-${selection.end.line + 1}):\n${selectedText}\n`;
-    } else {
-      context += `\nCursor at line ${selection.active.line + 1}\n`;
-    }
-
-    // Include full file content
-    context += `\n--- FULL FILE CONTENT ---\n${fullContent}\n--- END FILE CONTENT ---\n`;
-
-    // Search for related files in the workspace
-    const relatedFiles = await this.findRelatedFiles(document);
-    if (relatedFiles.length > 0) {
-      context += `\n--- RELATED FILES IN WORKSPACE ---\n`;
-      for (const file of relatedFiles) {
-        context += `${file}\n`;
-      }
-      context += `--- END RELATED FILES ---\n`;
-    }
-
-    return context;
-  }
-
-  /**
-   * Search the workspace for files related to the given document.
-   * Uses ripgrep/grep/find to locate relevant files.
-   */
-  private async findRelatedFiles(document: vscode.TextDocument): Promise<string[]> {
-    const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
-    if (!workspaceFolder) {
-      return [];
-    }
-
-    const cwd = workspaceFolder.uri.fsPath;
-    const fileName = path.basename(document.fileName, path.extname(document.fileName));
-    const ext = path.extname(document.fileName);
-
-    const relatedFiles: string[] = [];
-
-    try {
-      // Strategy 1: Find files with similar names
-      const findResult = cp.spawnSync('find', [
-        '.', '-type', 'f',
-        '-name', `*${fileName}*`,
-        '-o', '-name', `*${fileName.toLowerCase()}*`,
-        '!', '-path', '*/node_modules/*',
-        '!', '-path', '*/.git/*',
-        '!', '-path', '*/vendor/*'
-      ], {
-        cwd,
-        encoding: 'utf-8',
-        timeout: 3000
-      });
-
-      if (findResult.stdout) {
-        const files = findResult.stdout.split('\n').filter(f => f.trim() && f !== document.fileName);
-        relatedFiles.push(...files.slice(0, 5).map(f => `Similar name: ${f}`));
-      }
-
-      // Strategy 2: Find files that reference this file (using grep/ripgrep)
-      const searchTerm = fileName;
-      let grepResult = cp.spawnSync('rg', [
-        '-l', '--max-count', '1',
-        searchTerm,
-        '--type-not', 'binary',
-        '--ignore-file', '.gitignore',
-        '-g', '!node_modules',
-        '-g', '!.git'
-      ], {
-        cwd,
-        encoding: 'utf-8',
-        timeout: 3000
-      });
-
-      // Fallback to grep if ripgrep not available
-      if (grepResult.error || grepResult.status !== 0) {
-        grepResult = cp.spawnSync('grep', [
-          '-rl', '--include', `*${ext}`,
-          searchTerm, '.'
-        ], {
-          cwd,
-          encoding: 'utf-8',
-          timeout: 3000
-        });
-      }
-
-      if (grepResult.stdout) {
-        const files = grepResult.stdout.split('\n').filter(f => f.trim() && !f.includes(document.fileName));
-        relatedFiles.push(...files.slice(0, 5).map(f => `References this: ${f}`));
-      }
-
-      // Strategy 3: Find test files
-      const testPatterns = [`*${fileName}*test*${ext}`, `*${fileName}*spec*${ext}`, `test_${fileName}${ext}`];
-      for (const pattern of testPatterns) {
-        const testResult = cp.spawnSync('find', ['.', '-type', 'f', '-name', pattern, '!', '-path', '*/node_modules/*'], {
-          cwd,
-          encoding: 'utf-8',
-          timeout: 2000
-        });
-
-        if (testResult.stdout) {
-          const files = testResult.stdout.split('\n').filter(f => f.trim());
-          relatedFiles.push(...files.slice(0, 2).map(f => `Test file: ${f}`));
-        }
-      }
-
-    } catch (error) {
-      // Silently fail - this is optional context
-    }
-
-    // Remove duplicates and limit
-    return [...new Set(relatedFiles)].slice(0, 10);
+    return `Current File: ${fileName}\nFull Path: ${fullPath}\nLanguage: ${language}\nTotal Lines: ${lineCount}\n`;
   }
 
   // ── Private Methods ──

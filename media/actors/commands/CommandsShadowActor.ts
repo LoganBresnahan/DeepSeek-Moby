@@ -48,6 +48,7 @@ const DEFAULT_COMMANDS: CommandItem[] = [
   // Settings section
   { id: 'moby.editSystemPrompt', name: 'System Prompt', description: 'Edit system prompt', icon: '✏️', section: 'Settings' },
   { id: 'moby.openCommandRules', name: 'System Rules', description: 'Manage command approval rules', icon: '🛡️', section: 'Settings' },
+  { id: 'moby.refreshLspAvailability', name: 'Refresh LSP', description: 'Re-probe language servers (use after installing an LSP outside VS Code)', icon: '🔄', section: 'Settings' },
   // Info section
   { id: 'moby.showStats', name: 'Account Stats', description: 'DeepSeek & Tavily usage', icon: '📊', section: 'Info' }
 ];
