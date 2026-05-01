@@ -27,6 +27,48 @@ import { turnActorStyles } from './styles';
 import { createLogger } from '../../logging';
 import { extractCodeBlocks, hasIncompleteFence } from '../../utils/codeBlocks';
 import { highlightCode } from '../../utils/syntaxHighlight';
+import MarkdownIt from 'markdown-it';
+
+/**
+ * Shared markdown-it instance for rendering assistant prose. Configured for:
+ *  - `html: false`  — model-emitted raw HTML (`<a href>`, `<u>`, `<script>`)
+ *    is escaped, not rendered. Subsumes the manual `escapeHtml` pass that
+ *    the inline-regex pipeline used to do.
+ *  - `breaks: true` — single newlines render as `<br>`, matching the chat
+ *    UX users had with the regex pipeline.
+ *  - `linkify: true` — bare URLs (`https://example.com`) become anchors.
+ *  - `typographer: false` — no smart-quote / em-dash mangling. Code-adjacent
+ *    chat is full of literal punctuation we don't want auto-replaced.
+ *
+ * The `code_inline` renderer is overridden to keep the existing
+ * `.inline-code` class — webview CSS targets that selector.
+ *
+ * Fenced code blocks NEVER reach this renderer. They are pre-extracted and
+ * replaced with private-use-area placeholder tokens before the prose hits
+ * markdown-it; the rendered code-block HTML (with apply/diff/copy buttons +
+ * `# File:` language inference) is spliced back in afterwards.
+ */
+const markdown = new MarkdownIt({
+  html: false,
+  breaks: true,
+  linkify: true,
+  typographer: false
+});
+
+// Disable linkify-it's fuzzy modes — they treat any `name.tld`-shaped string
+// as a bare URL, which mangles common file/symbol names. `tictactoe.py`,
+// `server.io`, `build.sh`, `crate.rs`, `main.dev`, `module.co` all match real
+// TLDs (.py = Paraguay, .io = British Indian Ocean Territory, etc.) and the
+// fuzzy heuristic linkifies them. Restrict autolinking to explicit URLs with
+// a scheme (`http://` / `https://`) and explicit `mailto:` addresses.
+markdown.linkify.set({ fuzzyLink: false, fuzzyEmail: false, fuzzyIP: false });
+
+// Preserve the `inline-code` class that webview CSS targets.
+markdown.renderer.rules.code_inline = (tokens, idx) => {
+  const div = document.createElement('div');
+  div.textContent = tokens[idx].content;
+  return `<code class="inline-code">${div.innerHTML}</code>`;
+};
 import type {
   TurnRole,
   TurnData,
@@ -2071,51 +2113,54 @@ export class MessageTurnActor extends InterleavedShadowActor {
 
       const html = `<div class="code-block entering${expandedClass}" data-lang="${language}" data-edit-mode="${this._editMode}"><div class="code-header"><span class="code-toggle">▶</span><span class="code-lang">${language}</span><span class="code-preview">${escapedPreview}</span><div class="code-actions"><button class="code-action-btn diff-btn">Diff</button><button class="code-action-btn apply-btn">Apply</button><button class="code-action-btn copy-btn">Copy</button></div></div><div class="code-body"><pre><code class="language-${language}">${highlightedCode}</code></pre></div></div>`;
       renderedBlocks[bi] = html;
+      // Surround the placeholder with blank lines so markdown-it puts it
+      // in its own `<p>` rather than mid-paragraph. Otherwise we end up
+      // with `<p>...prose...{placeholder}...</p>` and inserting a block-
+      // level <div> there produces invalid (browser-corrected) HTML.
       withPlaceholders =
         withPlaceholders.substring(0, block.startIndex) +
-        `${PLACEHOLDER_OPEN}${bi}${PLACEHOLDER_CLOSE}` +
+        `\n\n${PLACEHOLDER_OPEN}${bi}${PLACEHOLDER_CLOSE}\n\n` +
         withPlaceholders.substring(block.endIndex);
     }
 
-    // Escape HTML on the prose. Code blocks are placeholders; markdown
-    // delimiters (backticks, asterisks, newlines) survive the escape.
-    let result = this.escapeHtml(withPlaceholders);
+    // Always strip any trailing unclosed fence from the prose before it
+    // hits markdown-it. The unified activity line already signals
+    // "Writing X..." / "Creating X..." / "Generating code..." at the turn
+    // level — we don't render an inline placeholder in the text segment
+    // anymore. Stripping here prevents raw backticks + partial content
+    // from leaking as a malformed inline fence when the fence is mid-stream
+    // or when a turn aborts before the fence closes.
+    withPlaceholders = withPlaceholders.replace(/```\w*(?:\n[\s\S]*)?$/, '');
 
-    // Always strip any trailing unclosed fence from rendered output. The
-    // unified activity line already signals "Writing X..." / "Creating X..."
-    // / "Generating code..." at the turn level — we don't render an inline
-    // placeholder in the text segment anymore. Stripping prevents raw
-    // backticks + partial content from leaking as prose when the fence is
-    // mid-stream or when a turn aborts before the fence closes.
-    result = result.replace(/```\w*(?:\n[\s\S]*)?$/, '');
+    // Collapse 3+ consecutive newlines to 2 (preserves CommonMark paragraph
+    // breaks but avoids huge gaps from streaming chunk boundaries).
+    withPlaceholders = withPlaceholders.replace(/\n{3,}/g, '\n\n');
 
-    // Inline code
-    result = result.replace(/`([^`\n]+)`/g, '<code class="inline-code">$1</code>');
+    // Render the prose through markdown-it. Tables, headings, lists,
+    // blockquotes, autolinks, nested bold/italic all handled. HTML escape
+    // is built in via `html: false`. Fenced code is already pre-extracted
+    // into placeholders that markdown-it treats as plain text.
+    let result = markdown.render(withPlaceholders);
 
-    // Bold
-    result = result.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-
-    // Italic
-    result = result.replace(/\*([^*]+)\*/g, '<em>$1</em>');
-
-    // Line breaks (collapse 3+ consecutive newlines to 2)
-    result = result.replace(/\n{3,}/g, '\n\n');
-    result = result.replace(/\n/g, '<br>');
-
-    // Restore rendered code blocks. Use a function replacer to avoid
-    // `$&` / `$1` interpretation in the substitution string when the
-    // generated HTML contains `$` characters.
+    // Unwrap placeholder paragraphs first — when markdown-it sees a
+    // placeholder on its own line (we surrounded it with `\n\n` above) it
+    // emits `<p>{placeholder}</p>`. Strip the wrapping <p> so the code-
+    // block <div> doesn't end up nested inside an invalid <p>. Function
+    // replacer avoids `$&` / `$1` interpretation when generated HTML
+    // contains `$` characters.
+    result = result.replace(
+      new RegExp(`<p>${PLACEHOLDER_OPEN}(\\d+)${PLACEHOLDER_CLOSE}</p>\\s*`, 'g'),
+      (_match, idx) => renderedBlocks[Number(idx)] ?? ''
+    );
+    // Fallback for any placeholder that didn't get wrapped (e.g. mid-line
+    // — shouldn't happen given the surrounding `\n\n`, but safety net).
     result = result.replace(
       new RegExp(`${PLACEHOLDER_OPEN}(\\d+)${PLACEHOLDER_CLOSE}`, 'g'),
       (_match, idx) => renderedBlocks[Number(idx)] ?? ''
     );
 
-    // Remove <br> tags after code blocks (prevents extra whitespace between code and text)
-    result = result.replace(/<\/div>(<br>)+/g, '</div>');
-    // Remove trailing <br> tags
-    result = result.replace(/(<br>)+$/, '');
-
-    return result;
+    // Trim leading/trailing whitespace from the rendered output.
+    return result.trim();
   }
 
   /** Pre-built HTML for the code-generating placeholder (static, cached once) */

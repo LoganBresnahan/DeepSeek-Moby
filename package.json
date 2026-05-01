@@ -767,6 +767,7 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",
+    "@types/markdown-it": "^14.1.2",
     "@types/node": "^18.x",
     "@types/uuid": "^10.0.0",
     "@types/vscode": "^1.85.0",
@@ -790,6 +791,7 @@
     "@signalapp/sqlcipher": "^3.1.0",
     "deepseek-moby-wasm": "file:packages/moby-wasm/pkg",
     "diff": "^8.0.3",
+    "markdown-it": "^14.1.1",
     "uuid": "^11.0.5"
   },
   "repository": {
