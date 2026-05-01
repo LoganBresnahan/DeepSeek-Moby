@@ -245,6 +245,64 @@ describe('MessageTurnActor', () => {
       expect(content?.querySelector('a')).toBeNull();
       expect(content?.textContent).toContain('<a>raw</a>');
     });
+
+    // ── Linkify regression — fuzzy mode disabled ───────────────────────
+    // markdown-it via linkify-it would otherwise auto-link any string
+    // matching `name.tld` because `.py`, `.io`, `.sh`, `.rs`, `.dev`, `.co`,
+    // `.ai` are all real ccTLDs. Users typing file names or symbol paths in
+    // chat would see them rendered as live links pointing at speculative
+    // URLs. Fuzzy modes disabled in MessageTurnActor; explicit URLs with a
+    // scheme still autolink.
+
+    it('does NOT autolink bare file-name patterns that look like domains', () => {
+      actor.reset();
+      actor.bind({ turnId: 'turn-no-fuzzy', role: 'assistant', timestamp: Date.now() });
+      actor.createTextSegment('can you give me a quick example what a python tictactoe.py would look like?');
+      actor.endStreaming();
+
+      const containers = findContainers('text');
+      const content = queryInShadow(containers[0], '.content');
+      expect(content?.querySelector('a')).toBeNull();
+      expect(content?.textContent).toContain('tictactoe.py');
+    });
+
+    it('does NOT autolink other common file/symbol patterns', () => {
+      actor.reset();
+      actor.bind({ turnId: 'turn-no-fuzzy-2', role: 'assistant', timestamp: Date.now() });
+      actor.createTextSegment('check server.io, build.sh, crate.rs, main.dev, module.co — none should link');
+      actor.endStreaming();
+
+      const containers = findContainers('text');
+      const content = queryInShadow(containers[0], '.content');
+      expect(content?.querySelector('a')).toBeNull();
+    });
+
+    it('still autolinks explicit https:// URLs', () => {
+      actor.reset();
+      actor.bind({ turnId: 'turn-explicit-url', role: 'assistant', timestamp: Date.now() });
+      actor.createTextSegment('see https://example.com for details');
+      actor.endStreaming();
+
+      const containers = findContainers('text');
+      const content = queryInShadow(containers[0], '.content');
+      const anchor = content?.querySelector('a');
+      expect(anchor).not.toBeNull();
+      expect(anchor?.getAttribute('href')).toBe('https://example.com');
+    });
+
+    it('renders explicit markdown links regardless of fuzzy setting', () => {
+      actor.reset();
+      actor.bind({ turnId: 'turn-md-link', role: 'assistant', timestamp: Date.now() });
+      actor.createTextSegment('open [the file](src/foo.ts) to see more');
+      actor.endStreaming();
+
+      const containers = findContainers('text');
+      const content = queryInShadow(containers[0], '.content');
+      const anchor = content?.querySelector('a');
+      expect(anchor).not.toBeNull();
+      expect(anchor?.getAttribute('href')).toBe('src/foo.ts');
+      expect(anchor?.textContent).toBe('the file');
+    });
   });
 
   // ============================================

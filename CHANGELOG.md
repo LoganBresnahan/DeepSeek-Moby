@@ -1,6 +1,23 @@
 # Changelog
 
-## [0.3.0] - 2026-04-30 (Pre-Release)
+## [0.3.0] - 2026-05-01 (Pre-Release)
+
+### Markdown rendering — markdown-it integration
+
+- **Replaced inline regex transforms with `markdown-it`** ([media/actors/turn/MessageTurnActor.ts](media/actors/turn/MessageTurnActor.ts) `formatContent`). The previous pipeline did a manual `escapeHtml` pass plus regexes for `<code class="inline-code">`, `<strong>`, `<em>`, and `<br>`; everything else (tables, headings, lists, blockquotes, links) leaked through as literal text. Now markdown-it (`html: false, breaks: true, linkify: true, typographer: false`) handles the prose end-to-end:
+  - Tables (`| a | b |`) render properly.
+  - Headings (`#`, `##`, etc.) render as `<h1>`/`<h2>`.
+  - Bullet and numbered lists render as `<ul>`/`<ol>`.
+  - Blockquotes (`>`) render as `<blockquote>`.
+  - Links (`[text](url)`) render as anchors; bare URLs with an explicit scheme (`https://...`) auto-linkify.
+  - Nested bold/italic (`**outer *inner* outer**`) handled cleanly — the previous regex couldn't.
+- **HTML-escape pass subsumed.** `html: false` is markdown-it's built-in escape, so model-emitted raw HTML (`<a>`, `<u>`, `<font>`, `<script>`) still lands as escaped text rather than live DOM. Drops the manual two-pass `escapeHtml` middleware that shipped earlier in the 0.3.0 cycle as a stopgap. Closes the "purple highlighting" bug originally observed when V4-thinking emitted raw `<a href>` anchors for layout under `reasoning_effort=max`.
+- **Linkify-it fuzzy modes disabled** (`fuzzyLink: false, fuzzyEmail: false, fuzzyIP: false`). Without this, linkify-it auto-links any `name.tld`-shaped string — `tictactoe.py`, `server.io`, `build.sh`, `crate.rs`, `main.dev`, `module.co` are all real ccTLDs and were rendering as live links pointing at speculative URLs. Explicit `https://...` URLs and `[label](url)` markdown still autolink.
+- **Code blocks unchanged in shape and behavior.** Fenced blocks are still pre-extracted with the apply/diff/copy buttons + `# File:` language inference + R1 fence-flip and orphan-fence guards from before. They never reach markdown-it — placeholders are surrounded by blank lines so they render as their own paragraph and the rendered code-block `<div>` doesn't end up nested inside `<p>`.
+- **`.inline-code` class preserved** via a markdown-it `code_inline` renderer override; existing CSS keeps hitting.
+- **Streaming-safe.** Trailing unclosed fence still stripped before markdown-it sees the prose, so mid-stream backticks don't leak as malformed inline code. Partial bold/italic mid-stream renders as text until the closer arrives — same behavior as before. Streaming code blocks themselves remain hidden until the closer arrives; the activity label still signals "Generating code..." at the turn level. Inline streaming code-block design captured in [docs/plans/streaming-code-blocks.md](docs/plans/streaming-code-blocks.md) for a future release.
+- System-prompt nudge: *"Output renders as markdown. Use markdown syntax (links, tables, lists), not raw HTML tags."* added to both minimal and standard prompt variants.
+- 117 `MessageTurnActor` tests pass — including 4 new linkify regression cases (file-name patterns don't autolink, explicit URLs and markdown links still do) and the existing HTML-escape guards (`<a>raw</a>` rendering as text, `<script>` not executing).
 
 ### Context cleanup — orientation-only editor header
 
@@ -40,12 +57,6 @@
 - **Auto-load on activation + session-restore.** Previously `tokenService.selectModel()` fired only on the webview's model-dropdown click — extension activation defaulted to V3 even when the restored model was V4. Now activation calls `selectModel(restoredModel)` after `initialize()`, and `chatProvider.onModelChanged` also routes to it so any model-switch path keeps the WASM vocab in sync.
 - TokenCV delta on V4 turns drops from ~77% (V3 vocab) to ~10% (V4 vocab + remaining gap from server-side chat-template wrappers and tool-array overhead).
 - TokenService log line includes vocab name on load: `[TokenService] Loaded "deepseek-v4" in 372ms (128000 tokens)` and emits a `Switched active vocab X → Y` line on switches.
-
-### Markdown rendering
-
-- **HTML escape in `formatContent`.** Model-emitted raw HTML tags (`<a href>`, `<u>`, `<font>`, `<script>`) now render as escaped text instead of executing as live elements. Two-pass placeholder substitution preserves fenced code-block extraction and the apply/diff/copy buttons; markdown bold/italic/inline-code/newlines work as before.
-- Bug: V4-thinking with `reasoning_effort=max` occasionally emitted raw `<a href>` anchors for layout, which the old renderer passed through verbatim. Result was prose styled as blue-underlined links — the "purple highlighting" bug. The escape pass closes the security/correctness floor; a follow-up will swap the manual regex transforms for `markdown-it` to render tables/headings/lists/links properly instead of passing them through as literal text.
-- System-prompt nudge: *"Output renders as markdown. Use markdown syntax (links, tables, lists), not raw HTML tags."* Added to both minimal and standard prompt variants.
 
 ### Database recovery
 
