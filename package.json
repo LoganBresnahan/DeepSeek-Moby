@@ -4,6 +4,10 @@
   "description": "AI coding assistant for VS Code, powered by DeepSeek",
   "version": "0.3.0",
   "publisher": "LoganBresnahan",
+  "author": {
+    "name": "Logan Bresnahan",
+    "email": "loganbbres@gmail.com"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
