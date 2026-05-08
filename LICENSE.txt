@@ -1,6 +1,3 @@
-DeepSeek Moby — AI coding assistant for VS Code
-Copyright (C) 2026 Logan Bresnahan
-
                     GNU AFFERO GENERAL PUBLIC LICENSE
                        Version 3, 19 November 2007
 
