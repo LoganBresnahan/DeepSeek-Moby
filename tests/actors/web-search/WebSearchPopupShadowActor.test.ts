@@ -478,6 +478,123 @@ describe('WebSearchPopupShadowActor', () => {
     });
   });
 
+  describe('Subagent controls (checkbox + dropdown + slider)', () => {
+    beforeEach(() => {
+      actor = new WebSearchPopupShadowActor(manager, element, mockVSCode);
+      actor.open();
+    });
+
+    it('renders checkbox, dropdown, and slider in the section', async () => {
+      await waitForRegistration();
+      manager.publishDirect('webSearch.subagent', {
+        digestMaxResults: 5,
+        digestEnabled: false,
+        digestModelId: 'deepseek-v4-pro-thinking',
+        availableModels: [
+          { id: 'deepseek-v4-pro-thinking', name: 'DeepSeek V4 Pro' },
+          { id: 'deepseek-v4-flash-thinking', name: 'DeepSeek V4 Flash' }
+        ]
+      });
+
+      const checkbox = element.shadowRoot?.querySelector<HTMLInputElement>('[data-id="subagentDigestEnabled"]');
+      const dropdown = element.shadowRoot?.querySelector<HTMLSelectElement>('[data-id="subagentDigestModel"]');
+      const slider = element.shadowRoot?.querySelector<HTMLInputElement>('[data-id="subagentDigestMaxSlider"]');
+
+      expect(checkbox).toBeTruthy();
+      expect(dropdown).toBeTruthy();
+      expect(slider).toBeTruthy();
+      expect(checkbox?.checked).toBe(false);
+      // Dropdown + slider disabled when checkbox unchecked
+      expect(dropdown?.disabled).toBe(true);
+      expect(slider?.disabled).toBe(true);
+      // Dropdown shows full model list with current id selected
+      expect(dropdown?.options.length).toBe(2);
+      expect(dropdown?.value).toBe('deepseek-v4-pro-thinking');
+    });
+
+    it('enables dropdown + slider when checkbox is on', async () => {
+      await waitForRegistration();
+      manager.publishDirect('webSearch.subagent', {
+        digestMaxResults: 3,
+        digestEnabled: true,
+        digestModelId: 'deepseek-v4-flash-thinking',
+        availableModels: [{ id: 'deepseek-v4-flash-thinking', name: 'V4 Flash' }]
+      });
+
+      const checkbox = element.shadowRoot?.querySelector<HTMLInputElement>('[data-id="subagentDigestEnabled"]');
+      const dropdown = element.shadowRoot?.querySelector<HTMLSelectElement>('[data-id="subagentDigestModel"]');
+      const slider = element.shadowRoot?.querySelector<HTMLInputElement>('[data-id="subagentDigestMaxSlider"]');
+
+      expect(checkbox?.checked).toBe(true);
+      expect(dropdown?.disabled).toBe(false);
+      expect(slider?.disabled).toBe(false);
+      expect(slider?.value).toBe('3');
+    });
+
+    it('posts setSubagentWebSearchDigest with current model id when checkbox toggled on', async () => {
+      await waitForRegistration();
+      manager.publishDirect('webSearch.subagent', {
+        digestMaxResults: 5,
+        digestEnabled: false,
+        digestModelId: 'deepseek-v4-pro-thinking',
+        availableModels: [{ id: 'deepseek-v4-pro-thinking', name: 'V4 Pro' }]
+      });
+
+      const checkbox = element.shadowRoot?.querySelector<HTMLInputElement>('[data-id="subagentDigestEnabled"]');
+      checkbox!.checked = true;
+      checkbox!.dispatchEvent(new Event('change', { bubbles: true }));
+
+      expect(mockVSCode.postMessage).toHaveBeenCalledWith({
+        type: 'setSubagentWebSearchDigest',
+        enabled: true,
+        modelId: 'deepseek-v4-pro-thinking'
+      });
+    });
+
+    it('posts setSubagentWebSearchDigest with "off" intent when checkbox toggled off', async () => {
+      await waitForRegistration();
+      manager.publishDirect('webSearch.subagent', {
+        digestMaxResults: 5,
+        digestEnabled: true,
+        digestModelId: 'deepseek-v4-flash-thinking',
+        availableModels: [{ id: 'deepseek-v4-flash-thinking', name: 'V4 Flash' }]
+      });
+
+      const checkbox = element.shadowRoot?.querySelector<HTMLInputElement>('[data-id="subagentDigestEnabled"]');
+      checkbox!.checked = false;
+      checkbox!.dispatchEvent(new Event('change', { bubbles: true }));
+
+      expect(mockVSCode.postMessage).toHaveBeenCalledWith({
+        type: 'setSubagentWebSearchDigest',
+        enabled: false,
+        modelId: 'deepseek-v4-flash-thinking'
+      });
+    });
+
+    it('posts setSubagentWebSearchDigest when dropdown changes (only if enabled)', async () => {
+      await waitForRegistration();
+      manager.publishDirect('webSearch.subagent', {
+        digestMaxResults: 5,
+        digestEnabled: true,
+        digestModelId: 'deepseek-v4-pro-thinking',
+        availableModels: [
+          { id: 'deepseek-v4-pro-thinking', name: 'V4 Pro' },
+          { id: 'deepseek-v4-flash-thinking', name: 'V4 Flash' }
+        ]
+      });
+
+      const dropdown = element.shadowRoot?.querySelector<HTMLSelectElement>('[data-id="subagentDigestModel"]');
+      dropdown!.value = 'deepseek-v4-flash-thinking';
+      dropdown!.dispatchEvent(new Event('change', { bubbles: true }));
+
+      expect(mockVSCode.postMessage).toHaveBeenCalledWith({
+        type: 'setSubagentWebSearchDigest',
+        enabled: true,
+        modelId: 'deepseek-v4-flash-thinking'
+      });
+    });
+  });
+
   describe('Popup visibility', () => {
     beforeEach(() => {
       actor = new WebSearchPopupShadowActor(manager, element, mockVSCode);

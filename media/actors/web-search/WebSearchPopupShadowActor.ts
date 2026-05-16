@@ -44,10 +44,20 @@ export interface SearxngConfig {
   engines: string[];
 }
 
-/** Subagent-related state surfaced to the popup. PR A exposes the
- *  digest output cap; PR B will add the on/off + model-id fields. */
+/** Subagent-related state surfaced to the popup. */
 export interface SubagentState {
   digestMaxResults: number;
+  /** True when `moby.subagents.web-search-digest` is set to a model id
+   *  (i.e. not "off" / not absent). Drives the popup checkbox. */
+  digestEnabled: boolean;
+  /** Currently-selected sub model id. When digestEnabled is false this is
+   *  the dropdown's last-shown value (defaults to the main-loop model so
+   *  re-checking gives a sane initial pick). */
+  digestModelId: string;
+  /** Full registered-model list — same one as the new-session selector.
+   *  No filter on subagentRoles eligibility; router falls back silently
+   *  if the user picks an ineligible model. */
+  availableModels: Array<{ id: string; name: string }>;
 }
 
 /** Common SearXNG engines. User can still add more by editing
@@ -77,7 +87,12 @@ export class WebSearchPopupShadowActor extends PopupShadowActor {
     searchDepth: 'basic'
   };
   private _searxng: SearxngConfig = { endpoint: '', engines: [] };
-  private _subagent: SubagentState = { digestMaxResults: 5 };
+  private _subagent: SubagentState = {
+    digestMaxResults: 5,
+    digestEnabled: false,
+    digestModelId: '',
+    availableModels: []
+  };
   /** Last test-connection result, keyed by provider id. Stored so we can
    *  render it inline beneath the Test button; cleared on next interaction. */
   private _testResults: Partial<Record<WebSearchProviderId, { success: boolean; message: string }>> = {};
@@ -157,7 +172,12 @@ export class WebSearchPopupShadowActor extends PopupShadowActor {
   }
 
   private handleSubagentUpdate(state: SubagentState): void {
-    this._subagent = { digestMaxResults: state.digestMaxResults ?? 5 };
+    this._subagent = {
+      digestMaxResults: state.digestMaxResults ?? 5,
+      digestEnabled: state.digestEnabled ?? false,
+      digestModelId: state.digestModelId ?? '',
+      availableModels: Array.isArray(state.availableModels) ? state.availableModels : []
+    };
     if (this.isVisible()) this.updateBodyContent(this.renderPopupContent());
   }
 
@@ -288,14 +308,42 @@ export class WebSearchPopupShadowActor extends PopupShadowActor {
   }
 
   /** Subagent controls — provider-agnostic, render below the provider-specific
-   *  section in both Tavily and SearXNG layouts. PR A: digest-output slider only.
-   *  PR B will add the on/off checkbox and model dropdown. */
+   *  section in both Tavily and SearXNG layouts. Three controls:
+   *    1. Checkbox — toggles `moby.subagents.web-search-digest` between
+   *       the dropdown's selected model id and "off".
+   *    2. Model dropdown — full registered-model list. Disabled when
+   *       checkbox unchecked. Changing it updates the setting (and turns
+   *       it on if checkbox is on).
+   *    3. Slider — output cap (`moby.subagents.webSearchDigest.maxResults`).
+   */
   private renderSubagentSection(isOff: boolean): string {
-    const digestMax = this._subagent?.digestMaxResults ?? 5;
+    const sub = this._subagent;
+    const digestMax = sub?.digestMaxResults ?? 5;
+    const enabled = sub?.digestEnabled ?? false;
+    const modelId = sub?.digestModelId ?? '';
+    const models = sub?.availableModels ?? [];
+    const dropdownDisabled = isOff || !enabled;
+    const sliderDisabled = isOff || !enabled;
+    const optionsHtml = models.map(m => {
+      const selected = m.id === modelId ? ' selected' : '';
+      return `<option value="${this.escapeHtml(m.id)}"${selected}>${this.escapeHtml(m.name)}</option>`;
+    }).join('');
     return `
       <div class="ws-option">
+        <label class="ws-engine-item">
+          <input type="checkbox" data-id="subagentDigestEnabled"${enabled ? ' checked' : ''}${isOff ? ' disabled' : ''}>
+          <span>Compress results via subagent</span>
+        </label>
+      </div>
+      <div class="ws-option">
+        <label>Sub model:</label>
+        <select data-id="subagentDigestModel"${dropdownDisabled ? ' disabled' : ''}>
+          ${optionsHtml || '<option value="">(no models registered)</option>'}
+        </select>
+      </div>
+      <div class="ws-option">
         <label>Subagent digest results: <span data-id="subagentDigestMaxValue">${digestMax}</span></label>
-        <input type="range" data-id="subagentDigestMaxSlider" min="1" max="20" step="1" value="${digestMax}"${isOff ? ' disabled' : ''}>
+        <input type="range" data-id="subagentDigestMaxSlider" min="1" max="20" step="1" value="${digestMax}"${sliderDisabled ? ' disabled' : ''}>
       </div>
     `;
   }
@@ -413,6 +461,37 @@ export class WebSearchPopupShadowActor extends PopupShadowActor {
 
       const el = this.query('[data-id="subagentDigestMaxValue"]');
       if (el) el.textContent = value;
+    });
+
+    // Subagent on/off checkbox. Writes the setting based on current dropdown
+    // selection. When turning on with no prior model picked, falls back to
+    // whatever the dropdown is showing (initial render seeds it from the
+    // main-loop model id).
+    this.delegate('change', '[data-id="subagentDigestEnabled"]', (_e, element) => {
+      const checked = (element as HTMLInputElement).checked;
+      this._subagent.digestEnabled = checked;
+      this._vscode.postMessage({
+        type: 'setSubagentWebSearchDigest',
+        enabled: checked,
+        modelId: this._subagent.digestModelId
+      });
+      // Re-render to enable/disable the dependent dropdown + slider.
+      this.updateBodyContent(this.renderPopupContent());
+    });
+
+    // Sub model dropdown. Only meaningful when the checkbox is on; the setting
+    // write is gated behind that. When checkbox is off the dropdown is disabled
+    // so this handler effectively only fires in the on state.
+    this.delegate('change', '[data-id="subagentDigestModel"]', (_e, element) => {
+      const newModelId = (element as HTMLSelectElement).value;
+      this._subagent.digestModelId = newModelId;
+      if (this._subagent.digestEnabled) {
+        this._vscode.postMessage({
+          type: 'setSubagentWebSearchDigest',
+          enabled: true,
+          modelId: newModelId
+        });
+      }
     });
 
     // Depth buttons (Tavily only, but the handler is safe on the SearXNG view too)

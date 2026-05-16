@@ -850,6 +850,18 @@ export class ChatProvider implements vscode.WebviewViewProvider {
           }
           break;
         }
+        case 'setSubagentWebSearchDigest': {
+          // Single message handles both checkbox + dropdown changes. Webview
+          // sends the desired enabled flag and the chosen model id; we write
+          // the full `moby.subagents` object to keep other roles' values intact.
+          const enabled = !!data.enabled;
+          const modelId = typeof data.modelId === 'string' ? data.modelId : '';
+          const config = vscode.workspace.getConfiguration('moby');
+          const current = config.get<Record<string, string>>('subagents') ?? {};
+          const next = { ...current, 'web-search-digest': enabled && modelId ? modelId : 'off' };
+          await config.update('subagents', next, vscode.ConfigurationTarget.Global);
+          break;
+        }
         case 'setCacheDuration':
           this.webSearchManager.updateSettings({ cacheDuration: data.cacheDuration });
           break;
@@ -1262,9 +1274,37 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         engines: searxngEngines
       },
       subagent: {
-        digestMaxResults: this.webSearchManager.getDigestMaxResults()
+        digestMaxResults: this.webSearchManager.getDigestMaxResults(),
+        // web-search-digest role state — derived from `moby.subagents.web-search-digest`.
+        // "off" or absent = checkbox unchecked. Anything else = checkbox checked,
+        // value is the chosen sub model id.
+        ...this.getWebSearchDigestSubagentState()
       }
     });
+  }
+
+  /** Resolve the current web-search-digest subagent state for the popup:
+   *  enabled flag (derived from setting), the current/last model id (falls
+   *  back to the main-loop model when not previously set), and the full
+   *  registered-model list for the dropdown. Same model list as the new-session
+   *  selector — no eligibility filter; router gracefully handles ineligible
+   *  picks. */
+  private getWebSearchDigestSubagentState(): {
+    digestEnabled: boolean;
+    digestModelId: string;
+    availableModels: Array<{ id: string; name: string }>;
+  } {
+    const config = vscode.workspace.getConfiguration('moby');
+    const subs = config.get<Record<string, string>>('subagents') ?? {};
+    const raw = subs['web-search-digest'];
+    const isEnabled = !!raw && raw !== 'off';
+    const modelId = isEnabled ? raw! : this.deepSeekClient.getModel();
+    const availableModels = getAllRegisteredModels().map(m => ({ id: m.id, name: m.name }));
+    return {
+      digestEnabled: isEnabled,
+      digestModelId: modelId,
+      availableModels
+    };
   }
 
   // ── History & Session Management ──
