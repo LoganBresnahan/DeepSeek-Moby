@@ -842,6 +842,14 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         case 'setMaxResultsPerSearch':
           this.webSearchManager.updateSettings({ maxResultsPerSearch: data.value });
           break;
+        case 'setSubagentDigestMaxResults': {
+          const value = Number(data.value);
+          if (Number.isFinite(value) && value >= 1) {
+            await vscode.workspace.getConfiguration('moby')
+              .update('subagents.webSearchDigest.maxResults', value, vscode.ConfigurationTarget.Global);
+          }
+          break;
+        }
         case 'setCacheDuration':
           this.webSearchManager.updateSettings({ cacheDuration: data.cacheDuration });
           break;
@@ -1252,6 +1260,9 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       searxng: {
         endpoint: searxngEndpoint,
         engines: searxngEngines
+      },
+      subagent: {
+        digestMaxResults: this.webSearchManager.getDigestMaxResults()
       }
     });
   }

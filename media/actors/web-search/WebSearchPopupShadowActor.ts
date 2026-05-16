@@ -44,6 +44,12 @@ export interface SearxngConfig {
   engines: string[];
 }
 
+/** Subagent-related state surfaced to the popup. PR A exposes the
+ *  digest output cap; PR B will add the on/off + model-id fields. */
+export interface SubagentState {
+  digestMaxResults: number;
+}
+
 /** Common SearXNG engines. User can still add more by editing
  *  `moby.webSearch.searxng.engines` in settings.json directly. */
 const COMMON_SEARXNG_ENGINES = [
@@ -71,6 +77,7 @@ export class WebSearchPopupShadowActor extends PopupShadowActor {
     searchDepth: 'basic'
   };
   private _searxng: SearxngConfig = { endpoint: '', engines: [] };
+  private _subagent: SubagentState = { digestMaxResults: 5 };
   /** Last test-connection result, keyed by provider id. Stored so we can
    *  render it inline beneath the Test button; cleared on next interaction. */
   private _testResults: Partial<Record<WebSearchProviderId, { success: boolean; message: string }>> = {};
@@ -94,6 +101,7 @@ export class WebSearchPopupShadowActor extends PopupShadowActor {
         'webSearch.provider': (value: unknown) => this.handleProviderUpdate(value as WebSearchProviderId),
         'webSearch.providerStatus': (value: unknown) => this.handleProviderStatusUpdate(value as Record<string, boolean>),
         'webSearch.searxng': (value: unknown) => this.handleSearxngUpdate(value as SearxngConfig),
+        'webSearch.subagent': (value: unknown) => this.handleSubagentUpdate(value as SubagentState),
         'webSearch.testResult': (value: unknown) => this.handleTestResult(value as { provider: WebSearchProviderId; success: boolean; message: string }),
       },
       additionalStyles: webSearchShadowStyles,
@@ -148,6 +156,11 @@ export class WebSearchPopupShadowActor extends PopupShadowActor {
     if (this.isVisible()) this.updateBodyContent(this.renderPopupContent());
   }
 
+  private handleSubagentUpdate(state: SubagentState): void {
+    this._subagent = { digestMaxResults: state.digestMaxResults ?? 5 };
+    if (this.isVisible()) this.updateBodyContent(this.renderPopupContent());
+  }
+
   private handleTestResult(r: { provider: WebSearchProviderId; success: boolean; message: string }): void {
     this._testResults[r.provider] = { success: r.success, message: r.message };
     if (this.isVisible()) this.updateBodyContent(this.renderPopupContent());
@@ -191,6 +204,8 @@ export class WebSearchPopupShadowActor extends PopupShadowActor {
         </div>
 
         ${provider === 'tavily' ? this.renderTavilySection(isOff) : this.renderSearxngSection(isOff)}
+
+        ${this.renderSubagentSection(isOff)}
 
         <div class="ws-option ws-test-row">
           <button class="ws-test-btn"${(isOff || !providerConfigured) ? ' disabled' : ''} title="${providerConfigured ? 'Run a small test query against this provider' : 'Provider not configured'}">Test connection</button>
@@ -268,6 +283,19 @@ export class WebSearchPopupShadowActor extends PopupShadowActor {
           `).join('')}
         </div>
         <div class="ws-engines-hint">Leave all unchecked to use your SearXNG instance's default engine set.</div>
+      </div>
+    `;
+  }
+
+  /** Subagent controls — provider-agnostic, render below the provider-specific
+   *  section in both Tavily and SearXNG layouts. PR A: digest-output slider only.
+   *  PR B will add the on/off checkbox and model dropdown. */
+  private renderSubagentSection(isOff: boolean): string {
+    const digestMax = this._subagent?.digestMaxResults ?? 5;
+    return `
+      <div class="ws-option">
+        <label>Subagent digest results: <span data-id="subagentDigestMaxValue">${digestMax}</span></label>
+        <input type="range" data-id="subagentDigestMaxSlider" min="1" max="20" step="1" value="${digestMax}"${isOff ? ' disabled' : ''}>
       </div>
     `;
   }
@@ -374,6 +402,16 @@ export class WebSearchPopupShadowActor extends PopupShadowActor {
       this._vscode.postMessage({ type: 'setMaxResultsPerSearch', value: numValue });
 
       const el = this.query('[data-id="maxResultsValue"]');
+      if (el) el.textContent = value;
+    });
+
+    // Subagent digest output cap slider
+    this.delegateInput('[data-id="subagentDigestMaxSlider"]', (value) => {
+      const numValue = parseInt(value, 10);
+      this._subagent.digestMaxResults = numValue;
+      this._vscode.postMessage({ type: 'setSubagentDigestMaxResults', value: numValue });
+
+      const el = this.query('[data-id="subagentDigestMaxValue"]');
       if (el) el.textContent = value;
     });
 

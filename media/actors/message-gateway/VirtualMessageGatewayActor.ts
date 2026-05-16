@@ -675,6 +675,9 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         if (msg.searxng !== undefined) {
           this._manager.publishDirect('webSearch.searxng', msg.searxng);
         }
+        if (msg.subagent !== undefined) {
+          this._manager.publishDirect('webSearch.subagent', msg.subagent);
+        }
         break;
       }
 

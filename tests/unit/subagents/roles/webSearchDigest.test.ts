@@ -7,8 +7,10 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { webSearchDigestRole } from '../../../../src/subagents/roles/webSearchDigest';
+import { makeWebSearchDigestRole } from '../../../../src/subagents/roles/webSearchDigest';
 import type { WebSearchResponse, WebSearchResult } from '../../../../src/clients/webSearchProvider';
+
+const webSearchDigestRole = makeWebSearchDigestRole({ maxResults: 5 });
 
 function makeResult(overrides: Partial<WebSearchResult> = {}): WebSearchResult {
   return {
@@ -30,28 +32,33 @@ function makeResponse(results: WebSearchResult[], extras: Partial<WebSearchRespo
 }
 
 describe('webSearchDigestRole', () => {
-  describe('shouldRoute threshold', () => {
-    it('returns false for small responses (≤3 results, ≤1.5KB)', () => {
-      const response = makeResponse([
-        makeResult({ content: 'short' }),
-        makeResult({ content: 'short' })
-      ]);
+  describe('shouldRoute (UI checkbox is the gate; role is defensive only)', () => {
+    it('returns false for empty result sets — nothing to digest', () => {
+      const response = makeResponse([]);
       expect(webSearchDigestRole.shouldRoute(response)).toBe(false);
     });
 
-    it('returns true when result count exceeds threshold (>3)', () => {
-      const response = makeResponse([
-        makeResult(), makeResult(), makeResult(), makeResult()
-      ]);
-      expect(webSearchDigestRole.shouldRoute(response)).toBe(true);
+    it('returns true for any non-empty result set, even single-result', () => {
+      expect(webSearchDigestRole.shouldRoute(makeResponse([makeResult()]))).toBe(true);
+      expect(webSearchDigestRole.shouldRoute(makeResponse([
+        makeResult(), makeResult(), makeResult(), makeResult(), makeResult()
+      ]))).toBe(true);
+    });
+  });
+
+  describe('maxResults config', () => {
+    it('embeds the maxResults value in the system prompt', () => {
+      const role = makeWebSearchDigestRole({ maxResults: 3 });
+      const prompt = role.buildSystemPrompt({ recentUserPrompt: 'task' });
+      expect(prompt).toContain('Pick the 3 result(s)');
+      expect(prompt).toContain('at most 3 entries');
     });
 
-    it('returns true when total content bytes exceed threshold (>1500)', () => {
-      const response = makeResponse([
-        makeResult({ content: 'x'.repeat(800) }),
-        makeResult({ content: 'x'.repeat(800) })
-      ]);
-      expect(webSearchDigestRole.shouldRoute(response)).toBe(true);
+    it('clamps maxResults to the [1, 20] range', () => {
+      const tooLow = makeWebSearchDigestRole({ maxResults: 0 }).buildSystemPrompt({ recentUserPrompt: '' });
+      const tooHigh = makeWebSearchDigestRole({ maxResults: 99 }).buildSystemPrompt({ recentUserPrompt: '' });
+      expect(tooLow).toContain('Pick the 1 result(s)');
+      expect(tooHigh).toContain('Pick the 20 result(s)');
     });
   });
 

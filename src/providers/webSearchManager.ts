@@ -16,7 +16,7 @@ import { WebSearchResponse, WebSearchResult } from '../clients/webSearchProvider
 import { logger } from '../utils/logger';
 import { tracer } from '../tracing';
 import { SubagentRouter } from '../subagents/router';
-import { webSearchDigestRole } from '../subagents/roles/webSearchDigest';
+import { makeWebSearchDigestRole, DEFAULT_MAX_DIGEST_RESULTS } from '../subagents/roles/webSearchDigest';
 import { WebSearchSettings, WebSearchResultEvent, WebSearchMode } from './types';
 
 export interface SearchProgress {
@@ -67,6 +67,24 @@ export class WebSearchManager {
    *  the orchestrator at the start of each turn. */
   setRecentUserPrompt(prompt: string): void {
     this.recentUserPrompt = prompt;
+  }
+
+  /** Read the user-tunable digest output cap from VS Code settings. The
+   *  web-search popup's slider writes this; the role uses it to decide how
+   *  aggressively to compress. Falls back to the role's default. */
+  private readDigestMaxResults(): number {
+    const config = vscode.workspace.getConfiguration('moby');
+    const raw = config.get<number>('subagents.webSearchDigest.maxResults');
+    if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 1) {
+      return raw;
+    }
+    return DEFAULT_MAX_DIGEST_RESULTS;
+  }
+
+  /** Public read of the same setting, for `sendWebSearchSettings` to expose
+   *  the slider's current value to the popup. */
+  getDigestMaxResults(): number {
+    return this.readDigestMaxResults();
   }
 
   /** The currently-active web search provider, resolved at call time so a
@@ -329,13 +347,15 @@ export class WebSearchManager {
       // Subagent routing — between dedup and final format. One sub call covers
       // all parallel responses by digesting their merged + deduped results.
       // All fallback paths land on `formatMultiSearchResults` so behavior is
-      // identical to pre-routing world when sub is off / fails / under threshold.
+      // identical to pre-routing world when sub is off / fails / has nothing
+      // to digest.
       let webSearchContext: string;
       let routedDigest = false;
       if (this.subagentRouter) {
         const synthetic = buildSyntheticResponse(fulfilled);
+        const role = makeWebSearchDigestRole({ maxResults: this.readDigestMaxResults() });
         const routeResult = await this.subagentRouter.route(
-          webSearchDigestRole,
+          role,
           synthetic,
           { recentUserPrompt: message }
         );
@@ -487,14 +507,15 @@ export class WebSearchManager {
       });
 
       // Subagent routing — between raw response and formatSearchResults.
-      // Failure paths (off, below threshold, schema fail, sub error) all
-      // collapse to using the formatted raw response below; main model
-      // never sees a difference.
+      // Failure paths (off, no results, schema fail, sub error) all collapse
+      // to using the formatted raw response below; main model never sees a
+      // difference.
       let formatted: string;
       let routedDigest = false;
       if (this.subagentRouter) {
+        const role = makeWebSearchDigestRole({ maxResults: this.readDigestMaxResults() });
         const routeResult = await this.subagentRouter.route(
-          webSearchDigestRole,
+          role,
           response,
           { recentUserPrompt: this.recentUserPrompt }
         );

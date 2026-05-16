@@ -190,6 +190,7 @@ describe('Phase 3 Fidelity: live events == hydrated events round-trip', () => {
       getSettings: vi.fn(async () => ({ enabled: false, settings: {}, configured: false, mode: 'auto' })),
       getMode: vi.fn(() => 'auto'), searchByQuery: vi.fn(async () => ''),
       resetToDefaults: vi.fn(), clearCache: vi.fn(), toggle: vi.fn(), updateSettings: vi.fn(),
+      setRecentUserPrompt: vi.fn(), getDigestMaxResults: vi.fn(() => 5),
     };
     const mockFileContext = {
       clearTurnTracking: vi.fn(), extractFileIntent: vi.fn(), getSelectedFilesContext: vi.fn(() => ''),

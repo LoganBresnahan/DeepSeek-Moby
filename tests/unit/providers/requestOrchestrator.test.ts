@@ -213,6 +213,8 @@ function createMockWebSearchManager() {
     clearCache: vi.fn(),
     toggle: vi.fn(),
     updateSettings: vi.fn(),
+    setRecentUserPrompt: vi.fn(),
+    getDigestMaxResults: vi.fn(() => 5),
   };
 }
 
