@@ -705,6 +705,87 @@ describe('WebSearchManager', () => {
     });
   });
 
+  // ── subagent routing in manual mode (searchForMessage) ──
+
+  describe('subagent routing — manual mode (searchForMessage)', () => {
+    function createMockRouter() {
+      return {
+        route: vi.fn()
+      };
+    }
+
+    it('returns digest verbatim when router routes successfully', async () => {
+      const router = createMockRouter();
+      router.route.mockResolvedValue({ routed: true, digest: 'DIGESTED OUTPUT' });
+      const m = new WebSearchManager(createMockRegistry(mockTavily) as any, router as any);
+      m.setMode('manual');
+      await m.toggle(true);
+
+      const result = await m.searchForMessage('what is foo?');
+
+      expect(result).toBe('DIGESTED OUTPUT');
+      expect(router.route).toHaveBeenCalledTimes(1);
+      // Sub receives synthetic merged response with the original query
+      expect(router.route).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'web-search-digest' }),
+        expect.objectContaining({ query: 'what is foo?', results: expect.any(Array) }),
+        { recentUserPrompt: 'what is foo?' }
+      );
+    });
+
+    it('falls back to formatMultiSearchResults when router declines (off / threshold / fail)', async () => {
+      const router = createMockRouter();
+      router.route.mockResolvedValue({ routed: false, reason: 'off' });
+      const m = new WebSearchManager(createMockRegistry(mockTavily) as any, router as any);
+      m.setMode('manual');
+      await m.toggle(true);
+
+      const result = await m.searchForMessage('what is foo?');
+
+      expect(result).toContain('Web search results for: "what is foo?"');
+      expect(result).toContain('Result 1');
+      expect(router.route).toHaveBeenCalledTimes(1);
+    });
+
+    it('passes synthetic deduped response to router (one sub call covers all parallel responses)', async () => {
+      // Bump credits so two parallel calls run; both return overlapping URLs.
+      mockTavily.search = vi.fn(async (query: string) => ({
+        results: [
+          { title: 'Dup', url: 'https://example.com/dup', content: 'first variant', score: 0.9 },
+          { title: 'Unique A', url: 'https://example.com/a', content: 'a content', score: 0.8 },
+        ],
+        answer: undefined,
+        query,
+        responseTime: 100
+      })) as any;
+      const router = createMockRouter();
+      router.route.mockResolvedValue({ routed: true, digest: 'D' });
+      const m = new WebSearchManager(createMockRegistry(mockTavily) as any, router as any);
+      m.setMode('manual');
+      await m.toggle(true);
+      m.updateSettings({ creditsPerPrompt: 2 });
+
+      await m.searchForMessage('q');
+
+      expect(router.route).toHaveBeenCalledTimes(1);
+      const syntheticArg = router.route.mock.calls[0][1];
+      // Dedup keeps the dup once; merged set has 2 URLs total.
+      expect(syntheticArg.results).toHaveLength(2);
+      const urls = new Set(syntheticArg.results.map((r: { url: string }) => r.url));
+      expect(urls).toEqual(new Set(['https://example.com/dup', 'https://example.com/a']));
+    });
+
+    it('uses formatMultiSearchResults path when no router is provided (back-compat)', async () => {
+      const m = new WebSearchManager(createMockRegistry(mockTavily) as any /* no router */);
+      m.setMode('manual');
+      await m.toggle(true);
+
+      const result = await m.searchForMessage('q');
+
+      expect(result).toContain('Web search results for: "q"');
+    });
+  });
+
   // ── dispose ──
 
   describe('dispose', () => {

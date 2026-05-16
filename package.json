@@ -494,6 +494,22 @@
           ],
           "description": "Which SearXNG engines to query. Leave empty to use the instance's default engine set. Common values: google, bing, duckduckgo, brave, wikipedia, github, stackoverflow."
         },
+        "moby.subagents": {
+          "type": "object",
+          "default": {},
+          "markdownDescription": "Per-role subagent routing. Each key is a subagent role; the value is a registered model id (e.g. `\"deepseek-v4-flash-thinking\"`) or `\"off\"`. Off by default. The configured model must declare the role in its `subagentRoles` capability. See `docs/plans/subagents.md`.",
+          "properties": {
+            "web-search-digest": {
+              "type": "string",
+              "default": "off",
+              "description": "Compress web_search responses into a ranked digest before they reach the main model. Set to \"off\" to disable, or to a model id (e.g. \"deepseek-v4-flash-thinking\") to enable."
+            }
+          },
+          "additionalProperties": {
+            "type": "string",
+            "description": "Other subagent roles (search-digest, file-summarize, tool-classify, image-describe). Same model-id-or-\"off\" shape."
+          }
+        },
         "moby.editMode": {
           "type": "string",
           "default": "manual",

@@ -21,6 +21,7 @@ import { PlanManager } from './planManager';
 import { TokenService } from '../services/tokenService';
 import { qrcodegen } from '../vendor/qrcodegen';
 import { getCapabilities, getAllRegisteredModels, supportsManualMode, MODEL_REGISTRY } from '../models/registry';
+import { SubagentRouter } from '../subagents/router';
 
 export class ChatProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'deepseek-chat-view';
@@ -36,6 +37,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
    *  interface. Resolved from the registry so there's one instance. */
   private tavilyClient: TavilyClient;
   private webSearchRegistry: WebSearchProviderRegistry;
+  private subagentRouter: SubagentRouter;
 
   // Message queuing during post-response summarization
   private _summarizing = false;
@@ -57,6 +59,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     statusBar: StatusBar,
     conversationManager: ConversationManager,
     webSearchRegistry: WebSearchProviderRegistry,
+    subagentRouter: SubagentRouter,
     drawingServer?: DrawingServer
   ) {
     this.deepSeekClient = deepSeekClient;
@@ -64,10 +67,11 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     this.conversationManager = conversationManager;
     this.webSearchRegistry = webSearchRegistry;
     this.tavilyClient = webSearchRegistry.getTavilyClient();
+    this.subagentRouter = subagentRouter;
     this.drawingServer = drawingServer || null;
 
     // Create managers
-    this.webSearchManager = new WebSearchManager(this.webSearchRegistry);
+    this.webSearchManager = new WebSearchManager(this.webSearchRegistry, this.subagentRouter);
     this.fileContextManager = new FileContextManager();
     const config = vscode.workspace.getConfiguration('moby');
     // Initialize web search mode from persisted setting

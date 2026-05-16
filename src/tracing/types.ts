@@ -39,7 +39,10 @@ export type TraceCategory =
   | 'command.approval'   // Approval requested/resolved
 
   // File Context
-  | 'file.context';      // File context operations (search, select, inject)
+  | 'file.context'      // File context operations (search, select, inject)
+
+  // Subagent Routing
+  | 'subagent.route';    // Subagent role dispatched (e.g. web-search-digest)
 
 /**
  * Source of the trace event.

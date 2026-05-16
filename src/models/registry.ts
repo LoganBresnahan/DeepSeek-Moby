@@ -124,6 +124,13 @@ export interface ModelCapabilities {
    *  use them; R1 (`xml-shell` transport) cannot. Custom models opt in per
    *  registry entry. See [docs/plans/lsp-integration.md]. */
   lspTools?: boolean;
+
+  /** Subagent roles this model can serve when configured via `moby.subagents`.
+   *  Loose `string[]` so the registry stays decoupled from the subagents
+   *  feature module — the canonical role names live in
+   *  [src/subagents/types.ts]. Empty / absent = main-only model (default).
+   *  See [docs/plans/subagents.md]. */
+  subagentRoles?: string[];
 }
 
 export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
@@ -192,6 +199,10 @@ export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
     // tool decisions instead of dropping it on the floor.
     streamingToolCalls: true,
     lspTools: true,
+    // Subagent eligibility — V4-flash is the cheap, fast workhorse for
+    // routed digestion. Phase 1 ships `web-search-digest`; more roles
+    // appear in subsequent phases.
+    subagentRoles: ['web-search-digest'],
   },
   'deepseek-v4-pro-thinking': {
     toolCalling: 'native',
@@ -377,6 +388,16 @@ export function validateCustomModelEntry(entry: unknown): { ok: true } | { ok: f
   }
   if (e.lspTools !== undefined && typeof e.lspTools !== 'boolean') {
     return { ok: false, error: 'lspTools must be boolean if provided' };
+  }
+  if (e.subagentRoles !== undefined) {
+    if (!Array.isArray(e.subagentRoles)) {
+      return { ok: false, error: 'subagentRoles must be an array of strings if provided' };
+    }
+    for (const role of e.subagentRoles) {
+      if (typeof role !== 'string') {
+        return { ok: false, error: 'subagentRoles entries must be strings' };
+      }
+    }
   }
   return { ok: true };
 }

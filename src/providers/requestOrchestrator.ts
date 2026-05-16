@@ -545,6 +545,10 @@ export class RequestOrchestrator {
     // Clear read files tracking and extract user intent
     this.fileContextManager.clearTurnTracking();
     this.fileContextManager.extractFileIntent(message);
+    // Subagent task context — used by web-search-digest etc. to bias rankings
+    // toward the user's current task. Empty string is safe (role falls back
+    // to general informativeness).
+    this.webSearchManager.setRecentUserPrompt(message);
 
     // Get or create current session
     let sessionId = currentSessionId;

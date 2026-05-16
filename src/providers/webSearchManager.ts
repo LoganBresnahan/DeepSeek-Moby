@@ -15,6 +15,8 @@ import { WebSearchProviderRegistry } from '../clients/webSearchProviderRegistry'
 import { WebSearchResponse, WebSearchResult } from '../clients/webSearchProvider';
 import { logger } from '../utils/logger';
 import { tracer } from '../tracing';
+import { SubagentRouter } from '../subagents/router';
+import { webSearchDigestRole } from '../subagents/roles/webSearchDigest';
 import { WebSearchSettings, WebSearchResultEvent, WebSearchMode } from './types';
 
 export interface SearchProgress {
@@ -52,8 +54,20 @@ export class WebSearchManager {
     maxResultsPerSearch: 5
   };
   private cache = new Map<string, { results: string; timestamp: number }>();
+  /** Most recent user prompt — used as task context for subagent digestion.
+   *  The orchestrator updates this at the top of each turn. Empty until set. */
+  private recentUserPrompt = '';
 
-  constructor(private readonly registry: WebSearchProviderRegistry) {}
+  constructor(
+    private readonly registry: WebSearchProviderRegistry,
+    private readonly subagentRouter?: SubagentRouter
+  ) {}
+
+  /** Update the user-prompt context used by subagent digesters. Call from
+   *  the orchestrator at the start of each turn. */
+  setRecentUserPrompt(prompt: string): void {
+    this.recentUserPrompt = prompt;
+  }
 
   /** The currently-active web search provider, resolved at call time so a
    *  settings-level provider switch takes effect on the next search without
@@ -312,12 +326,37 @@ export class WebSearchManager {
         throw new Error(errorMsg);
       }
 
-      const webSearchContext = this.formatMultiSearchResults(fulfilled);
+      // Subagent routing — between dedup and final format. One sub call covers
+      // all parallel responses by digesting their merged + deduped results.
+      // All fallback paths land on `formatMultiSearchResults` so behavior is
+      // identical to pre-routing world when sub is off / fails / under threshold.
+      let webSearchContext: string;
+      let routedDigest = false;
+      if (this.subagentRouter) {
+        const synthetic = buildSyntheticResponse(fulfilled);
+        const routeResult = await this.subagentRouter.route(
+          webSearchDigestRole,
+          synthetic,
+          { recentUserPrompt: message }
+        );
+        if (routeResult.routed) {
+          webSearchContext = routeResult.digest;
+          routedDigest = true;
+        } else {
+          webSearchContext = this.formatMultiSearchResults(fulfilled);
+        }
+      } else {
+        webSearchContext = this.formatMultiSearchResults(fulfilled);
+      }
+
       const totalResults = fulfilled.reduce((sum, r) => sum + r.results.length, 0);
       logger.webSearchResult(totalResults, Date.now() - searchStartTime);
 
       if (fulfilled.length < callCount) {
         logger.info(`[WebSearch] ${callCount - fulfilled.length} of ${callCount} calls failed, proceeding with ${fulfilled.length} successful`);
+      }
+      if (routedDigest) {
+        logger.info(`[WebSearch] Manual-mode results digested by subagent`);
       }
 
       // Cache the results
@@ -447,16 +486,36 @@ export class WebSearchManager {
         maxResults: this.settings.maxResultsPerSearch
       });
 
-      const formatted = this.formatSearchResults(response);
+      // Subagent routing — between raw response and formatSearchResults.
+      // Failure paths (off, below threshold, schema fail, sub error) all
+      // collapse to using the formatted raw response below; main model
+      // never sees a difference.
+      let formatted: string;
+      let routedDigest = false;
+      if (this.subagentRouter) {
+        const routeResult = await this.subagentRouter.route(
+          webSearchDigestRole,
+          response,
+          { recentUserPrompt: this.recentUserPrompt }
+        );
+        if (routeResult.routed) {
+          formatted = routeResult.digest;
+          routedDigest = true;
+        } else {
+          formatted = this.formatSearchResults(response);
+        }
+      } else {
+        formatted = this.formatSearchResults(response);
+      }
 
       this.cache.set(cacheKey, {
         results: formatted,
         timestamp: Date.now()
       });
 
-      logger.info(`[WebSearch] Tool-triggered search complete: ${response.results.length} results`);
+      logger.info(`[WebSearch] Tool-triggered search complete: ${response.results.length} results${routedDigest ? ' (digested by subagent)' : ''}`);
       tracer.trace('state.publish', 'webSearch.toolSearch.complete', {
-        data: { query: query.substring(0, 80), resultCount: response.results.length }
+        data: { query: query.substring(0, 80), resultCount: response.results.length, routedDigest }
       });
       return formatted;
     } catch (error: any) {
@@ -498,4 +557,31 @@ export class WebSearchManager {
     this._onSettingsChanged.dispose();
     this._onModeChanged.dispose();
   }
+}
+
+/**
+ * Merge multiple parallel search responses into a single synthetic
+ * `WebSearchResponse` for subagent routing. Dedupes by URL keeping the
+ * highest-scored variant; sorts by score desc. Mirrors the dedup pass
+ * inside `formatMultiSearchResults` so the sub sees the same cleaned-up
+ * input the formatter would have rendered.
+ */
+function buildSyntheticResponse(responses: WebSearchResponse[]): WebSearchResponse {
+  const seen = new Map<string, WebSearchResult>();
+  for (const response of responses) {
+    for (const result of response.results) {
+      const existing = seen.get(result.url);
+      if (!existing || result.score > existing.score) {
+        seen.set(result.url, result);
+      }
+    }
+  }
+  const deduped = Array.from(seen.values()).sort((a, b) => b.score - a.score);
+  const totalResponseTime = responses.reduce((sum, r) => sum + r.responseTime, 0);
+  return {
+    query: responses[0].query,
+    results: deduped,
+    answer: responses.find(r => r.answer)?.answer,
+    responseTime: totalResponseTime
+  };
 }

@@ -13,6 +13,7 @@ import { TokenService } from './services/tokenService';
 import { LspAvailability } from './services/lspAvailability';
 import { DrawingServer } from './providers/drawingServer';
 import { registerCustomModels } from './models/registry';
+import { SubagentRouter } from './subagents/router';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -143,6 +144,11 @@ export async function activate(context: vscode.ExtensionContext) {
   });
   context.subscriptions.push({ dispose: () => drawingServer.dispose() });
 
+  // Subagent routing — owned at the extension level so all consumers share
+  // one router (and one per-modelId DeepSeekClient cache). Off by default;
+  // user opts in per role via `moby.subagents.<role>` setting.
+  const subagentRouter = new SubagentRouter(context);
+
   // Initialize chat provider (sidebar)
   chatProvider = new ChatProvider(
     context.extensionUri,
@@ -150,6 +156,7 @@ export async function activate(context: vscode.ExtensionContext) {
     statusBar,
     conversationManager,
     webSearchRegistry,
+    subagentRouter,
     drawingServer
   );
 

@@ -489,6 +489,59 @@ These exercise the `run_shell` tool for native-tool-calling models (V4, V3 Chat,
 
 ---
 
+## Subagent web-search-digest — Phase 1 first ship (P0)
+
+**Why this matters:** first subagent role lands. Routing happens inside `webSearchManager.searchByQuery`; main agent loop is unchanged. Off-by-default — must verify no behavior change when setting is absent / `"off"`, and a real digest when enabled. See [docs/plans/subagents.md](./subagents.md).
+
+**Setup:**
+- Have a Tavily key OR a configured SearXNG endpoint (`moby.webSearch.provider`). Web search mode = `auto`.
+- DeepSeek API key set (the V4-flash-thinking subagent uses it).
+
+**S1. Setting off → no behavior change.**
+1. Confirm `moby.subagents` is unset OR `"web-search-digest": "off"`.
+2. Run a turn that triggers `web_search` (e.g. *"Search the web for the latest TypeScript 6 release notes."*).
+3. Watch the Tool dropdown: web search result text should match today's `formatSearchResults` output (header line, separator, per-result title/URL/content blocks).
+4. *Moby: Show Logs* → no `[Subagent]` lines. Trace export shows no `subagent.route` events.
+
+**S2. Setting on → digest replaces raw output.**
+1. Add `"moby.subagents": { "web-search-digest": "deepseek-v4-flash-thinking" }` in user settings.
+2. Run the same turn from S1.
+3. Tool dropdown's web search result should now show the digested format: each entry includes a `Why relevant: ...` line, plus a trailing `(Subagent considered N results; M omitted as less relevant.)` note when applicable.
+4. Logs include `[WebSearch] Tool-triggered search complete: ... (digested by subagent)`. Trace export contains a `subagent.route` span with `validationResult: 'ok'` and a `digestBytes` value smaller than `inputBytes`.
+
+**S3. Sub failure falls back gracefully.**
+1. Temporarily set `"web-search-digest": "deepseek-chat"` (a model that does NOT declare `subagentRoles: ['web-search-digest']`).
+2. Run the same turn.
+3. Tool dropdown's web search result should show the raw `formatSearchResults` output unchanged. Main response should be normal — model has no idea routing was attempted.
+4. Logs include `[Subagent] Model "deepseek-chat" is not declared for role "web-search-digest". Falling back to raw input.` Trace export does NOT contain a `subagent.route` span (router exits before opening one in this branch).
+
+**Pass criteria:** all three scenarios behave as described, no regressions in non-search turns, and the main model's behavior is identical between S1 and S3 (proves invisibility of routing failures).
+
+---
+
+## Subagent web-search-digest — manual-mode routing (P0)
+
+**Why this matters:** Phase 1 first ship only wired the auto-mode `web_search` tool path. Manual ("forced") mode uses a separate entry point (`webSearchManager.searchForMessage`) and was bypassing routing entirely. Phase 1 polish fix wires the router into manual mode too. See [docs/plans/subagents.md](./subagents.md) — "Phase 1 polish".
+
+**Setup:** same as the prior P0 entry (Tavily key OR SearXNG endpoint, web search mode `manual`).
+
+**S1. Manual mode + subagent enabled → digest replaces formatMultiSearchResults output.**
+1. Set `"moby.subagents": { "web-search-digest": "deepseek-v4-flash-thinking" }`.
+2. Toggle web search to **manual** mode in the popup, then click the search toggle so it's enabled.
+3. Type a prompt that's a question (e.g. *"latest news in jquery"*). Send.
+4. Logs include `[WebSearch] Manual-mode results digested by subagent`. Trace export contains a `subagent.route` span with `validationResult: 'ok'`.
+5. The injected web search context (visible via *Moby: Export Turn as JSON*) shows the digest format (per-entry `Why relevant:` lines + trailing `(Subagent considered N results...)` note when applicable), not the raw `formatMultiSearchResults` output.
+
+**S2. Manual mode + subagent off → unchanged behavior.**
+1. Set `"moby.subagents": { "web-search-digest": "off" }` (or remove the key).
+2. Repeat the manual-mode search from S1.
+3. Injected web search context matches today's `formatMultiSearchResults` output (header + dedup'd results, no `Why relevant:` lines, no subagent footer).
+4. No `[Subagent]` log lines, no `subagent.route` trace span.
+
+**Pass criteria:** S1 digests, S2 doesn't. Both produce coherent main-model responses.
+
+---
+
 ## Scroll investigation (not yet a test, still an audit item)
 
 See the scroll-audit findings in conversation history. Top suspect is that any mouse movement during streaming breaks auto-scroll (via [ScrollActor.ts:309-324](../../media/actors/scroll/ScrollActor.ts#L309-L324)), and when combined with a large content jump (code block landing), the user can end up >100px from the bottom with `_userScrolled=true`, locking out automatic re-engagement.
