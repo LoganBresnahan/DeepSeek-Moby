@@ -297,6 +297,27 @@ The router is generic over roles — adding a new role is a new module + a regis
 
 **Acceptance:** popup exposes checkbox + dropdown + slider; toggling them updates settings live and changes next search behavior accordingly. Manual-mode (forced) search routes through subagent when enabled. Threshold change visible in trace logs (small searches now show no `subagent.route` span at all).
 
+### Phase 1.75 — non-thinking V4-flash variant for sub use
+
+**Goal:** cut subagent latency by 2–3x using a true non-thinking model variant, after first-session data confirmed thinking-mode reasoning was the dominant per-call cost.
+
+**Why this slice:** Phase 1+polish data showed subagent calls land in 4–7s range, with 457–1527 chars of reasoning per call. The digest task (rank N results, write 1-sentence snippets) doesn't need reasoning — it's pure output formatting. Cutting reasoning should give same compression in much less wall time.
+
+**Why we missed this earlier:** the original V4 integration tested `model: "deepseek-v4-flash"` with no `thinking` param and observed reasoning still emitted. Concluded "non-thinking V4 doesn't actually exist." Wrong conclusion — DeepSeek's API defaults the `thinking` param to `enabled` when omitted. The documented mechanism is to send `thinking: {"type": "disabled"}` explicitly. Confirmed empirically 2026-05-15 — request returns no `reasoning_content`, fast wall time. See [api-docs.deepseek.com Thinking Mode guide](https://api-docs.deepseek.com/guides/thinking_mode).
+
+**Work:**
+- **Capability axis change.** Today's `sendThinkingParam?: boolean` injects `{thinking: {type: 'enabled'}}` when true. Two options:
+  - **A. Tri-state field.** Convert to `sendThinkingParam?: 'enabled' | 'disabled'`. Cleaner — one field captures all three states (omitted, enabled, disabled). Touches a handful of call sites in `deepseekClient.applyThinkingMode`.
+  - **B. New mutually-exclusive field.** Keep boolean, add `disableThinking?: boolean` for the `{type: 'disabled'}` case. No breaking change but two fields for one concept.
+  - Recommend A.
+- **New registry entry.** Add `deepseek-v4-flash` (no `-thinking` suffix) with `sendThinkingParam: 'disabled'`, no `reasoningEffort`, no `reasoningEcho`. Display name "DeepSeek V4 Flash (Non-thinking)". Tag `subagentRoles: ['web-search-digest']`.
+- **Also tag `deepseek-v4-pro-thinking` with `subagentRoles: ['web-search-digest']`.** Lets users pick the higher-quality (more expensive) variant from the popup dropdown if they want better digestion. Currently the dropdown shows it but the router rejects it.
+- **No webview changes needed** — popup dropdown already lists all registered models; eligibility is enforced at route time.
+- Tests: capability axis change → unit tests for `applyThinkingMode` with both `'enabled'` and `'disabled'`. Registry entry validation. Sub-routing test with the new model id.
+- Manual-test backlog: 1 entry — pick `deepseek-v4-flash` (non-thinking) in popup dropdown, run a search, confirm trace `subagent.route` span has shorter `durationMs` than the thinking variant on a comparable input.
+
+**Acceptance:** with `moby.subagents.web-search-digest = "deepseek-v4-flash"` (the new non-thinking entry), web-search routing produces digests of comparable quality to V4-flash-thinking but in 1.5–2.5s instead of 4–7s. No reasoning chars in trace logs for sub calls.
+
 ### Phase 2 — `image-describe` (capability bridge)
 
 **Goal:** unblock vision use cases for non-vision main models (DeepSeek V3/R1/V4 today, future text-only models tomorrow). User can paste a screenshot or attach an image and get useful behavior even when their chosen main model is blind.
