@@ -305,18 +305,33 @@ The router is generic over roles — adding a new role is a new module + a regis
 
 **Why we missed this earlier:** the original V4 integration tested `model: "deepseek-v4-flash"` with no `thinking` param and observed reasoning still emitted. Concluded "non-thinking V4 doesn't actually exist." Wrong conclusion — DeepSeek's API defaults the `thinking` param to `enabled` when omitted. The documented mechanism is to send `thinking: {"type": "disabled"}` explicitly. Confirmed empirically 2026-05-15 — request returns no `reasoning_content`, fast wall time. See [api-docs.deepseek.com Thinking Mode guide](https://api-docs.deepseek.com/guides/thinking_mode).
 
-**Work:**
-- **Capability axis change.** Today's `sendThinkingParam?: boolean` injects `{thinking: {type: 'enabled'}}` when true. Two options:
-  - **A. Tri-state field.** Convert to `sendThinkingParam?: 'enabled' | 'disabled'`. Cleaner — one field captures all three states (omitted, enabled, disabled). Touches a handful of call sites in `deepseekClient.applyThinkingMode`.
-  - **B. New mutually-exclusive field.** Keep boolean, add `disableThinking?: boolean` for the `{type: 'disabled'}` case. No breaking change but two fields for one concept.
-  - Recommend A.
-- **New registry entry.** Add `deepseek-v4-flash` (no `-thinking` suffix) with `sendThinkingParam: 'disabled'`, no `reasoningEffort`, no `reasoningEcho`. Display name "DeepSeek V4 Flash (Non-thinking)". Tag `subagentRoles: ['web-search-digest']`.
-- **Also tag `deepseek-v4-pro-thinking` with `subagentRoles: ['web-search-digest']`.** Lets users pick the higher-quality (more expensive) variant from the popup dropdown if they want better digestion. Currently the dropdown shows it but the router rejects it.
-- **No webview changes needed** — popup dropdown already lists all registered models; eligibility is enforced at route time.
-- Tests: capability axis change → unit tests for `applyThinkingMode` with both `'enabled'` and `'disabled'`. Registry entry validation. Sub-routing test with the new model id.
-- Manual-test backlog: 1 entry — pick `deepseek-v4-flash` (non-thinking) in popup dropdown, run a search, confirm trace `subagent.route` span has shorter `durationMs` than the thinking variant on a comparable input.
+**Why a per-call override instead of new registry entries:** original draft proposed adding non-thinking V4 entries (`deepseek-v4-flash`, `deepseek-v4-pro`) alongside the thinking ones, so users could pick a non-thinking model from the popup dropdown. Realized that's the wrong shape — sub digestion *never* needs thinking, so the router can just force non-thinking on its own `chat()` calls regardless of which V4 model the user picked. Zero new registry entries, zero dropdown clutter, zero new UI surface. User picks any V4 model → sub call uses it in non-thinking mode automatically.
 
-**Acceptance:** with `moby.subagents.web-search-digest = "deepseek-v4-flash"` (the new non-thinking entry), web-search routing produces digests of comparable quality to V4-flash-thinking but in 1.5–2.5s instead of 4–7s. No reasoning chars in trace logs for sub calls.
+**Main-loop user control over thinking mode** (pill toggle next to reasoning_effort) is a separate concern. Worthwhile but motivated by main UX, not subagent latency. Lives in Phase 1.85.
+
+**Work:**
+- **`ChatOptions.thinkingMode` override.** Add `thinkingMode?: 'enabled' | 'disabled'` to `ChatOptions` in [src/deepseekClient.ts](../../src/deepseekClient.ts). Modify `applyThinkingMode` to read the option first, fall back to capability defaults. When `'disabled'`: inject `{thinking: {type: 'disabled'}}`, omit `reasoning_effort`, still strip the V4-rejected sampling params (`temperature`, `top_p`, etc.). When `'enabled'` or omitted: existing behavior.
+- **Router uses the override.** `SubagentRouter.route()` calls `client.chat(..., { jsonMode: true, thinkingMode: 'disabled' })` on every sub dispatch. Forced because subagent role design assumes non-thinking; no benefit to letting thinking run.
+- **Tag `deepseek-v4-pro-thinking` with `subagentRoles: ['web-search-digest']`.** Currently the popup dropdown lists it but router rejects with "Model not declared for role". This wasn't intentional gatekeeping — Phase 1 only declared v4-flash because we wanted the cheap option. Pro is fine for users who want max digestion quality.
+- Tests: `applyThinkingMode` honors `options.thinkingMode = 'disabled'` (sets `type: 'disabled'`, no `reasoning_effort`, still strips sampling). Router test asserts `chat()` called with `thinkingMode: 'disabled'`.
+- Manual-test backlog: 1 entry — turn subagent on with `deepseek-v4-flash-thinking`, run a search, confirm trace `subagent.route` span has shorter `durationMs` and the `[v4-thinking]` log line for the sub call shows the disabled path (or just verify no `reasoning_content` chars in trace data).
+
+**Acceptance:** sub `subagent.route` traces show `durationMs` in 1.5–2.5s range (down from 4–7s observed in Phase 1+polish), digest quality unchanged. No `reasoning_content` emitted by sub calls. Main-loop turn time noticeably lower on multi-search turns. Zero changes to user-facing UI.
+
+### Phase 1.85 — main-loop thinking-mode toggle (UX)
+
+**Goal:** let the user disable thinking on the main conversation model for trivial-question turns, mirroring the existing `reasoning_effort` high/max pill.
+
+**Why this is separate from Phase 1.75:** different motivation. Phase 1.75 is "make sub fast" (latency). Phase 1.85 is "give user fast main mode for trivial questions" (UX). Independent code paths — 1.75's `ChatOptions.thinkingMode` override is per-call; 1.85 is a persistent per-model user setting.
+
+**Work:**
+- New `moby.modelOptions.<id>.thinkingMode: 'enabled' | 'disabled'` setting. Default `'enabled'` for V4-thinking models. User-overridable per model id.
+- `applyThinkingMode` reads the setting before applying capability defaults. Same call site as Phase 1.75's option override — the option wins, then user setting, then capability default.
+- Toolbar pill control in the model selector (existing pattern from `reasoningEffort`). Wired via `RegisteredModelInfo` augmentation.
+- Tests: setting overrides capability default, toolbar pill writes setting.
+- Manual-test backlog: 1 entry — flip toggle, run trivial query, confirm no reasoning tokens emitted, faster response.
+
+**Acceptance:** user can flip a "Thinking" pill in the model selector; setting persists; main-loop turns honor the user's choice; no regression for users who don't touch it (default unchanged).
 
 ### Phase 2 — `image-describe` (capability bridge)
 

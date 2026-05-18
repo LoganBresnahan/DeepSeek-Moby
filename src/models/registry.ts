@@ -226,6 +226,10 @@ export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
     // valuable here (the user can see what they're paying for).
     streamingToolCalls: true,
     lspTools: true,
+    // Subagent eligibility — Pro is the high-quality option for digestion.
+    // Router forces thinkingMode='disabled' on sub calls so the extra
+    // reasoning cost only applies to main-loop use.
+    subagentRoles: ['web-search-digest'],
   },
 };
 

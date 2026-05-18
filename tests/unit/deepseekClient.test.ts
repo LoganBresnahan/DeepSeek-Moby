@@ -285,6 +285,45 @@ describe('DeepSeekClient — non-streaming', () => {
       expect(body.model).toBe('deepseek-chat'); // no suffix to strip
       expect(body.temperature).toBe(0.42);
     });
+
+    it('honors options.thinkingMode = "disabled" — sets type:disabled, omits reasoning_effort, still strips sampling params', async () => {
+      mockConfigValues.set('model', 'deepseek-v4-flash-thinking');
+      mockSecrets.get.mockResolvedValue('test-key');
+      stubChatResponse();
+      const client = new DeepSeekClient(createContext());
+
+      await client.chat([{ role: 'user', content: 'hi' }], undefined, { thinkingMode: 'disabled' });
+      const body = lastRequestBody();
+      expect(body.thinking).toEqual({ type: 'disabled' });
+      expect(body).not.toHaveProperty('reasoning_effort');
+      // suffix still stripped + sampling params still rejected — both
+      // apply regardless of thinking mode.
+      expect(body.model).toBe('deepseek-v4-flash');
+      expect(body).not.toHaveProperty('temperature');
+    });
+
+    it('honors options.thinkingMode = "enabled" explicitly (same as default)', async () => {
+      mockConfigValues.set('model', 'deepseek-v4-flash-thinking');
+      mockSecrets.get.mockResolvedValue('test-key');
+      stubChatResponse();
+      const client = new DeepSeekClient(createContext());
+
+      await client.chat([{ role: 'user', content: 'hi' }], undefined, { thinkingMode: 'enabled' });
+      const body = lastRequestBody();
+      expect(body.thinking).toEqual({ type: 'enabled' });
+      expect(body.reasoning_effort).toBe('high');
+    });
+
+    it('thinkingMode override is silently ignored on non-thinking models', async () => {
+      mockConfigValues.set('model', 'deepseek-chat');
+      mockSecrets.get.mockResolvedValue('test-key');
+      stubChatResponse();
+      const client = new DeepSeekClient(createContext());
+
+      await client.chat([{ role: 'user', content: 'hi' }], undefined, { thinkingMode: 'disabled' });
+      const body = lastRequestBody();
+      expect(body).not.toHaveProperty('thinking');
+    });
   });
 
   describe('chat() tool gating', () => {

@@ -59,7 +59,14 @@ export class SubagentRouter {
     try {
       const client = this.getClient(modelId);
       const messages: Message[] = [{ role: 'user', content: userMessage }];
-      const response = await client.chat(messages, systemPrompt, { jsonMode: true });
+      // Force non-thinking on every sub call — digest roles never need
+      // reasoning, and thinking-mode reasoning was the dominant latency
+      // cost in Phase 1+polish observations (4-7s per call). For models
+      // without sendThinkingParam, the option is silently ignored.
+      const response = await client.chat(messages, systemPrompt, {
+        jsonMode: true,
+        thinkingMode: 'disabled'
+      });
       rawContent = (response.content ?? '').trim();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

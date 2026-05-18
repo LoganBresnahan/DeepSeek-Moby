@@ -186,7 +186,7 @@ describe('SubagentRouter', () => {
       expect(role.formatForMain).toHaveBeenCalled();
     });
 
-    it('calls chat with jsonMode:true and the role-built prompt + user message', async () => {
+    it('calls chat with jsonMode:true, thinkingMode:disabled, and the role-built prompt + user message', async () => {
       mockChat.mockResolvedValue({ content: '{"summary":"ok"}' });
       const router = new SubagentRouter(createContext());
       const role = buildFixtureRole();
@@ -194,7 +194,7 @@ describe('SubagentRouter', () => {
       expect(mockChat).toHaveBeenCalledWith(
         [{ role: 'user', content: 'user: data' }],
         'system: task here',
-        { jsonMode: true }
+        { jsonMode: true, thinkingMode: 'disabled' }
       );
     });
   });

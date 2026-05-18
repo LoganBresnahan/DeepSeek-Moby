@@ -90,6 +90,18 @@ export interface ChatOptions {
   maxTokens?: number;
   signal?: AbortSignal;
   /**
+   * Per-call override of the V4 `thinking` request param. When set,
+   * `applyThinkingMode` uses this instead of the capability default.
+   *
+   * - `'enabled'`  — `{thinking: {type: 'enabled'}}` + `reasoning_effort` (today's V4-thinking behavior).
+   * - `'disabled'` — `{thinking: {type: 'disabled'}}` and skip `reasoning_effort`.
+   *                 Sub-roles (e.g. web-search-digest) pass this so digestion
+   *                 doesn't pay the reasoning-token latency tax.
+   *
+   * Only meaningful on models with `sendThinkingParam: true`. Ignored otherwise.
+   */
+  thinkingMode?: 'enabled' | 'disabled';
+  /**
    * Phase 4.5 — fired the moment a tool call's metadata (`id` + `function.name`)
    * arrives in the stream, well before its argument deltas finish accumulating.
    * The callback gets a partially-filled ToolCall: `id` and `function.name` are
@@ -305,31 +317,39 @@ export class DeepSeekClient {
     });
   }
 
-  private applyThinkingMode(requestBody: Record<string, unknown>, modelId: string): void {
+  private applyThinkingMode(
+    requestBody: Record<string, unknown>,
+    modelId: string,
+    thinkingModeOverride?: 'enabled' | 'disabled'
+  ): void {
     const caps = getCapabilities(modelId);
     if (!caps.sendThinkingParam) return;
 
     // Strip the `-thinking` suffix for the wire model id.
     requestBody.model = modelId.replace(/-thinking$/, '');
 
-    requestBody.thinking = { type: 'enabled' };
+    // Per-call override wins over capability default. Default is 'enabled'
+    // for any model with sendThinkingParam set — matches today's behavior.
+    const mode = thinkingModeOverride ?? 'enabled';
+    requestBody.thinking = { type: mode };
 
-    const override = this.config.get<Record<string, { reasoningEffort?: 'high' | 'max' }>>('modelOptions') ?? {};
-    const effort = override[modelId]?.reasoningEffort ?? caps.reasoningEffort ?? 'high';
-    requestBody.reasoning_effort = effort;
+    if (mode === 'enabled') {
+      const override = this.config.get<Record<string, { reasoningEffort?: 'high' | 'max' }>>('modelOptions') ?? {};
+      const effort = override[modelId]?.reasoningEffort ?? caps.reasoningEffort ?? 'high';
+      requestBody.reasoning_effort = effort;
+      logger.info(`[v4-thinking] ${modelId} → model=${requestBody.model}, reasoning_effort=${effort}`);
+    } else {
+      // Disabled path — no reasoning_effort param (the API ignores it
+      // anyway when thinking is off, but omitting keeps the wire clean).
+      logger.info(`[v4-thinking] ${modelId} → model=${requestBody.model}, thinking=disabled`);
+    }
 
-    // Sampling params that V4-thinking explicitly rejects.
+    // Sampling params that V4-thinking-family models reject regardless of
+    // the on/off thinking toggle.
     delete requestBody.temperature;
     delete requestBody.top_p;
     delete requestBody.presence_penalty;
     delete requestBody.frequency_penalty;
-
-    // Diagnostic — lets us verify mid-production that the thinking transform
-    // is actually firing. Previous confusion: a V4-thinking request came back
-    // with no reasoning_content at all, and we couldn't tell whether the
-    // model skipped reasoning on a simple prompt or our wire format was
-    // wrong. This log resolves that ambiguity on the next run.
-    logger.info(`[v4-thinking] ${modelId} → model=${requestBody.model}, reasoning_effort=${effort}`);
   }
 
   // Standard chat completion
@@ -372,7 +392,7 @@ export class DeepSeekClient {
       // V4-thinking transforms (strip suffix, inject thinking + reasoning_effort,
       // drop unsupported sampling params). No-op for any model without
       // `sendThinkingParam`.
-      this.applyThinkingMode(requestBody, model);
+      this.applyThinkingMode(requestBody, model, options?.thinkingMode);
 
       // Per-call span. Mirrors streamChat — gives runToolLoop's non-streaming
       // probe its own trace event instead of being invisible inside the outer
@@ -502,7 +522,7 @@ export class DeepSeekClient {
       // V4-thinking transforms (strip suffix, inject thinking + reasoning_effort,
       // drop unsupported sampling params). No-op for any model without
       // `sendThinkingParam`.
-      this.applyThinkingMode(requestBody, model);
+      this.applyThinkingMode(requestBody, model, options?.thinkingMode);
 
       const response = await this.getHttpClient().post<ReadableStream<Uint8Array>>('/chat/completions', requestBody, {
         headers: {
