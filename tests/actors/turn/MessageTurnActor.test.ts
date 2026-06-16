@@ -773,6 +773,89 @@ describe('MessageTurnActor', () => {
   });
 
   // ============================================
+  // Tool Coalescing Tests
+  // ============================================
+  //
+  // Within a text-delimited section, consecutive tool batches merge into ONE
+  // tools container (calls array grows) instead of one container per call.
+  // createTextSegment is the SOLE thing that clears the active group, starting
+  // a fresh container for the next batch. _activeToolBatchOffset maps the
+  // batch-relative index from updateTool/updateToolBatch into the merged array.
+
+  describe('Tool coalescing', () => {
+    beforeEach(() => {
+      actor = new MessageTurnActor({ manager, element });
+      actor.bind({ turnId: 'turn-1', role: 'assistant', timestamp: Date.now() });
+      actor.startStreaming();
+    });
+
+    it('coalesces consecutive tool batches into a single container', () => {
+      // Two batches with NO createTextSegment between them → one container.
+      actor.startToolBatch([{ name: 'read_file', detail: 'a.ts' }]);
+      actor.startToolBatch([
+        { name: 'write_file', detail: 'b.ts' },
+        { name: 'edit_file', detail: 'c.ts' }
+      ]);
+
+      // Exactly ONE tools container host.
+      const containers = findContainers('tools');
+      expect(containers.length).toBe(1);
+
+      // The merged container holds all three tool items.
+      const items = containers[0].shadowRoot?.querySelectorAll('.tool-item');
+      expect(items?.length).toBe(3);
+
+      // Header aggregates the combined count (still running → "Using N tools...").
+      const title = queryInShadow(containers[0], '.tools-title');
+      expect(title?.textContent).toContain('Using 3 tools');
+
+      // After completion the aggregated count carries into the "Used N tools" header.
+      actor.completeToolBatch();
+      expect(queryInShadow(containers[0], '.tools-title')?.textContent).toBe('Used 3 tools');
+    });
+
+    it('starts a fresh tools container after a text segment', () => {
+      // Batch → text output → batch → the text output is a section delimiter,
+      // so the second batch creates its own container (TWO total).
+      actor.startToolBatch([{ name: 'read_file', detail: 'a.ts' }]);
+      actor.createTextSegment('Here is what I found.');
+      actor.startToolBatch([{ name: 'write_file', detail: 'b.ts' }]);
+
+      const containers = findContainers('tools');
+      expect(containers.length).toBe(2);
+
+      // Each container holds only its own batch's single tool.
+      expect(containers[0].shadowRoot?.querySelectorAll('.tool-item').length).toBe(1);
+      expect(containers[1].shadowRoot?.querySelectorAll('.tool-item').length).toBe(1);
+    });
+
+    it('updateTool offset maps a second-batch index into the merged group', () => {
+      // First batch: indices 0,1 in the merged array.
+      actor.startToolBatch([
+        { name: 'read_file', detail: 'a.ts' },
+        { name: 'read_file', detail: 'b.ts' }
+      ]);
+      // Second appended batch: batch-relative index 0 → merged index 2.
+      actor.startToolBatch([{ name: 'write_file', detail: 'c.ts' }]);
+
+      // updateTool(0, ...) is relative to the SECOND batch — the offset must
+      // shift it past the first batch's two tools onto the write_file call.
+      actor.updateTool(0, 'done');
+
+      const containers = findContainers('tools');
+      expect(containers.length).toBe(1);
+      const items = Array.from(containers[0].shadowRoot?.querySelectorAll('.tool-item') ?? []);
+      expect(items.length).toBe(3);
+
+      // The third tool (second batch, relative index 0) shows the done status.
+      expect(items[2].getAttribute('data-status')).toBe('done');
+      // Earlier-batch tools are untouched (still running).
+      expect(items[0].getAttribute('data-status')).toBe('running');
+      expect(items[1].getAttribute('data-status')).toBe('running');
+    });
+  });
+
+  // ============================================
   // Shell Tests
   // ============================================
 
@@ -894,6 +977,10 @@ describe('MessageTurnActor', () => {
       // Group 1: rejected file
       actor.addPendingFile({ filePath: '/path/to/file.ts', diffId: 'diff-1', status: 'rejected' });
 
+      // Assistant text output delimits the section, closing the pending group
+      // chain so the retry starts a fresh group (tool batches alone coalesce now).
+      actor.createTextSegment('Retrying that change.', { isContinuation: true });
+
       // Group 2: same file, new diffId (retry)
       actor.startToolBatch([{ name: 'edit_file', detail: 'file.ts' }]);
       actor.completeToolBatch();
@@ -911,15 +998,19 @@ describe('MessageTurnActor', () => {
       expect(item2?.getAttribute('data-status')).toBe('applied');
     });
 
-    it('creates separate pending containers per tool batch', () => {
+    it('creates separate pending containers per section', () => {
       actor.setEditMode('auto');
 
-      // First tool batch + modified file
+      // First section: tool batch + modified file
       actor.startToolBatch([{ name: 'edit_file', detail: 'file1.ts' }]);
       actor.completeToolBatch();
       actor.addPendingFile({ filePath: 'src/file1.ts', status: 'applied' });
 
-      // Second tool batch + modified file
+      // Assistant text output is the section delimiter — clears the pending
+      // group chain (tool batches alone now coalesce and no longer split it).
+      actor.createTextSegment('Updated file1, now file2.', { isContinuation: true });
+
+      // Second section: tool batch + modified file
       actor.startToolBatch([{ name: 'edit_file', detail: 'file2.ts' }]);
       actor.completeToolBatch();
       actor.addPendingFile({ filePath: 'src/file2.ts', status: 'applied' });
@@ -965,6 +1056,10 @@ describe('MessageTurnActor', () => {
       actor.startToolBatch([{ name: 'edit', detail: 'f1' }]);
       actor.completeToolBatch();
       const id1 = actor.addPendingFile({ filePath: 'src/f1.ts', status: 'applied' });
+
+      // Text output delimits the section so the next pending file starts a new
+      // group (tool batches alone now coalesce and no longer split the chain).
+      actor.createTextSegment('Now the second file.', { isContinuation: true });
 
       actor.startToolBatch([{ name: 'edit', detail: 'f2' }]);
       actor.completeToolBatch();

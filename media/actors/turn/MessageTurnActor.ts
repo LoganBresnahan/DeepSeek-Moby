@@ -157,6 +157,14 @@ export class MessageTurnActor extends InterleavedShadowActor {
   private _toolBatches: Map<string, ToolBatch> = new Map();
   private _currentToolBatch: ToolBatch | null = null;
   private _toolCounter = 0;
+  // Coalescing: the section's single tool group. All tool batches between two
+  // assistant text outputs merge into this one container; only createTextSegment
+  // clears it (interleaved thinking/shell/pending no longer split tools apart).
+  private _activeToolGroup: ToolBatch | null = null;
+  // Index in _activeToolGroup.calls where the most-recent appended batch begins, so
+  // updateTool/updateToolBatch (which use batch-relative indices) map correctly into
+  // the merged calls array.
+  private _activeToolBatchOffset = 0;
 
   // ============================================
   // Shell State
@@ -324,6 +332,8 @@ export class MessageTurnActor extends InterleavedShadowActor {
     // Reset tools
     this._toolBatches.clear();
     this._currentToolBatch = null;
+    this._activeToolGroup = null;
+    this._activeToolBatchOffset = 0;
     this._toolCounter = 0;
 
     // Reset shell
@@ -689,7 +699,11 @@ export class MessageTurnActor extends InterleavedShadowActor {
   createTextSegment(content: string = '', options?: { isContinuation?: boolean }): string {
     this.markFirstTokenReceived();
     this._dbgSection('TEXT', options?.isContinuation ? 'continuation' : 'first');
+    // Text is the SOLE section delimiter: close the section's coalesced groups so the
+    // next thinking/tools/etc. start fresh containers below this text output.
     this._currentPendingGroup = null;
+    this._activeToolGroup = null;
+    this._activeToolBatchOffset = 0;
     this._textSegmentCounter++;
     const segmentId = `${this._turnId}-text-${this._textSegmentCounter}`;
     const isContinuation = options?.isContinuation ?? false;
@@ -1006,22 +1020,35 @@ export class MessageTurnActor extends InterleavedShadowActor {
     this.markFirstTokenReceived();
     this._dbgSection('TOOLS', `count=${tools.length} [${tools.map(t => t.name).join(',')}]`);
     this.ensureRoleHeader();
-    this._currentPendingGroup = null;
-    const container = this.createContainer('message', {
-      hostClasses: ['tools-container'],
-      dataAttributes: { 'turn-id': this._turnId ?? '' }
-    });
 
-    const calls: ToolCall[] = tools.map(tool => ({
+    const newCalls: ToolCall[] = tools.map(tool => ({
       id: `tool-${++this._toolCounter}`,
       name: tool.name,
       detail: tool.detail,
       status: 'running' as ToolStatus
     }));
 
+    // Coalesce: within a text-delimited section, every tool batch merges into one
+    // container. _activeToolBatchOffset records where this batch's calls start so the
+    // batch-relative indices from updateTool/updateToolBatch resolve in the merged
+    // array. createTextSegment is the only thing that clears _activeToolGroup.
+    if (this._activeToolGroup) {
+      this._activeToolBatchOffset = this._activeToolGroup.calls.length;
+      this._activeToolGroup.calls.push(...newCalls);
+      this._activeToolGroup.complete = false; // new running tools re-open the group
+      this._currentToolBatch = this._activeToolGroup;
+      this.renderToolBatch(this._activeToolGroup.id);
+      return this._activeToolGroup.id;
+    }
+
+    const container = this.createContainer('message', {
+      hostClasses: ['tools-container'],
+      dataAttributes: { 'turn-id': this._turnId ?? '' }
+    });
+
     const batch: ToolBatch = {
       id: container.id,
-      calls,
+      calls: newCalls,
       containerId: container.id,
       expanded: false,
       complete: false
@@ -1029,6 +1056,8 @@ export class MessageTurnActor extends InterleavedShadowActor {
 
     this._toolBatches.set(batch.id, batch);
     this._currentToolBatch = batch;
+    this._activeToolGroup = batch;
+    this._activeToolBatchOffset = 0;
 
     this.renderToolBatch(batch.id);
     this.setupToolBatchHandlers(container.id);
@@ -1044,7 +1073,9 @@ export class MessageTurnActor extends InterleavedShadowActor {
   updateTool(index: number, status: ToolStatus): void {
     if (!this._currentToolBatch) return;
 
-    const call = this._currentToolBatch.calls[index];
+    // index is relative to the most-recent appended batch within the coalesced
+    // group; shift it past earlier batches via the offset.
+    const call = this._currentToolBatch.calls[this._activeToolBatchOffset + index];
     if (call) {
       call.status = status;
       this.renderToolBatch(this._currentToolBatch.id);
@@ -1057,12 +1088,16 @@ export class MessageTurnActor extends InterleavedShadowActor {
   updateToolBatch(tools: Array<{ name: string; detail: string; status: ToolStatus }>): void {
     if (!this._currentToolBatch) return;
 
-    this._currentToolBatch.calls = tools.map((tool, i) => ({
-      id: this._currentToolBatch!.calls[i]?.id ?? `tool-${++this._toolCounter}`,
+    // Replace only the current batch's slice (from the offset) within the coalesced
+    // group, leaving earlier batches in this section intact.
+    const head = this._currentToolBatch.calls.slice(0, this._activeToolBatchOffset);
+    const newTail = tools.map((tool, i) => ({
+      id: this._currentToolBatch!.calls[this._activeToolBatchOffset + i]?.id ?? `tool-${++this._toolCounter}`,
       name: tool.name,
       detail: tool.detail,
       status: tool.status
     }));
+    this._currentToolBatch.calls = [...head, ...newTail];
 
     this.renderToolBatch(this._currentToolBatch.id);
   }
