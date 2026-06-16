@@ -148,7 +148,13 @@ export class MessageTurnActor extends InterleavedShadowActor {
   private _currentThinkingIteration = 0;
   private _thinkingBaseOffset = 0;
   private _lastKnownThinkingLength = 0;
-  private _expandedThinking: Set<number> = new Set();
+  // Expansion is per coalesced group (keyed by the group's container id), since a
+  // section's thinking iterations all share one container.
+  private _expandedThinking: Set<string> = new Set();
+  // Coalescing: every thinking iteration between two assistant text outputs renders
+  // into this one container (the section's single "Thinking" dropdown). Only
+  // createTextSegment clears it — interleaved tools/shell/pending do not split it.
+  private _activeThinkingGroup: { containerId: string; iterationIndices: number[] } | null = null;
 
   // ============================================
   // Tool Calls State
@@ -328,6 +334,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
     this._thinkingBaseOffset = 0;
     this._lastKnownThinkingLength = 0;
     this._expandedThinking.clear();
+    this._activeThinkingGroup = null;
 
     // Reset tools
     this._toolBatches.clear();
@@ -466,7 +473,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
     const thinking = this._thinkingIterations.get(this._currentThinkingIteration);
     if (thinking && !thinking.complete) {
       thinking.complete = true;
-      this.renderThinkingIteration(this._currentThinkingIteration);
+      this.renderThinkingGroup(thinking.containerId);
     }
 
     // Mark tool batches as complete
@@ -704,6 +711,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
     this._currentPendingGroup = null;
     this._activeToolGroup = null;
     this._activeToolBatchOffset = 0;
+    this._activeThinkingGroup = null;
     this._textSegmentCounter++;
     const segmentId = `${this._turnId}-text-${this._textSegmentCounter}`;
     const isContinuation = options?.isContinuation ?? false;
@@ -902,15 +910,33 @@ export class MessageTurnActor extends InterleavedShadowActor {
     this.ensureRoleHeader();
     this._currentPendingGroup = null;
 
-    // Complete the previous thinking iteration (stops pulse animation)
+    // Complete the previous thinking iteration (stops pulse animation). Render its
+    // group so the prior step shows as done.
     const prev = this._thinkingIterations.get(this._currentThinkingIteration);
     if (prev && !prev.complete) {
       prev.complete = true;
-      this.renderThinkingIteration(this._currentThinkingIteration);
+      this.renderThinkingGroup(prev.containerId);
     }
 
     this._currentThinkingIteration++;
     this._thinkingBaseOffset = this._lastKnownThinkingLength;
+
+    // Coalesce: within a text-delimited section, every thinking iteration merges
+    // into one container as an additional step. createTextSegment is the only thing
+    // that clears _activeThinkingGroup (interleaved tools/shell do not split it).
+    if (this._activeThinkingGroup) {
+      const iteration: ThinkingIteration = {
+        index: this._currentThinkingIteration,
+        content: '',
+        containerId: this._activeThinkingGroup.containerId,
+        complete: false
+      };
+      this._thinkingIterations.set(this._currentThinkingIteration, iteration);
+      this._activeThinkingGroup.iterationIndices.push(this._currentThinkingIteration);
+      this.renderThinkingGroup(this._activeThinkingGroup.containerId);
+      this.publish({ 'turn.thinkingCount': this._thinkingIterations.size });
+      return this._currentThinkingIteration;
+    }
 
     const container = this.createContainer('message', {
       hostClasses: ['thinking-container', 'streaming'],
@@ -928,8 +954,9 @@ export class MessageTurnActor extends InterleavedShadowActor {
     };
 
     this._thinkingIterations.set(this._currentThinkingIteration, iteration);
-    this.renderThinkingIteration(this._currentThinkingIteration);
-    this.setupThinkingHandlers(container.id, this._currentThinkingIteration);
+    this._activeThinkingGroup = { containerId: container.id, iterationIndices: [this._currentThinkingIteration] };
+    this.renderThinkingGroup(container.id);
+    this.setupThinkingHandlers(container.id);
 
     this.publish({ 'turn.thinkingCount': this._thinkingIterations.size });
 
@@ -959,31 +986,38 @@ export class MessageTurnActor extends InterleavedShadowActor {
     if (this._isStreaming) {
       const container = this.getContainer(iteration.containerId);
       if (container) {
-        const body = container.content.querySelector('.thinking-body') as HTMLElement | null;
+        // Target only the current step's text node (single-step: the .thinking-body
+        // itself carries data-step; multi-step: the .thinking-step-text does).
+        const target = container.content.querySelector(
+          `[data-step="${this._currentThinkingIteration}"]`
+        ) as HTMLElement | null;
+        const scroller = container.content.querySelector('.thinking-body') as HTMLElement | null;
         const preview = container.content.querySelector('.thinking-preview');
 
-        if (body) {
+        if (target) {
           // Check if user is at (or near) the bottom before updating
-          const isAtBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 30;
+          const isAtBottom = scroller
+            ? scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 30
+            : true;
 
-          body.textContent = content;
+          target.textContent = content;
 
           // Only auto-scroll if user was already following at the bottom
-          if (isAtBottom) {
-            body.scrollTop = body.scrollHeight;
+          if (isAtBottom && scroller) {
+            scroller.scrollTop = scroller.scrollHeight;
           }
-        }
 
-        // Show the start of thinking text (CSS ellipsis handles overflow)
-        if (preview) {
-          preview.textContent = content.replace(/\n/g, ' ').trim();
+          // Show the start of thinking text (CSS ellipsis handles overflow)
+          if (preview) {
+            preview.textContent = content.replace(/\n/g, ' ').trim();
+          }
+          return;
         }
-        return;
       }
     }
 
     // Full re-render for non-streaming updates (initial render, completion, etc.)
-    this.renderThinkingIteration(this._currentThinkingIteration);
+    this.renderThinkingGroup(iteration.containerId);
   }
 
   /**
@@ -993,20 +1027,23 @@ export class MessageTurnActor extends InterleavedShadowActor {
     const iteration = this._thinkingIterations.get(this._currentThinkingIteration);
     if (iteration) {
       iteration.complete = true;
-      this.renderThinkingIteration(this._currentThinkingIteration);
+      this.renderThinkingGroup(iteration.containerId);
     }
   }
 
   /**
-   * Toggle thinking iteration expansion.
+   * Toggle expansion of the coalesced thinking group that owns the given iteration.
    */
   toggleThinkingExpanded(index: number): void {
-    if (this._expandedThinking.has(index)) {
-      this._expandedThinking.delete(index);
+    const iteration = this._thinkingIterations.get(index);
+    if (!iteration) return;
+    const containerId = iteration.containerId;
+    if (this._expandedThinking.has(containerId)) {
+      this._expandedThinking.delete(containerId);
     } else {
-      this._expandedThinking.add(index);
+      this._expandedThinking.add(containerId);
     }
-    this.renderThinkingIteration(index);
+    this.renderThinkingGroup(containerId);
   }
 
   // ============================================
@@ -1354,25 +1391,49 @@ export class MessageTurnActor extends InterleavedShadowActor {
     container.content.innerHTML = html;
   }
 
-  private renderThinkingIteration(index: number): void {
-    const iteration = this._thinkingIterations.get(index);
-    if (!iteration) return;
-
-    const container = this.getContainer(iteration.containerId);
+  /**
+   * Render the coalesced thinking group that owns `containerId` — all the section's
+   * thinking iterations in one dropdown. A single step renders exactly as before
+   * (one .thinking-body); multiple steps stack inside one scrollable body with a
+   * "Thinking — N steps" header.
+   */
+  private renderThinkingGroup(containerId: string): void {
+    const container = this.getContainer(containerId);
     if (!container) return;
 
-    const isExpanded = this._expandedThinking.has(index);
+    // Gather this group's iterations, in index order.
+    const steps = [...this._thinkingIterations.values()]
+      .filter(it => it.containerId === containerId)
+      .sort((a, b) => a.index - b.index);
+    if (steps.length === 0) return;
+
+    const isExpanded = this._expandedThinking.has(containerId);
+    const allComplete = steps.every(s => s.complete);
     const toggle = isExpanded ? '−' : '+';
     const emoji = '💭';
-    const label = this._thinkingIterations.size > 1
-      ? `Thinking (${index}/${this._thinkingIterations.size})`
-      : 'Thinking';
+    const label = steps.length > 1 ? `Thinking — ${steps.length} steps` : 'Thinking';
 
-    // Preview: show start of thinking text (CSS ellipsis handles overflow)
-    const previewText = iteration.content.replace(/\n/g, ' ').trim();
+    // Preview: the latest step's text (CSS ellipsis handles overflow).
+    const last = steps[steps.length - 1];
+    const previewText = last.content.replace(/\n/g, ' ').trim();
 
     container.host.classList.toggle('expanded', isExpanded);
-    container.host.classList.toggle('streaming', !iteration.complete);
+    container.host.classList.toggle('streaming', !allComplete);
+
+    let bodyHtml: string;
+    if (steps.length === 1) {
+      // Single step: identical structure to the pre-coalescing render (plus data-step
+      // so the streaming fast-path can target it).
+      bodyHtml = `<div class="thinking-body scrollable" data-step="${steps[0].index}">${this.escapeHtml(steps[0].content)}</div>`;
+    } else {
+      const stepsHtml = steps.map((s, i) => `
+        <div class="thinking-step${s.complete ? '' : ' streaming'}">
+          <div class="thinking-step-label">Step ${i + 1}</div>
+          <div class="thinking-step-text" data-step="${s.index}">${this.escapeHtml(s.content)}</div>
+        </div>
+      `).join('');
+      bodyHtml = `<div class="thinking-body scrollable">${stepsHtml}</div>`;
+    }
 
     container.content.innerHTML = `
       <div class="thinking-header">
@@ -1381,7 +1442,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
         <span class="thinking-label">${label}</span>
         <span class="thinking-preview">${this.escapeHtml(previewText)}</span>
       </div>
-      <div class="thinking-body scrollable">${this.escapeHtml(iteration.content)}</div>
+      ${bodyHtml}
     `;
   }
 
@@ -1741,21 +1802,19 @@ export class MessageTurnActor extends InterleavedShadowActor {
     });
   }
 
-  private setupThinkingHandlers(containerId: string, iterationIndex: number): void {
+  private setupThinkingHandlers(containerId: string): void {
     this.delegateInContainer(containerId, 'click', '.thinking-header', () => {
-      const iteration = this._thinkingIterations.get(iterationIndex);
-      if (!iteration) return;
-      const container = this.getContainer(iteration.containerId);
+      const container = this.getContainer(containerId);
       if (!container) return;
       // Flip only the host class + toggle glyph on the persistent element so the
-      // CSS max-height transition animates. Keep _expandedThinking in sync so a
-      // later streaming-driven renderThinkingIteration() restores the open state.
-      // (toggleThinkingExpanded — which re-renders — is left for external callers.)
-      const nowExpanded = !this._expandedThinking.has(iterationIndex);
+      // CSS max-height transition animates. Keep _expandedThinking (keyed by the
+      // group's container id) in sync so a later streaming-driven renderThinkingGroup()
+      // restores the open state.
+      const nowExpanded = !this._expandedThinking.has(containerId);
       if (nowExpanded) {
-        this._expandedThinking.add(iterationIndex);
+        this._expandedThinking.add(containerId);
       } else {
-        this._expandedThinking.delete(iterationIndex);
+        this._expandedThinking.delete(containerId);
       }
       container.host.classList.toggle('expanded', nowExpanded);
       const toggleEl = container.content.querySelector('.thinking-toggle');

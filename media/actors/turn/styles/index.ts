@@ -486,6 +486,35 @@ const thinkingStyles = `
   display: none;
 }
 
+/* Coalesced multi-step thinking: each iteration is a labelled block inside the
+   one scrollable body. */
+.thinking-step {
+  padding: 6px 0;
+}
+
+.thinking-step + .thinking-step {
+  border-top: 1px dotted var(--vscode-panel-border);
+}
+
+.thinking-step-label {
+  color: var(--vscode-descriptionForeground);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.7;
+  margin-bottom: 2px;
+}
+
+.thinking-step-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+:host(.thinking-container.streaming) .thinking-step.streaming .thinking-step-label {
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
 :host(.thinking-container.streaming) .thinking-emoji {
   animation: pulse 1.5s ease-in-out infinite;
 }

@@ -722,6 +722,105 @@ describe('MessageTurnActor', () => {
     });
   });
 
+  // Within a text-delimited section, consecutive thinking iterations merge into ONE
+  // thinking container (rendered as stacked steps) instead of one container per
+  // iteration. createTextSegment is the SOLE thing that clears the active group;
+  // interleaved tools/shell do NOT split it (R1 reason→act loop).
+
+  describe('Thinking coalescing', () => {
+    beforeEach(() => {
+      actor = new MessageTurnActor({ manager, element });
+      actor.bind({ turnId: 'turn-1', role: 'assistant', timestamp: Date.now() });
+      actor.startStreaming();
+    });
+
+    it('coalesces consecutive thinking iterations into a single container', () => {
+      // Two iterations with NO createTextSegment between them → one container.
+      actor.startThinkingIteration();
+      actor.updateThinkingContent('First pass reasoning.');
+      actor.startThinkingIteration();
+      actor.updateThinkingContent('Second pass reasoning.');
+
+      const containers = findContainers('thinking');
+      expect(containers.length).toBe(1);
+
+      // Header aggregates the step count.
+      const label = queryInShadow(containers[0], '.thinking-label');
+      expect(label?.textContent).toBe('Thinking — 2 steps');
+
+      // Both steps' text survive — the latest update does not clobber the first.
+      const steps = containers[0].shadowRoot?.querySelectorAll('.thinking-step-text');
+      expect(steps?.length).toBe(2);
+      expect(steps?.[0].textContent).toContain('First pass reasoning.');
+      expect(steps?.[1].textContent).toContain('Second pass reasoning.');
+    });
+
+    it('starts a fresh thinking container after a text segment', () => {
+      // Thinking → text output → thinking → the text is a section delimiter, so the
+      // second iteration creates its own container (TWO total).
+      actor.startThinkingIteration();
+      actor.updateThinkingContent('Before.');
+      actor.createTextSegment('Here is the answer.');
+      actor.startThinkingIteration();
+      actor.updateThinkingContent('After.');
+
+      const containers = findContainers('thinking');
+      expect(containers.length).toBe(2);
+      // Each is a single-step "Thinking" dropdown.
+      expect(queryInShadow(containers[0], '.thinking-label')?.textContent).toBe('Thinking');
+      expect(queryInShadow(containers[1], '.thinking-label')?.textContent).toBe('Thinking');
+    });
+
+    it('interleaved tool batches do not split the thinking group', () => {
+      // R1 reason→act: think → tools → think, with NO text between → one thinking
+      // container (two steps) and one tools container.
+      actor.startThinkingIteration();
+      actor.updateThinkingContent('Need to read the file.');
+      actor.startToolBatch([{ name: 'read_file', detail: 'a.ts' }]);
+      actor.updateTool(0, 'done');
+      actor.completeToolBatch();
+      actor.startThinkingIteration();
+      actor.updateThinkingContent('Now I understand.');
+
+      const thinking = findContainers('thinking');
+      const tools = findContainers('tools');
+      expect(thinking.length).toBe(1);
+      expect(tools.length).toBe(1);
+      expect(queryInShadow(thinking[0], '.thinking-label')?.textContent).toBe('Thinking — 2 steps');
+      expect(thinking[0].shadowRoot?.querySelectorAll('.thinking-step-text').length).toBe(2);
+    });
+
+    it('toggling the coalesced group expands all of its steps', () => {
+      actor.startThinkingIteration();
+      actor.updateThinkingContent('Step one.');
+      actor.startThinkingIteration();
+      actor.updateThinkingContent('Step two.');
+
+      const containers = findContainers('thinking');
+      expect(containers[0].classList.contains('expanded')).toBe(false);
+
+      // Any iteration index in the group toggles the one shared container.
+      actor.toggleThinkingExpanded(2);
+      expect(containers[0].classList.contains('expanded')).toBe(true);
+      actor.toggleThinkingExpanded(1);
+      expect(containers[0].classList.contains('expanded')).toBe(false);
+    });
+
+    it('marks the group complete only once every step is done', () => {
+      actor.startThinkingIteration();
+      actor.updateThinkingContent('One.');
+      actor.startThinkingIteration();
+      actor.updateThinkingContent('Two.');
+
+      const container = findContainers('thinking')[0];
+      // Second step still streaming → group streaming.
+      expect(container.classList.contains('streaming')).toBe(true);
+
+      actor.completeThinkingIteration();
+      expect(container.classList.contains('streaming')).toBe(false);
+    });
+  });
+
   // ============================================
   // Tool Calls Tests
   // ============================================
