@@ -396,6 +396,37 @@ describe('DiffManager', () => {
       expect(changes[1].iteration).toBe(2);
     });
 
+    // Regression: "Modified files dropdown missing on restore".
+    // The real auto edit_file path calls this with skipNotification=true. The
+    // onCodeApplied event MUST still carry filePath, because RequestOrchestrator's
+    // subscriber drops events whose filePath is falsy and that subscriber writes the
+    // `file-modified` structural event that history RESTORE reads to rebuild the
+    // "Modified files" dropdown.
+    it('should fire onCodeApplied WITH filePath even when skipNotification is true', async () => {
+      (vscode.workspace.fs.stat as any).mockResolvedValue({});
+      const codeAppliedEvents: CodeAppliedEvent[] = [];
+      manager.onCodeApplied(e => codeAppliedEvents.push(e));
+
+      const mockDoc = {
+        uri: { toString: () => 'file:///workspace/src/app.ts', scheme: 'file' },
+        // Must differ from the applied content so the real apply branch runs
+        // (matching content takes the idempotent skip path that omits filePath).
+        getText: () => 'old content',
+        positionAt: (o: number) => ({ line: 0, character: o }),
+        save: vi.fn(async () => true),
+      };
+      (vscode.workspace.openTextDocument as any).mockResolvedValue(mockDoc);
+
+      const result = await manager.applyCodeDirectlyForAutoMode(
+        'src/app.ts', 'new content', 'desc', /*skipNotification*/ true
+      );
+
+      expect(result).toBe(true);
+      expect(codeAppliedEvents).toHaveLength(1);
+      expect(codeAppliedEvents[0].success).toBe(true);
+      expect(codeAppliedEvents[0].filePath).toBe('src/app.ts');
+    });
+
     it('should fire onWarning when diff engine reports issues', async () => {
       // Re-create manager with a failing diff engine (clearAllMocks resets the diffEngine mock)
       const { manager: m, diffEngine: de } = createManager();
@@ -423,6 +454,87 @@ describe('DiffManager', () => {
       expect(warnings).toHaveLength(1);
       expect(warnings[0].message).toContain('No matching code found');
       m.dispose();
+    });
+  });
+
+  // ── createNewFileForAutoMode (via applyCodeDirectlyForAutoMode new-file path) ──
+
+  describe('createNewFileForAutoMode', () => {
+    // createNewFileForAutoMode is private; it is reached through
+    // applyCodeDirectlyForAutoMode when the target file does NOT exist and the
+    // code uses the empty-SEARCH create pattern.
+    const CREATE_CODE = '<<<<<<< SEARCH\n=======\nexport const x = 1;\n>>>>>>> REPLACE';
+
+    // Regression: "Modified files dropdown missing on restore" — new-file variant.
+    // Same contract as the edit path: the success path must fire onCodeApplied WITH
+    // filePath even when skipNotification is true, so RESTORE can rebuild the dropdown.
+    it('should fire onCodeApplied WITH filePath on new-file success when skipNotification is true', async () => {
+      // File not found -> falls through to create-new-file path.
+      (vscode.workspace.fs.stat as any).mockRejectedValue(new Error('Not found'));
+      (vscode.workspace.fs.writeFile as any).mockResolvedValue(undefined);
+
+      const codeAppliedEvents: CodeAppliedEvent[] = [];
+      manager.onCodeApplied(e => codeAppliedEvents.push(e));
+
+      const result = await manager.applyCodeDirectlyForAutoMode(
+        'src/created.ts', CREATE_CODE, 'desc', /*skipNotification*/ true
+      );
+
+      expect(result).toBe(true);
+      expect(vscode.workspace.fs.writeFile).toHaveBeenCalled();
+      expect(codeAppliedEvents).toHaveLength(1);
+      expect(codeAppliedEvents[0].success).toBe(true);
+      expect(codeAppliedEvents[0].filePath).toBe('src/created.ts');
+
+      // Restore stat mock for subsequent tests
+      (vscode.workspace.fs.stat as any).mockResolvedValue({});
+    });
+
+    it('should fire onCodeApplied WITH filePath on new-file success (skipNotification false)', async () => {
+      (vscode.workspace.fs.stat as any).mockRejectedValue(new Error('Not found'));
+      (vscode.workspace.fs.writeFile as any).mockResolvedValue(undefined);
+
+      const codeAppliedEvents: CodeAppliedEvent[] = [];
+      manager.onCodeApplied(e => codeAppliedEvents.push(e));
+
+      const result = await manager.applyCodeDirectlyForAutoMode('src/created2.ts', CREATE_CODE);
+
+      expect(result).toBe(true);
+      expect(codeAppliedEvents).toHaveLength(1);
+      expect(codeAppliedEvents[0].filePath).toBe('src/created2.ts');
+
+      (vscode.workspace.fs.stat as any).mockResolvedValue({});
+    });
+  });
+
+  // ── onCodeApplied failure path (regression) ──
+
+  describe('onCodeApplied failure path', () => {
+    // The failure path already carried filePath; lock it in so it can't regress.
+    it('should fire onCodeApplied WITH filePath when the apply throws', async () => {
+      (vscode.workspace.fs.stat as any).mockResolvedValue({});
+
+      const codeAppliedEvents: CodeAppliedEvent[] = [];
+      manager.onCodeApplied(e => codeAppliedEvents.push(e));
+
+      const mockDoc = {
+        uri: { toString: () => 'file:///workspace/src/boom.ts', scheme: 'file' },
+        getText: () => 'old content',
+        positionAt: (o: number) => ({ line: 0, character: o }),
+        save: vi.fn(async () => true),
+      };
+      (vscode.workspace.openTextDocument as any).mockResolvedValue(mockDoc);
+      // Force the apply to throw so the catch branch runs.
+      (vscode.workspace.applyEdit as any).mockRejectedValueOnce(new Error('apply failed'));
+
+      const result = await manager.applyCodeDirectlyForAutoMode('src/boom.ts', 'new content');
+
+      expect(result).toBe(false);
+      expect(codeAppliedEvents).toHaveLength(1);
+      expect(codeAppliedEvents[0].success).toBe(false);
+      expect(codeAppliedEvents[0].filePath).toBe('src/boom.ts');
+
+      (vscode.workspace.applyEdit as any).mockResolvedValue(true);
     });
   });
 

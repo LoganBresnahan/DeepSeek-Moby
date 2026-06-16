@@ -244,6 +244,82 @@ describe('ScrollActor', () => {
     });
   });
 
+  describe('sticky-scroll re-engage (regression)', () => {
+    // happy-dom (like jsdom) does no layout, so scrollHeight/clientHeight default
+    // to 0. We control them directly to simulate the viewport's distance from the
+    // bottom: distanceFromBottom = scrollHeight - (scrollTop + clientHeight).
+    const CLIENT_HEIGHT = 500;
+    const SCROLL_HEIGHT = 1000;
+
+    /** Position the viewport `distanceFromBottom` pixels above the absolute bottom. */
+    function setScrollGeometry(el: HTMLElement, distanceFromBottom: number): void {
+      Object.defineProperty(el, 'scrollHeight', { value: SCROLL_HEIGHT, configurable: true });
+      Object.defineProperty(el, 'clientHeight', { value: CLIENT_HEIGHT, configurable: true });
+      // scrollTop = scrollHeight - clientHeight - distanceFromBottom
+      el.scrollTop = SCROLL_HEIGHT - CLIENT_HEIGHT - distanceFromBottom;
+    }
+
+    /** Begin a streaming session with the user scrolled up (auto-scroll disengaged). */
+    function startStreamingThenScrollUp(): void {
+      manager.handleStateChange({
+        source: 'streaming-actor',
+        state: { 'streaming.active': true },
+        changedKeys: ['streaming.active'],
+        publicationChain: [],
+        timestamp: Date.now()
+      });
+
+      // Simulate the user scrolling away during streaming. The mousemove handler
+      // disengages auto-scroll and marks userScrolled while streaming is active.
+      element.dispatchEvent(new Event('mousemove'));
+
+      expect(actor.isAutoScrollEnabled()).toBe(false);
+      expect(actor.hasUserScrolled()).toBe(true);
+    }
+
+    it('re-engages when a user scroll lands within 100px of bottom (but not within 5px)', () => {
+      startStreamingThenScrollUp();
+
+      // Land 40px from the bottom: within the 100px nearBottom threshold, but
+      // outside the strict 5px absolute-bottom tolerance.
+      setScrollGeometry(element, 40);
+      element.dispatchEvent(new Event('scroll'));
+
+      expect(actor.isAutoScrollEnabled()).toBe(true);
+      expect(actor.hasUserScrolled()).toBe(false);
+      expect(actor.isAtBottom()).toBe(true);
+    });
+
+    it('does not re-engage when a user scroll lands far from the bottom (300px)', () => {
+      startStreamingThenScrollUp();
+
+      // Land 300px from the bottom: well outside the 100px nearBottom threshold.
+      setScrollGeometry(element, 300);
+      element.dispatchEvent(new Event('scroll'));
+
+      expect(actor.isAutoScrollEnabled()).toBe(false);
+      expect(actor.hasUserScrolled()).toBe(true);
+    });
+
+    it('does not re-engage on passive content resize when near-but-not-absolute bottom (40px)', async () => {
+      startStreamingThenScrollUp();
+
+      // Viewport is 40px from the bottom: near (within 100px) but NOT at the
+      // absolute bottom (>5px). A passive content-resize must stay strict and
+      // leave the reading user disengaged.
+      setScrollGeometry(element, 40);
+
+      // Trigger the handleContentResize() path the way the source does: a DOM
+      // mutation observed by the actor's MutationObserver.
+      element.appendChild(document.createElement('span'));
+      await flushMicrotasks();
+      await new Promise(resolve => setTimeout(resolve, 20));
+
+      expect(actor.isAutoScrollEnabled()).toBe(false);
+      expect(actor.hasUserScrolled()).toBe(true);
+    });
+  });
+
   describe('scroll event listener', () => {
     it('attaches scroll listener to element', () => {
       const addEventListenerSpy = vi.spyOn(element, 'addEventListener');
