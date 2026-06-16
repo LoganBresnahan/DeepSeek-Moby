@@ -3207,9 +3207,17 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
 
         logger.toolCall(toolCall.function.name);
 
-        batchToolDetails[batchIndex].status = 'running';
+        // A prior tool in this iteration may have closed the batch (an ask-mode
+        // edit_file triggers a blocking diff and resets batchToolDetails to []).
+        // Guard the batch-relative update the same way the final-status block below
+        // does, or a later tool (e.g. delete_file) indexes into the emptied array
+        // and crashes the whole turn. allToolDetails accumulates globally and is
+        // never reset, so it stays safe to index.
         allToolDetails[globalIndex].status = 'running';
-        this._onToolCallUpdate.fire({ index: batchIndex, status: 'running', detail: detail.detail });
+        if (batchIndex < batchToolDetails.length) {
+          batchToolDetails[batchIndex].status = 'running';
+          this._onToolCallUpdate.fire({ index: batchIndex, status: 'running', detail: detail.detail });
+        }
 
         const dispatch = await this.dispatchToolCall(toolCall, signal);
         const result = dispatch.result;
@@ -3465,14 +3473,19 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
 
         logger.toolCall(toolCall.function.name);
 
-        // Update status to running
-        batchToolDetails[batchIndex].status = 'running';
+        // Update status to running. Guard the batch-relative update: a prior tool
+        // in this iteration may have closed the batch (ask-mode approval resets
+        // batchToolDetails to []), so a later tool would index into the emptied
+        // array and crash. Mirrors the guarded final-status block below.
         allToolDetails[globalIndex].status = 'running';
-        this._onToolCallUpdate.fire({
-          index: batchIndex,
-          status: 'running',
-          detail: detail.detail
-        });
+        if (batchIndex < batchToolDetails.length) {
+          batchToolDetails[batchIndex].status = 'running';
+          this._onToolCallUpdate.fire({
+            index: batchIndex,
+            status: 'running',
+            detail: detail.detail
+          });
+        }
 
         // Phase 4.5 — dispatch the tool call. Helper handles all per-tool
         // branches (web_search, read tracking, edit_file, write_file,

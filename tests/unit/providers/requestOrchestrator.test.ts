@@ -2379,5 +2379,118 @@ describe('RequestOrchestrator', () => {
       const calls = mockClient.streamChat.mock.calls.length;
       expect(calls).toBe(1);
     });
+
+    // Regression: a two-tool iteration where the FIRST tool closes the batch.
+    //
+    // In ask mode, an edit_file dispatch blocks on diff approval and returns
+    // `closesBatch: true`. runStreamingToolCallsLoop reacts by firing
+    // onToolCallsEnd and doing `batchToolDetails = []` mid-iteration. The
+    // SECOND tool in that same iteration (here delete_file) then reaches the
+    // running-status update and indexes into the now-empty batch array. Before
+    // the fix, `batchToolDetails[batchIndex].status = 'running'` was UNGUARDED,
+    // so it threw `TypeError: Cannot set properties of undefined (setting
+    // 'status')`. That TypeError is not an AbortError, so handleMessage's catch
+    // error-finalized the whole turn (fired onError, saved an *[API error]*
+    // record) instead of completing normally.
+    //
+    // The fix wraps the running-status update in
+    // `if (batchIndex < batchToolDetails.length)` — matching the guard the
+    // final-status block already had. allToolDetails is never reset and stays
+    // safe to index.
+    //
+    // This test drives that exact iteration and asserts the turn finalizes
+    // cleanly: no throw, no onError, onEndResponse fires, and the history
+    // record is `status: 'complete'`. With the guard removed it fails because
+    // onError fires with "Cannot set properties of undefined" and the
+    // end/complete assertions never hold.
+    it('does not crash when the first tool in an iteration closes the batch and a second tool follows (ask-mode edit_file + delete_file)', async () => {
+      // Ask mode is what makes edit_file dispatch block on approval and set
+      // closesBatch=true (see dispatchToolCall ~line 2622).
+      mockDiffManager.currentEditMode = 'ask';
+      // The blocking approval resolves "approved" so the edit dispatch returns
+      // a normal (non-Error) result and proceeds to set closesBatch.
+      mockDiffManager.waitForPendingApprovals.mockResolvedValue([
+        { approved: true, filePath: 'src/index.ts' },
+      ]);
+
+      let call = 0;
+      mockClient.streamChat.mockImplementation(async (
+        _messages: any,
+        onToken: (t: string) => void,
+      ) => {
+        call++;
+        if (call === 1) {
+          onToken('Editing then deleting.');
+          // ONE iteration, TWO tools. edit_file (ask mode → closesBatch) comes
+          // first; delete_file follows in the SAME batch and must survive the
+          // mid-iteration `batchToolDetails = []` reset.
+          return {
+            content: 'Editing then deleting.',
+            tool_calls: [
+              {
+                id: 'call_edit',
+                type: 'function' as const,
+                function: {
+                  name: 'edit_file',
+                  arguments: JSON.stringify({
+                    file: 'src/index.ts',
+                    edits: [{ search: 'old code', replace: 'new code' }],
+                    language: 'typescript',
+                  }),
+                },
+              },
+              {
+                id: 'call_delete',
+                type: 'function' as const,
+                function: {
+                  name: 'delete_file',
+                  arguments: JSON.stringify({ path: 'src/obsolete.ts' }),
+                },
+              },
+            ],
+            finish_reason: 'tool_calls',
+          };
+        }
+        // Second iteration: model produces its final answer, loop ends cleanly.
+        onToken('All done.');
+        return { content: 'All done.', finish_reason: 'stop' };
+      });
+
+      const errors: Array<{ error: string }> = [];
+      const endEvents: EndResponseEvent[] = [];
+      orchestrator.onError(e => errors.push(e));
+      orchestrator.onEndResponse(e => endEvents.push(e));
+
+      // The crash happened inside the loop and propagated out of handleMessage's
+      // try as a TypeError; assert it never throws and never error-finalizes.
+      await expect(
+        orchestrator.handleMessage('Edit then delete', 'session-1', async () => '', undefined)
+      ).resolves.toBeDefined();
+
+      // No TypeError reached the error path. (With the guard removed, onError
+      // fires with "Cannot set properties of undefined".)
+      expect(errors).toHaveLength(0);
+      const crashError = errors.find(e =>
+        /Cannot set properties of undefined/i.test(e.error)
+      );
+      expect(crashError).toBeUndefined();
+
+      // The turn finalized normally with the second iteration's content.
+      expect(endEvents).toHaveLength(1);
+      expect(endEvents[0].content).toContain('All done.');
+
+      // The edit's ask-mode approval was actually exercised (this is what
+      // produces closesBatch=true and the mid-iteration batch reset).
+      expect(mockDiffManager.handleAskModeDiff).toHaveBeenCalled();
+      expect(mockDiffManager.waitForPendingApprovals).toHaveBeenCalled();
+
+      // Both tool calls ran (a second streamChat iteration only happens if the
+      // first iteration completed without throwing past the delete_file tool).
+      expect(mockClient.streamChat).toHaveBeenCalledTimes(2);
+
+      // History saved as a clean completion, not an interrupted/error record.
+      const finalCall = mockConversation.recordAssistantMessage.mock.calls.at(-1);
+      expect(finalCall?.[7]).toMatchObject({ status: 'complete' });
+    });
   });
 });
