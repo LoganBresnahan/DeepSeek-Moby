@@ -178,9 +178,10 @@ export class ScrollActor extends EventStateActor {
     const currentlyNearBottom = this.isNearBottom();
     const atAbsoluteBottom = this.isAtAbsoluteBottom();
 
-    // Re-engage auto-scroll if user is currently near/at bottom but was marked as scrolled away
-    // This handles the case where user scrolled to bottom but content grew before we detected it
-    if (this._isStreaming && this._userScrolled && (currentlyNearBottom || atAbsoluteBottom)) {
+    // Re-engage auto-scroll only if the user is at the ABSOLUTE bottom (5px) but was
+    // marked as scrolled away. Using atAbsoluteBottom rather than the 100px nearBottom
+    // avoids snapping the viewport to the bottom when the user is merely *near* it.
+    if (this._isStreaming && this._userScrolled && atAbsoluteBottom) {
       this._userScrolled = false;
       this._autoScroll = true;
       this._nearBottom = true;
@@ -193,7 +194,7 @@ export class ScrollActor extends EventStateActor {
 
     // Handle content shrinking (jarring collapse)
     // When content shrinks significantly and we're at/near bottom, smooth scroll to new bottom
-    if (heightShrunk && (this._nearBottom || currentlyNearBottom)) {
+    if (heightShrunk && this._isStreaming && (this._nearBottom || currentlyNearBottom)) {
       // Use smooth scroll to ease the visual jump
       this._scrollContainer.scrollTo({
         top: this._scrollContainer.scrollHeight,
@@ -207,7 +208,7 @@ export class ScrollActor extends EventStateActor {
     // 1. Content actually grew (not shrunk)
     // 2. Auto-scroll is enabled (user hasn't scrolled up)
     // 3. We were near the bottom (use cached value as content growth would push us away)
-    if (heightGrew && this._autoScroll && !this._userScrolled && this._nearBottom) {
+    if (heightGrew && this._isStreaming && this._autoScroll && !this._userScrolled && this._nearBottom) {
       // Debounce to batch rapid updates during streaming
       if (this._trailTimer) {
         clearTimeout(this._trailTimer);
@@ -332,9 +333,10 @@ export class ScrollActor extends EventStateActor {
 
     // Only track user scroll during streaming
     if (this._isStreaming) {
-      // If user scrolled back to bottom, re-enable auto-scroll
-      // Use atAbsoluteBottom OR nearBottom to be more forgiving during rapid content growth
-      if ((nearBottom || atAbsoluteBottom) && this._userScrolled) {
+      // If user scrolled back to the ABSOLUTE bottom (5px), re-enable auto-scroll.
+      // Using only atAbsoluteBottom — not the 100px nearBottom — prevents the viewport
+      // from being snapped to the bottom when the user is merely near it.
+      if (atAbsoluteBottom && this._userScrolled) {
         this._userScrolled = false;
         this._autoScroll = true;
         this._nearBottom = true; // Force near-bottom state
