@@ -616,6 +616,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
             // Built-in model: write to its registered per-model config key.
             const configKey = getCapabilities(model).maxTokensConfigKey;
             await config.update(configKey, data.maxTokens, vscode.ConfigurationTarget.Global);
+            logger.settingsChanged(configKey, data.maxTokens);
           } else {
             // Custom model: the `maxTokensConfigKey` field names an arbitrary
             // user-invented key that VS Code rejects at write time because
@@ -630,6 +631,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
             }
             entries[idx].maxOutputTokens = data.maxTokens;
             await config.update('customModels', entries, vscode.ConfigurationTarget.Global);
+            logger.settingsChanged(`customModels.${model}.maxOutputTokens`, data.maxTokens);
           }
           break;
         }

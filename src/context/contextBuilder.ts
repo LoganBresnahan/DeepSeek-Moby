@@ -10,28 +10,13 @@
 
 import { TokenCounter } from '../services/tokenCounter';
 import { logger } from '../utils/logger';
+import { getCapabilities } from '../models/registry';
 import type { Message, MessageContent } from '../deepseekClient';
 
-interface ModelBudget {
-  totalContext: number;
-  maxOutputTokens: number;
-}
-
-const MODEL_BUDGETS: Record<string, ModelBudget> = {
-  'deepseek-chat': {
-    totalContext: 128_000,
-    maxOutputTokens: 8_192,
-  },
-  'deepseek-reasoner': {
-    totalContext: 128_000,
-    maxOutputTokens: 16_384,
-  },
-};
-
-const DEFAULT_BUDGET: ModelBudget = {
-  totalContext: 128_000,
-  maxOutputTokens: 8_192,
-};
+/** Context window used when a model doesn't declare one in the registry
+ *  (e.g. a custom model). Real per-model windows — V3 = 128K, V4 = 1M —
+ *  come from `getCapabilities(model).contextWindow`. */
+const FALLBACK_CONTEXT_WINDOW = 128_000;
 
 /** When using estimation, reserve 10% as safety margin */
 const ESTIMATION_SAFETY_MARGIN = 0.10;
@@ -71,7 +56,11 @@ export class ContextBuilder {
     model: string,
     snapshotSummary?: SnapshotSummary
   ): Promise<ContextResult> {
-    const budget = MODEL_BUDGETS[model] ?? DEFAULT_BUDGET;
+    // Context window (and the output reserve) come from the registry so this
+    // budget can't drift from the model's real capabilities. V4 = 1M, V3 = 128K.
+    const caps = getCapabilities(model);
+    const totalContext = caps.contextWindow ?? FALLBACK_CONTEXT_WINDOW;
+    const outputReserve = caps.maxOutputTokens;
 
     const safetyMultiplier = this.tokenCounter.isExact
       ? 1.0
@@ -84,7 +73,7 @@ export class ContextBuilder {
 
     // Available budget for conversation messages
     const availableBudget = Math.floor(
-      (budget.totalContext - budget.maxOutputTokens) * safetyMultiplier
+      (totalContext - outputReserve) * safetyMultiplier
     ) - systemTokens;
 
     // Count tokens for each message (with cache for event-sourced messages)
@@ -193,7 +182,7 @@ export class ContextBuilder {
     const result: ContextResult = {
       messages: includedMessages,
       tokenCount: usedTokens + systemTokens,
-      budget: budget.totalContext - budget.maxOutputTokens,
+      budget: totalContext - outputReserve,
       truncated: droppedCount > 0,
       droppedCount,
       summaryInjected,

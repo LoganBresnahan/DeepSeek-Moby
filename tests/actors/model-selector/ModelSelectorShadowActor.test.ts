@@ -123,7 +123,7 @@ describe('ModelSelectorShadowActor', () => {
     it('highlights selected model', () => {
       const selectedOption = element.shadowRoot?.querySelector('.model-option.selected');
       expect(selectedOption).toBeTruthy();
-      expect(selectedOption?.getAttribute('data-model')).toBe('deepseek-chat');
+      expect(selectedOption?.getAttribute('data-model')).toBe('deepseek-v4-pro-thinking');
     });
   });
 
@@ -135,44 +135,44 @@ describe('ModelSelectorShadowActor', () => {
     });
 
     it('selects model when clicked', () => {
-      const reasonerOption = element.shadowRoot?.querySelector('.model-option[data-model="deepseek-reasoner"]') as HTMLElement;
-      reasonerOption?.click();
+      const flashOption = element.shadowRoot?.querySelector('.model-option[data-model="deepseek-v4-flash-thinking"]') as HTMLElement;
+      flashOption?.click();
 
-      expect(actor.getSelectedModel()).toBe('deepseek-reasoner');
+      expect(actor.getSelectedModel()).toBe('deepseek-v4-flash-thinking');
     });
 
     it('posts selectModel message to extension', () => {
-      const reasonerOption = element.shadowRoot?.querySelector('.model-option[data-model="deepseek-reasoner"]') as HTMLElement;
-      reasonerOption?.click();
+      const flashOption = element.shadowRoot?.querySelector('.model-option[data-model="deepseek-v4-flash-thinking"]') as HTMLElement;
+      flashOption?.click();
 
       expect(mockVSCode.postMessage).toHaveBeenCalledWith({
         type: 'selectModel',
-        model: 'deepseek-reasoner'
+        model: 'deepseek-v4-flash-thinking'
       });
     });
 
     it('updates selected visual on model change', () => {
-      const reasonerOption = element.shadowRoot?.querySelector('.model-option[data-model="deepseek-reasoner"]') as HTMLElement;
-      reasonerOption?.click();
+      const flashOption = element.shadowRoot?.querySelector('.model-option[data-model="deepseek-v4-flash-thinking"]') as HTMLElement;
+      flashOption?.click();
 
       // Re-query after click because selectModel() re-renders the popup content
-      const updatedReasonerOption = element.shadowRoot?.querySelector('.model-option[data-model="deepseek-reasoner"]');
-      expect(updatedReasonerOption?.classList.contains('selected')).toBe(true);
+      const updatedFlashOption = element.shadowRoot?.querySelector('.model-option[data-model="deepseek-v4-flash-thinking"]');
+      expect(updatedFlashOption?.classList.contains('selected')).toBe(true);
 
-      const chatOption = element.shadowRoot?.querySelector('.model-option[data-model="deepseek-chat"]');
-      expect(chatOption?.classList.contains('selected')).toBe(false);
+      const proOption = element.shadowRoot?.querySelector('.model-option[data-model="deepseek-v4-pro-thinking"]');
+      expect(proOption?.classList.contains('selected')).toBe(false);
     });
 
     it('publishes model.selected on change', () => {
       // The actor uses this.publish() which calls manager.handleStateChange()
       const handleStateSpy = vi.spyOn(manager, 'handleStateChange');
 
-      const reasonerOption = element.shadowRoot?.querySelector('.model-option[data-model="deepseek-reasoner"]') as HTMLElement;
-      reasonerOption?.click();
+      const flashOption = element.shadowRoot?.querySelector('.model-option[data-model="deepseek-v4-flash-thinking"]') as HTMLElement;
+      flashOption?.click();
 
       expect(handleStateSpy).toHaveBeenCalledWith(
         expect.objectContaining({
-          state: expect.objectContaining({ 'model.selected': 'deepseek-reasoner' })
+          state: expect.objectContaining({ 'model.selected': 'deepseek-v4-flash-thinking' })
         })
       );
     });
@@ -223,8 +223,12 @@ describe('ModelSelectorShadowActor', () => {
     });
 
     it('updates shell iterations on slider input when R1 is selected', () => {
-      // Switch to R1 model so shell iterations slider appears
-      actor.toggle();
+      // Make the R1 model available in the list, then switch to it so the
+      // shell iterations slider appears (it's gated on deepseek-reasoner).
+      actor.setModels([
+        { id: 'deepseek-v4-pro-thinking', name: 'DeepSeek V4 Pro', description: '', maxTokens: 384000 },
+        { id: 'deepseek-reasoner', name: 'R1', description: '', maxTokens: 65536 }
+      ]);
       const r1Option = element.shadowRoot?.querySelector('.model-option[data-model="deepseek-reasoner"]') as HTMLElement;
       r1Option?.click();
 
@@ -244,10 +248,15 @@ describe('ModelSelectorShadowActor', () => {
       slider.value = '4096';
       slider.dispatchEvent(new Event('input', { bubbles: true }));
 
-      expect(mockVSCode.postMessage).toHaveBeenCalledWith({
-        type: 'setMaxTokens',
-        maxTokens: 4096
-      });
+      // Includes the selected model id so the backend writes the correct per-model
+      // config key instead of falling back to getModel() (the latent wrong-key bug).
+      expect(mockVSCode.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'setMaxTokens',
+          maxTokens: 4096,
+          model: expect.any(String)
+        })
+      );
     });
 
     it('displays value next to slider', () => {
@@ -293,7 +302,7 @@ describe('ModelSelectorShadowActor', () => {
     });
 
     it('getSelectedModel() returns current model', () => {
-      expect(actor.getSelectedModel()).toBe('deepseek-chat');
+      expect(actor.getSelectedModel()).toBe('deepseek-v4-pro-thinking');
     });
 
     it('getSettings() returns all settings', () => {
@@ -311,10 +320,10 @@ describe('ModelSelectorShadowActor', () => {
       actor.onModelChange(handler);
 
       actor.toggle();
-      const option = element.shadowRoot?.querySelector('.model-option[data-model="deepseek-reasoner"]') as HTMLElement;
+      const option = element.shadowRoot?.querySelector('.model-option[data-model="deepseek-v4-flash-thinking"]') as HTMLElement;
       option?.click();
 
-      expect(handler).toHaveBeenCalledWith('deepseek-reasoner');
+      expect(handler).toHaveBeenCalledWith('deepseek-v4-flash-thinking');
     });
 
     it('onSettingsChange() handler is called on parameter change', () => {

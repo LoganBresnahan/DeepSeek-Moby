@@ -58,8 +58,8 @@ export type SettingsChangeHandler = (settings: Partial<ModelSettings>) => void;
 // ============================================
 
 const DEFAULT_MODELS: ModelOption[] = [
-  { id: 'deepseek-chat', name: 'DeepSeek Chat (V3)', description: 'Fast, general-purpose', maxTokens: 8192 },
-  { id: 'deepseek-reasoner', name: 'DeepSeek Reasoner (R1)', description: 'Chain-of-thought reasoning', maxTokens: 65536 }
+  { id: 'deepseek-v4-pro-thinking', name: 'DeepSeek V4 Pro', description: 'Highest-quality reasoning', maxTokens: 384000, reasoningEffortDefault: 'max' },
+  { id: 'deepseek-v4-flash-thinking', name: 'DeepSeek V4 Flash', description: 'Fast reasoning', maxTokens: 384000, reasoningEffortDefault: 'high' }
 ];
 
 // ============================================
@@ -68,18 +68,18 @@ const DEFAULT_MODELS: ModelOption[] = [
 
 export class ModelSelectorShadowActor extends PopupShadowActor {
   private _models: ModelOption[] = DEFAULT_MODELS;
-  private _selectedModel = 'deepseek-chat';
+  private _selectedModel = 'deepseek-v4-pro-thinking';
   private _temperature = 0.7;
   private _toolLimit = 100;
   private _shellIterations = 100;
   private _fileEditLoops = 100;
-  private _maxTokens = 8192;
+  private _maxTokens = 65536;
   private _streaming = false;
 
   // Per-model maxTokens storage — each model remembers its own setting
   private _perModelMaxTokens: Map<string, number> = new Map([
-    ['deepseek-chat', 8192],
-    ['deepseek-reasoner', 65536]
+    ['deepseek-v4-pro-thinking', 65536],
+    ['deepseek-v4-flash-thinking', 65536]
   ]);
 
   private _onModelChange: ModelChangeHandler | null = null;
@@ -157,7 +157,7 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
     const shellIterations = this._shellIterations ?? 100;
     const fileEditLoops = this._fileEditLoops ?? 100;
     const maxTokens = this._maxTokens ?? 8192;
-    const isReasoner = (this._selectedModel || 'deepseek-chat') === 'deepseek-reasoner';
+    const isReasoner = (this._selectedModel || 'deepseek-v4-pro-thinking') === 'deepseek-reasoner';
 
     // Use the selected model's max tokens as the slider maximum
     const modelMaxTokens = this.getSelectedModelMaxTokens();
@@ -181,7 +181,7 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
   }
 
   private renderModelOption(model: ModelOption): string {
-    const selectedModel = this._selectedModel || 'deepseek-chat';
+    const selectedModel = this._selectedModel || 'deepseek-v4-pro-thinking';
     const isSelected = model.id === selectedModel;
     // Reasoning-effort sub-control: only on the active model AND only when
     // the model is thinking-capable (registry default present). Inactive
@@ -427,7 +427,7 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
         this._maxTokens = value;
         this._perModelMaxTokens.set(this._selectedModel, value);
         if (valueEl) valueEl.textContent = this.formatTokens(value);
-        this._vscode.postMessage({ type: 'setMaxTokens', maxTokens: value });
+        this._vscode.postMessage({ type: 'setMaxTokens', maxTokens: value, model: this._selectedModel });
         this.publish({ 'model.maxTokens': value });
         break;
     }
@@ -443,7 +443,7 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
   // ============================================
 
   private formatTokens(value: number): string {
-    return value >= 1000 ? `${(value / 1024).toFixed(1)}K` : value.toString();
+    return value >= 1000 ? `${(value / 1000).toFixed(1)}K` : value.toString();
   }
 
   private formatIterations(value: number): string {
@@ -451,8 +451,8 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
   }
 
   private getTokenHint(): string {
-    const selectedModel = this._selectedModel || 'deepseek-chat';
-    return `Maximum tokens in response. ${selectedModel === 'deepseek-reasoner' ? 'Reasoner: 64K' : 'Chat: 8K'}`;
+    const selectedModel = this._selectedModel || 'deepseek-v4-pro-thinking';
+    return `Maximum tokens in response. ${selectedModel === 'deepseek-reasoner' ? 'Reasoner: 64K' : 'V4: up to 384K'}`;
   }
 
   /**
@@ -460,7 +460,7 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
    */
   private getSelectedModelMaxTokens(): number {
     const models = this._models || [];
-    const selectedModel = this._selectedModel || 'deepseek-chat';
+    const selectedModel = this._selectedModel || 'deepseek-v4-pro-thinking';
     const model = models.find(m => m.id === selectedModel);
     return model?.maxTokens ?? 8192;
   }

@@ -162,11 +162,28 @@ describe('ContextBuilder', () => {
       'deepseek-reasoner'
     );
 
-    // Reasoner reserves 16384 for output
-    expect(result.budget).toBe(128_000 - 16_384);
+    // Reasoner reserves its registered max output (65_536). ContextBuilder now
+    // sources budgets from the model registry (caps.maxOutputTokens) instead of a
+    // separate hardcoded table, so the reserve matches the model's real capability.
+    expect(result.budget).toBe(128_000 - 65_536);
   });
 
-  it('should use default budget for unknown models', async () => {
+  it('should use V4 Pro\'s 1M context window', async () => {
+    const counter = new EstimationTokenCounter();
+    const builder = new ContextBuilder(counter);
+
+    const result = await builder.build(
+      [{ role: 'user', content: 'test' }],
+      undefined,
+      'deepseek-v4-pro-thinking'
+    );
+
+    // V4 declares contextWindow=1_048_576 in the registry; reserve is its 65_536
+    // default output. Regression guard for V4 being budgeted as a generic 128K model.
+    expect(result.budget).toBe(1_048_576 - 65_536);
+  });
+
+  it('should fall back to the default capable model for unknown models', async () => {
     const counter = new EstimationTokenCounter();
     const builder = new ContextBuilder(counter);
 
@@ -176,8 +193,10 @@ describe('ContextBuilder', () => {
       'unknown-model-v99'
     );
 
-    // Should fall back to default (same as deepseek-chat)
-    expect(result.budget).toBe(128_000 - 8_192);
+    // Unknown IDs resolve through getCapabilities() to FALLBACK_CAPABILITIES
+    // (deepseek-v4-pro-thinking), inheriting V4's 1M window + 65_536 reserve —
+    // consistent with how unknown models are treated everywhere else.
+    expect(result.budget).toBe(1_048_576 - 65_536);
   });
 
   it('should handle multimodal content (array format)', async () => {

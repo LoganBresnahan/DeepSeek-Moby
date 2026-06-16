@@ -326,17 +326,20 @@ export class ScrollActor extends EventStateActor {
 
   private handleScroll(): void {
     const nearBottom = this.isNearBottom();
-    const atAbsoluteBottom = this.isAtAbsoluteBottom();
     const wasNearBottom = this._nearBottom;
 
     this._nearBottom = nearBottom;
 
     // Only track user scroll during streaming
     if (this._isStreaming) {
-      // If user scrolled back to the ABSOLUTE bottom (5px), re-enable auto-scroll.
-      // Using only atAbsoluteBottom — not the 100px nearBottom — prevents the viewport
-      // from being snapped to the bottom when the user is merely near it.
-      if (atAbsoluteBottom && this._userScrolled) {
+      // Re-engage auto-scroll when the user actively scrolls back toward the bottom.
+      // This is a USER-driven scroll gesture, so we use the forgiving 100px nearBottom
+      // threshold rather than the strict 5px absolute-bottom check: while content is
+      // still streaming the bottom is a moving target and a fling-to-bottom rarely lands
+      // within 5px, which is what broke sticky-follow. The PASSIVE content-resize
+      // re-engage in handleContentResize stays strict (atAbsoluteBottom) so growing
+      // content never snaps a user who is merely reading near the bottom.
+      if (nearBottom && this._userScrolled) {
         this._userScrolled = false;
         this._autoScroll = true;
         this._nearBottom = true; // Force near-bottom state

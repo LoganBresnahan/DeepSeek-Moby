@@ -41,6 +41,13 @@ export interface ModelCapabilities {
    *  See [docs/plans/deepseek-v4-integration.md](../../docs/plans/deepseek-v4-integration.md). */
   maxOutputTokensCap?: number;
 
+  /** Total context window (input + output) in tokens. Drives ContextBuilder's
+   *  conversation-history budget and the tool-loop's "approaching budget" guard.
+   *  V3 family is 128_000; V4 (Pro and Flash) is 1_048_576 (1M). Optional —
+   *  ContextBuilder falls back to 128_000 when a model (e.g. a custom entry)
+   *  doesn't declare one. */
+  contextWindow?: number;
+
   // VS Code config key for the user-adjustable per-model max tokens override.
   // Historical naming — preserved to avoid breaking existing user settings.
   maxTokensConfigKey: string;
@@ -141,6 +148,7 @@ export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
     shellProtocol: 'native-tool',
     supportsTemperature: true,
     maxOutputTokens: 8192,
+    contextWindow: 128_000,
     maxTokensConfigKey: 'maxTokensChatModel',
     streaming: true,
     apiEndpoint: 'https://api.deepseek.com',
@@ -162,6 +170,7 @@ export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
     shellProtocol: 'xml-shell',
     supportsTemperature: false,
     maxOutputTokens: 65536,
+    contextWindow: 128_000,
     maxTokensConfigKey: 'maxTokensReasonerModel',
     streaming: true,
     apiEndpoint: 'https://api.deepseek.com',
@@ -185,6 +194,7 @@ export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
     supportsTemperature: false,        // thinking mode rejects temperature/top_p
     maxOutputTokens: 65536,
     maxOutputTokensCap: 384000,
+    contextWindow: 1_048_576,        // 1M (DeepSeek-V4-Flash)
     maxTokensConfigKey: 'maxTokensV4FlashThinking',
     streaming: true,
     apiEndpoint: 'https://api.deepseek.com',
@@ -212,6 +222,7 @@ export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
     supportsTemperature: false,
     maxOutputTokens: 65536,
     maxOutputTokensCap: 384000,
+    contextWindow: 1_048_576,        // 1M (DeepSeek-V4-Pro)
     maxTokensConfigKey: 'maxTokensV4ProThinking',
     streaming: true,
     apiEndpoint: 'https://api.deepseek.com',

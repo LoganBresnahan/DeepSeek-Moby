@@ -1023,7 +1023,14 @@ export class DiffManager {
       if (!skipNotification) {
         this.emitAutoAppliedChanges();
       }
-      this.sendCodeAppliedStatus(true);
+      // ALWAYS pass filePath. RequestOrchestrator's onCodeApplied subscription turns this
+      // into the `file-modified` structural event, which is the ONLY thing that drives the
+      // "Modified files" dropdown on history RESTORE. It must fire even when
+      // skipNotification is true: the auto edit_file path (requestOrchestrator ~2625) passes
+      // skipNotification=true and batches its own live diffListChanged notification, but
+      // restore still needs the per-file structural event. (Gating this on !skipNotification
+      // was the bug that left restore with no dropdown.)
+      this.sendCodeAppliedStatus(true, undefined, filePath);
       return true;
 
     } catch (error: any) {
@@ -1081,7 +1088,14 @@ export class DiffManager {
       if (!skipNotification) {
         this.emitAutoAppliedChanges();
       }
-      this.sendCodeAppliedStatus(true);
+      // ALWAYS pass filePath. RequestOrchestrator's onCodeApplied subscription turns this
+      // into the `file-modified` structural event, which is the ONLY thing that drives the
+      // "Modified files" dropdown on history RESTORE. It must fire even when
+      // skipNotification is true: the auto edit_file path (requestOrchestrator ~2625) passes
+      // skipNotification=true and batches its own live diffListChanged notification, but
+      // restore still needs the per-file structural event. (Gating this on !skipNotification
+      // was the bug that left restore with no dropdown.)
+      this.sendCodeAppliedStatus(true, undefined, filePath);
       return true;
     } catch (error: any) {
       logger.error(`[DiffManager] Auto mode: Failed to create file ${filePath}:`, error.message);
