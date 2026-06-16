@@ -155,6 +155,9 @@ export class MessageTurnActor extends InterleavedShadowActor {
   // into this one container (the section's single "Thinking" dropdown). Only
   // createTextSegment clears it — interleaved tools/shell/pending do not split it.
   private _activeThinkingGroup: { containerId: string; iterationIndices: number[] } | null = null;
+  // Steps that have already played their one-shot append entrance animation, so a
+  // later re-render (status/content change) does not replay it.
+  private _enteredThinkingSteps: Set<number> = new Set();
 
   // ============================================
   // Tool Calls State
@@ -171,6 +174,8 @@ export class MessageTurnActor extends InterleavedShadowActor {
   // updateTool/updateToolBatch (which use batch-relative indices) map correctly into
   // the merged calls array.
   private _activeToolBatchOffset = 0;
+  // Tool-call ids that have already played their one-shot append entrance animation.
+  private _enteredToolIds: Set<string> = new Set();
 
   // ============================================
   // Shell State
@@ -287,21 +292,6 @@ export class MessageTurnActor extends InterleavedShadowActor {
   }
 
   // ============================================
-  // Coalescing Diagnostics (Phase 0 — TEMPORARY)
-  // ============================================
-  // Logs the order in which section containers START within a turn (NOT the
-  // high-frequency token updates), so we can validate the "assistant text is
-  // the sole section delimiter" model against real streamed output before
-  // refactoring the render layer. Grep the webview devtools console for
-  // "[coalesce-dbg]". Remove once coalescing ships and is verified.
-  private _dbgSectionSeq = 0;
-  private _dbgSection(kind: string, detail = ''): void {
-    this._dbgSectionSeq++;
-    // Raw console.log (not the gated logger) so it always surfaces for paste-back.
-    console.log(`[coalesce-dbg] #${this._dbgSectionSeq} ${kind}${detail ? ' · ' + detail : ''} · turn=${this._turnId} · streaming=${this._isStreaming}`);
-  }
-
-  // ============================================
   // Pool Lifecycle
   // ============================================
 
@@ -335,12 +325,14 @@ export class MessageTurnActor extends InterleavedShadowActor {
     this._lastKnownThinkingLength = 0;
     this._expandedThinking.clear();
     this._activeThinkingGroup = null;
+    this._enteredThinkingSteps.clear();
 
     // Reset tools
     this._toolBatches.clear();
     this._currentToolBatch = null;
     this._activeToolGroup = null;
     this._activeToolBatchOffset = 0;
+    this._enteredToolIds.clear();
     this._toolCounter = 0;
 
     // Reset shell
@@ -705,7 +697,6 @@ export class MessageTurnActor extends InterleavedShadowActor {
    */
   createTextSegment(content: string = '', options?: { isContinuation?: boolean }): string {
     this.markFirstTokenReceived();
-    this._dbgSection('TEXT', options?.isContinuation ? 'continuation' : 'first');
     // Text is the SOLE section delimiter: close the section's coalesced groups so the
     // next thinking/tools/etc. start fresh containers below this text output.
     this._currentPendingGroup = null;
@@ -833,7 +824,6 @@ export class MessageTurnActor extends InterleavedShadowActor {
    * segment doesn't keep a live-looking animation above newly rendered content.
    */
   completeCurrentTextSegment(): void {
-    this._dbgSection('TEXT-complete');
     if (!this._currentTextContainerId) return;
     const container = this.getContainer(this._currentTextContainerId);
     if (!container) return;
@@ -906,7 +896,6 @@ export class MessageTurnActor extends InterleavedShadowActor {
    */
   startThinkingIteration(): number {
     this.markFirstTokenReceived();
-    this._dbgSection('THINK', `iter=${this._currentThinkingIteration + 1}`);
     this.ensureRoleHeader();
     this._currentPendingGroup = null;
 
@@ -933,7 +922,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
       };
       this._thinkingIterations.set(this._currentThinkingIteration, iteration);
       this._activeThinkingGroup.iterationIndices.push(this._currentThinkingIteration);
-      this.renderThinkingGroup(this._activeThinkingGroup.containerId);
+      this.renderThinkingGroup(this._activeThinkingGroup.containerId, { animateNew: true });
       this.publish({ 'turn.thinkingCount': this._thinkingIterations.size });
       return this._currentThinkingIteration;
     }
@@ -1055,7 +1044,6 @@ export class MessageTurnActor extends InterleavedShadowActor {
    */
   startToolBatch(tools: Array<{ name: string; detail: string }>): string {
     this.markFirstTokenReceived();
-    this._dbgSection('TOOLS', `count=${tools.length} [${tools.map(t => t.name).join(',')}]`);
     this.ensureRoleHeader();
 
     const newCalls: ToolCall[] = tools.map(tool => ({
@@ -1074,7 +1062,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
       this._activeToolGroup.calls.push(...newCalls);
       this._activeToolGroup.complete = false; // new running tools re-open the group
       this._currentToolBatch = this._activeToolGroup;
-      this.renderToolBatch(this._activeToolGroup.id);
+      this.renderToolBatch(this._activeToolGroup.id, { animateNew: true });
       return this._activeToolGroup.id;
     }
 
@@ -1158,7 +1146,6 @@ export class MessageTurnActor extends InterleavedShadowActor {
    */
   createShellSegment(commands: Array<{ command: string; cwd?: string }>): string {
     this.markFirstTokenReceived();
-    this._dbgSection('SHELL', `count=${commands.length}`);
     this._currentPendingGroup = null;
     log.debug(`createShellSegment: creating with ${commands.length} commands`);
 
@@ -1239,7 +1226,6 @@ export class MessageTurnActor extends InterleavedShadowActor {
    * Add a pending file.
    */
   addPendingFile(file: { filePath: string; diffId?: string; status?: PendingFileStatus; action?: PendingFileAction; editMode?: EditMode }): string {
-    this._dbgSection('PENDING', `${this._currentPendingGroup ? 'append' : 'new-group'} · ${file.filePath}`);
     // Show workspace-relative path (e.g., "src/game.ts" not just "game.ts")
     // For directories (no extension, no dots in last segment), append trailing slash
     let fileName = file.filePath;
@@ -1397,7 +1383,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
    * (one .thinking-body); multiple steps stack inside one scrollable body with a
    * "Thinking — N steps" header.
    */
-  private renderThinkingGroup(containerId: string): void {
+  private renderThinkingGroup(containerId: string, opts?: { animateNew?: boolean }): void {
     const container = this.getContainer(containerId);
     if (!container) return;
 
@@ -1420,20 +1406,28 @@ export class MessageTurnActor extends InterleavedShadowActor {
     container.host.classList.toggle('expanded', isExpanded);
     container.host.classList.toggle('streaming', !allComplete);
 
+    // Animate only genuinely-new steps and only when a coalesced append asked for it
+    // during live streaming. The first step rides the container bubble-in.
+    const animateNew = !!opts?.animateNew && this._isStreaming;
     let bodyHtml: string;
     if (steps.length === 1) {
       // Single step: identical structure to the pre-coalescing render (plus data-step
       // so the streaming fast-path can target it).
       bodyHtml = `<div class="thinking-body scrollable" data-step="${steps[0].index}">${this.escapeHtml(steps[0].content)}</div>`;
     } else {
-      const stepsHtml = steps.map((s, i) => `
-        <div class="thinking-step${s.complete ? '' : ' streaming'}">
+      const stepsHtml = steps.map((s, i) => {
+        const enter = animateNew && !this._enteredThinkingSteps.has(s.index) ? ' item-enter' : '';
+        return `
+        <div class="thinking-step${s.complete ? '' : ' streaming'}${enter}">
           <div class="thinking-step-label">Step ${i + 1}</div>
           <div class="thinking-step-text" data-step="${s.index}">${this.escapeHtml(s.content)}</div>
         </div>
-      `).join('');
+      `;
+      }).join('');
       bodyHtml = `<div class="thinking-body scrollable">${stepsHtml}</div>`;
     }
+    // Mark every current step as entered so future re-renders don't replay it.
+    steps.forEach(s => this._enteredThinkingSteps.add(s.index));
 
     container.content.innerHTML = `
       <div class="thinking-header">
@@ -1446,7 +1440,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
     `;
   }
 
-  private renderToolBatch(batchId: string): void {
+  private renderToolBatch(batchId: string, opts?: { animateNew?: boolean }): void {
     const batch = this._toolBatches.get(batchId);
     if (!batch) return;
 
@@ -1483,12 +1477,17 @@ export class MessageTurnActor extends InterleavedShadowActor {
     container.host.classList.toggle('complete', batch.complete);
     container.host.classList.toggle('has-errors', errorCount > 0);
 
+    // Animate only items that are genuinely new (not yet entered) and only when a
+    // coalesced append asked for it during live streaming — never on restore or on
+    // status-only re-renders. The first batch's items ride the container bubble-in.
+    const animateNew = !!opts?.animateNew && this._isStreaming;
     let itemsHtml = '';
     batch.calls.forEach((call, i) => {
       const tree = i === batch.calls.length - 1 ? '└─' : '├─';
       const statusIcon = this.getStatusIcon(call.status);
+      const enter = animateNew && !this._enteredToolIds.has(call.id) ? ' item-enter' : '';
       itemsHtml += `
-        <div class="tool-item" data-status="${call.status}">
+        <div class="tool-item${enter}" data-status="${call.status}">
           <span class="tool-tree">${tree}</span>
           <span class="tool-status">${statusIcon}</span>
           <span class="tool-name">${this.escapeHtml(call.name)}</span>
@@ -1496,6 +1495,8 @@ export class MessageTurnActor extends InterleavedShadowActor {
         </div>
       `;
     });
+    // Mark every current item as entered so future re-renders don't replay it.
+    batch.calls.forEach(call => this._enteredToolIds.add(call.id));
 
     container.content.innerHTML = `
       <div class="tools-header">
@@ -1913,7 +1914,6 @@ export class MessageTurnActor extends InterleavedShadowActor {
    * Create an inline command approval widget.
    */
   createCommandApproval(command: string, prefix: string, unknownSubCommand: string): string {
-    this._dbgSection('APPROVAL', command.slice(0, 40));
     // Break any pending group chain
     this._currentPendingGroup = null;
 
@@ -2036,7 +2036,6 @@ export class MessageTurnActor extends InterleavedShadowActor {
    * Create a drawing segment displaying a phone drawing image.
    */
   createDrawingSegment(imageDataUrl: string): string {
-    this._dbgSection('DRAWING');
     this._currentPendingGroup = null;
     this._drawingCounter++;
     const segmentId = `${this._turnId}-drawing-${this._drawingCounter}`;

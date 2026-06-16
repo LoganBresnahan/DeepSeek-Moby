@@ -821,6 +821,66 @@ describe('MessageTurnActor', () => {
     });
   });
 
+  // An item appended to an already-visible coalesced dropdown gets a one-shot
+  // entrance animation (.item-enter); the first item rides the container bubble-in,
+  // status/content re-renders never replay it, and restore (non-streaming) is silent.
+  describe('Append entrance animation', () => {
+    beforeEach(() => {
+      actor = new MessageTurnActor({ manager, element });
+      actor.bind({ turnId: 'turn-1', role: 'assistant', timestamp: Date.now() });
+      actor.startStreaming();
+    });
+
+    it('animates only the appended tool, not the first batch', () => {
+      actor.startToolBatch([{ name: 'read_file', detail: 'a.ts' }]);
+      actor.startToolBatch([{ name: 'write_file', detail: 'b.ts' }]);
+
+      const items = findContainers('tools')[0].shadowRoot?.querySelectorAll('.tool-item');
+      expect(items?.length).toBe(2);
+      expect(items?.[0].classList.contains('item-enter')).toBe(false);
+      expect(items?.[1].classList.contains('item-enter')).toBe(true);
+    });
+
+    it('does not replay the tool entrance on a status-only re-render', () => {
+      actor.startToolBatch([{ name: 'read_file', detail: 'a.ts' }]);
+      actor.startToolBatch([{ name: 'write_file', detail: 'b.ts' }]);
+      actor.updateTool(0, 'done'); // re-renders the whole body
+
+      const items = findContainers('tools')[0].shadowRoot?.querySelectorAll('.tool-item');
+      expect(Array.from(items ?? []).some(el => el.classList.contains('item-enter'))).toBe(false);
+    });
+
+    it('animates only the appended thinking step', () => {
+      actor.startThinkingIteration();
+      actor.updateThinkingContent('one');
+      actor.startThinkingIteration();
+      actor.updateThinkingContent('two');
+
+      const steps = findContainers('thinking')[0].shadowRoot?.querySelectorAll('.thinking-step');
+      expect(steps?.length).toBe(2);
+      expect(steps?.[0].classList.contains('item-enter')).toBe(false);
+      expect(steps?.[1].classList.contains('item-enter')).toBe(true);
+    });
+
+    it('stays silent on restore (non-streaming replay)', () => {
+      const restoreEl = document.createElement('div');
+      const restoreActor = new MessageTurnActor({ manager, element: restoreEl });
+      restoreActor.bind({ turnId: 'turn-2', role: 'assistant', timestamp: Date.now() });
+      // No startStreaming() — this mimics pool re-bind / history restore.
+      restoreActor.startThinkingIteration();
+      restoreActor.updateThinkingContent('one');
+      restoreActor.startThinkingIteration();
+      restoreActor.updateThinkingContent('two');
+
+      const container = Array.from(restoreEl.children).find(
+        c => c.classList.contains('thinking-container')
+      ) as HTMLElement | undefined;
+      const steps = container?.shadowRoot?.querySelectorAll('.thinking-step');
+      expect(steps?.length).toBe(2);
+      expect(Array.from(steps ?? []).some(el => el.classList.contains('item-enter'))).toBe(false);
+    });
+  });
+
   // ============================================
   // Tool Calls Tests
   // ============================================

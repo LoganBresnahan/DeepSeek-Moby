@@ -35,6 +35,19 @@ const baseStyles = `
   to { opacity: 1; transform: translateY(0); }
 }
 
+/* One-shot entrance for an item appended to an already-visible coalesced dropdown
+   (a tool call or a thinking step joining its section's existing container). The
+   first item of a fresh dropdown rides the container's bubble-in instead. */
+.tool-item.item-enter,
+.thinking-step.item-enter {
+  animation: itemEnter 0.22s ease-out;
+}
+
+@keyframes itemEnter {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 /* Scrollbar styling */
 .scrollable::-webkit-scrollbar {
   width: 8px;
