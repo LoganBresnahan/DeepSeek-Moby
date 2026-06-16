@@ -83,10 +83,9 @@ jobs:
           ls "$PREBUILDS"
 
       - name: Package platform-specific VSIX
-        # --pre-release must match the flag passed to `vsce publish` below.
-        # vsce v3+ enforces this: publishing a non-pre-release VSIX with the
-        # --pre-release flag will error out.
-        run: vsce package --target ${{ matrix.target }} --pre-release
+        # Stable release: no --pre-release. This flag must match the one on
+        # `vsce publish` below — vsce v3+ errors out if they disagree.
+        run: vsce package --target ${{ matrix.target }}
 
       - name: Upload VSIX artifact
         uses: actions/upload-artifact@v4
@@ -115,7 +114,7 @@ jobs:
           pattern: vsix-*
           merge-multiple: true
 
-      - name: Publish all platforms to Marketplace (pre-release)
+      - name: Publish all platforms to Marketplace (stable)
         # Don't abort the loop on a single platform failure — partial publishes
         # still ship the platforms that worked. The summary at the end lists
         # any failures so a maintainer can republish them manually (see
@@ -125,7 +124,7 @@ jobs:
           FAILED=()
           for vsix in *.vsix; do
             echo "::group::Publishing $vsix"
-            if vsce publish --packagePath "$vsix" --pre-release; then
+            if vsce publish --packagePath "$vsix"; then
               echo "✓ $vsix published"
             else
               echo "✗ $vsix FAILED"
@@ -138,7 +137,7 @@ jobs:
             echo "Failed VSIXes are still attached to the GitHub Release."
             echo "Retry locally with:"
             echo "  gh release download <tag> --pattern '<failed-vsix-name>'"
-            echo "  vsce publish --packagePath '<failed-vsix-name>' --pre-release"
+            echo "  vsce publish --packagePath '<failed-vsix-name>'"
             exit 1
           fi
         env:
@@ -153,4 +152,4 @@ jobs:
         with:
           files: '*.vsix'
           generate_release_notes: true
-          prerelease: true
+          prerelease: false

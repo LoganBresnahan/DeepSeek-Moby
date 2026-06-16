@@ -2,7 +2,7 @@
   "name": "deepseek-moby",
   "displayName": "DeepSeek Moby",
   "description": "AI coding assistant for VS Code, powered by DeepSeek",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "publisher": "LoganBresnahan",
   "author": {
     "name": "Logan Bresnahan",
@@ -14,8 +14,7 @@
   "categories": [
     "Programming Languages",
     "Snippets",
-    "Machine Learning",
-    "AI"
+    "Machine Learning"
   ],
   "keywords": [
     "deepseek",

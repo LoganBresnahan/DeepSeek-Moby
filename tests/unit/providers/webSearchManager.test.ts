@@ -705,6 +705,58 @@ describe('WebSearchManager', () => {
     });
   });
 
+  // ── subagent routing in auto mode (searchByQuery) ──
+
+  describe('subagent routing — auto mode (searchByQuery)', () => {
+    function createMockRouter() {
+      return {
+        route: vi.fn()
+      };
+    }
+
+    it('returns digest verbatim when router routes successfully', async () => {
+      const router = createMockRouter();
+      router.route.mockResolvedValue({ routed: true, digest: 'DIGESTED OUTPUT' });
+      // Auto mode is the default; searchByQuery bypasses the enabled toggle.
+      const m = new WebSearchManager(createMockRegistry(mockTavily) as any, router as any);
+
+      const result = await m.searchByQuery('what is foo?');
+
+      expect(result).toBe('DIGESTED OUTPUT');
+      // Verbatim digest — NOT the raw formatted results.
+      expect(result).not.toContain('Web search results for:');
+      expect(router.route).toHaveBeenCalledTimes(1);
+      // Sub receives the raw single search response (recentUserPrompt unset → '').
+      expect(router.route).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'web-search-digest' }),
+        expect.objectContaining({ query: 'what is foo?', results: expect.any(Array) }),
+        { recentUserPrompt: '' }
+      );
+    });
+
+    it('falls back to formatSearchResults when router declines (off / threshold / fail)', async () => {
+      const router = createMockRouter();
+      router.route.mockResolvedValue({ routed: false, reason: 'off' });
+      const m = new WebSearchManager(createMockRegistry(mockTavily) as any, router as any);
+
+      const result = await m.searchByQuery('what is foo?');
+
+      expect(result).toContain('Web search results for: "what is foo?"');
+      expect(result).toContain('Result 1');
+      expect(result).toContain('Summary answer');
+      expect(router.route).toHaveBeenCalledTimes(1);
+    });
+
+    it('uses formatSearchResults path when no router is provided (back-compat)', async () => {
+      const m = new WebSearchManager(createMockRegistry(mockTavily) as any /* no router */);
+
+      const result = await m.searchByQuery('q');
+
+      expect(result).toContain('Web search results for: "q"');
+      expect(result).toContain('Result 1');
+    });
+  });
+
   // ── subagent routing in manual mode (searchForMessage) ──
 
   describe('subagent routing — manual mode (searchForMessage)', () => {

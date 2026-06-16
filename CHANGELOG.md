@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.4.0] - 2026-06-16
+
+### Subagent web-search digest
+
+- **Tool-routing compression layer for web search.** Verbose web-search output is now routed through a cheap secondary model that digests it before it reaches the main model, with a fully transparent fallback to raw output on any failure (worst case it's a no-op). Entry point `SubagentRouter.route()` ([src/subagents/router.ts](src/subagents/router.ts)); the `web-search-digest` role ([src/subagents/roles/webSearchDigest.ts](src/subagents/roles/webSearchDigest.ts)); wired into both the manual (`searchForMessage`) and auto (`searchByQuery`) paths of [src/providers/webSearchManager.ts](src/providers/webSearchManager.ts). Off by default (`moby.subagents.web-search-digest`), with a user-tunable max-results cap. Declared on `deepseek-v4-flash-thinking` and `deepseek-v4-pro-thinking`.
+- Added auto-mode (`searchByQuery`) routing tests, closing the prior coverage gap.
+
+### UI — smooth dropdown open animations
+
+- **Thinking, tools, shell, and pending dropdowns now open with the same smooth `max-height` transition as the code block.** Root cause: their click handlers re-rendered `innerHTML` on toggle, destroying the element mid-transition so it snapped open. They now flip the host `expanded` class + toggle glyph on the *persistent* element instead ([media/actors/turn/MessageTurnActor.ts](media/actors/turn/MessageTurnActor.ts)), while streaming-driven re-renders still restore the open state from the persisted flag.
+
+### Model selector defaults to V4
+
+- The webview pre-load model state now defaults to `deepseek-v4-pro-thinking` instead of the legacy `deepseek-chat`, so fresh installs land on a current model. Reasoner-specific controls remain intact when `deepseek-reasoner` is selected. ([media/actors/model-selector/ModelSelectorShadowActor.ts](media/actors/model-selector/ModelSelectorShadowActor.ts))
+
+### Housekeeping
+
+- Dropped the invalid `"AI"` marketplace category (not an official VS Code category).
+- Added `shared/**` to `.vscodeignore`.
+
 ## [0.3.0] - 2026-05-01 (Pre-Release)
 
 ### Markdown rendering — markdown-it integration

@@ -127,6 +127,18 @@ const textStyles = `
   padding: 0;
 }
 
+/* Markdown links — render like the surrounding text (inherit color), keep the underline */
+.content a,
+.content a:visited {
+  color: inherit;
+  text-decoration: underline;
+}
+
+.content a:hover {
+  text-decoration: underline;
+  opacity: 0.85;
+}
+
 /* File attachments */
 .files {
   display: flex;

@@ -2,6 +2,7 @@
 src/**
 scripts/**
 packages/**
+shared/**
 
 # === Media source (keep only the icon) ===
 media/**

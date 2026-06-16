@@ -273,6 +273,21 @@ export class MessageTurnActor extends InterleavedShadowActor {
   }
 
   // ============================================
+  // Coalescing Diagnostics (Phase 0 — TEMPORARY)
+  // ============================================
+  // Logs the order in which section containers START within a turn (NOT the
+  // high-frequency token updates), so we can validate the "assistant text is
+  // the sole section delimiter" model against real streamed output before
+  // refactoring the render layer. Grep the webview devtools console for
+  // "[coalesce-dbg]". Remove once coalescing ships and is verified.
+  private _dbgSectionSeq = 0;
+  private _dbgSection(kind: string, detail = ''): void {
+    this._dbgSectionSeq++;
+    // Raw console.log (not the gated logger) so it always surfaces for paste-back.
+    console.log(`[coalesce-dbg] #${this._dbgSectionSeq} ${kind}${detail ? ' · ' + detail : ''} · turn=${this._turnId} · streaming=${this._isStreaming}`);
+  }
+
+  // ============================================
   // Pool Lifecycle
   // ============================================
 
@@ -673,6 +688,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
    */
   createTextSegment(content: string = '', options?: { isContinuation?: boolean }): string {
     this.markFirstTokenReceived();
+    this._dbgSection('TEXT', options?.isContinuation ? 'continuation' : 'first');
     this._currentPendingGroup = null;
     this._textSegmentCounter++;
     const segmentId = `${this._turnId}-text-${this._textSegmentCounter}`;
@@ -795,6 +811,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
    * segment doesn't keep a live-looking animation above newly rendered content.
    */
   completeCurrentTextSegment(): void {
+    this._dbgSection('TEXT-complete');
     if (!this._currentTextContainerId) return;
     const container = this.getContainer(this._currentTextContainerId);
     if (!container) return;
@@ -867,6 +884,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
    */
   startThinkingIteration(): number {
     this.markFirstTokenReceived();
+    this._dbgSection('THINK', `iter=${this._currentThinkingIteration + 1}`);
     this.ensureRoleHeader();
     this._currentPendingGroup = null;
 
@@ -986,6 +1004,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
    */
   startToolBatch(tools: Array<{ name: string; detail: string }>): string {
     this.markFirstTokenReceived();
+    this._dbgSection('TOOLS', `count=${tools.length} [${tools.map(t => t.name).join(',')}]`);
     this.ensureRoleHeader();
     this._currentPendingGroup = null;
     const container = this.createContainer('message', {
@@ -1067,6 +1086,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
    */
   createShellSegment(commands: Array<{ command: string; cwd?: string }>): string {
     this.markFirstTokenReceived();
+    this._dbgSection('SHELL', `count=${commands.length}`);
     this._currentPendingGroup = null;
     log.debug(`createShellSegment: creating with ${commands.length} commands`);
 
@@ -1147,6 +1167,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
    * Add a pending file.
    */
   addPendingFile(file: { filePath: string; diffId?: string; status?: PendingFileStatus; action?: PendingFileAction; editMode?: EditMode }): string {
+    this._dbgSection('PENDING', `${this._currentPendingGroup ? 'append' : 'new-group'} · ${file.filePath}`);
     // Show workspace-relative path (e.g., "src/game.ts" not just "game.ts")
     // For directories (no extension, no dots in last segment), append trailing slash
     let fileName = file.filePath;
@@ -1687,27 +1708,55 @@ export class MessageTurnActor extends InterleavedShadowActor {
 
   private setupThinkingHandlers(containerId: string, iterationIndex: number): void {
     this.delegateInContainer(containerId, 'click', '.thinking-header', () => {
-      this.toggleThinkingExpanded(iterationIndex);
+      const iteration = this._thinkingIterations.get(iterationIndex);
+      if (!iteration) return;
+      const container = this.getContainer(iteration.containerId);
+      if (!container) return;
+      // Flip only the host class + toggle glyph on the persistent element so the
+      // CSS max-height transition animates. Keep _expandedThinking in sync so a
+      // later streaming-driven renderThinkingIteration() restores the open state.
+      // (toggleThinkingExpanded — which re-renders — is left for external callers.)
+      const nowExpanded = !this._expandedThinking.has(iterationIndex);
+      if (nowExpanded) {
+        this._expandedThinking.add(iterationIndex);
+      } else {
+        this._expandedThinking.delete(iterationIndex);
+      }
+      container.host.classList.toggle('expanded', nowExpanded);
+      const toggleEl = container.content.querySelector('.thinking-toggle');
+      if (toggleEl) toggleEl.textContent = nowExpanded ? '−' : '+';
     });
   }
 
   private setupToolBatchHandlers(containerId: string): void {
     this.delegateInContainer(containerId, 'click', '.tools-header', () => {
       const batch = this._toolBatches.get(containerId);
-      if (batch) {
-        batch.expanded = !batch.expanded;
-        this.renderToolBatch(containerId);
-      }
+      if (!batch) return;
+      const container = this.getContainer(batch.containerId);
+      if (!container) return;
+      // Flip only the host class + toggle glyph on the persistent element so the
+      // CSS max-height transition animates. The expanded flag stays in sync so a
+      // later streaming-driven renderToolBatch() restores the correct open state.
+      batch.expanded = !batch.expanded;
+      container.host.classList.toggle('expanded', batch.expanded);
+      const toggleEl = container.content.querySelector('.tools-toggle');
+      if (toggleEl) toggleEl.textContent = batch.expanded ? '−' : '+';
     });
   }
 
   private setupShellHandlers(containerId: string): void {
     this.delegateInContainer(containerId, 'click', '.shell-header', () => {
       const segment = this._shellSegments.get(containerId);
-      if (segment) {
-        segment.expanded = !segment.expanded;
-        this.renderShellSegment(containerId);
-      }
+      if (!segment) return;
+      const container = this.getContainer(segment.containerId);
+      if (!container) return;
+      // Flip only the host class + toggle glyph on the persistent element so the
+      // CSS max-height transition animates. The expanded flag stays in sync so a
+      // later streaming-driven renderShellSegment() restores the correct open state.
+      segment.expanded = !segment.expanded;
+      container.host.classList.toggle('expanded', segment.expanded);
+      const toggleEl = container.content.querySelector('.shell-toggle');
+      if (toggleEl) toggleEl.textContent = segment.expanded ? '−' : '+';
     });
   }
 
@@ -1715,11 +1764,15 @@ export class MessageTurnActor extends InterleavedShadowActor {
     // Toggle expansion
     this.delegateInContainer(containerId, 'click', '.pending-header', () => {
       const container = this.getContainer(containerId);
-      if (container) {
-        container.host.classList.toggle('expanded');
-        const group = this._pendingGroups.find(g => g.containerId === containerId);
-        if (group) this.renderPendingGroup(group);
-      }
+      if (!container) return;
+      // Flip only the host class + toggle glyph on the persistent element so the
+      // CSS max-height transition animates. The host's `expanded` class is the
+      // persisted state that a later streaming-driven renderPendingGroup() reads
+      // (it derives isExpanded from container.host.classList), so the open state
+      // survives content updates without re-rendering on the user click.
+      const nowExpanded = container.host.classList.toggle('expanded');
+      const toggleEl = container.content.querySelector('.pending-toggle');
+      if (toggleEl) toggleEl.textContent = nowExpanded ? '−' : '+';
     });
 
     // File click - focus in editor
@@ -1766,6 +1819,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
    * Create an inline command approval widget.
    */
   createCommandApproval(command: string, prefix: string, unknownSubCommand: string): string {
+    this._dbgSection('APPROVAL', command.slice(0, 40));
     // Break any pending group chain
     this._currentPendingGroup = null;
 
@@ -1888,6 +1942,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
    * Create a drawing segment displaying a phone drawing image.
    */
   createDrawingSegment(imageDataUrl: string): string {
+    this._dbgSection('DRAWING');
     this._currentPendingGroup = null;
     this._drawingCounter++;
     const segmentId = `${this._turnId}-drawing-${this._drawingCounter}`;
