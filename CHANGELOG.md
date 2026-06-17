@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.4.0] - 2026-06-16
+## [0.4.0] - 2026-06-17
 
 ### Subagent web-search digest
 
@@ -11,9 +11,23 @@
 
 - **Thinking, tools, shell, and pending dropdowns now open with the same smooth `max-height` transition as the code block.** Root cause: their click handlers re-rendered `innerHTML` on toggle, destroying the element mid-transition so it snapped open. They now flip the host `expanded` class + toggle glyph on the *persistent* element instead ([media/actors/turn/MessageTurnActor.ts](media/actors/turn/MessageTurnActor.ts)), while streaming-driven re-renders still restore the open state from the persisted flag.
 
+### UI — coalesced thinking & tool dropdowns
+
+- **Thinking iterations and tool batches now collapse into one dropdown per text-delimited section.** Assistant text output is the sole section delimiter; within a section every tool batch merges into a single "Used N tools" container and every reasoning pass merges into one "Thinking — N steps" container, generalizing the existing Modified/Pending Files coalescing. Previously the R1 reason→act loop produced a separate dropdown per iteration, scattering one logical turn across many boxes; interleaved tools/thinking no longer split each other. Contained entirely to [media/actors/turn/MessageTurnActor.ts](media/actors/turn/MessageTurnActor.ts) — live streaming, history restore, and scroll-rebind all funnel through the same `startToolBatch` / `startThinkingIteration` methods, so all three paths coalesce identically. Single-iteration sections render byte-identically to before.
+- **Appended items slide in.** A tool call or thinking step joining an already-visible dropdown plays a one-shot entrance (`.item-enter`) instead of popping when the body re-renders; the first item of a fresh dropdown rides the container's bubble-in, status/content re-renders never replay the animation, and history restore stays silent (gated to live streaming).
+- 9 new `MessageTurnActor` regression tests (merge, section split, offset-mapped status updates, group toggle, append animation, restore silence); the thinking-coalescing change additionally cleared a three-lens adversarial review (restore / streaming / CSS) with zero findings.
+
 ### Model selector defaults to V4
 
 - The webview pre-load model state now defaults to `deepseek-v4-pro-thinking` instead of the legacy `deepseek-chat`, so fresh installs land on a current model. Reasoner-specific controls remain intact when `deepseek-reasoner` is selected. ([media/actors/model-selector/ModelSelectorShadowActor.ts](media/actors/model-selector/ModelSelectorShadowActor.ts))
+
+### Fixes
+
+- **V4 context budget was silently capped at 128K.** `ContextBuilder` now sources each model's input budget from the model registry's new `contextWindow` capability instead of a separate hardcoded table that never knew about V4. V4 Pro/Flash budget off their real 1,048,576-token window (reserve = the model's registered max output); Reasoner's reserve matches its registered 65K output. ([src/context/contextBuilder.ts](src/context/contextBuilder.ts), [src/models/registry.ts](src/models/registry.ts))
+- **"Modified files" dropdown missing on history restore.** Auto-mode edits now always pass `filePath` to `sendCodeAppliedStatus`, so the `file-modified` structural event records — the only input that drives the restore dropdown. The previous gate on `!skipNotification` dropped it, since the real auto path passes `skipNotification=true`. ([src/providers/diffManager.ts](src/providers/diffManager.ts))
+- **Sticky scroll stopped following streamed content.** User-driven scroll re-engages auto-scroll on the 100px near-bottom threshold (was an unreachable 5px while content streams), while passive content-resize stays strict so reading just above the bottom isn't yanked down. Combined with the earlier idle-scroll fix (resize-driven follow now gated on `_isStreaming`), the viewport only chases new content when you're actually at the bottom of a live stream. ([media/actors/scroll/ScrollActor.ts](media/actors/scroll/ScrollActor.ts))
+- **Max output tokens slider looked dead.** `setMaxTokens` was the only slider bypassing `SettingsManager`, so it emitted no debug output and appeared to do nothing; it now logs via `settingsChanged`, sends the model id to avoid a wrong per-model-key write, and the slider label divides by 1000. ([src/providers/chatProvider.ts](src/providers/chatProvider.ts), [media/actors/model-selector/ModelSelectorShadowActor.ts](media/actors/model-selector/ModelSelectorShadowActor.ts))
+- **Crash on ask-mode multi-tool batches.** An ask-mode `edit_file` opens a blocking diff approval that resets the batch mid-iteration (`closesBatch`); a later tool in the same iteration then indexed into the emptied array (`TypeError: Cannot set properties of undefined`), error-finalizing the turn. The running-status update is now wrapped in the same bounds guard the final-status block already used, in both `runStreamingToolCallsLoop` and `runToolLoop`. ([src/providers/requestOrchestrator.ts](src/providers/requestOrchestrator.ts))
 
 ### Housekeeping
 
