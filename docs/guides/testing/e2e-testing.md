@@ -41,7 +41,7 @@ const mockDeepSeekClient = {
     if (messages.some(m => m.content.includes('list files'))) {
       return {
         content: '',
-        tool_calls: [{ name: 'shell_execute', arguments: { command: 'ls' }}]
+        tool_calls: [{ name: 'run_shell', arguments: { command: 'ls' }}]
       };
     }
   }
@@ -89,12 +89,16 @@ expect(result.finalState).toMatchSnapshot();
 
 ## Existing Logger Infrastructure
 
-We have **two loggers** that see different parts of the system:
+There are **two primary loggers** that see different parts of the system:
 
 | Logger | Location | What It Sees |
 |--------|----------|--------------|
 | `src/utils/logger.ts` | Extension side | API calls, tool execution, shell results, sessions |
 | `media/state/EventStateLogger.ts` | Webview side | State changes, actor communication, pub/sub flow |
+
+Two other logging surfaces back these up: the webview shared logging module
+(`media/logging/`) that `EventStateLogger` delegates to, and the extension-side
+tracing system (`src/tracing/`) that `src/utils/logger.ts` feeds spans into.
 
 ### Extension Logger Events
 
@@ -150,15 +154,22 @@ logger.publicationError(actorId, key, error)
 
 ### Trace Recording
 
+> Note: the extension `Logger` does **not** expose an `on('event')` / EventEmitter
+> API. Activity is captured two ways today: the logger's ring buffer
+> (`logger.getLogBuffer()` returns `LogBufferEntry[]`) and the tracing system
+> (`src/tracing`, exported as `tracer`), which records correlated spans you can
+> read via `tracer.getTrace(correlationId)` or `tracer.export()`. The snippet
+> below is aspirational and assumes a hook that does not yet exist.
+
 ```typescript
-// Capture all events during a test run
+// Aspirational: capture all events during a test run
 const trace: LogEvent[] = [];
-logger.on('event', (e) => trace.push(e));
+logger.on('event', (e) => trace.push(e)); // no such API today
 
 await runChatScenario('hello world');
 
 expect(trace).toMatchObject([
-  { type: 'apiRequest', model: 'deepseek-chat' },
+  { type: 'apiRequest', model: 'deepseek-v4-pro-thinking' }, // current default model
   { type: 'apiResponse', tokenCount: expect.any(Number) },
 ]);
 ```
@@ -194,42 +205,94 @@ expect(states.map(s => s.changedKeys)).toEqual([
 
 ---
 
-## Proposed Architecture
+## Shipped Architecture
+
+> The mock-client-injection plan below (mock DeepSeek/Tavily clients injected
+> into `ChatProvider`, a JSON scenario format, a `ScenarioRunner`, and a
+> test-side `TraceCollector`) was **superseded**. What actually shipped is a
+> Playwright suite under `tests/e2e/` organized into two launch modes plus a
+> CQRS history-replay harness. The original plan is preserved at the end for
+> historical context.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                         Test Layer                               │
+│                    Playwright E2E Suite                         │
+│                       (tests/e2e/)                              │
 ├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
-│  │ Mock Client  │  │ Recording    │  │ Scenario Runner      │  │
-│  │              │  │ Playback     │  │                      │  │
-│  │ Canned       │  │              │  │ - Load scenario      │  │
-│  │ responses    │  │ - Record     │  │ - Execute steps      │  │
-│  │ based on     │  │   real LLM   │  │ - Validate state     │  │
-│  │ input        │  │ - Replay     │  │ - Check trajectory   │  │
-│  │ patterns     │  │   for tests  │  │                      │  │
-│  └──────┬───────┘  └──────┬───────┘  └──────────┬───────────┘  │
-│         │                 │                      │               │
-│         └─────────────────┼──────────────────────┘               │
-│                           ▼                                      │
-│  ┌─────────────────────────────────────────────────────────────┐│
-│  │                    ChatProvider                              ││
-│  │                    (with injected client)                    ││
-│  └──────────────────────────┬──────────────────────────────────┘│
-│                             │                                    │
-│  ┌──────────────────────────▼──────────────────────────────────┐│
-│  │                    Trace Collector                           ││
-│  │  - Logger events                                             ││
-│  │  - State changes                                             ││
-│  │  - Message bridge traffic                                    ││
-│  └─────────────────────────────────────────────────────────────┘│
+│                                                                 │
+│  ┌──────────────────────────┐  ┌──────────────────────────────┐ │
+│  │ Layer 2: Webview         │  │ Layer 3: VS Code Integration │ │
+│  │ Rendering (headless)     │  │ (full Electron app)          │ │
+│  │                          │  │                              │ │
+│  │ launchWebview()          │  │ launchVSCode() via           │ │
+│  │ → harness.html in        │  │ @vscode/test-electron + CDP  │ │
+│  │   Chromium               │  │                              │ │
+│  │ → replayHistory()        │  │ → openChatPanel()            │ │
+│  │   dispatches loadHistory │  │ → sendMessageAndWait()       │ │
+│  │   CQRS events            │  │   against the REAL DeepSeek  │ │
+│  │ → assert shadow-DOM      │  │   API (skipped if            │ │
+│  │   rendering              │  │   DEEPSEEK_API_KEY unset)    │ │
+│  │                          │  │                              │ │
+│  │ smoke.spec.ts            │  │ vscode-integration.spec.ts   │ │
+│  │ webview-rendering.spec   │  │ workflows.spec.ts (W1-W8,W18)│ │
+│  │                          │  │ chat-model-boot.spec.ts      │ │
+│  └──────────────────────────┘  └──────────────────────────────┘ │
+│                                                                 │
+│  Helpers: helpers/launch.ts · helpers/replay.ts ·               │
+│           helpers/workflow.ts · helpers/harness.html            │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+Run with `npm run test:e2e` (Playwright). Layer 3 specs additionally require a
+display server (WSLg, X11, or xvfb) and a built extension
+(`npm run compile && npm run build:media`).
+
 ---
 
-## Implementation Plan
+## How the Shipped Suite Works
+
+### Layer 2 — Webview rendering (fast, headless)
+
+`launchWebview()` (`tests/e2e/helpers/launch.ts`) opens the webview test harness
+(`helpers/harness.html`) directly in headless Chromium and mocks
+`acquireVsCodeApi`. Tests then call `replayHistory(page, turns)`
+(`helpers/replay.ts`), which dispatches a `loadHistory` `MessageEvent` into the
+page — this is the **CQRS event replay** mechanism — and assert the rendered
+shadow-DOM via helpers like `getTurnSegments`, `getTextContents`,
+`getPendingFiles`, and `countTurns`. See `smoke.spec.ts` and
+`webview-rendering.spec.ts` (sections 2A–2G).
+
+### Layer 3 — Full VS Code integration (slow, real API)
+
+`launchVSCode()` boots the full VS Code Electron app with the extension loaded
+(via `@vscode/test-electron`) and drives it over the Chrome DevTools Protocol.
+`helpers/workflow.ts` provides `openChatPanel`, `getWebviewFrame`,
+`sendMessageAndWait`, `getLastAssistantText`, etc. These tests run against the
+**real DeepSeek API** and are skipped when `DEEPSEEK_API_KEY` is unset. See
+`vscode-integration.spec.ts` (3A–3E) and `workflows.spec.ts` (P0 workflows
+W1–W8, W18).
+
+### Scenarios live as spec files
+
+There is no JSON scenario format or `ScenarioRunner`; scenarios are encoded
+directly as Playwright `.spec.ts` files. `tests/mocks/` contains only `vscode.ts`
+(a VS Code API mock); no mock DeepSeek or Tavily clients were built.
+
+### Tracing already ships in the runtime
+
+A `TraceCollector` already exists at `src/tracing/TraceCollector.ts` (exported as
+`tracer`, with `types.ts`/`index.ts` alongside and a unit test at
+`tests/unit/tracing/TraceCollector.test.ts`). It is part of the extension runtime
+— `src/utils/logger.ts` feeds spans into it — not a test-only collector to be
+built under `tests/e2e/`.
+
+---
+
+## Original Plan (superseded — historical)
+
+> The phased plan below was the original proposal. It was **not** implemented as
+> written; see "Shipped Architecture" above for what actually exists. Kept for
+> context.
 
 ### Phase 1: Mock Client Infrastructure
 

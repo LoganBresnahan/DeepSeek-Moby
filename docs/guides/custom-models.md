@@ -79,13 +79,13 @@ If you want Moby to reach multiple hosted providers (Anthropic, OpenAI, Together
 }
 ```
 
-**Security note:** Putting an API key in `settings.json` means it's in plain text on disk (and in your dotfiles backups if you sync settings). For local runners this is fine — the key is a placeholder. For hosted providers with real billing (OpenAI, Anthropic), consider using LiteLLM as a local proxy so the real key only lives in the LiteLLM config, and Moby only holds a per-machine proxy token.
+**Security note:** Putting an API key in `settings.json` means it's in plain text on disk (and in your dotfiles backups if you sync settings). For local runners this is fine — the key is a placeholder. For hosted providers with real billing (OpenAI, Anthropic), prefer the **Moby: Set Custom Model API Key** command, which stores the key in VS Code's SecretStorage (secret key `moby.customModelKey.<id>`) instead of `settings.json`. That per-model secret takes precedence over the plaintext `apiKey` in `moby.customModels` and the global `moby.apiKey` secret, so you can leave `apiKey` out of the JSON entirely. Alternatively, run LiteLLM as a local proxy so the real key only lives in the LiteLLM config and Moby only holds a per-machine proxy token.
 
 ## Field reference
 
 | Field | Values | What it controls |
 |---|---|---|
-| `id` | string | Model ID sent in the request body. Must not collide with a built-in (`deepseek-chat`, `deepseek-reasoner`). |
+| `id` | string | Model ID sent in the request body. Must not collide with any built-in (`deepseek-v4-pro-thinking`, `deepseek-v4-flash-thinking`, `deepseek-chat`, `deepseek-reasoner`). |
 | `name` | string | Display name in the model selector dropdown. |
 | `toolCalling` | `"native"` \| `"none"` | Does the model support OpenAI-format function calling? Chat-style models → `"native"`. Pure reasoning models (R1-style) → `"none"`. |
 | `reasoningTokens` | `"inline"` \| `"none"` | Does the API return a separate `reasoning_content` channel (R1, QwQ)? Most models → `"none"`. |
@@ -97,31 +97,33 @@ If you want Moby to reach multiple hosted providers (Anthropic, OpenAI, Together
 | `promptStyle` | `"minimal"` \| `"standard"` | System-prompt flavor. `"minimal"` drops the reference-vs-edit decision tree and most numbered rules — calibrated for thinking-style models that infer intent. `"standard"` (default) is the full prompt for V3 / non-thinking / custom models. |
 | `streamingToolCalls` | boolean | Route through a single streaming pipeline that accumulates `delta.tool_calls` alongside content. Eliminates duplicate generation on no-tool turns. Set `true` for all native-tool models unless your runner has buggy SSE tool-call streaming. Defaults to `false`. |
 | `maxOutputTokensCap` | number (optional) | Upper bound for the per-model maxTokens slider. When absent, the slider max falls back to `maxOutputTokens` (V3 behavior where default and cap coincide). V4 sets this to 384000 to match the real API cap. |
+| `contextWindow` | number (optional) | Total context window (input + output) in tokens. Drives ContextBuilder's conversation-history budget. Falls back to 128000 when omitted. |
 | `supportsTemperature` | boolean | Whether to send `temperature` in the request. Reasoning models often reject it. |
 | `maxOutputTokens` | number | Hard cap on completion tokens. Match what the model actually supports. |
 | `maxTokensConfigKey` | string | A unique VS Code setting name for the per-model max-tokens override (e.g. `"maxTokensCustomQwen"`). Invented per-entry. |
 | `streaming` | boolean | Use SSE streaming responses. Almost always `true` for OpenAI-compat. |
 | `apiEndpoint` | string | Base URL for the OpenAI-compat API. The client appends `/chat/completions`. |
-| `apiKey` | string (optional) | API key. Omit to fall back to the global `moby.apiKey` secret. Local runners usually accept any non-empty string. |
-| `tokenizer` | `"deepseek-v3"` (optional) | Reuse a bundled tokenizer for exact counting. Omit for custom models (Moby falls back to character-based estimation that auto-calibrates from real API usage within a few messages). |
+| `apiKey` | string (optional) | API key. Overridden by a per-model SecretStorage key (set via **Moby: Set Custom Model API Key**) when one exists; if both are omitted, falls back to the global `moby.apiKey` secret (then the `DEEPSEEK_API_KEY` env var). Local runners usually accept any non-empty string. |
+| `tokenizer` | `"deepseek-v3"` \| `"deepseek-v4"` (optional) | Reuse a bundled tokenizer for exact counting. Pick `"deepseek-v4"` for V4-derived models (its vocab adds ~465 special tokens the V3 vocab under-counts). Omit for other custom models (Moby falls back to character-based estimation that auto-calibrates from real API usage within a few messages). |
+| `lspTools` | boolean (optional) | Expose the LSP-backed navigation tools (`outline`, `get_symbol_source`) to this model. Defaults to `false`; native-tool models can opt in. |
+| `subagentRoles` | string[] (optional) | Subagent roles this model may serve when wired up via `moby.subagents` (e.g. `["web-search-digest"]`). Empty/absent = main-loop only. |
 | `requestFormat` | `"openai"` | Wire format. Only `"openai"` is supported today. |
 
 ## What falls back to estimation
 
 Token counting for custom models uses the estimation counter (character-based heuristic, auto-calibrates from `usage.prompt_tokens` returned by the endpoint). Counts are within ±5% after ~5-10 messages, ±10% on cold start. This is a tradeoff: we avoid shipping a separate tokenizer vocab per model.
 
-If your model happens to use the same tokenizer as DeepSeek V3, you can set `"tokenizer": "deepseek-v3"` to get exact counts. Otherwise leave it out.
+If your model happens to use the same tokenizer as DeepSeek V3 or V4, you can set `"tokenizer": "deepseek-v3"` (or `"deepseek-v4"` for V4-derived models) to get exact counts. Otherwise leave it out.
 
 ## What doesn't yet work
 
-- **Stats modal balance display** — the balance widget calls DeepSeek's `/user/balance` endpoint, which doesn't exist elsewhere. It returns `null` for non-DeepSeek models and the modal just hides the line. A richer "estimated cost from `usage` tokens" display is planned (see [model-capability-registry plan](../plans/model-capability-registry.md) F7).
-- **Per-model secure API-key storage.** Keys live in `moby.customModels` plaintext today. F3 follow-up work will move them to VS Code's SecretStorage.
+- **Stats modal balance display** — the balance widget calls DeepSeek's `/user/balance` endpoint, which doesn't exist elsewhere. It returns `null` for non-DeepSeek models and the modal just hides the line. A richer "estimated cost from `usage` tokens" display is planned (see [model-capability-registry plan](../plans/completed/model-capability-registry.md) F7).
 
 ## Troubleshooting
 
 **The model doesn't appear in the dropdown.**
 - Check Output → DeepSeek Moby for `[Registry] Loaded N custom model(s)` or `[Registry] Custom model rejected — ...` messages. The rejection text identifies which field is invalid.
-- Make sure the `id` doesn't collide with `deepseek-chat` or `deepseek-reasoner`.
+- Make sure the `id` doesn't collide with any built-in (`deepseek-v4-pro-thinking`, `deepseek-v4-flash-thinking`, `deepseek-chat`, `deepseek-reasoner`).
 
 **Requests fail with 401 / 403.**
 - Check the `apiKey`. Local runners usually ignore it but still need *something* non-empty.

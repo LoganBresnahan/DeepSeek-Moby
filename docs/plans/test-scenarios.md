@@ -1,8 +1,10 @@
 # Comprehensive UI Test Scenarios
 
+_Last reconciled with code 2026-06-16._
+
 Full regression test scenarios for the DeepSeek Moby extension. Each scenario tests multiple features together in realistic user workflows.
 
-**Current Status:** 2,440 tests passing (2,393 unit + 47 E2E)
+**Current Status:** ~2,834 vitest tests passing (1 known failure in `tests/unit/providers/fidelity.test.ts`) across `tests/{unit,actors,events,integration}`, plus 112 Playwright E2E tests in `tests/e2e/` (5 spec files). The W-scenarios below are implemented in `tests/e2e/workflows.spec.ts` — all except **W16 (Drawing Server)**, which has no E2E test yet (the feature exists at `src/providers/drawingServer.ts`).
 
 ---
 

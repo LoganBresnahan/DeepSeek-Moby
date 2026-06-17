@@ -9,13 +9,13 @@ The backend (VS Code extension) follows an **Event-Driven Coordinator pattern** 
 │                         VS Code Extension (Node.js)                          │
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────────┐ │
-│  │                      ChatProvider (~960 lines)                          │ │
+│  │                     ChatProvider (~1,860 lines)                         │ │
 │  │                    (Coordinator + Webview Bridge)                        │ │
 │  │                                                                         │ │
 │  │  • Receive webview messages (onDidReceiveMessage) → delegate            │ │
 │  │  • Subscribe to manager events → forward to webview (postMessage)       │ │
 │  │  • Session lifecycle owner (currentSessionId, instanceId, persistence) │ │
-│  │  • VS Code context gathering (getEditorContext, findRelatedFiles)       │ │
+│  │  • VS Code context gathering (delegates to fileContextManager)          │ │
 │  └───────────┬───────────────────────────────────────────────────────────┘ │
 │              │ delegates to                                                  │
 │  ┌───────────┴───────────────────────────────────────────────────────────┐ │
@@ -24,9 +24,9 @@ The backend (VS Code extension) follows an **Event-Driven Coordinator pattern** 
 │  │ ┌─────────────────┐  ┌────────────────┐  ┌─────────────────────────┐  │ │
 │  │ │ Request         │  │ DiffManager    │  │ WebSearchManager        │  │ │
 │  │ │ Orchestrator    │  │                │  │                         │  │ │
-│  │ │                 │  │ • Diff create  │  │ • Tavily search         │  │ │
+│  │ │                 │  │ • Diff create  │  │ • Provider registry     │  │ │
 │  │ │ • System prompt │  │ • Accept/reject│  │ • Cache + TTL           │  │ │
-│  │ │ • Streaming     │  │ • Edit modes   │  │ • Toggle/settings       │  │ │
+│  │ │ • Streaming     │  │ • Edit modes   │  │ • Mode/toggle/settings  │  │ │
 │  │ │ • Tool loop     │  │ • Superseding  │  └─────────────────────────┘  │ │
 │  │ │ • Shell loop    │  │ • Tab mgmt     │                               │ │
 │  │ │ • History save  │  └────────────────┘  ┌─────────────────────────┐  │ │
@@ -44,8 +44,8 @@ The backend (VS Code extension) follows an **Event-Driven Coordinator pattern** 
 │  ┌─────────────────────────────────────────────────────────────────────────┐ │
 │  │                          Service Layer                                   │ │
 │  │  ┌─────────────────┐  ┌─────────────────┐  ┌───────────────────────┐   │ │
-│  │  │  DeepSeekClient │  │  TavilyClient   │  │  ConversationManager  │   │ │
-│  │  │  • HTTP/SSE     │  │  • Search API   │  │  • Event Sourcing     │   │ │
+│  │  │  DeepSeekClient │  │  WebSearch Reg. │  │  ConversationManager  │   │ │
+│  │  │  • HTTP/SSE     │  │  • Tavily/Searx │  │  • Event Sourcing     │   │ │
 │  │  │  • Streaming    │  │                 │  │  • Session CRUD       │   │ │
 │  │  │  • Tool calls   │  │                 │  │  • Pure data service  │   │ │
 │  │  └─────────────────┘  └─────────────────┘  └───────────┬───────────┘   │ │
@@ -64,7 +64,7 @@ The backend (VS Code extension) follows an **Event-Driven Coordinator pattern** 
 │  │  │                 │  │ • read_file     │  │                     │     │ │
 │  │  │ • Tag filtering │  │ • write_file    │  │ • <shell> parsing   │     │ │
 │  │  │ • Lookahead     │  │ • find_files  │  │ • Command safety    │     │ │
-│  │  │ • Debouncing    │  │ • list_dir      │  │ • Execution         │     │ │
+│  │  │ • Debouncing    │  │ • list_directory│  │ • Execution         │     │ │
 │  │  └─────────────────┘  └─────────────────┘  └─────────────────────┘     │ │
 │  └─────────────────────────────────────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────────────────────────────────┘
@@ -133,24 +133,29 @@ ChatProvider (coordinator)
 ### Event Wiring Pattern
 
 ```typescript
-// ChatProvider.wireEvents() — subscribes to all manager events, forwards to webview
+// ChatProvider.wireEvents() — subscribes to all manager events, forwards to webview.
+// Each subscription posts to the webview inline (there is no shared post() helper).
 private wireEvents(): void {
   // Streaming events
-  this.requestOrchestrator.onStartResponse(d => this.post('startResponse', d));
-  this.requestOrchestrator.onStreamToken(d => this.post('streamToken', d));
-  this.requestOrchestrator.onEndResponse(d => this.post('endResponse', d));
+  this.requestOrchestrator.onStartResponse(d => {
+    this._view?.webview.postMessage({ type: 'startResponse', ...d });
+  });
+  this.requestOrchestrator.onEndResponse(d => {
+    this._view?.webview.postMessage({ type: 'endResponse', ...d });
+  });
 
   // Diff events
-  this.diffManager.onDiffListChanged(d => this.post('diffListChanged', d));
-  this.diffManager.onCodeApplied(d => this.post('codeApplied', d));
+  this.diffManager.onCodeApplied(d => {
+    this._view?.webview.postMessage({ type: 'codeApplied', success: d.success, error: d.error, filePath: d.filePath });
+  });
 
-  // ... ~25 total subscriptions
-}
-
-private post(type: string, data?: any): void {
-  this._view?.webview.postMessage({ type, ...data });
+  // ... ~45 total subscriptions
 }
 ```
+
+> Note: content/reasoning stream tokens (`onStreamToken` / `onStreamReasoning`) are not
+> forwarded one-for-one — ChatProvider batches them for up to 50ms before posting
+> `streamToken` / `streamReasoning` to cut postMessage volume.
 
 ## Request Lifecycle
 
@@ -160,13 +165,17 @@ private post(type: string, data?: any): void {
 User types message in webview
          │
          ▼
-InputAreaShadowActor.handleSubmit()
+InputAreaShadowActor.submit()
          │
-         │ vscode.postMessage({
-         │   type: 'sendMessage',
-         │   message: 'fix the bug',
-         │   attachments: [...]
-         │ })
+         │ this._onSend?.(content, attachments)
+         │   (host-injected callback, wired in media/chat.ts)
+         │
+         ▼
+host onSend handler → vscode.postMessage({
+           type: 'sendMessage',
+           message: 'fix the bug',
+           attachments: [...]
+         })
          │
          ▼
 ════════════════════════════════════
@@ -214,10 +223,11 @@ requestOrchestrator.handleMessage(message, sessionId, editorContextProvider)
 ### Phase 3: API Call & Streaming (RequestOrchestrator)
 
 ```
-requestOrchestrator.streamAndIterate(messages, systemPrompt, signal)
+requestOrchestrator.streamAndIterate(contextMessages, systemPrompt, signal,
+                                     userMessage, isReasonerModel, state, budget)
          │
-         │ Creates ContentTransformBuffer
-         │ Sets diffManager.flushCallback
+         │ (ContentTransformBuffer was created earlier in handleMessage;
+         │  diffManager.setFlushCallback was wired in the constructor)
          │
          ▼
 deepSeekClient.streamChat(...)
@@ -271,10 +281,9 @@ Stream ends
          │   • _onEndResponse.fire(...)
          │
          └─► saveToHistory()
-             • conversationManager.recordReasoningContent()
-             • conversationManager.recordToolCalls()
-             • conversationManager.recordShellResults()
-             • conversationManager.recordFileModifications()
+             • conversationManager.recordAssistantReasoning()
+             • conversationManager.recordToolCall() / recordToolResult()
+               (tool calls, shell results, and _file_modified markers)
              • conversationManager.recordAssistantMessage()
 ```
 
@@ -302,14 +311,37 @@ saveToHistory() completes
 ```
 
 **Key files:**
-- Trigger: `src/providers/requestOrchestrator.ts` (lines 334-361)
+- Trigger: `src/providers/requestOrchestrator.ts` (lines ~935-950)
 - Guard: `src/events/ConversationManager.ts` → `hasFreshSummary()`
 - Summarizer: `src/events/SnapshotManager.ts` → `createLLMSummarizer()`
 - Queuing: `src/providers/chatProvider.ts` → `_summarizing`, `_pendingMessages`, `drainQueue()`
 
-## Two Model Paths
+## Model Paths
 
-The system supports two models with different tool execution strategies:
+The registry (`src/models/registry.ts`) declares **four built-in models** (plus
+runtime custom models loaded from `moby.customModels`):
+
+| Model ID | Display name | Tool calling | Reasoning | Execution path |
+|----------|--------------|--------------|-----------|----------------|
+| `deepseek-v4-pro-thinking` | DeepSeek V4 Pro **(default)** | native | inline | streaming tool-calls loop |
+| `deepseek-v4-flash-thinking` | DeepSeek V4 Flash | native | inline | streaming tool-calls loop |
+| `deepseek-chat` | DeepSeek Chat (V3 — retiring Jul 2026) | native | none | runToolLoop + streamAndIterate |
+| `deepseek-reasoner` | DeepSeek Reasoner (R1 — retiring Jul 2026) | none (xml-shell) | inline | streamAndIterate |
+
+`DEFAULT_MODEL_ID` is `deepseek-v4-pro-thinking`; the V3 chat/reasoner models are
+labeled as retiring (2026-07-24). `handleMessage()` chooses one of **three**
+execution paths based on `getCapabilities(model).streamingToolCalls`:
+
+1. **Streaming tool-calls loop** (`runStreamingToolCallsLoop()`) — used when
+   `streamingToolCalls: true` (both V4 thinking models, and any custom model that
+   opts in). A single streaming pipeline accumulates `delta.content`,
+   `reasoning_content`, and `delta.tool_calls` together and dispatches tools
+   inline, so V4 does native tool calling **and** live inline reasoning.
+2. **Two-phase native path** (`runToolLoop()` then `streamAndIterate()`) — used by
+   `deepseek-chat` (flag off): a non-streaming probe collects tool messages, then
+   the final answer is streamed.
+3. **Shell-tag path** (`streamAndIterate()` directly) — used by `deepseek-reasoner`
+   (R1), whose `<shell>` XML transport is parsed inline during streaming.
 
 ### Chat Model (deepseek-chat)
 
@@ -362,6 +394,26 @@ The system supports two models with different tool execution strategies:
 └─────────────────────────────────────────────────────────────┘
 ```
 
+### V4 Thinking Models (deepseek-v4-pro / -flash-thinking)
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│            Streaming Tool Calls + Inline Reasoning           │
+│                                                              │
+│  Single SSE stream interleaves:                             │
+│    • delta.reasoning_content  → live "thinking" tokens      │
+│    • delta.content            → assistant text              │
+│    • delta.tool_calls         → accumulated native calls    │
+│                                                              │
+│  Handled by: RequestOrchestrator.runStreamingToolCallsLoop()│
+│  • One pipeline (no separate probe + summary phases)        │
+│  • Tools dispatched inline as the stream resolves           │
+│  • reasoning echoed back on next request (reasoningEcho:    │
+│    'required') — V4-thinking 400s otherwise                 │
+│  • 1M-token context window                                  │
+└─────────────────────────────────────────────────────────────┘
+```
+
 ## State Management
 
 ### Event Sourcing Architecture
@@ -407,7 +459,7 @@ The conversation state uses **Event Sourcing** - all changes are stored as an ap
 │  │    selectedFiles, readFilesInTurn                                    │    │
 │  │                                                                      │    │
 │  │  WebSearchManager:                                                   │    │
-│  │    searchCache, enabled, settings                                    │    │
+│  │    cache, mode, enabled, settings, registry                          │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  Database File                                                               │
@@ -441,15 +493,15 @@ The conversation state uses **Event Sourcing** - all changes are stored as an ap
 
 | File | Responsibility |
 |------|----------------|
-| [src/providers/chatProvider.ts](../../../src/providers/chatProvider.ts) | Coordinator + webview bridge (~960 lines) |
+| [src/providers/chatProvider.ts](../../../src/providers/chatProvider.ts) | Coordinator + webview bridge (~1,860 lines) |
 
 ### Extracted Managers
 
 | File | Responsibility |
 |------|----------------|
-| [src/providers/requestOrchestrator.ts](../../../src/providers/requestOrchestrator.ts) | Request pipeline: handleUserMessage + runToolLoop + streaming |
+| [src/providers/requestOrchestrator.ts](../../../src/providers/requestOrchestrator.ts) | Request pipeline: handleMessage + runToolLoop / runStreamingToolCallsLoop + streaming |
 | [src/providers/diffManager.ts](../../../src/providers/diffManager.ts) | Diff lifecycle, edit modes, tab management, superseding |
-| [src/providers/webSearchManager.ts](../../../src/providers/webSearchManager.ts) | Web search state, caching, Tavily integration |
+| [src/providers/webSearchManager.ts](../../../src/providers/webSearchManager.ts) | Web search state, caching, provider-registry dispatch (Tavily / SearXNG) |
 | [src/providers/fileContextManager.ts](../../../src/providers/fileContextManager.ts) | File selection, search, context injection |
 | [src/providers/settingsManager.ts](../../../src/providers/settingsManager.ts) | Settings read/write/sync |
 | [src/providers/types.ts](../../../src/providers/types.ts) | Shared event payload types |
@@ -463,7 +515,9 @@ The conversation state uses **Event Sourcing** - all changes are stored as an ap
 | [src/events/EventStore.ts](../../../src/events/EventStore.ts) | Append-only event storage |
 | [src/events/SnapshotManager.ts](../../../src/events/SnapshotManager.ts) | Snapshot creation/retrieval |
 | [src/events/SqlJsWrapper.ts](../../../src/events/SqlJsWrapper.ts) | SQLite via SQLCipher |
-| [src/clients/tavilyClient.ts](../../../src/clients/tavilyClient.ts) | Tavily web search API client |
+| [src/clients/webSearchProviderRegistry.ts](../../../src/clients/webSearchProviderRegistry.ts) | Resolves the active web search provider |
+| [src/clients/tavilyClient.ts](../../../src/clients/tavilyClient.ts) | Tavily provider (implements WebSearchProvider) |
+| [src/clients/searxngClient.ts](../../../src/clients/searxngClient.ts) | SearXNG provider (implements WebSearchProvider) |
 
 ### Supporting Modules
 
@@ -473,7 +527,8 @@ The conversation state uses **Event Sourcing** - all changes are stored as an ap
 | [src/tools/reasonerShellExecutor.ts](../../../src/tools/reasonerShellExecutor.ts) | R1 shell command handling |
 | [src/utils/ContentTransformBuffer.ts](../../../src/utils/ContentTransformBuffer.ts) | Streaming tag filter |
 | [src/providers/commandProvider.ts](../../../src/providers/commandProvider.ts) | VS Code command handlers |
-| [src/providers/completionProvider.ts](../../../src/providers/completionProvider.ts) | Inline completions |
+| [src/providers/planManager.ts](../../../src/providers/planManager.ts) | Plan state tracking |
+| [src/providers/commandApprovalManager.ts](../../../src/providers/commandApprovalManager.ts) | Shell command approval rules |
 
 ## Comparison: Frontend vs Backend Architecture
 
@@ -499,11 +554,12 @@ The conversation state uses **Event Sourcing** - all changes are stored as an ap
 │                    Error Handling Layers                     │
 └─────────────────────────────────────────────────────────────┘
 
-Layer 1: API Errors (RequestOrchestrator)
-├─► Network failures → Retry with backoff
-├─► Rate limits → Queue and retry
-├─► Auth errors → Prompt for API key
-└─► Invalid response → Log and notify user
+Layer 1: API Errors (DeepSeekClient.handleError)
+├─► Network failure (ENOTFOUND) → "check your connection" message
+├─► Rate limit (429) → "wait before more requests" message (no retry/queue)
+├─► Auth error (401) → "Invalid API key" message
+└─► Server error (500) / other → mapped to a user-facing error message
+    (no automatic retry or backoff anywhere in src/)
 
 Layer 2: Tool Errors (RequestOrchestrator.runToolLoop)
 ├─► File not found → Return error to LLM (it can adapt)
@@ -516,13 +572,13 @@ Layer 3: Stream Errors (RequestOrchestrator.streamAndIterate)
 ├─► Parse error → Skip chunk, continue
 └─► Timeout (30s) → Force end stream
 
-Layer 4: Database Errors (ConversationManager)
-├─► Encryption key error → Toast error message
-├─► Write failure → Retry, then notify
-└─► Corruption → Offer to reset
+Layer 4: Database Errors (dbRecovery.openDbWithRecovery)
+├─► Encryption key error / key mismatch → throw with recovery hint
+├─► Write failure → surfaced (no automatic retry)
+└─► Corruption → quarantine the bad file, throw with recovery hint
 
 Layer 5: User Notification (ChatProvider → webview)
-└─► postMessage({ type: 'error', message: '...' })
+└─► postMessage({ type: 'error', error: '...' })
 ```
 
 ## Related Documentation
@@ -533,4 +589,4 @@ Layer 5: User Notification (ChatProvider → webview)
 - [Tool Execution](tool-execution.md) - Tool loop and shell commands
 - [Chat Streaming](../integration/chat-streaming.md) - Token processing and ContentTransformBuffer
 - [Diff Engine](../integration/diff-engine.md) - Code edit handling
-- [ChatProvider Refactor Plan](../../plans/chatprovider-refactor.md) - Full refactor plan and history
+- [ChatProvider Refactor Plan](../../plans/completed/chatprovider-refactor.md) - Full refactor plan and history

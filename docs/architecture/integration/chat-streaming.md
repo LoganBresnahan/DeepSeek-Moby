@@ -56,7 +56,7 @@ User types in InputAreaShadowActor
               ▼
     ┌─────────────────────┐
     │ vscode.postMessage  │
-    │ { type: 'sendMsg',  │
+    │ { type:'sendMessage'│
     │   message: content, │
     │   attachments }     │
     └─────────────────────┘
@@ -66,21 +66,23 @@ User types in InputAreaShadowActor
 
 ```typescript
 // RequestOrchestrator.handleMessage()
-// Called by ChatProvider: this.requestOrchestrator.handleMessage(message, sessionId, editorContextProvider)
-async handleMessage(message, currentSessionId, editorContextProvider) {
-  // 1. Prepare session — clear turn tracking, record user message
-  const sessionId = await this.prepareSession(message, currentSessionId);
+// Called by ChatProvider: this.requestOrchestrator.handleMessage(
+//   data.message, this.currentSessionId, () => editorContext, data.attachments)
+async handleMessage(message, currentSessionId, editorContextProvider, attachments?, options?) {
+  // 1. Clear per-turn tracking, get-or-create session, record user message inline
+  //    (createSession / recordUserMessage), begin structural event recording
+  let sessionId = currentSessionId
+    ?? (await this.conversationManager.createSession(message, ...)).id;
 
   // 2. Build system prompt — edit mode, editor context, modified files, web search
-  const systemPrompt = await this.buildSystemPrompt(editorContextProvider);
+  const systemPrompt = await this.buildSystemPrompt(message, editorContextProvider);
 
-  // 3. Get conversation history + inject attachments + selected files
-  const messages = await this.prepareMessages(sessionId, attachments);
+  // 3. Token budget truncation via ContextBuilder (inside DeepSeekClient.buildContext),
+  //    fed history messages + any latest snapshot summary
+  const contextResult = await this.deepSeekClient.buildContext(
+    historyMessages, systemPrompt, snapshotSummary);
 
-  // 4. Token budget truncation via ContextBuilder
-  const contextResult = await this.buildContext(messages, systemPrompt, sessionId);
-
-  // 5. Tool loop (chat model) or streaming + shell loop (reasoner)
+  // 4. Tool loop (chat model) or streaming + shell loop (reasoner) via streamAndIterate()
   // ...
 }
 ```
@@ -130,7 +132,7 @@ These take **different paths** through the backend:
 ```
 DeepSeek API
      │
-     ├─── reasoning_content ───→ sendStreamReasoning() ───→ 'streamReasoning'
+     ├─── reasoning_content ───→ _onStreamReasoning.fire() ─→ 'streamReasoning'
      │    (R1 thinking)           NO buffer, direct to webview
      │
      └─── content ─────────────→ ContentTransformBuffer ───→ 'streamToken'
@@ -139,28 +141,31 @@ DeepSeek API
 ```
 
 ```typescript
-// In RequestOrchestrator.streamOneIteration()
-for await (const chunk of stream) {
-  const delta = chunk.choices[0]?.delta;
-
-  if (delta.reasoning_content) {
-    // Reasoner model thinking - direct path, emitted as event
-    this._onStreamReasoning.fire({ token: delta.reasoning_content });
-    // ChatProvider subscribes → postMessage('streamReasoning')
-  }
-
-  if (delta.content) {
+// In RequestOrchestrator.streamAndIterate()
+// The chunk loop lives in deepseekClient.streamChat(); the orchestrator
+// receives tokens via the onToken / onReasoning callbacks it passes in.
+// Signature: streamChat(messages, onToken, systemPrompt?, onReasoning?, options?)
+await this.deepSeekClient.streamChat(
+  currentHistoryMessages,
+  async (token) => {
     // Regular content - goes through ContentTransformBuffer
-    this.contentBuffer.append(delta.content);
+    this.contentBuffer.append(token);
     // Buffer's onFlush callback fires _onStreamToken events
     // ChatProvider subscribes → postMessage('streamToken')
-  }
-}
+  },
+  systemPrompt,
+  (reasoningToken) => {
+    // Reasoner model thinking - direct path, emitted as event
+    this._onStreamReasoning.fire({ token: reasoningToken });
+    // ChatProvider subscribes → postMessage('streamReasoning')
+  },
+  { signal }
+);
 ```
 
 ### ContentTransformBuffer
 
-**Location**: Backend ([src/utils/ContentTransformBuffer.ts](../src/utils/ContentTransformBuffer.ts))
+**Location**: Backend ([src/utils/ContentTransformBuffer.ts](../../../src/utils/ContentTransformBuffer.ts))
 
 The buffer prevents jarring UI transitions when special tags appear mid-stream:
 
@@ -186,14 +191,16 @@ With buffer:
 | Code blocks NOT filtered | ` ``` ` flows through to frontend markdown renderer |
 | `<think>` tags filtered | Legacy pattern for non-R1 models; R1 uses `reasoning_content` instead |
 
-**Why code blocks render inside thinking dropdowns:**
+**Why ` ``` ` fences appear inside thinking dropdowns as literal text:**
 
 1. Thinking content arrives via `streamReasoning` (bypasses ContentTransformBuffer)
 2. Frontend receives raw thinking text including ` ``` ` fences
-3. ThinkingShadowActor passes content to markdown renderer
-4. Markdown renderer handles code block syntax highlighting
+3. `MessageTurnActor.renderThinkingGroup()` writes each step's content into the
+   `.thinking-body` element via `escapeHtml()` — it is **not** run through markdown-it
+4. So fenced code inside reasoning shows as escaped plain text, not a highlighted
+   code block (only the assistant's regular response prose is markdown-rendered)
 
-This is **content-level mitigation**, not pub/sub optimization. It operates before tokens enter the actor system. See [REMINDER.md](../REMINDER.md#scalability--mitigations) for pub/sub level optimizations.
+This is **content-level mitigation**, not pub/sub optimization. It operates before tokens enter the actor system. See [REMINDER.md](../../../REMINDER.md#scalability--mitigations) for pub/sub level optimizations.
 
 ## Phase 3: Webview Message Handling
 
@@ -214,47 +221,48 @@ Extension → Webview Messages:
 │ toolCallsStart  │ Tool execution beginning                │
 │ toolCallsUpdate │ Tool status change                      │
 │ toolCallsEnd    │ Tool execution complete                 │
-│ pendingFileAdd  │ File modification detected              │
-│ diffListChanged │ Diff state updated                      │
+│ diffListChanged │ Diff state updated (file modified)      │
 │ endResponse     │ Stream complete                         │
 └─────────────────┴─────────────────────────────────────────┘
 ```
 
-### chat.ts Message Handler
+### Message Router (VirtualMessageGatewayActor)
+
+`chat.ts` itself does **not** listen for extension messages — it only wires up the
+actors and exposes `window.actors` / `window.actorManager` for debugging. The single
+extension→webview message router lives in `VirtualMessageGatewayActor`, which registers
+one `window.addEventListener('message', ...)` listener and dispatches via `handleMessage()`.
+Each message is converted into a **TurnEvent** appended to a per-turn log; a projector
+derives render mutations (CQRS: *record event → projector produces mutations → render*).
 
 ```typescript
-window.addEventListener('message', (event) => {
-  const msg = event.data;
-
+// media/actors/message-gateway/VirtualMessageGatewayActor.ts
+private handleMessage(msg) {
   switch (msg.type) {
     case 'startResponse':
-      isStreaming = true;
-      currentSegmentContent = '';
-      hasInterleavedContent = false;
-      streaming.startStream(msg.messageId, currentModel);
+      // begin a new turn; set reasoner mode
       break;
 
     case 'streamToken':
-      // Check if tools/thinking interrupted
-      if (message.needsNewSegment()) {
-        message.resumeWithNewSegment();
-        currentSegmentContent = '';
-      }
-      currentSegmentContent += msg.token;
-      message.updateCurrentSegmentContent(currentSegmentContent);
+      this.handleStreamToken(msg);
+      // → emitTurnEvent(turnId, { type: 'text-append', content: token, ... })
       break;
 
     case 'streamReasoning':
-      // Finalize text before thinking
-      if (message.isStreaming() && !hasInterleavedContent) {
-        message.finalizeCurrentSegment();
-        hasInterleavedContent = true;
-      }
-      streaming.handleThinkingChunk(msg.token);
+      this.handleStreamReasoning(msg);
+      // → emitTurnEvent(turnId, { type: 'thinking-start' / 'thinking-content', ... })
       break;
-    // ... more cases
+    // ... iterationStart, shellExecuting, shellResults, toolCalls*,
+    //     diffListChanged, endResponse, etc.
   }
-});
+}
+
+// emitTurnEvent appends to the turn log, runs the projector, and applies mutations:
+private emitTurnEvent(turnId, event) {
+  const index = this.getTurnLog(turnId).append(event);
+  const mutations = this._projector.projectIncremental(this._currentViewSegments, event, index);
+  this.applyMutations(turnId, mutations);  // → VirtualListActor renders
+}
 ```
 
 ## Phase 4: Interleaved Rendering
@@ -278,62 +286,60 @@ Time →
   └─ [Stream ends]
 ```
 
-### Segment State Machine
+### Event-Log Projection (CQRS)
+
+There is no imperative segment state machine and no `MessageShadowActor` — both were
+retired in favor of a CQRS event-log model. Each incoming message becomes a `TurnEvent`
+appended to a per-turn `TurnEventLog`, and `TurnProjector` derives an ordered
+`ViewSegment[]` (the view model) that `VirtualListActor` renders.
+
+Interleaving falls out of the projection rules — no manual `finalize`/`resume`
+bookkeeping:
 
 ```
-                    ┌─────────────────┐
-                    │   NO_SEGMENT    │
-                    │  (initial)      │
-                    └────────┬────────┘
-                             │ startResponse
-                             ▼
-                    ┌─────────────────┐
-         ┌────────▶│   STREAMING     │◀────────┐
-         │         │ (active segment)│         │
-         │         └────────┬────────┘         │
-         │                  │                  │
-         │   resumeWith     │  finalize        │
-         │   NewSegment()   │  Segment()       │
-         │                  ▼                  │
-         │         ┌─────────────────┐         │
-         │         │   NEEDS_NEW     │         │
-         └─────────│   _SEGMENT      │─────────┘
-                   └────────┬────────┘
-                            │ endResponse
-                            ▼
-                   ┌─────────────────┐
-                   │    COMPLETE     │
-                   └─────────────────┘
+TurnEventLog (append-only)        TurnProjector → ViewSegment[]
+───────────────────────────       ─────────────────────────────
+text-append   "Text chunk 1"  ─→  [ text(complete=false) ]
+text-append   "Text chunk 2"  ─→  [ text                 ]
+thinking-start                ─→  [ text(complete=true), thinking ]   ◄ open text finalized
+thinking-content ...          ─→  [ text, thinking(...)  ]
+thinking-complete             ─→  [ text, thinking(complete) ]
+text-append   "Text chunk 3"  ─→  [ ..., text(continuation=true) ]    ◄ new text segment
+shell-start                   ─→  [ text(complete=true), ..., shell ] ◄ open text finalized
+text-append   "Text chunk 4"  ─→  [ ..., text(continuation=true) ]    ◄ new text segment
+file-modified                 ─→  [ ..., file-modified ]              ◄ appended, text NOT closed
 ```
 
 ### Code Flow
 
 ```typescript
-// In MessageShadowActor
+// media/events/TurnProjector.ts — projectIncremental(segments, event, index)
 
-// When text arrives
-updateCurrentSegmentContent(content: string) {
-  if (!this.currentSegment) {
-    this.currentSegment = this.createSegment();
+// When a text token arrives: extend the open text segment, or start a new one.
+case 'text-append': {
+  const openText = this.findLastIncomplete(segments, 'text');
+  if (openText) {
+    openText.content += event.content;
+    return [{ op: 'update', segmentIndex: segments.indexOf(openText), segment: openText }];
   }
-  this.renderToSegment(this.currentSegment, content);
+  // No open text segment (e.g. after thinking/shell) — append a continuation segment
+  const newSeg = { type: 'text', content: event.content, complete: false,
+                   continuation: segments.some(s => s.type === 'text'), iteration: event.iteration };
+  segments.push(newSeg);
+  return [{ op: 'append', segment: newSeg }];
 }
 
-// When tools/thinking interrupt
-finalizeCurrentSegment(): boolean {
-  if (this.currentSegment && this.isStreaming) {
-    this.markSegmentComplete(this.currentSegment);
-    this.needsNewSegment = true;
-    this.currentSegment = null;
-    return true;
+// When thinking/shell interrupt: finalize (complete=true) the open text segment,
+// then append the new thinking/shell segment.
+case 'thinking-start': {
+  const lastText = this.findLastOfType(segments, 'text');
+  const mutations = [];
+  if (lastText && !lastText.complete) {
+    lastText.complete = true;
+    mutations.push({ op: 'update', segmentIndex: segments.lastIndexOf(lastText), segment: lastText });
   }
-  return false;
-}
-
-// When text resumes after interruption
-resumeWithNewSegment() {
-  this.currentSegment = this.createSegment();
-  this.needsNewSegment = false;
+  // ... append the new thinking segment ...
+  return mutations;
 }
 ```
 
@@ -350,25 +356,27 @@ npm run test
 </shell>
 ```
 
-**Inline execution (primary path):** Shell commands are detected by `ContentTransformBuffer` during streaming. Each `<shell>` tag is extracted, parsed with the heredoc-aware `parseShellCommands()`, and executed immediately — one command at a time, interleaved with surrounding text. Each command gets its own dropdown in the UI.
+**Interrupt-and-resume (primary R1 path):** When `ContentTransformBuffer` detects a complete `<shell>...</shell>` tag during streaming, it fires its `onShellDetected` callback. For reasoner models the orchestrator wires this callback to **abort the HTTP stream** (`abortController.abort()`). `streamChat` throws an `AbortError`, which `streamAndIterate()` catches; it then parses the command (heredoc-aware `parseShellCommands()`), executes it, injects the result into history, and starts a **new** API call — resuming where R1 left off. The same logic also runs when the stream finishes naturally before the abort lands (the post-stream race handler).
 
 ```typescript
-// ContentTransformBuffer detects complete <shell>...</shell> tags
-// and queues them for inline execution via onFlush callback
-case 'shell':
-  this._pendingInlineShellCommands.push(cmd);
+// ContentTransformBuffer.onShellDetected (reasoner only):
+onShellDetected: (command) => {
+  this._shellInterruptCommand = command;
+  this._shellInterruptAborted = true;
+  this.abortController?.abort();   // streamChat throws AbortError
+}
 
-// RequestOrchestrator.executeInlineShellCommands() processes the queue
-// - Command approval check (may block for user input)
-// - File watcher for detecting modifications
-// - Results injected into context for next iteration
+// streamAndIterate() catch / post-stream handler:
+// - parseShellCommands(`<shell>${command}</shell>`)
+// - approval via commandApprovalManager.requestApproval() (awaited inline)
+// - FileSystemWatcher detects modifications → diffManager.registerShellModifiedFiles()
+// - inject "[Shell output]\n...\n[Continue]..." into currentHistoryMessages
+// - continue the do/while loop (next iteration / API call)
 ```
 
-**Command approval:** Before executing each command, `commandApprovalManager.checkCommand()` is called synchronously. If the command needs approval (`'blocked'` or `'ask'`), the approval prompt is shown and the iteration loop blocks until the user decides. The `onFlush` pre-scan detects this synchronously and holds text segments in the same batch to prevent them from rendering while approval is pending.
+**Command approval:** Before executing, `commandApprovalManager.checkCommand()` is called synchronously. If the command needs approval (decision other than `'allowed'`), approval is awaited **inline** via `await commandApprovalManager.requestApproval(command)` inside the interrupt handler, before results are injected and the loop continues — so iteration 2 cannot start while a command from iteration 1 is awaiting approval. (`onFlush` also runs a synchronous pre-scan that sets `_approvalPending` and holds text segments so they don't render while approval is pending.)
 
-**Iteration loop blocking:** After `streamChat` returns, the iteration loop checks `commandApprovalManager.hasPendingApproval()` and awaits it before starting the next iteration. This prevents iteration 2 from starting while a command from iteration 1 is still awaiting approval.
-
-**Batch fallback path:** After streaming, `streamAndIterate()` also checks for shell commands in the full response text and runs any that weren't already handled inline (deduplication via `_inlineExecutedCommands` set).
+**Legacy / disabled paths:** An older inline-queue mechanism (`_pendingInlineShellCommands` + `executeInlineShellCommands()`) still exists in the file but is **not wired up** — it is being replaced by interrupt-and-resume and is never called. The post-streaming batch shell scan is likewise disabled for the streaming path (`hasShell = false`); interrupt-and-resume catches `<shell>` tags during streaming instead.
 
 ### Tool Loop
 
@@ -461,39 +469,31 @@ Tool: write_file(path, content)    Shell: cat >> file.txt << 'EOF'
     └─────────────────┬───────────────────────────┘
                       │
                       ▼
-            ┌───────────────────┐
-            │ Gateway: queued   │ ← During streaming, notifications
-            │ or immediate?    │   are QUEUED to prevent splitting
-            └────────┬──────────┘   text segments mid-word
-                     │
-         ┌───────────┴───────────┐
-         │ Streaming active      │ Not streaming
-         ▼                       ▼
-  Queue in                Insert immediately
-  _pendingFileNotifications  via addPendingFile()
-         │
-         │ Flush at natural break:
-         │ - Next shell command
-         │ - Iteration boundary
-         │ - End of response
-         ▼
-  Insert via addPendingFile()
+       ┌──────────────────────────────┐
+       │ Gateway.handleDiffListChanged │ ← Appends a 'file-modified'
+       │ (no streaming-active gate)    │   TurnEvent at the CURRENT
+       └──────────────┬───────────────┘   stream position (append,
+                      │                     not insertCausal — so it
+                      ▼                     is NOT backdated behind
+       ┌──────────────────────────────┐    the causing shell command)
+       │ turnLog.append(file-modified) │
+       │ + addPendingFile() immediately │ (skipped in 'manual' mode —
+       └──────────────────────────────┘  diffs shown via VS Code tabs)
 ```
 
-### File Notification Queuing
+### File Notification Ordering
 
-During live streaming, `diffListChanged` messages from the file watcher arrive asynchronously and can land in the middle of a text segment (e.g., splitting "I've" into "I" and "'ve"). To prevent this:
+During live streaming, `diffListChanged` messages from the file watcher arrive asynchronously. `VirtualMessageGatewayActor.handleDiffListChanged()` does **not** queue them or gate on a streaming flag — it processes each diff immediately:
 
-1. `VirtualMessageGatewayActor.handleDiffListChanged()` checks if streaming is active
-2. If active, new file notifications are queued in `_pendingFileNotifications`
-3. `flushPendingFileNotifications()` is called at natural break points:
-   - `handleShellExecuting()` — before a new shell dropdown
-   - `handleIterationStart()` — before a new thinking iteration
-   - `handleEndResponse()` — before the stream finalizes
+1. It dedupes against existing pending files (by `diffId` globally, then by `filePath` in the current turn).
+2. For a genuinely new diff it `append`s a `file-modified` event to the turn log — **always `append`, never `insertCausal`** — so the file notification lands at the *current* stream position, matching where the dropdown renders live. Backdating it behind the causing shell command would split text that streamed between the shell command and the notification.
+3. It then calls `virtualList.addPendingFile()` right away (skipped in `manual` mode, where diffs are surfaced via VS Code diff tabs rather than a webview dropdown).
 
-This ensures the Modified Files dropdown never interrupts flowing text. See [cqrs-webui.md](../plans/cqrs-webui.md) for the architectural context.
+Ordering correctness therefore comes from the append-only event-log semantics, not from a `_pendingFileNotifications` queue. See [cqrs-webui.md](../../plans/completed/cqrs-webui.md) for the architectural context.
 
 ### Diff States
+
+The diagram shows the common subset. A pending file's `status` (`VirtualListActor.addPendingFile` / `updatePendingStatus`) actually has seven values: `pending`, `applied`, `rejected`, `superseded`, `error`, `deleted`, `expired`.
 
 ```
 ┌─────────┐     ┌─────────┐     ┌──────────┐
@@ -552,46 +552,44 @@ Time(ms)  Extension                 Webview                 DOM
 ────────────────────────────────────────────────────────────────────
    0      User clicks Send
           │
-  10      │ handleUserMessage()
+  10      │ handleMessage()
           │ build context
           │
   50      │ API request sent
           │
- 100      │ startResponse ─────────▶ streaming.start()
-          │                         message.prepare()
+ 100      │ startResponse ─────────▶ begin turn (new log)
+          │                         streaming.start()
           │
- 150      │ streamReasoning ───────▶ thinking.start()   ─▶ Thinking box
- 160      │ streamReasoning ───────▶ thinking.append()  ─▶ Thinking grows
+ 150      │ streamReasoning ───────▶ thinking-start event ─▶ Thinking box
+ 160      │ streamReasoning ───────▶ thinking-content     ─▶ Thinking grows
           │
- 300      │ iterationStart ────────▶ flush queued files
-          │                         finalize segment
+ 300      │ iterationStart ────────▶ thinking-complete    ─▶ iteration N
+          │                         (open text closes)
           │
- 350      │ streamToken ───────────▶ update segment     ─▶ Text appears
- 360      │ streamToken ───────────▶ update segment     ─▶ More text
+ 350      │ streamToken ───────────▶ text-append event    ─▶ Text appears
+ 360      │ streamToken ───────────▶ text-append event    ─▶ More text
           │
  400      │ <shell> tag detected
-          │ shellExecuting ────────▶ flush queued files
-          │                         finalize segment
-          │                         shell.start()       ─▶ Shell dropdown
-          │ executeInlineShell()
+          │ onShellDetected ───▶ abortController.abort()
+          │   (streamChat throws AbortError; loop catches it)
+          │ shellExecuting ────────▶ shell-start event    ─▶ Shell dropdown
           │   ├─ checkCommand()
-          │   ├─ (if needs approval: block iteration loop)
-          │   └─ execute command
+          │   ├─ requestApproval() (awaited inline if needed)
+          │   ├─ execute command + inject [Shell output]
+          │   └─ new API call (resume)
           │
  410      │ File watcher fires
-          │ diffListChanged ───────▶ QUEUED (streaming)  ─▶ (nothing yet)
+          │ diffListChanged ───────▶ file-modified event  ─▶ Modified Files
+          │   (append at stream pos; manual mode skipped)    dropdown appears
           │
- 450      │ streamToken ───────────▶ resumeWithNew()    ─▶ More text
-          │                                                 (not split!)
+ 450      │ streamToken ───────────▶ text-append event    ─▶ More text
+          │                         (continuation segment)    (not split!)
           │
- 500      │ <shell> tag detected
-          │ shellExecuting ────────▶ flush queued files  ─▶ Modified Files
-          │                         finalize segment        dropdown appears
-          │                         shell.start()       ─▶ Shell dropdown
+ 500      │ <shell> tag detected (interrupt-and-resume again)
+          │ shellExecuting ────────▶ shell-start event    ─▶ Shell dropdown
           │
- 600      │ endResponse ───────────▶ flush queued files
-          │                         streaming.end()
-          │                         finalize all
+ 600      │ endResponse ───────────▶ streaming.end()
+          │                         finalize turn log
 ────────────────────────────────────────────────────────────────────
 ```
 
@@ -607,16 +605,23 @@ case 'stopGeneration':
 
 // RequestOrchestrator.stopGeneration()
 stopGeneration(): void {
-  this.abortController?.abort();
+  this._userInitiatedStop = true;          // catch block saves marker-only
+  if (this.abortController) {
+    this.abortController.abort();
+    this.abortController = null;
+    logger.apiAborted();
+  }
+  // Cancel any in-flight approval prompts so a blocked turn unblocks
+  this.diffManager.cancelPendingApprovals();
+  this.commandApprovalManager?.cancelPendingApproval();
   this._onGenerationStopped.fire();
   // ChatProvider subscribes → postMessage('generationStopped')
 }
 
-// In webview
+// In webview (VirtualMessageGatewayActor.handleMessage)
 case 'generationStopped':
-  isStreaming = false;
-  streaming.endStream();
-  // Clean up partial content
+  this.handleGenerationStopped(msg.userStopped === true);
+  break;
 ```
 
 ### API Errors
@@ -626,11 +631,13 @@ case 'generationStopped':
 try {
   // ... streaming pipeline ...
 } catch (error) {
-  if (isAbortError(error, signal)) {
-    await this.savePartialResponse(...);  // Save what we have
+  if (error.name === 'CanceledError' || error.name === 'AbortError' || signal.aborted) {
+    // User/backend abort — save a marker (or partial for backend aborts) via
+    // conversationManager.recordAssistantMessage(..., { status: 'interrupted' })
     return { sessionId };
   }
-  this._onError.fire({ error: formatError(error) });
+  // Other errors: error.message (enriched for context-length cases)
+  this._onError.fire({ error: errorMessage });
   // ChatProvider subscribes → postMessage('error')
 }
 ```
@@ -640,32 +647,28 @@ try {
 ### Enable Logging
 
 ```typescript
-// In chat.ts
-console.log('[Frontend] streamToken:', msg.token.substring(0, 50));
-console.log('[Frontend] segment state:', {
-  currentSegmentContent: currentSegmentContent.length,
-  hasInterleavedContent,
-  needsNewSegment: message.needsNewSegment()
-});
+// In VirtualMessageGatewayActor.handleMessage() — every inbound message is logged:
+log.debug('Received:', msg.type);
+// And each rendered ViewSegment is logged in renderSegment():
+log.debug(`[${turnId}] RENDER: ${this.summarizeSegment(segment)}`);
 ```
 
 ### State Inspection
 
 ```javascript
-// Browser console
-window.actors.message.getSegmentCount()
-window.actors.streaming.isActive()
+// Browser console (actors registered on window in chat.ts)
+window.actors.streaming.isActive          // getter, not a method
 window.actorManager.getState('streaming.active')
+window.actors.virtualList.getTurn('<turnId>')
 ```
 
 ### Common Issues
 
 | Symptom | Likely Cause | Solution |
 |---------|--------------|----------|
-| Duplicate content | Not checking `hasInterleavedContent` | Check before finalizing |
-| Missing continuation | `needsNewSegment` not set | Call `resumeWithNewSegment()` |
-| Thinking in wrong place | Not finalizing before thinking | Call `finalizeCurrentSegment()` |
-| Styles leaking | Light DOM used instead of Shadow | Use `ShadowActor` pattern |
-| Text split mid-word by dropdown | Async notification (diffListChanged) arrives during text streaming | Queue in `_pendingFileNotifications`, flush at natural break points |
-| Iteration continues during approval | `streamChat` doesn't await `onToken` callback | Check `commandApprovalManager.hasPendingApproval()` after `streamChat` returns |
+| Missing continuation segment | `thinking-start`/`shell-start` event not finalizing the open text segment | Ensure the projector marks the open text `complete` so the next `text-append` starts a `continuation` segment |
+| Thinking in wrong place | `thinking-start` event emitted at the wrong log position | Emit `thinking-start` before the first `thinking-content` (`handleStreamReasoning` defers it to the first reasoning token) |
+| Styles leaking | Light DOM used instead of Shadow | Use the Shadow-DOM actor pattern |
+| File notification backdated behind shell | Used `insertCausal` instead of `append` for `file-modified` | `handleDiffListChanged` always `append`s at the current stream position |
+| Iteration continues during approval | Approval not awaited inside the interrupt handler | Approval is awaited inline via `commandApprovalManager.requestApproval()` before the loop continues |
 | Approval widget reverts on scroll | Decision not persisted in VirtualListActor data | Call `resolveCommandApprovalByActorId()` from click handler to persist in turn data |

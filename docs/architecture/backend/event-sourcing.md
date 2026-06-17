@@ -34,7 +34,7 @@ Two design constraints are load-bearing for everything below:
 
 1. **Events table is session-agnostic.** Rows in `events` carry no `session_id` or `sequence`. Those columns live in the `event_sessions` join table, which provides a many-to-many mapping with per-session sequencing. JSON blobs do not contain `sessionId`/`sequence` — they're hydrated from the join table on read. This decoupling makes forking zero-copy.
 
-2. **Structural events are first-class.** Per ADR 0003, the extension emits structural events (`code-block-start`/`end`, iteration boundaries, shell lifecycle, approval lifecycle, drawings) as it observes them. The webview replays these on hydration to reconstruct exactly what was shown live — there is no client-side reconstruction heuristic.
+2. **Structural events are first-class.** Per ADR 0003, the extension emits structural events (`code-block`, iteration boundaries, shell lifecycle, approval lifecycle, drawings) as it observes them. The webview replays these on hydration to reconstruct exactly what was shown live — there is no client-side reconstruction heuristic.
 
 ## Component Architecture
 
@@ -50,7 +50,7 @@ Two design constraints are load-bearing for everything below:
 │  Content events (recorded by RequestOrchestrator):                           │
 │    recordUserMessage, recordAssistantMessage,                                │
 │    recordDiffCreated/Accepted/Rejected, recordWebSearch,                     │
-│    recordError, recordFileRead/Write                                         │
+│    recordError                                                               │
 │                                                                              │
 │  Structural events (per ADR 0003):                                           │
 │    recordStructuralEvent(turnId, indexInTurn, payload)                       │
@@ -67,9 +67,9 @@ Two design constraints are load-bearing for everything below:
 │  │  StructuralEventRecorder     │  │  EventStore                     │       │
 │  │  (in-memory turn builder)    │  │  • append()                     │       │
 │  │  • startTurn / drainTurn     │──│  • getEvents()                  │       │
-│  │  • append(TurnEvent)         │  │  • getByType()                  │       │
-│  │  • flush via record-         │  └────────────┬────────────────────┘       │
-│  │    StructuralEvent           │               │                            │
+│  │  • append(TurnEvent)         │  │  • getEventsByType()            │       │
+│  │  • peek for Export-Turn      │  └────────────┬────────────────────┘       │
+│  │    debug command             │               │                            │
 │  └──────────────────────────────┘  ┌────────────▼────────────────────┐       │
 │                                     │  SnapshotManager                │       │
 │                                     │  • createSnapshot               │       │
@@ -126,8 +126,8 @@ Events are strongly typed and split into two roles: **content events** describe 
 │                                                                              │
 │  File                                                                        │
 │  ├── file_read           { filePath, contentHash, lineCount }               │
-│  ├── file_write          { filePath, contentHash, lineCount }               │
-│  ├── diff_created        { diffId, filePath, original, new }                │
+│  ├── file_write          { filePath }                                       │
+│  ├── diff_created        { diffId, filePath, originalContent, newContent }   │
 │  ├── diff_accepted       { diffId }                                          │
 │  └── diff_rejected       { diffId }                                          │
 │                                                                              │
@@ -138,7 +138,7 @@ Events are strongly typed and split into two roles: **content events** describe 
 │                                                                              │
 │  Other                                                                       │
 │  ├── web_search          { query, resultCount, resultsPreview }             │
-│  ├── context_imported    { previousSessionId }                               │
+│  ├── context_imported    { }                                                 │
 │  └── error               { errorType, message, recoverable }                │
 │                                                                              │
 │  Structural Events (ADR 0003 — drives hydration replay)                     │
@@ -147,12 +147,15 @@ Events are strongly typed and split into two roles: **content events** describe 
 │        { turnId, indexInTurn, payload: TurnEvent }                          │
 │                                                                              │
 │      payload variants (the TurnEvent union):                                │
-│        code-block-start / code-block-end                                     │
-│        iteration-end                                                         │
-│        shell-start / shell-output / shell-end                               │
+│        text-append / text-finalize                                          │
+│        thinking-start / thinking-content / thinking-complete                 │
+│        shell-start / shell-complete                                          │
 │        approval-created / approval-resolved                                  │
-│        drawing                                                               │
-│        content-chunk      (Phase 2 — flushed at buffer boundaries)          │
+│        file-modified                                                         │
+│        tool-batch-start / tool-batch-update / tool-update /                  │
+│          tool-batch-complete                                                 │
+│        code-block / drawing / iteration-end                                  │
+│        shutdown-interrupted  (synthesized at hydration, never persisted)     │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -163,7 +166,9 @@ Events are strongly typed and split into two roles: **content events** describe 
 
 ### `StructuralEventRecorder`
 
-[src/events/StructuralEventRecorder.ts](../../../src/events/StructuralEventRecorder.ts) is the in-memory accumulator that batches structural events emitted during a single turn. The orchestrator calls `startTurn(turnId, sessionId)` at turn start, `append(event)` as code-block boundaries / iteration ends / shell lifecycle / approvals fire, and `drainTurn()` at end. Events are flushed into the events table via `recordStructuralEvent`. Phase 2 added incremental flushes at `ContentTransformBuffer` boundaries (iteration end, pre-shell, pre-approval, end-of-turn) so a process death mid-turn no longer evaporates streamed content — the most common case being VS Code being closed while awaiting a shell-approval click.
+[src/events/StructuralEventRecorder.ts](../../../src/events/StructuralEventRecorder.ts) is the in-memory accumulator that mirrors the structural events emitted during a single turn. The orchestrator calls `startTurn(turnId, sessionId)` at turn start and `drainTurn()` at end. The recorder itself does **not** touch the events table — it has no `recordStructuralEvent`/DB calls; `drainTurn()` returns a single `RecordedTurn` (or `null`) that finalizes the in-memory turn for the `Moby: Export Turn as JSON` debug command, and the orchestrator discards that return value rather than iterating it to persist.
+
+Persistence is immediate and per-event: the orchestrator's `_appendStructuralEvent(event)` ([requestOrchestrator.ts](../../../src/providers/requestOrchestrator.ts)) both `append()`s to the recorder **and** calls `conversationManager.recordStructuralEvent(sessionId, turnId, index++, event)` inline at each emission site (text-append, iteration-end, shell lifecycle, approvals, file-modified, code-block, drawing, …). Because every event lands on disk the instant it fires, a process death mid-turn no longer evaporates streamed content — the most common case being VS Code being closed while awaiting a shell-approval click.
 
 The recorder has no `vscode` or DOM dependencies — pure TypeScript so it's testable without a host.
 
@@ -293,6 +298,11 @@ sessions
 ├── model               TEXT
 ├── created_at          INTEGER
 ├── updated_at          INTEGER
+├── event_count         INTEGER DEFAULT 0
+├── last_snapshot_sequence INTEGER DEFAULT 0
+├── tags                TEXT  DEFAULT '[]'  (JSON array)
+├── first_user_message  TEXT
+├── last_activity_preview  TEXT
 ├── parent_session_id   TEXT  (NULL unless this is a fork; informational, no FK)
 └── fork_sequence       INTEGER (sequence in parent at which this fork branched)
 
@@ -303,10 +313,13 @@ events                  -- session-agnostic
 └── data                TEXT  (JSON blob; does NOT include sessionId/sequence)
 
 event_sessions          -- M:N join, provides sequencing per session
+├── event_id            TEXT  REFERENCES events(id) ON DELETE CASCADE
 ├── session_id          TEXT  REFERENCES sessions(id) ON DELETE CASCADE
-├── event_id            TEXT  REFERENCES events(id)
 ├── sequence            INTEGER
-└── PRIMARY KEY (session_id, sequence)
+├── UNIQUE (session_id, sequence)
+└── UNIQUE (event_id, session_id)
+    -- index idx_event_sessions_session on (session_id, sequence) backs
+    -- per-session reads (no PRIMARY KEY on this table)
 
 snapshots
 ├── id                  TEXT PRIMARY KEY
@@ -330,12 +343,15 @@ command_rules           -- separate, not part of session history
 
 ## Initialization
 
-@signalapp/sqlcipher initialization is synchronous. The encryption key is retrieved asynchronously in `activate()` and passed to the constructor:
+@signalapp/sqlcipher initialization is synchronous. The encryption key is retrieved asynchronously in `activate()` and passed to the constructor inside a `ConversationManagerOptions` object (which also carries the required `summarizer`):
 
 ```typescript
 // extension.ts
 const dbKey = await getOrCreateEncryptionKey(context);
-conversationManager = new ConversationManager(context, dbKey);  // fully sync
+conversationManager = new ConversationManager(context, {
+  encryptionKey: dbKey,
+  summarizer: llmSummarizer,
+});  // fully sync
 ```
 
 Constructor sequence:
@@ -385,16 +401,23 @@ await conversationManager.recordAssistantMessage(
 // Per-turn lifecycle owned by RequestOrchestrator:
 recorder.startTurn(turnId, sessionId);
 
-// As events fire from the stream:
-recorder.append({ type: 'code-block-start', language: 'typescript', ... });
-recorder.append({ type: 'iteration-end', iteration: 0 });
-recorder.append({ type: 'shell-start', commandId, command });
+// As each event fires from the stream, _appendStructuralEvent both mirrors it
+// into the recorder AND persists it immediately (synchronous, per-event):
+function _appendStructuralEvent(event: TurnEvent) {
+  recorder.append(event);                        // in-memory mirror (Export-Turn)
+  conversationManager.recordStructuralEvent(     // immediate disk write
+    sessionId, turnId, index++, event
+  );
+}
+
+_appendStructuralEvent({ type: 'code-block', language: 'typescript', content, iteration: 0, ts: Date.now() });
+_appendStructuralEvent({ type: 'iteration-end', iteration: 0, ts: Date.now() });
+_appendStructuralEvent({ type: 'shell-start', id, commands, iteration: 0, ts: Date.now() });
 // ...
 
-// At buffer-flush boundaries (Phase 2) and end-of-turn:
-for (const ev of recorder.drainTurn()) {
-  await conversationManager.recordStructuralEvent(sessionId, turnId, ev.indexInTurn, ev.payload);
-}
+// At end-of-turn, drainTurn() just finalizes the in-memory turn for the
+// Export-Turn debug command; its return value is not used to persist.
+recorder.drainTurn();
 ```
 
 ### Forking
@@ -409,7 +432,7 @@ const { session: forked, lastUserMessage } = await conversationManager.forkSessi
 
 ## History Restore
 
-`getSessionRichHistory(sessionId)` ([ConversationManager.ts:751](../../../src/events/ConversationManager.ts#L751)) is the **only** hydration path. It walks the session's events in sequence order and groups them into `RichHistoryTurn` objects containing reasoning iterations, tool calls, shell results, file modifications, and per-iteration content text. Structural events drive the segment ordering (so reload order matches what was shown live, exactly).
+`getSessionRichHistory(sessionId)` ([ConversationManager.ts:751](../../../src/events/ConversationManager.ts#L751)) is the **only** hydration path. Per ADR 0003 Phase 3, it reads turn boundaries from `user_message` + `assistant_message` rows and loads each assistant turn's ordered `structural_turn_event` rows (keyed by `turnId`) into the `RichHistoryTurn.turnEvents` array. The webview consumes that `TurnEvent[]` stream directly — it no longer reconstructs reasoning/tool/shell/file segments from separate `assistant_reasoning`/`tool_call`/`tool_result` fragment rows. Structural events drive the segment ordering (so reload order matches what was shown live, exactly).
 
 The webview's `handleLoadHistory()` renders these turns through the `VirtualListActor` API. Segment ordering matches the live streaming experience (Reasoner: thinking → content → shell; Chat: tools → files → text).
 
@@ -421,11 +444,11 @@ For full save → restore → render flow, see the [History Persistence Guide](.
 |---------|-------------|
 | **Auditability** | Complete history of every interaction |
 | **Debuggability** | Replay events to reproduce issues; `Moby: Export Turn as JSON` exports the live structural-event stream |
-| **Crash safety** | Phase 2's incremental flushes mean partial turns survive process death (mid-stream content, mid-approval shell calls) |
+| **Crash safety** | Structural events are persisted immediately per-event, so partial turns survive process death (mid-stream content, mid-approval shell calls) |
 | **Context management** | Snapshots prevent context-window overflow on long sessions |
 | **Zero-copy forking** | M:N join table — fork via `INSERT...SELECT` on event_sessions |
 | **Durability** | SQLite ACID + SQLCipher encryption + WAL mode |
-| **Performance** | Prepared statements + `(session_id, sequence)` PK on event_sessions for flat per-session lookups |
+| **Performance** | Prepared statements + `idx_event_sessions_session` index on `(session_id, sequence)` for flat per-session lookups |
 
 ## Related Documentation
 

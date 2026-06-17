@@ -4,7 +4,7 @@
 </p>
 
 <h1 align="center">DeepSeek Moby</h1>
-<h2 align="center">v0.3.0 Pre-Release</h2>
+<h2 align="center">v0.4.0 Pre-Release</h2>
 
 <p align="center">
   <sub><em>This is a pre-release build. Core functionality has been validated on the maintainer's primary development environment, but coverage across the full matrix of operating systems, VS Code versions, shell environments, and model configurations remains incomplete. Expect rough edges. Bug reports and reproduction steps are welcome via the <a href="https://github.com/LoganBresnahan/DeepSeek-Moby/issues">issue tracker</a>.</em></sub>
@@ -162,13 +162,13 @@ The model navigates code by symbol, not just by line offset, using whatever lang
 - **Works with whatever you have installed** — no Moby-specific configuration; if VS Code's "Go to Definition" works on a file, so do these tools
 - **Refresh on demand** — *Moby: Refresh LSP Availability* command flushes the cache after you install a language server outside VS Code (e.g. `gem install`, `asdf install`)
 
-Available on V4 Pro/Flash (with and without thinking) and V3 Chat. R1 uses its shell-only transport and doesn't ship LSP tools.
+Available on V4 Pro, V4 Flash, and V3 Chat (every model with native tool calling). R1 uses its shell-only transport and doesn't ship LSP tools.
 
 ### Context Window Management
 
 Automatic context budgeting so conversations can run indefinitely:
 
-- 128K token context window for both models
+- Per-model context windows — **1M tokens** for V4 Pro / V4 Flash, **128K** for V3 Chat and R1
 - Oldest messages dropped first when budget is exceeded
 - Compressed summaries injected to preserve key context
 - WASM-based tokenizer for exact token counting (fallback estimation available)
@@ -214,7 +214,7 @@ Hit a snag? Common issues and recovery guides:
 - **[Logging and tracing](docs/guides/logging-and-tracing.md)** — How to surface logs when filing a bug or debugging behavior.
 - **[Shell execution](docs/guides/shell-execution.md)** — How approval flows work and how to allow/block specific commands.
 
-For bugs not covered above, run `Moby: Show Logs` from the Command Palette, then file an issue with the relevant snippet.
+For bugs not covered above, run `Moby: Show Log` from the Command Palette, then file an issue with the relevant snippet.
 
 ## Getting Started
 
@@ -343,6 +343,7 @@ Open the Command Palette (`Ctrl+Shift+P`) and search "Moby":
 | **Start Drawing Server** | Launch the drawing pad server |
 | **Stop Drawing Server** | Shut down the drawing server |
 | **Manage Database Encryption Key** | View or regenerate the database encryption key |
+| **Refresh LSP Availability** | Re-probe language servers after installing one outside VS Code |
 
 ---
 
@@ -356,7 +357,7 @@ Moby is built with a layered architecture designed for reliability and extensibi
 │  ┌─────────────┐  ┌──────────────────────────┐  │
 │  │ DeepSeek API │  │ Managers                  │  │
 │  │  Client      │  │  ├─ RequestOrchestrator   │  │
-│  │  (Chat, R1)  │  │  ├─ DiffManager           │  │
+│  │  (V4/V3/R1)  │  │  ├─ DiffManager           │  │
 │  │              │  │  ├─ WebSearchManager      │  │
 │  └─────────────┘  │  ├─ FileContextManager    │  │
 │                    │  ├─ CommandApprovalMgr    │  │
@@ -406,7 +407,7 @@ For contributors, see the full architecture documentation in `docs/architecture/
 
 Planned features for future releases:
 
-- **Sub-agent parallelization** — Multiple LLM calls running concurrently for complex tasks
+- **Expanded sub-agent routing** — Web-search digestion already offloads to a V4-Flash subagent (`src/subagents/`); more roles (search/file digest) and concurrent calls for complex tasks are planned
 - **Plugin system** — Extensible tool definitions for domain-specific workflows
 - **Per-turn lazy event load** — On-demand hydration of large session histories (deferred until real usage surfaces the need)
 

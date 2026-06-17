@@ -4,6 +4,21 @@
 
 Record real DeepSeek sessions as JSON fixtures for deterministic Layer 2 tests. Eliminates AI nondeterminism (R1 using shell vs code blocks) and enables offline testing.
 
+## Implementation status (as of 2026-06-16)
+
+**Partial / diverged.** The export command and the replay infrastructure both ship, but the recorded-fixture corpus this plan centered on was never created — Layer 2 tests use inline hand-written event arrays instead, and `tests/e2e/fixtures/` is empty.
+
+Shipped:
+- `moby.exportTestFixture` command registered (`src/extension.ts:259`) and exposed in the Command Palette as "Export Session (Test Fixture)" (`package.json:678`), gated behind `config.moby.devMode` (`package.json:703`).
+- `exportTestFixture()` builds `RichHistoryTurn[]` via `getSessionRichHistory()` and writes formatted JSON through a save dialog defaulting into `tests/e2e/fixtures/` (`src/extension.ts:982-1023`).
+- `getSessionRichHistory()` reconstructs full-fidelity turns including the `turnEvents` array (`src/events/ConversationManager.ts:751`, type at `:35-48`).
+- The automated replay side exists: `replayHistory()` dispatches a `loadHistory` message (`tests/e2e/helpers/replay.ts:40-46`) and `tests/e2e/webview-rendering.spec.ts` asserts DOM state — exactly the Layer 2 flow described here.
+
+Not yet / differs:
+- No recorded fixture JSON files exist; `tests/e2e/fixtures/` is empty, so none of the named categories (`ask-accept.json`, `auto-apply.json`, etc.) were produced. Tests pass `turnEvents` arrays written inline (`tests/e2e/webview-rendering.spec.ts:53-57`).
+- The plan placed `exportSessionAsFixture()` on `ConversationManager`; it actually lives as the free function `exportTestFixture()` in `src/extension.ts`. The default filename is `<title>.fixture.json`, not the bare names in the table.
+- `TurnEventLog.consolidateForSave()` does exist (`media/events/TurnEventLog.ts:230`) and is the webview-side producer, but the export path doesn't call it: `getSessionRichHistory()` hydrates `turnEvents` from the persisted ADR 0003 `structural_turn_event` rows (`src/events/ConversationManager.ts:751-767`), so a fixture captures the stored event log, not a fresh consolidation.
+
 ## How It Works
 
 ### Recording (manual)

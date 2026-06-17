@@ -1,5 +1,20 @@
 # Adaptive Personality System
 
+## Implementation status (as of 2026-06-16)
+
+**Status: Not started.** This is a design doc only — no part of the personality inference system exists in code.
+
+Shipped:
+- Nothing. None of the planned phases (Foundation, Inference, Integration, Polish) have been started.
+
+Not yet / differs:
+- No `src/personality/` directory exists (`find src -maxdepth 2 -type d` lists none).
+- `PersonalityInferenceActor`, `InferredPersonality`, `DISCProfile`, `EgoState`, `NeedsAssessment`, `PersonalityModifier`, `inferDISC`, `assessNeeds`, `generateModifier` — none of these symbols appear anywhere in `src/` (repo-wide grep returns 0 hits).
+- The `personality.modifier` / `personality.enabled` / `personality.confidence` event keys and `storage.getPersonality()` do not exist; no `personality` `globalState` key is read or written.
+- No `adaptivePersonality` (or similar) setting or command is registered in `package.json`.
+- The system prompt is assembled in `src/providers/requestOrchestrator.ts` and `src/providers/chatProvider.ts` with no personality-modifier injection.
+- The plan's assumed base classes `EventStateActor` / `EventStateManager` (`src/personality/PersonalityInferenceActor.ts:331`) are not present in `src/events/`, so the actor pattern shown here would not compile against current code.
+
 ## Goal
 
 Build an implicit inference system that observes user behavior and adapts the AI's communication style to respect the user's intent, emotional state, and psychological needs—without requiring explicit configuration.

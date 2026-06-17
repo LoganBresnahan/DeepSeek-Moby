@@ -67,8 +67,8 @@ async function getOrCreateEncryptionKey(context: vscode.ExtensionContext): Promi
   return key;
 }
 
-// Key is passed to ConversationManager constructor
-conversationManager = new ConversationManager(context, dbKey);
+// Key is passed to ConversationManager via its options object
+conversationManager = new ConversationManager(context, { encryptionKey: dbKey, summarizer });
 ```
 
 ## Schema Migrations
@@ -77,12 +77,15 @@ All schema is managed by `src/events/migrations.ts` — the **single source of t
 
 ```
 ConversationManager constructor:
-  1. new Database(dbPath, encryptionKey)    → PRAGMA foreign_keys = ON
+  1. openDbWithRecovery(dbPath, encryptionKey) → new Database(...):
+                                             → PRAGMA foreign_keys = ON
                                              → PRAGMA journal_mode = WAL
                                              → PRAGMA busy_timeout = 5000
+                                             (quarantines ≤4KB corrupt/key-mismatched
+                                              files; rethrows for larger files)
   2. runMigrations(this.db)                 → v1: clean schema (all tables + indexes)
   3. new EventStore(this.db)               → prepareStatements() only
-  4. new SnapshotManager(this.db, ...)     → prepareStatements() only
+  4. new SnapshotManager(this.db, summarizer, ...) → prepareStatements() only
   5. prepare session statements (no session state — ChatProvider owns lifecycle)
 ```
 
@@ -187,6 +190,34 @@ CREATE TABLE command_rules (
 
 CREATE UNIQUE INDEX idx_command_rules_prefix_type
   ON command_rules(prefix, type);
+```
+
+### Saved Prompts Table
+
+Stores reusable system prompts (managed by `savedPromptManager.ts`):
+
+```sql
+CREATE TABLE saved_prompts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  content TEXT NOT NULL,
+  model TEXT,                      -- Optional model association
+  is_active INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+```
+
+### Events turnId Index (functional, partial)
+
+A functional partial index over the JSON-embedded `turnId` so turn hydration can
+group `assistant_message` and `structural_turn_event` rows by turn without a full
+table scan (ADR 0003):
+
+```sql
+CREATE INDEX idx_events_turn_id
+  ON events (json_extract(data, '$.turnId'))
+  WHERE type IN ('assistant_message', 'structural_turn_event');
 ```
 
 ## Entity Relationship Diagram
@@ -314,12 +345,13 @@ db.close();
 The native module is externalized (not bundled):
 
 ```javascript
-// webpack.config.js
+// webpack.config.js (externals is an array; WASM external omitted for brevity)
 module.exports = {
-  externals: {
-    vscode: 'commonjs vscode',
-    '@signalapp/sqlcipher': 'commonjs @signalapp/sqlcipher'
-  }
+  externals: [
+    { vscode: 'commonjs vscode' },
+    { '@signalapp/sqlcipher': 'commonjs @signalapp/sqlcipher' },  // Native N-API module
+    // ...plus a function external that resolves the WASM tokenizer to dist/wasm/
+  ]
 };
 ```
 
@@ -425,6 +457,7 @@ All conversation data lives here:
 | `event_sessions` | M:N join table linking events to sessions with per-session sequence |
 | `snapshots` | Periodic conversation summaries for context compression |
 | `command_rules` | Allowed/blocked command prefixes for shell approval |
+| `saved_prompts` | Reusable saved system prompts |
 
 ### 2. VS Code SecretStorage (`context.secrets`)
 
@@ -433,34 +466,42 @@ OS keychain-backed encrypted storage for sensitive credentials:
 | Key | Purpose | Set By |
 |-----|---------|--------|
 | `deepseek-moby.db-encryption-key` | Database encryption key (64-char hex) | Auto-generated on first run |
-| `deepseek.apiKey` | DeepSeek API key | User via `deepseek.setApiKey` command |
-| `deepseek.tavilyApiKey` | Tavily web search API key | User via `deepseek.setTavilyApiKey` command |
+| `moby.apiKey` | DeepSeek API key | User via `moby.setApiKey` command |
+| `moby.tavilyApiKey` | Tavily web search API key | User via `moby.setTavilyApiKey` command |
 
-### 3. VS Code Settings (`workspace.getConfiguration('deepseek')`)
+### 3. VS Code Settings (`workspace.getConfiguration('moby')`)
 
 User-facing configuration in `settings.json`. Non-sensitive values only:
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `model` | string | `deepseek-chat` | LLM model selection |
-| `temperature` | number | 0.7 | Creativity level |
-| `maxTokens` | number | 8192 | Max output tokens |
+| `model` | string | `deepseek-v4-pro-thinking` | LLM model selection |
+| `customModels` | array | `[]` | Custom models registered alongside built-ins |
+| `modelOptions` | object | `{}` | Per-model options (e.g. `reasoningEffort`) keyed by model id |
+| `temperature` | number | 0.7 | Creativity level (Chat model only) |
 | `maxToolCalls` | number | 100 | Tool loop iterations (Chat model) |
 | `maxShellIterations` | number | 100 | Shell iterations (Reasoner model) |
+| `maxFileEditLoops` | number | 100 | Continuations after R1 file edits (Reasoner model) |
+| `maxTokensChatModel` | number | 8192 | Max output tokens (Chat model) |
+| `maxTokensReasonerModel` | number | 65536 | Max output tokens (Reasoner model) |
+| `maxTokensV4FlashThinking` | number | 65536 | Max output tokens (V4 Flash Thinking) |
+| `maxTokensV4ProThinking` | number | 65536 | Max output tokens (V4 Pro Thinking) |
 | `editMode` | string | `manual` | Code edit mode (manual/ask/auto) |
-| `systemPrompt` | string | `""` | Custom system prompt |
 | `showStatusBar` | boolean | true | Status bar visibility |
-| `enableCompletions` | boolean | true | Inline completions |
-| `autoFormat` | boolean | true | Auto-format code |
-| `useLanguageFormatter` | boolean | true | Use VS Code formatter |
 | `autoSaveHistory` | boolean | true | Auto-save conversations |
-| `maxHistorySessions` | number | 100 | Max session retention |
 | `logLevel` | string | `WARN` | Extension output log level |
 | `webviewLogLevel` | string | `WARN` | Webview console log level |
-| `logColors` | boolean | true | Color-coded log output |
 | `tracing.enabled` | boolean | true | Trace collection |
+| `webSearchMode` | string | `auto` | Web search mode (off/manual/auto) |
+| `webSearch.provider` | string | `tavily` | Web search backend (tavily/searxng) |
+| `webSearch.searxng.endpoint` | string | `""` | SearXNG instance base URL |
+| `webSearch.searxng.engines` | array | `["google","bing","duckduckgo"]` | SearXNG engines to query |
 | `tavilySearchesPerPrompt` | number | 1 | Web searches per prompt |
-| `tavilySearchDepth` | string | `basic` | Tavily search depth |
+| `tavilySearchDepth` | string | `basic` | Tavily search depth (basic/advanced) |
+| `subagents` | object | `{}` | Per-role subagent routing (model id or `off`) |
+| `subagents.webSearchDigest.maxResults` | number | 5 | Web-search digest output cap |
+| `allowAllShellCommands` | boolean | false | Allow all shell commands without approval |
+| `devMode` | boolean | false | Developer mode (UI token editor) |
 
 ### 4. VS Code globalState (`context.globalState`)
 

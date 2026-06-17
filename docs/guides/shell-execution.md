@@ -36,7 +36,9 @@ Located in `src/tools/reasonerShellExecutor.ts`. Called once and cached.
 
 ## Security Layers
 
-Commands pass through three security layers before execution:
+A separate **long-running-command guard** runs before any of these layers — see [Long-Running Command Guard](#long-running-command-guard) below.
+
+Commands then pass through three security layers before execution:
 
 ### Layer 1: Regex Blocklist (reasonerShellExecutor.ts)
 
@@ -44,19 +46,19 @@ Hard-coded patterns that block catastrophic operations regardless of settings:
 
 ```
 rm -rf /    rm -rf ~    sudo    su -    shutdown    reboot
-dd if=...of=/dev/    mkfs    poweroff    halt
+dd if=...of=/dev/    mkfs    poweroff
 ```
 
-Cannot be bypassed except by `allowAllShellCommands` setting.
+This regex blocklist is a last-resort safety net. `validateCommand()` skips it for any command already approved upstream — `allowAllShellCommands`, user-approved commands (`approvalStatus` `'user-allowed'`), and rule/auto-approved commands (`approvalStatus` `'auto'`). Since the orchestrator tags rule-matched commands `'auto'` and user-approved ones `'user-allowed'` before they reach the executor, in practice the blocklist only fires for commands that were *not* approved by the layers above.
 
 ### Layer 2: Command Approval Rules (commandApprovalManager.ts)
 
-Prefix-based allowed/blocked lists stored in the encrypted database:
+Prefix-based allowed/blocked lists stored in the SQLCipher-encrypted database (`SqlJsWrapper`):
 
-- **Default rules** are platform-specific (Unix vs Windows equivalents)
+- **Default rules** are the same Unix/bash set on all platforms (Windows runs via Git Bash)
 - **User rules** can be added via the Command Rules modal
 - Commands not matching any rule trigger an approval prompt
-- Compound commands (`&&`, `||`, `;`, `|`) are split and each sub-command checked independently
+- The full command string is prefix-matched as a single unit by `checkCommand()`. Compound commands (`&&`, `||`, `;`, `|`) are **not** split into sub-commands — a `splitCompoundCommand()` helper exists but is unused in the current pipeline
 
 ### Layer 3: User Approval Prompt
 
@@ -65,6 +67,12 @@ For unknown commands, the user sees an inline approval widget with Accept/Reject
 ### Bypass Mode
 
 Setting `moby.allowAllShellCommands = true` skips all three layers. Used for trusted environments where the user wants unrestricted AI access.
+
+### Long-Running Command Guard
+
+`isLongRunningCommand()` (in `reasonerShellExecutor.ts`, backed by `LONG_RUNNING_PATTERNS`) matches dev servers, watch modes, and REPLs across many languages — e.g. `npm run dev`, `npx vite`, `python -m http.server`, `rails server`, `cargo watch`, `dotnet watch`, `flask run`, `redis-server`. Heredoc bodies are stripped before matching so a file's contents (e.g. a `nodemon` dependency in a `package.json` written via `cat > … << 'EOF'`) don't trigger false positives.
+
+This guard runs **before** the approval gate in `streamAndIterate()`. Matching commands are **not** executed; instead a `Skipped: … long-running command` result is returned to the model so it can move on. Because the check precedes the `allowAllShellCommands` read, it is **not** bypassed by Bypass Mode.
 
 ## Execution Paths
 
@@ -89,7 +97,7 @@ Regex patterns detect file operations from the command string itself:
 | `commandsCreateFiles()` | Heredocs, redirects, tee | `cat > file << 'EOF'`, `echo "x" > file`, `tee file` |
 | `commandsDeleteFiles()` | rm, unlink | `rm file`, `rm -f file`, `unlink file` |
 
-Sets `state.shellCreatedFiles` / `state.shellDeletedFiles`. Used to prevent false auto-continuation nudges.
+Sets `state.shellCreatedFiles` / `state.shellDeletedFiles`. These flags are currently only tracked and logged — they are not yet read by the continuation logic (see Auto-Continuation below).
 
 ### Layer 2: File System Watcher
 
@@ -104,20 +112,23 @@ Both layers feed into the same flags, providing redundancy if either misses an e
 
 ## Auto-Continuation
 
-When DeepSeek's response contains shell commands but no code edits, the orchestrator may auto-continue to nudge DeepSeek to produce the actual changes. This is suppressed when:
+When DeepSeek runs shell commands but produces no code edits, the orchestrator may auto-continue to nudge it toward the actual changes. The nudge fires only when **all** of these hold:
 
-- `state.shellCreatedFiles` is true (files were created — task likely complete)
-- `state.shellDeletedFiles` is true (files were deleted — task likely complete)
-- `hasCodeEdits` is true (SEARCH/REPLACE blocks detected)
-- `autoContinuationCount >= 2` (budget exhausted)
+- `shellIteration > 0` (at least one iteration has run)
+- `!hasCodeEdits` — this iteration produced no SEARCH/REPLACE blocks
+- `nudgeContinuations < maxNudgeContinuations` (budget of 4)
+
+When `hasCodeEdits` **is** true, the nudge is skipped and a separate post-edit continuation loop runs instead (`postEditContinuations`, bounded by the user-configurable File Edit Loops budget), giving the model a chance to run install/build/verify steps after writing files.
+
+> Note: `state.shellCreatedFiles` / `state.shellDeletedFiles` are tracked and logged but are **not** read by this logic — they do not currently gate continuation.
 
 ## Default Command Rules
 
 All platforms use the same bash/Unix rules since Windows uses Git Bash for execution.
 
-**Allowed**: `ls`, `cat`, `grep`, `echo`, `pwd`, `find`, `wc`, `head`, `tail`, `tree`, `which`, `file`, `stat`, `du`, `df`, `env`, `uname`, `whoami`, `date`, `node`, `npm test/run/ls`, `npx vitest/tsc/jest`, `git status/log/diff/branch/show`, `tsc`, `python -c`, `cargo check/test`, `go test/vet/build`, `rg`, `fd`
+**Allowed**: `ls`, `cat`, `grep`, `echo`, `pwd`, `find`, `wc`, `head`, `tail`, `tree`, `which`, `whereis`, `file`, `stat`, `du`, `df`, `env`, `printenv`, `uname`, `whoami`, `hostname`, `date`, `node`, `npm test/run/ls/list/info`, `npx vitest/tsc/jest/eslint/prettier`, `git status/log/diff/branch/show/remote`, `tsc`, `python -c`, `python3 -c`, `cargo check/test/clippy`, `go test/vet/build`, `rg`, `fd`
 
-**Blocked**: `rm -rf /`, `rm -rf ~`, `rm -rf *`, `sudo`, `su`, `shutdown`, `reboot`, `dd if=`, `mkfs`, `bash -c`, `sh -c`, `eval`, `npm publish`, `cargo publish`, `curl -X POST`, `wget --post`
+**Blocked**: `rm -rf /`, `rm -rf ~`, `rm -rf *`, `sudo`, `su`, `shutdown`, `reboot`, `poweroff`, `halt`, `dd if=`, `mkfs`, `bash -c`, `sh -c`, `eval`, `npm publish`, `cargo publish`, `curl -X POST`, `wget --post`
 
 ## Key Files
 

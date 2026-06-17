@@ -18,8 +18,8 @@ The server provides two modes:
 The header button turns green when the server is running. Click it again to open the popup and stop the server.
 
 You can also use the Command Palette:
-- **DeepSeek Moby: Start Drawing Server** — starts the server
-- **DeepSeek Moby: Stop Drawing Server** — stops the server
+- **Moby: Start Drawing Server** — starts the server
+- **Moby: Stop Drawing Server** — stops the server
 
 ## WSL2 Setup
 
@@ -221,7 +221,7 @@ On WSL2, the popup automatically detects and displays the real Windows LAN IP (v
 - **Max upload size**: 5 MB
 - **QR code**: Vendored nayuki qrcodegen (`src/vendor/qrcodegen.ts`), MIT license
 - **Storage**: Ephemeral — content is not saved to disk or database
-- **Devices**: Single phone at a time
+- **Devices**: Designed for one phone at a time — not enforced (the server applies no connection limit; concurrent uploads are accepted and each just fires a receive event)
 - **WSL2 IP detection**: Shells out to `powershell.exe` to find the DHCP-assigned IPv4 address
 - **ASCII grid**: Dynamic sizing, 16px monospace font, Unicode box-drawing characters
 - **Drawing canvas**: HiDPI-aware (`devicePixelRatio`), PNG via `canvas.toDataURL()`
@@ -247,7 +247,7 @@ Phone Browser (/ — ASCII grid editor + shape tools)
 DrawingServer (src/providers/drawingServer.ts)
   ↓ vscode.EventEmitter<AsciiReceivedEvent>
 ChatProvider (src/providers/chatProvider.ts)
-  ↓ webview.postMessage({ type: 'asciiDrawingReceived', text })
+  ↓ webview.postMessage({ type: 'asciiDrawingReceived', text, timestamp })
 VirtualMessageGatewayActor
   → Injected as code-fenced user message via sendMessage pipeline
 ```

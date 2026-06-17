@@ -68,3 +68,10 @@ Rejected because: the snapshot approach is more machinery than the event-sourcin
 - ✅ **Done.** `Moby: Export Turn as JSON` is wired up in devMode (see `package.json`, `CommandsShadowActor`, `extension.ts`).
 - ✅ **Done.** Fidelity test landed at [tests/unit/providers/fidelity.test.ts](../../../tests/unit/providers/fidelity.test.ts).
 - **Parked.** Phase 3b — per-turn lazy load. Split `loadHistory` into headers + on-demand `requestTurnEvents(turnId)`, with VirtualListActor visibility callbacks driving requests. Deferred until real-world session sizes surface the need.
+
+---
+
+**Implementation note (2026-06-16) — naming drift, decision unchanged.** This ADR records the decision as taken; the names below are the *as-shipped* event types (the decision itself still holds — the events table is the sole source of truth). For accuracy when discussing the shipped code, see [`shared/events/TurnEvent.ts`](../../../shared/events/TurnEvent.ts):
+- The Phase 1 names `code-block-start`/`code-block-end` shipped as a single **`code-block`** event.
+- The Phase 2 `content-chunk` event shipped as **`text-append`** / **`text-finalize`** (incremental streamed text), alongside the assistant message's `status` metadata for crash-survivable content.
+- `iteration-end`, `drawing`, and the approval lifecycle events all shipped as named.

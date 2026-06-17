@@ -1,6 +1,6 @@
 # State Keys Reference
 
-This document lists all pub/sub state keys used in the actor system.
+This document lists the primary pub/sub state keys used in the actor system.
 
 ## Key Naming Convention
 
@@ -22,18 +22,37 @@ Keys related to AI response streaming.
 
 | Key | Type | Publisher | Subscribers | Description |
 |-----|------|-----------|-------------|-------------|
-| `streaming.active` | `boolean` | StreamingActor | InputAreaShadowActor, ToolbarShadowActor, ScrollActor, VirtualListActor | Whether a response is being streamed |
-| `streaming.messageId` | `string` | StreamingActor | VirtualListActor | ID of current streaming message |
+| `streaming.active` | `boolean` | StreamingActor | InputAreaShadowActor, ToolbarShadowActor, ScrollActor, VirtualListActor, ModelSelectorShadowActor | Whether a response is being streamed |
+| `streaming.content` | `string` | StreamingActor | - | Current streamed assistant text |
+| `streaming.thinking` | `string` | StreamingActor | - | Current streamed reasoning text |
+| `streaming.messageId` | `string \| null` | StreamingActor | - | ID of current streaming message |
 | `streaming.model` | `string` | StreamingActor | - | Model being used |
 
 ### turn.*
 
 Keys related to conversation turns (Unified Turn Architecture).
 
+Published per-turn by MessageTurnActor (last-writer-wins, since only one turn streams at a time).
+
 | Key | Type | Publisher | Subscribers | Description |
 |-----|------|-----------|-------------|-------------|
-| `turn.active` | `string` | VirtualListActor | - | Currently active turn ID |
-| `turn.streaming` | `boolean` | VirtualListActor | ScrollActor | Whether a turn is streaming |
+| `turn.id` | `string` | MessageTurnActor | - | Current turn ID |
+| `turn.role` | `string` | MessageTurnActor | - | Turn role (user/assistant) |
+| `turn.streaming` | `boolean` | MessageTurnActor | - | Whether this turn is streaming |
+| `turn.hasInterleaved` | `boolean` | MessageTurnActor | - | Turn has interleaved content |
+| `turn.textSegmentCount` | `number` | MessageTurnActor | - | Number of text segments |
+| `turn.thinkingCount` | `number` | MessageTurnActor | - | Number of thinking iterations |
+| `turn.toolBatchCount` | `number` | MessageTurnActor | - | Number of tool batches |
+| `turn.shellSegmentCount` | `number` | MessageTurnActor | - | Number of shell segments |
+
+### activity.*
+
+Keys driving the StatusPanelShadowActor's activity slot, published per-turn by MessageTurnActor.
+
+| Key | Type | Publisher | Subscribers | Description |
+|-----|------|-----------|-------------|-------------|
+| `activity.streaming` | `boolean` | MessageTurnActor | StatusPanelShadowActor | Whether a turn is streaming |
+| `activity.label` | `string \| null` | MessageTurnActor | StatusPanelShadowActor | Current activity label |
 
 ### virtualList.*
 
@@ -42,7 +61,8 @@ Keys related to virtual list state.
 | Key | Type | Publisher | Subscribers | Description |
 |-----|------|-----------|-------------|-------------|
 | `virtualList.turnCount` | `number` | VirtualListActor | - | Total number of turns |
-| `virtualList.visibleRange` | `{start, end}` | VirtualListActor | - | Currently visible turn range |
+| `virtualList.visibleCount` | `number` | VirtualListActor | - | Number of bound (rendered) turns |
+| `virtualList.poolStats` | `object` | VirtualListActor | - | Actor pool statistics |
 
 ### input.*
 
@@ -50,8 +70,9 @@ Keys related to user input area.
 
 | Key | Type | Publisher | Subscribers | Description |
 |-----|------|-----------|-------------|-------------|
-| `input.value` | `string` | InputAreaShadowActor | - | Current input text |
-| `input.focused` | `boolean` | InputAreaShadowActor | - | Input has focus |
+| `input.value` | `string` | InputAreaShadowActor | ToolbarShadowActor | Current input text |
+| `input.submitting` | `boolean` | InputAreaShadowActor | - | Submit in progress |
+| `input.streaming` | `boolean` | InputAreaShadowActor | - | Streaming-driven disabled state |
 | `input.attachments` | `Attachment[]` | InputAreaShadowActor | - | Attached files |
 
 ### toolbar.*
@@ -60,8 +81,11 @@ Keys related to toolbar state.
 
 | Key | Type | Publisher | Subscribers | Description |
 |-----|------|-----------|-------------|-------------|
-| `toolbar.editMode` | `string` | ToolbarShadowActor | VirtualListActor | Selected edit mode |
-| `toolbar.webSearch` | `boolean` | ToolbarShadowActor | - | Web search enabled |
+| `toolbar.editMode` | `string` | ToolbarShadowActor | - | Selected edit mode |
+| `toolbar.webSearchEnabled` | `boolean` | ToolbarShadowActor | - | Web search enabled |
+| `toolbar.webSearchMode` | `string` | ToolbarShadowActor | - | Web search mode |
+| `toolbar.filesModalOpen` | `boolean` | ToolbarShadowActor | - | Files modal open state |
+| `toolbar.planEnabled` | `boolean` | ToolbarShadowActor | - | Plan mode enabled |
 
 ### edit.*
 
@@ -69,7 +93,7 @@ Keys related to edit mode.
 
 | Key | Type | Publisher | Subscribers | Description |
 |-----|------|-----------|-------------|-------------|
-| `edit.mode` | `EditMode` | EditModeActor | VirtualListActor, ToolbarShadowActor | Current edit mode (manual/ask/auto) |
+| `edit.mode` | `EditMode` | EditModeActor | - | Current edit mode (manual/ask/auto) |
 | `edit.mode.set` | `EditMode` | external | EditModeActor | Request to change edit mode |
 
 ### history.*
@@ -90,7 +114,7 @@ Keys related to current session.
 |-----|------|-----------|-------------|-------------|
 | `session.id` | `string` | SessionActor | HistoryShadowActor | Current session ID |
 | `session.title` | `string` | SessionActor | HeaderActor | Current session title |
-| `session.model` | `string` | SessionActor | HeaderActor, ModelSelectorShadowActor | Current model ID |
+| `session.model` | `string` | SessionActor | HeaderActor, ToolbarShadowActor | Current model ID |
 | `session.loading` | `boolean` | SessionActor | - | Session is loading |
 | `session.error` | `string` | SessionActor | - | Session error message |
 
@@ -107,6 +131,8 @@ Keys related to model selection.
 | `model.settings` | `ModelSettings` | external | ModelSelectorShadowActor | Model settings from extension |
 | `model.temperature` | `number` | ModelSelectorShadowActor | - | Temperature setting |
 | `model.toolLimit` | `number` | ModelSelectorShadowActor | - | Tool iteration limit |
+| `model.shellIterations` | `number` | ModelSelectorShadowActor | - | Shell iteration limit |
+| `model.fileEditLoops` | `number` | ModelSelectorShadowActor | - | File edit loop limit |
 | `model.maxTokens` | `number` | ModelSelectorShadowActor | - | Max output tokens |
 
 ### status.*
@@ -115,8 +141,10 @@ Keys related to status display.
 
 | Key | Type | Publisher | Subscribers | Description |
 |-----|------|-----------|-------------|-------------|
-| `status.message` | `string` | StatusPanelShadowActor | - | Current status message |
-| `status.type` | `string` | StatusPanelShadowActor | - | info/warning/error |
+| `status.hasMessage` | `boolean` | StatusPanelShadowActor | - | A message is currently shown |
+| `status.hasWarning` | `boolean` | StatusPanelShadowActor | - | A warning is currently shown |
+| `status.hasError` | `boolean` | StatusPanelShadowActor | - | An error is currently shown |
+| `status.message` | `{type, message}` | external | StatusPanelShadowActor | Message to display (injected via publishDirect) |
 
 ### gateway.*
 
@@ -124,8 +152,19 @@ Keys for gateway observability (debugging).
 
 | Key | Type | Publisher | Subscribers | Description |
 |-----|------|-----------|-------------|-------------|
-| `gateway.phase` | `GatewayPhase` | VirtualMessageGatewayActor | - | idle/streaming/waiting |
+| `gateway.phase` | `GatewayPhase` | VirtualMessageGatewayActor | - | idle/streaming/waiting-for-results |
 | `gateway.currentTurn` | `string` | VirtualMessageGatewayActor | - | Current streaming turn ID |
+
+### scroll.*
+
+Keys related to scroll behavior.
+
+| Key | Type | Publisher | Subscribers | Description |
+|-----|------|-----------|-------------|-------------|
+| `scroll.autoScroll` | `boolean` | ScrollActor | - | Auto-scroll is engaged |
+| `scroll.userScrolled` | `boolean` | ScrollActor | - | User scrolled away from bottom |
+| `scroll.nearBottom` | `boolean` | ScrollActor | - | Viewport is near the bottom |
+| `scroll.request` | `ScrollRequest` | external | ScrollActor | Request to scroll |
 
 ### external.*
 
@@ -189,9 +228,13 @@ class DashboardActor {
 State can be injected from outside the actor system:
 
 ```typescript
-// From chat.ts message handler
-manager.publishDirect('history.sessions', sessions);
+// From chat.ts (toolbar/command handlers)
 manager.publishDirect('history.modal.open', true);
+manager.publishDirect('files.modal.open', true);
+manager.publishDirect('status.message', { type: 'info', message: '...' });
+
+// From VirtualMessageGatewayActor.onMessage (extension → webview)
+manager.publishDirect('history.sessions', sessions);
 manager.publishDirect('session.id', sessionId);
 ```
 
@@ -230,8 +273,8 @@ manager.publishDirect('session.id', sessionId);
     │           │   │           │   │           │
     │ subs:     │   │ subs:     │   │ subs:     │
     │ streaming │   │ streaming │   │ history.* │
-    │ .*, edit  │   │ .active   │   │ session.  │
-    │ .mode     │   │           │   │ id        │
+    │ .active   │   │ .active   │   │ session.  │
+    │           │   │           │   │ id        │
     └───────────┘   └───────────┘   └───────────┘
 ```
 
@@ -246,6 +289,7 @@ window.actorManager.getState('streaming.active')
 // → false
 
 // Watch for state changes
-window.actorManager.getLogger().setLevel('DEBUG')
+window.actorManager.getLogger().setLogLevel('DEBUG')
+// Or: window.actorManager.getLogger().enableDebug()
 // Logs all state changes to console
 ```

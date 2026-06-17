@@ -14,7 +14,7 @@ No index to maintain, no embeddings to compute, no daemon. The LSP is already ru
 
 ## Tool surface
 
-Five tools, all routed through the same dispatcher as workspace tools and gated per-model via `ModelCapabilities.lspTools` ([src/models/registry.ts:126](../../../src/models/registry.ts#L126)).
+Five tools, all routed through the same dispatcher as workspace tools and gated per-model via `ModelCapabilities.lspTools` ([src/models/registry.ts:133](../../../src/models/registry.ts#L133)).
 
 | Tool | LSP backend | Accepts | Returns |
 |---|---|---|---|
@@ -36,12 +36,12 @@ Position-bearing tools (`find_definition`, `find_references`) accept either `(pa
 
 | Model | `lspTools` |
 |---|---|
-| `deepseek-v4-flash`, `deepseek-v4-pro`, and `-thinking` variants | `true` |
+| `deepseek-v4-flash-thinking`, `deepseek-v4-pro-thinking` | `true` |
 | `deepseek-chat` (V3) | `true` |
 | `deepseek-reasoner` (R1) | `false` (XML-shell transport only) |
 | Custom models | per-entry, default `false` |
 
-Beyond the per-model flag, the orchestrator also checks `LspAvailability.getDeclaredAvailability().available.length > 0` per request. A workspace with no LSP-backed languages installed gets neither the tool definitions nor the prompt declaration — saving ~600 prompt tokens per request the model can't use.
+Beyond the per-model flag, the orchestrator also checks `LspAvailability.getInstance().getDeclaredAvailability().available.length > 0` per request. A workspace with no LSP-backed languages installed gets neither the tool definitions nor the prompt declaration — saving ~600 prompt tokens per request the model can't use.
 
 Both gates are evaluated in [requestOrchestrator.ts](../../../src/providers/requestOrchestrator.ts):
 - Streaming path: line ~3010
@@ -58,13 +58,13 @@ Both gates are evaluated in [requestOrchestrator.ts](../../../src/providers/requ
 interface AvailabilityState {
   available: boolean;
   sampledFile: string;       // path of the file probed/observed
-  observedAt: number;        // unix-ms; 0 means "found via discovery, not yet probed"
+  observedAt: number;        // unix-ms timestamp of last update
   source: 'probe' | 'tool-failure' | 'tool-success' | 'extension-event';
   consecutiveEmpties: number; // delays true→false flip past EMPTY_FLIP_THRESHOLD
 }
 ```
 
-Reads go through `getDeclaredAvailability()` which buckets the map into three sorted arrays (`available`, `unavailable`, `untested`). The orchestrator calls this once per request, synchronous, hot path.
+Reads go through `getDeclaredAvailability()` which buckets the map into three sorted arrays (`available`, `unavailable`, `untested`). The orchestrator calls this once per request, synchronous, hot path. The `untested` bucket is currently a defined-but-unreachable state: the partition routes an entry there only when `source === 'probe' && observedAt === 0`, but no writer ever stamps `observedAt: 0` (`probeLanguage` always writes `Date.now()`), so discovery only ever yields `available` or `unavailable`.
 
 ### Probe cadence
 
@@ -85,7 +85,7 @@ Plus inline adaptive correction via `reportToolResult(languageId, hadSymbols, sa
 ```
 discoverWorkspace():
   1. findFiles(PROBE_FILE_GLOB, PROBE_EXCLUDE, DISCOVERY_FILE_LIMIT=100)
-     → enumerate workspace files matching ~60 source extensions
+     → enumerate workspace files matching ~95 source extensions
   2. group files by languageId via openTextDocument(uri).languageId
      → one representative sample per language
   3. probe each language in parallel batches (DISCOVERY_CONCURRENCY=3):
@@ -118,8 +118,9 @@ When LSP tools are advertised, the prompt builder appends `renderLspDeclaration`
 ```
 LSP works for: typescript, python.
 No LSP for: ruby — use grep + read_file for those.
-Untested: go (try LSP first; fall back to grep on empty).
 ```
+
+`renderLspDeclaration` also has an `Untested: ...` clause, but as noted under [State](#state) the `untested` bucket never populates from discovery, so that line is dormant in practice.
 
 Computed by `getDeclaredAvailability()` and rendered into both `renderMinimalToolGuidance` and `renderStandardToolGuidance` in [requestOrchestrator.ts](../../../src/providers/requestOrchestrator.ts). Token cost: ~30–80 tokens depending on language count, replacing earlier ad-hoc "fall back to grep" hints.
 

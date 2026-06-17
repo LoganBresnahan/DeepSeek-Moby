@@ -8,9 +8,9 @@ This document formalizes when and how to use getters vs publications in the acto
 
 | Pattern | Use Case | Example |
 |---------|----------|---------|
-| **Direct Calls** | Ordered operations, mutations | `message.finalizeCurrentSegment()` |
-| **Publications (Pub/Sub)** | Broadcast state to multiple observers | `manager.publishDirect('streaming.active', true)` |
-| **Getters** | Synchronous single-consumer queries | `message.isStreaming()` |
+| **Direct Calls** | Ordered operations, mutations | `turn.completeCurrentTextSegment()` |
+| **Publications (Pub/Sub)** | Broadcast state to multiple observers | `manager.publishDirect('history.modal.open', true)` |
+| **Getters** | Synchronous single-consumer queries | `turn.isStreaming()` |
 
 ---
 
@@ -26,14 +26,15 @@ Getters are appropriate when ALL of these conditions are true:
 ### Good Examples
 
 ```typescript
-// Gateway coordination - needs immediate answer for ordering decision
-if (message.isStreaming() && !this._hasInterleaved) {
-  message.finalizeCurrentSegment();
+// Turn coordination - needs immediate answer for ordering decision
+if (turn.isStreaming() && !turn.hasInterleaved()) {
+  turn.completeCurrentTextSegment();
 }
 
-// Conditional update based on current state
-const currentCalls = toolCalls.getCalls();
-if (currentCalls[msg.index]) { ... }
+// Conditional decision based on current state
+if (editMode.isValidMode(msg.mode)) {
+  editMode.setMode(msg.mode);
+}
 
 // UI coordination - close competing dropdowns
 if (modelSelector?.isVisible()) modelSelector.close();
@@ -49,47 +50,41 @@ Use **publications** instead when:
 
 ```typescript
 // BAD: Multiple actors observing this
-const isStreaming = streaming.isStreaming();
+const isStreaming = streaming.isActive;
 inputArea.setStreaming(isStreaming);
 toolbar.setStreaming(isStreaming);
-statusPanel.setStreaming(isStreaming);
+scroll.setStreaming(isStreaming);
 
 // GOOD: Publish once, actors subscribe
 streaming.startStream(...); // Publishes 'streaming.active': true
-// InputArea, Toolbar, StatusPanel all subscribe to 'streaming.active'
+// InputArea, Toolbar, Scroll all subscribe to 'streaming.active'
 ```
 
 ---
 
 ## Current Getter Consumers
 
-### 1. MessageGatewayActor (Primary Consumer)
+### 1. VirtualMessageGatewayActor (Primary Consumer)
 
-The gateway uses getters for **coordination decisions**:
+The gateway uses getters for **coordination decisions**. Content rendering is
+delegated to a single `VirtualListActor` (the old per-type content actors —
+message, shell, toolCalls, thinking, pending — were replaced by it):
 
 ```typescript
-// File: media/actors/message-gateway/MessageGatewayActor.ts
-
-// Check if we need to start new segment after interleaving
-if (message.needsNewSegment()) {
-  message.resumeWithNewSegment();
-}
-
-// Finalize segment before tools/thinking (6 usages)
-if (message.isStreaming() && !this._hasInterleaved) {
-  message.finalizeCurrentSegment();
-}
-
-// Update specific tool call by index
-const currentCalls = toolCalls.getCalls();
-if (currentCalls[msg.index]) { ... }
-
-// Sync pending files with backend diff list
-const currentFiles = pending.getFiles();
+// File: media/actors/message-gateway/VirtualMessageGatewayActor.ts
 
 // Validate edit mode before applying
-if (editMode.isValidMode(msg.mode)) { ... }
+if (msg.mode && editMode.isValidMode(msg.mode)) {
+  editMode.setMode(mode);
+}
+
+// Finalize the current text segment when a text-finalize update arrives,
+// so the segment drops its streaming placeholder before later content
+virtualList.completeCurrentTextSegment(turnId);
 ```
+
+The segment getters themselves live on `MessageTurnActor`, which `VirtualListActor`
+drives per turn (e.g. `isStreaming()`, `getCurrentSegmentContent()`, `hasInterleaved()`).
 
 ### 2. chat.ts (Entry Point Wiring)
 
@@ -98,19 +93,23 @@ The entry point uses getters for **UI initialization and event handlers**:
 ```typescript
 // File: media/chat.ts
 
-// Toggle button state
-inspectorBtn.classList.toggle('active', inspector.isVisible());
-
 // Close competing dropdowns
 if (settings?.isVisible()) settings.close();
 if (modelSelector?.isVisible()) modelSelector.close();
 
 // Initialize actors with current state
 const initialEditMode = editModeActor.getMode();
-pending.setEditMode(initialEditMode);
+toolbar.setEditMode(initialEditMode);
+virtualList.setEditMode(initialEditMode);
+```
 
-// Handler needs file data for backend message
-const file = pending.getFiles().find(f => f.id === fileId);
+`media/dev.ts` also reads getters when wiring dev-only UI:
+
+```typescript
+// File: media/dev.ts
+
+// Toggle inspector button state
+inspectorBtn.classList.toggle('active', inspector.isVisible());
 ```
 
 ---
@@ -119,10 +118,9 @@ const file = pending.getFiles().find(f => f.id === fileId);
 
 | Prefix | Returns | Example |
 |--------|---------|---------|
-| `is*` | boolean | `isStreaming()`, `isVisible()`, `isCollapsed(id)` |
-| `has*` | boolean | `hasErrors()`, `hasContent()`, `hasPending()` |
-| `needs*` | boolean | `needsNewSegment()` |
-| `get*` | data | `getFiles()`, `getCalls()`, `getMode()` |
+| `is*` | boolean | `isStreaming()`, `isVisible()`, `isValidMode(mode)` |
+| `has*` | boolean | `hasInterleaved()`, `hasPendingInterrupt()` |
+| `get*` | data | `getMode()`, `getCurrentSegmentContent()` |
 
 ---
 
@@ -135,7 +133,7 @@ Getters should be pure reads, not compute-heavy:
 ```typescript
 // GOOD: Direct state access
 isStreaming(): boolean {
-  return this._currentSegment !== null;
+  return this._isStreaming;
 }
 
 // AVOID: Complex computation
@@ -164,11 +162,12 @@ When adding a getter, add a comment noting who uses it:
 
 ```typescript
 /**
- * Check if new segment needed after interleaving.
- * Used by: MessageGatewayActor for streamToken handling
+ * Whether non-text content (shell/tools/thinking) has been interleaved
+ * into this turn. Used by: MessageTurnActor coordination when deciding
+ * whether to start a fresh text segment.
  */
-needsNewSegment(): boolean {
-  return this._segmentFinalized && !this._currentSegment;
+hasInterleaved(): boolean {
+  return this._hasInterleaved;
 }
 ```
 
@@ -179,7 +178,7 @@ needsNewSegment(): boolean {
 A getter registry was considered but rejected because:
 
 1. **Type safety already exists** - TypeScript provides compile-time safety
-2. **Limited consumers** - Only 2 locations use getters (gateway, entry point)
+2. **Scoped consumers** - Getters are read at a handful of coordination points (gateway, entry point in `chat.ts`/`dev.ts`, and a few shadow actors), not broadcast widely
 3. **No multi-consumer pattern** - Getters are 1:1, not 1:N
 4. **Overhead** - Registry adds indirection without benefit
 5. **Debugging** - Direct calls are easier to trace than registry lookups
@@ -190,7 +189,7 @@ If getter usage expands significantly or multi-consumer patterns emerge, revisit
 
 ## Related Documentation
 
-- [message-gateway.md](message-gateway.md) - Gateway pattern and coordination state
-- [actor-diagram.md](actor-diagram.md) - Actor relationships
-- [media/state/EventStateActor.ts](../media/state/EventStateActor.ts) - Base actor with publication system
+- [message-gateway.md](../frontend/message-gateway.md) - Gateway pattern and coordination state
+- [actor-diagram.md](../overview/actor-diagram.md) - Actor relationships
+- [media/state/EventStateActor.ts](../../../media/state/EventStateActor.ts) - Base actor with publication system
 

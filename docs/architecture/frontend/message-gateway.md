@@ -71,20 +71,31 @@ The VirtualMessageGatewayActor implements the **Gateway Pattern** (also known as
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Unified Turn Architecture
+### Unified Turn Architecture (CQRS Event Sourcing)
 
-The gateway routes all content to `VirtualListActor`, which manages turn-based rendering:
+The gateway does **not** make direct per-message `VirtualListActor` calls. Each external
+message handler appends a `TurnEvent` to a per-turn `TurnEventLog`, then runs it through
+the shared `TurnProjector` (`emitTurnEvent()` → `projectIncremental()`). The projector
+produces `ViewSegment` mutations, which `renderSegment()` / `updateRenderedSegment()` map
+to the actual `VirtualListActor` calls. This CQRS / event-sourcing pipeline (`TurnEventLog`,
+`TurnProjector`, `ViewSegment`, `_projector`, `_turnLogs`) is the real mechanism — the
+table below shows the `TurnEvent` each message emits, not a direct method call:
 
-| External Message | Gateway Action |
-|------------------|----------------|
-| `startResponse` | `virtualList.addTurn(turnId, 'assistant')` |
-| `streamToken` | `virtualList.updateTextContent(turnId, content)` |
-| `iterationStart` | `virtualList.startThinkingIteration(turnId)` |
-| `streamReasoning` | `virtualList.updateThinking(turnId, content)` |
-| `toolCallsStart` | `virtualList.startToolBatch(turnId, tools)` |
-| `shellExecuting` | `virtualList.createShellSegment(turnId, commands)` |
-| `diffListChanged` | `virtualList.updatePendingFiles(turnId, files)` |
-| `endResponse` | `virtualList.endStreamingTurn(turnId)` |
+| External Message | Emitted TurnEvent (→ projector → render) |
+|------------------|------------------------------------------|
+| `startResponse` | resets CQRS state, fresh `TurnEventLog`; `virtualList.addTurn(turnId, 'assistant', { model, timestamp })` + `startStreamingTurn(turnId)` |
+| `streamToken` | `{ type: 'text-append', content: token }` |
+| `iterationStart` | finalizes prior thinking/text and advances the iteration counter (no thinking-start here) |
+| `streamReasoning` | `{ type: 'thinking-start' }` (first token only) then `{ type: 'thinking-content' }` |
+| `toolCallsStart` | `{ type: 'tool-batch-start' }` |
+| `shellExecuting` | `emitTextFinalizeIfOpen()` then `{ type: 'shell-start' }` |
+| `diffListChanged` | appends `{ type: 'file-modified' }` and calls `virtualList.addPendingFile(turnId, ...)` |
+| `endResponse` | finalizes the log, then `virtualList.endStreamingTurn()` (no arg) |
+
+Segment rendering maps `ViewSegment` types to `VirtualListActor` methods inside
+`renderSegment()`/`updateRenderedSegment()` — e.g. a `thinking` segment calls
+`startThinkingIteration()` + `updateThinkingContent()`, a `shell` segment calls
+`createShellSegment()`, a `tool-batch` segment calls `startToolBatch()`.
 
 ---
 
@@ -92,38 +103,42 @@ The gateway routes all content to `VirtualListActor`, which manages turn-based r
 
 ### 1. Ordering Guarantees
 
-With the gateway, this sequence is **guaranteed**:
+With the gateway, this sequence is **guaranteed** (inside `handleShellExecuting()`):
 
 ```typescript
-case 'shellExecuting':
-  // 1. Finalize current text segment FIRST
-  virtualList.finalizeTextSegment(turnId);
-  // 2. THEN create shell segment (appears after text in DOM)
-  virtualList.createShellSegment(turnId, msg.commands);
+// 1. Finalize the open text segment FIRST (if any)
+this.emitTextFinalizeIfOpen(turnId);
+// 2. THEN emit a shell-start event; the projector emits a shell ViewSegment,
+//    and renderSegment() calls virtualList.createShellSegment() after the text.
+this.emitTurnEvent(turnId, { type: 'shell-start', id: shellId, commands, ... });
 ```
 
 With pure pub/sub, if multiple actors subscribe to the same event, order is **undefined**.
 
 ### 2. Atomicity
 
-The gateway case is **atomic** within a single event loop tick:
+The gateway handler is **atomic** within a single event loop tick (`handleStreamToken()`):
 
 ```typescript
-case 'streamToken':
-  const display = this.stripShellTags(content);  // Step 1
-  virtualList.updateTextContent(turnId, display); // Step 2
-  streaming.handleContentChunk(msg.token);        // Step 3
+// Step 1: append a text-append event → projector → renderSegment()
+this.emitTurnEvent(turnId, { type: 'text-append', content: token, ... });
+// Step 2: forward the raw token to the streaming actor
+streaming.handleContentChunk(token);
 ```
 
-No other code runs between these lines.
+No other code runs between these lines. `<shell>...</shell>` stripping is **not** done
+here — it happens later at render time inside `renderSegment()`/`updateRenderedSegment()`
+(an inline `replace(/<shell>[\s\S]*?<\/shell>/gi, '')`) and **only** in reasoner mode
+(`session.model === 'deepseek-reasoner'`).
 
 ### 3. Conditional Logic
 
 The gateway can make decisions based on current state:
 
 ```typescript
-if (virtualList.isStreaming(turnId)) {
-  virtualList.finalizeTextSegment(turnId);
+const turn = virtualList.getTurn(turnId);
+if (turn && turn.isStreaming) {
+  this.emitTextFinalizeIfOpen(turnId);
 }
 ```
 
@@ -135,7 +150,7 @@ Per-token streaming: ~50-100 tokens/second
 
 **Pure pub/sub path:**
 ```
-handleExternalMessage() → deepClone() → updateGlobalState() → broadcast() → O(n) actors
+handleMessage() → deepClone() → updateGlobalState() → broadcast() → O(n) actors
 ```
 
 **Direct method call:**
@@ -175,14 +190,19 @@ Current streaming phase for debugging: `'idle' | 'streaming' | 'waiting-for-resu
 
 ### 1. Direct Method Calls to VirtualListActor
 
-For turn-based content operations:
+Turn lifecycle calls are made directly from the message handlers:
 
 ```typescript
-virtualList.addTurn(turnId, 'assistant');
-virtualList.updateTextContent(turnId, content);
-virtualList.startThinkingIteration(turnId);
-virtualList.endStreamingTurn(turnId);
+virtualList.addTurn(turnId, 'assistant', { model, timestamp });
+virtualList.startStreamingTurn(turnId);
+virtualList.endStreamingTurn();   // no arg — streaming turn id is tracked internally
 ```
+
+Content operations (`updateTextContent`, `startThinkingIteration`,
+`updateThinkingContent`, `createShellSegment`, `startToolBatch`, `addPendingFile`)
+are **not** called directly from the handlers — they are invoked by
+`renderSegment()`/`updateRenderedSegment()` as the projector emits `ViewSegment`
+mutations.
 
 ### 2. Pub/Sub (Broadcast State)
 
@@ -205,7 +225,7 @@ if (virtualList.isStreaming(turnId)) { ... }
 
 ## Message Categories
 
-The gateway handles ~40 message types in categories:
+The gateway's `handleMessage()` switch handles ~60 message types in categories:
 
 | Category | Messages | Handler Pattern |
 |----------|----------|-----------------|
@@ -217,7 +237,7 @@ The gateway handles ~40 message types in categories:
 | History | loadHistory, addMessage, clearChat | VirtualListActor + History |
 | Settings | settings, editModeSettings, modelChanged | Direct + pub/sub |
 | Files | openFiles, searchResults, fileContent | Pub/sub broadcast |
-| Status | error, warning, statusMessage | Direct calls to StatusPanel |
+| Status | error, warning, statusMessage | Pub/sub `publishDirect('status.message', ...)` (error also ends the current streaming turn) |
 
 ---
 
@@ -257,11 +277,17 @@ UI displays:
 
 ### Implementation
 
-**Backend (chatProvider.ts):**
-- Accumulates tools across iterations until a file modification happens
-- When `edit_file` succeeds in auto mode, closes the current tool batch
-- Sends `toolCallsEnd` followed by `diffListChanged`
+**Backend (requestOrchestrator.ts — the tool-call loop):**
+- Accumulates a tool batch across each iteration
+- Fires `_onToolCallsEnd` to close the batch at every tool-iteration boundary (and on
+  ask-mode approval that closes a batch mid-loop)
+- When a file was modified in the iteration, calls `diffManager.emitAutoAppliedChanges()`
+  (keeping the batch open) so the Modified Files UI updates
 - Next iteration starts a fresh tool batch
+
+**Backend bridge (chatProvider.ts):**
+- Only forwards the orchestrator's events (`toolCallsStart`, `toolCallsUpdate`,
+  `toolCallsEnd`) and `diffManager`'s `diffListChanged` to the webview
 
 **Frontend (VirtualMessageGatewayActor.ts):**
 - `toolCallsStart` creates a new tools container in the turn
@@ -287,6 +313,10 @@ UI displays:
 media/actors/message-gateway/
 ├── VirtualMessageGatewayActor.ts   # Main implementation
 └── index.ts                        # Exports
+
+media/events/
+├── TurnEventLog.ts                 # Per-turn append-only event log
+└── TurnProjector.ts                # Projects events → ViewSegment[]
 ```
 
 See also:

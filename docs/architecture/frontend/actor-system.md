@@ -27,7 +27,7 @@ The central coordinator that manages all actor communication.
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Location**: [media/state/EventStateManager.ts](../media/state/EventStateManager.ts)
+**Location**: [media/state/EventStateManager.ts](../../../media/state/EventStateManager.ts)
 
 ### Actor Registration
 
@@ -40,9 +40,9 @@ Each actor registers with:
 ```typescript
 interface ActorRegistration {
   actorId: string;
-  publicationKeys: string[];
-  subscriptionKeys: string[];
   element: HTMLElement;
+  publicationKeys: readonly string[];
+  subscriptionKeys: readonly string[];
 }
 ```
 
@@ -108,24 +108,33 @@ interface StateChangeEvent {
 
 ```typescript
 class MyActor extends ShadowActor {
-  protected actorId = 'my-actor';
-  protected publicationKeys = ['my.state'];
-  protected subscriptionKeys = ['other.state'];
-
-  constructor(manager: EventStateManager, container: HTMLElement) {
-    super(manager, container);
-    // Actor is now registered with manager
+  constructor(manager: EventStateManager, element: HTMLElement) {
+    super({
+      manager,
+      element,
+      styles: myActorStyles,
+      publications: {
+        'my.state': () => this._value
+      },
+      subscriptions: {
+        'other.state': (value, key) => this.handle(value)
+      }
+    });
+    // actorId is auto-generated (className + element.id, or a uniqueId).
+    // Publication/subscription keys are derived from the maps above.
+    // Registration is deferred to a microtask, not done in the constructor.
   }
 }
 ```
 
 ### 2. Initial State Publication
 
-On registration, actors can publish initial state:
+On registration, actors publish their initial state:
 
 ```typescript
-// In ShadowActor.register()
-manager.register(registration, this.getInitialState());
+// In EventStateActor.register() (private, run from a queued microtask)
+const initialState = this.readPublishedState();
+manager.register(registration, initialState);
 ```
 
 ### 3. Receiving State Changes
@@ -135,17 +144,19 @@ Actors receive state via CustomEvent:
 ```typescript
 // EventStateManager dispatches to actor's element
 const customEvent = new CustomEvent('state-changed', {
-  detail: stateChangeEvent,
-  bubbles: false,
-  cancelable: false
+  detail: stateChangeEvent
 });
 actor.element.dispatchEvent(customEvent);
+```
 
-// Actor handles in onStateChange()
-protected onStateChange(event: StateChangeEvent): void {
-  if (event.changedKeys.includes('streaming.active')) {
-    this.handleStreamingChange(event.state['streaming.active']);
-  }
+There is no `onStateChange()` override. The base class's private `handleStateChanged()`
+walks `changedKeys` and dispatches each key to the matching handler in the actor's
+`subscriptions` map (exact key first, then any wildcard pattern). Handlers receive
+`(value, key)`:
+
+```typescript
+subscriptions: {
+  'streaming.active': (value, key) => this.handleStreamingChange(value as boolean)
 }
 ```
 
@@ -193,11 +204,15 @@ if (publicationChain.length >= this.maxChainDepth) {
 For state from outside the actor system (e.g., VS Code messages):
 
 ```typescript
-// In chat.ts message handler
+// In VirtualMessageGatewayActor.handleMessage()
 case 'historySessions':
-  manager.publishDirect('history.sessions', msg.sessions);
+  this._manager.publishDirect('history.sessions', msg.sessions);
   break;
 ```
+
+(`chat.ts` makes its own `publishDirect` calls too, e.g. `history.modal.open`,
+`files.modal.open`, `status.message`, but the incoming VS Code message switch
+lives in `VirtualMessageGatewayActor`.)
 
 `publishDirect()` creates a synthetic state change with source `'external'`.
 
@@ -206,43 +221,52 @@ case 'historySessions':
 The `EventStateLogger` provides detailed logging:
 
 ```typescript
-// Enable verbose logging
-manager.getLogger().setLevel('DEBUG');
+// Enable verbose logging (LogLevel enum, not a string;
+// this sets the global webview log level)
+manager.getLogger().setLogLevel(LogLevel.DEBUG);
 ```
 
-Log output example:
+Log output example (each line is prefixed with a `[EventState]` tag and timestamp):
 ```
-[ESM] Actor register: message-actor
-      Publications: [message.content, message.streaming]
-      Subscriptions: [streaming.*, session.id]
-[ESM] State change: streaming-actor → streaming.active
-      Chain depth: 0
-[ESM] Broadcast to: message-actor [streaming.active]
+📝 Actor [message-actor] registered
+   Publications: [message.content, message.streaming]
+   Subscriptions: [streaming.*, session.id]
+🔄 State change from [streaming-actor]
+   Changed keys: [streaming.active]
+→ [message-actor]: [streaming.active]
 ```
 
 ## Actor Registry
 
-Current actors in the system:
+Core actors constructed in the webview (`media/chat.ts`):
 
 | Actor | Publications | Subscriptions |
 |-------|-------------|---------------|
 | **VirtualMessageGatewayActor** | `gateway.*` | - |
-| **VirtualListActor** | `virtualList.*` | `streaming.active`, `edit.mode` |
-| **MessageTurnActor** | `turn.*` | - |
+| **VirtualListActor** | `virtualList.*` | `streaming.active` |
+| **MessageTurnActor** | `turn.*`, `activity.streaming`, `activity.label` | - |
 | StreamingActor | `streaming.*` | - |
-| SessionActor | `session.*` | - |
-| EditModeActor | `edit.*` | - |
+| SessionActor | `session.*` | `message.count`, `input.submitting` |
+| EditModeActor | `edit.mode` | `edit.mode.set` |
 | InputAreaShadowActor | `input.*` | `streaming.active` |
-| StatusPanelShadowActor | `status.*` | - |
-| ToolbarShadowActor | `toolbar.*` | `streaming.active` |
-| HistoryShadowActor | `history.modal.*` | `history.*`, `session.id` |
-| ScrollActor | - | `turn.*`, `streaming.*` |
+| StatusPanelShadowActor | `status.*` | `status.message`, `activity.label`, `activity.streaming` |
+| ToolbarShadowActor | `toolbar.*` | `streaming.active`, `plans.activeCount`, `files.selectedCount`, `session.model`, `model.list`, `input.value` |
+| HistoryShadowActor | `history.modal.visible` | `history.modal.open`, `history.sessions`, `session.id` |
+| ScrollActor | `scroll.autoScroll`, `scroll.userScrolled`, `scroll.nearBottom` | `streaming.active`, `message.count`, `scroll.request` |
 | HeaderActor | - | `session.model`, `session.title` |
-| ModelSelectorShadowActor | `model.*` | `model.current`, `model.settings` |
-| FilesShadowActor | `files.*` | - |
+| ModelSelectorShadowActor | `model.*` | `model.current`, `model.settings`, `model.list`, `streaming.active` |
+| FilesShadowActor | `files.selected`, `files.selectedCount` | `files.openFiles`, `files.searchResults`, `files.content` |
 | CommandsShadowActor | - | - |
-| SettingsShadowActor | - | - |
-| InspectorShadowActor | - | - |
+| SettingsShadowActor | - | `settings.values`, `settings.defaultPrompt`, `model.list` |
+| PlanPopupShadowActor | `plans.activeCount` | `plans.state` |
+| WebSearchPopupShadowActor | `toolbar.webSearchEnabled`, `toolbar.webSearchMode` | `webSearch.*` (settings, mode, enabled, provider, providerStatus, searxng, subagent, testResult) |
+| StatsModalActor | - | `stats.data` |
+| SystemPromptModalActor | - | `settings.values`, `savedPrompts.list` |
+| CommandRulesModalActor | - | `rules.list`, `rules.allowAll` |
+| DrawingServerShadowActor | `drawingServer.running` | `drawingServer.state` |
+
+> `InspectorShadowActor` (`media/dev/inspector`) publishes `inspector.*` but is a
+> dev-only tool and is **not** instantiated in the production webview.
 
 ## Unified Turn Architecture
 
@@ -317,7 +341,7 @@ media/actors/turn/
     └── index.ts          # Combined styles for all container types
 ```
 
-See [media/actors/turn/MessageTurnActor.ts](../media/actors/turn/MessageTurnActor.ts) for implementation.
+See [media/actors/turn/MessageTurnActor.ts](../../../media/actors/turn/MessageTurnActor.ts) for implementation.
 
 ## VirtualListActor: Pool Management & Virtual Rendering
 
@@ -400,7 +424,7 @@ media/actors/virtual-list/
 └── index.ts              # Exports
 ```
 
-See [media/actors/virtual-list/VirtualListActor.ts](../media/actors/virtual-list/VirtualListActor.ts) for implementation.
+See [media/actors/virtual-list/VirtualListActor.ts](../../../media/actors/virtual-list/VirtualListActor.ts) for implementation.
 
 ## Best Practices
 
@@ -412,7 +436,7 @@ See [media/actors/virtual-list/VirtualListActor.ts](../media/actors/virtual-list
 
 ## Scalability & Performance
 
-The actor system includes several optimizations for performance at scale. See [REMINDER.md](../REMINDER.md) for the full list of mitigations with implementation status.
+The actor system includes several optimizations for performance at scale. See [REMINDER.md](../../../REMINDER.md) for the full list of mitigations with implementation status.
 
 ### Implemented Optimizations
 

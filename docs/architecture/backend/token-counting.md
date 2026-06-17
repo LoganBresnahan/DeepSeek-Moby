@@ -24,8 +24,10 @@ Exact token counting for context window management using DeepSeek's native token
 
 DeepSeek uses a custom Byte-level BPE tokenizer with a 128K vocabulary — completely different from OpenAI's cl100k_base. We compile DeepSeek's tokenizer to WebAssembly via the HuggingFace `tokenizers` Rust crate, giving us exact token counts with minimal JS heap impact.
 
+`TokenService` is **multi-vocab**: the shared WASM binary (BPE logic) is loaded once, and per-model vocabularies are loaded on demand keyed by model family — `deepseek-v3` (V3 chat + R1 reasoner) and `deepseek-v4` (V4 thinking models). V4 shares V3's BPE base but adds ~465 new special tokens, so V4 entries select the `deepseek-v4` vocab for exact counts on those tokens. Models whose registry entry declares no `tokenizer` (custom/local models) fall back to estimation.
+
 **Why WASM:**
-- Tokenizer data (128K vocab, 127K merge rules) lives in WASM linear memory — outside V8's GC heap and 4 GB limit
+- Each loaded vocab's data (~128K vocab, ~127K merge rules) lives in WASM linear memory — outside V8's GC heap and 4 GB limit
 - < 2 MB JS heap cost for wrapper objects
 - 3-5x faster encoding than pure JS BPE implementations
 - Exact counts vs the +/-10-20% accuracy of character-based estimation
@@ -41,8 +43,8 @@ Extension activation
 +--------------------------------------------------+
 |  TokenService (singleton)                         |
 |                                                   |
-|  1. Read tokenizer.json.br (1.3 MB from disk)    |
-|  2. Brotli decompress -> 7.5 MB JSON string      |
+|  1. Read <vocab>.json.br (~1.4 MB) from disk     |
+|  2. Brotli decompress -> ~7.8 MB JSON string     |
 |  3. Pass JSON to WASM constructor                 |
 |  4. Rust parses JSON -> HashMap in linear memory  |
 |  5. Expose count() / encode() to TypeScript       |
@@ -54,7 +56,7 @@ Extension activation
 |                     |    |                        |
 |  Budget management: |    |  Cross-validation:     |
 |  Which messages fit |    |  countRequestTokens()  |
-|  in 128K context?   |    |  vs API prompt_tokens  |
+|  in model window?   |    |  vs API prompt_tokens  |
 +---------------------+    +------------------------+
 ```
 
@@ -92,12 +94,15 @@ export interface TokenCounter {
 - `countMessage()` adds per-message overhead: 4 tokens for regular roles, 8 tokens for system
 - `isExact` distinguishes WASM (exact) from estimation (approximate) — used by `ContextBuilder` to apply a safety margin
 
-Two implementations:
+Three implementations:
 
 | Implementation | `isExact` | Used When |
 |----------------|-----------|-----------|
-| `TokenService` | `true` | WASM loaded successfully (normal operation) |
-| `EstimationTokenCounter` | `false` | WASM failed to load, or in unit tests |
+| `TokenService` | `true` | WASM loaded and the active model declares a `tokenizer` vocab |
+| `EstimationTokenCounter` | `false` | WASM failed to load, custom model with no `tokenizer`, or unit tests |
+| `DynamicTokenCounter` | delegates | The top-level counter `DeepSeekClient` injects — dispatches per-call to WASM or estimation based on the active model |
+
+`DynamicTokenCounter` is what `DeepSeekClient` actually constructs and passes into `ContextBuilder` and `countRequestTokens()`. On each call it calls `getActive()`: if the active model's registry entry declares a `tokenizer` **and** a WASM counter is available, it delegates to the exact `TokenService`; otherwise it delegates to the shared `EstimationTokenCounter`. Its `isExact` reflects whichever it currently resolves to.
 
 ---
 
@@ -117,31 +122,41 @@ try {
 
 const useWasm = tokenService.isReady;
 deepSeekClient = new DeepSeekClient(context, useWasm ? tokenService : undefined);
+
+// Switch the active vocab to match the restored model (initialize() only
+// loaded the default deepseek-v3 vocab).
+if (useWasm) { await tokenService.selectModel(deepSeekClient.getModel()); }
 ```
 
 ### Init Steps
 
-1. Dynamic `import('deepseek-moby-wasm')` — loads the WASM JS glue
-2. Read `tokenizer.json.br` (1.3 MB) from dist/assets/ or packages/ (dev fallback)
+1. Dynamic `import('deepseek-moby-wasm')` — loads the WASM JS glue (once, shared across all vocabs)
+2. Read `<vocabName>.json.br` (e.g. `deepseek-v3.json.br`, ~1.4 MB) from `dist/assets/vocabs/` (prod) or `packages/moby-wasm/assets/vocabs/` (dev fallback). The single-file `tokenizer.json.br` is a legacy fallback path used only for the default (`deepseek-v3`) vocab.
 3. `zlib.brotliDecompressSync()` — Node.js built-in, zero dependencies
 4. Pass JSON string to `DeepSeekTokenizer` constructor — Rust parses into WASM linear memory
-5. Total: ~433 ms measured
+5. Total: ~433 ms measured per vocab
+
+`initialize()` loads only the default vocab (`deepseek-v3`). `selectModel(modelId)` lazily loads and switches the active vocab when the model changes — looking up the vocab name via `getCapabilities(modelId).tokenizer`, returning `false` (caller should use estimation) when the model declares none.
 
 ### API
 
 | Method | Description |
 |--------|-------------|
-| `count(text)` | Exact token count via WASM BPE. Throws if not initialized. |
+| `count(text)` | Exact token count for the active vocab via WASM BPE. Throws if not initialized. |
 | `countMessage(role, content)` | `count(content)` + role overhead (4 or 8 tokens) |
+| `selectModel(modelId)` | Switch/lazy-load the active vocab for a model; returns `false` if the model declares no `tokenizer` |
 | `encode(text)` | Returns `Uint32Array` of token IDs |
 | `decode(ids)` | Token IDs back to text |
-| `vocabSize` | 128,000 for DeepSeek V3 |
-| `isReady` | Whether WASM is loaded |
-| `dispose()` | Calls `tokenizer.free()` to release WASM memory |
+| `activeVocabName` / `loadedVocabs` | Current active vocab name / list of loaded vocab names |
+| `vocabSize` | Vocab size of the **active** tokenizer (128,000 for the V3 vocab) |
+| `isReady` | Whether the active vocab's tokenizer is loaded |
+| `dispose()` | Calls `tokenizer.free()` on every loaded vocab to release WASM memory |
 
 ### Graceful Degradation
 
 If WASM fails to load (missing binary, unsupported platform, etc.), the extension falls back to `EstimationTokenCounter`. The client checks `tokenService.isReady` and passes either the WASM service or `undefined` (which triggers estimation mode internally).
+
+Even when WASM loads fine, `DynamicTokenCounter` routes any model whose registry entry declares no `tokenizer` (custom/local models — Qwen, Llama, LM Studio, Ollama, etc.) to `EstimationTokenCounter` on a per-call basis. So estimation is a normal-operation path, not only a hard-failure fallback.
 
 ---
 
@@ -163,13 +178,13 @@ counter.calibrate(charCount, apiPromptTokens);
 // Updates rolling average: ratio = actualTokens / charCount
 ```
 
-The calibration is driven by `crossValidateTokens()` in DeepSeekClient — it passes the total request character count and the API's reported token count.
+The calibration is driven by `crossValidateTokens()` in DeepSeekClient — it passes the total request character count and the API's reported token count. It runs **after every API response unconditionally**, feeding the shared `EstimationTokenCounter` even when the active model is on the WASM path — so if the user later switches to an estimation-only custom model, its counter already has real calibration samples instead of the default ratio.
 
 ### When It's Used
 
-- **Unit tests**: No WASM needed in vitest — tests use `EstimationTokenCounter` directly
+- **Custom / local models**: Any model whose registry entry declares no `tokenizer` (Qwen, Llama, LM Studio, Ollama, etc.) uses estimation in normal operation — `DynamicTokenCounter` routes to it, and it auto-calibrates from `usage.prompt_tokens`
 - **WASM failure fallback**: If the WASM binary fails to load at activation
-- **Never in normal operation**: The extension always tries WASM first
+- **Unit tests**: No WASM needed in vitest — tests use `EstimationTokenCounter` directly
 
 ---
 
@@ -180,7 +195,10 @@ Counts tokens for an entire API request — not just message content, but everyt
 ```typescript
 export function countRequestTokens(
   counter: TokenCounter,
-  requestMessages: Array<{ role; content; tool_calls?; tool_call_id? }>,
+  // Relaxed to Record<string, unknown> so serializer additions (e.g.
+  // reasoning_content for V4-thinking) don't churn the signature; only
+  // role/content/tool_calls/tool_call_id are read.
+  requestMessages: Array<Record<string, unknown>>,
   systemPrompt?: string,
   tools?: Array<{ type; function: { name; description; parameters } }>
 ): number
@@ -213,8 +231,8 @@ The `crossValidateTokens()` method in [src/deepseekClient.ts](../../../src/deeps
 
 1. Calls `countRequestTokens()` to count everything we sent
 2. Compares against `usage.prompt_tokens` from the API response
-3. Logs `[TokenCV]` with the delta and percentage
-4. If using estimation, calibrates the ratio via `calibrate()`
+3. Logs `[TokenCV]` with the delta and percentage (tagged `[WASM]` or `[estimation]` per the active counter)
+4. Always calibrates the shared `EstimationTokenCounter` via `calibrate()` — regardless of whether WASM or estimation is currently active
 
 ### Log Format
 
@@ -241,21 +259,25 @@ The remaining gap in tool-calling mode is the API's hidden tool-use instruction 
 
 ## ContextBuilder
 
-Budget management for the 128K context window. Defined in [src/context/contextBuilder.ts](../../../src/context/contextBuilder.ts).
+Budget management for the model's context window (128K for V3, 1M for V4). Defined in [src/context/contextBuilder.ts](../../../src/context/contextBuilder.ts). The window and output reserve come from `getCapabilities(model)`, so the budget can't drift from the model's real capabilities; `FALLBACK_CONTEXT_WINDOW = 128_000` is used only when a model (e.g. a custom entry) declares no window.
 
 ### Strategy
 
 1. Count system prompt tokens (fixed cost)
-2. Calculate available budget: `(totalContext - maxOutputTokens) × safetyMultiplier - systemTokens`
+2. Calculate available budget: `(totalContext - outputReserve) × safetyMultiplier - systemTokens`, where `totalContext = caps.contextWindow ?? 128_000` and `outputReserve = caps.maxOutputTokens`
 3. Fill from **newest messages backward** until budget exhausted
 4. If oldest messages were dropped and a snapshot summary exists, inject it
 
 ### Model Budgets
 
+`Max Output` below is `maxOutputTokens` (the registry default sent as `max_tokens` and used as the budget's output reserve). V4 models also expose a higher slider cap of 384,000 via `maxOutputTokensCap`. `deepseek-v4-pro-thinking` is the `DEFAULT_MODEL_ID`.
+
 | Model | Total Context | Max Output | Available for Input |
 |-------|--------------|------------|-------------------|
 | deepseek-chat | 128,000 | 8,192 | ~119,808 |
-| deepseek-reasoner | 128,000 | 16,384 | ~111,616 |
+| deepseek-reasoner | 128,000 | 65,536 | ~62,464 |
+| deepseek-v4-flash-thinking | 1,048,576 | 65,536 | ~983,040 |
+| deepseek-v4-pro-thinking | 1,048,576 | 65,536 | ~983,040 |
 
 ### Safety Margin
 
@@ -306,7 +328,7 @@ ContextBuilder.build() → contextResult { tokenCount, budget }
 
 This means snapshot summaries are pre-computed and available when ContextBuilder needs them, avoiding on-the-fly summarization during request handling.
 
-- **Trigger:** `src/providers/requestOrchestrator.ts` (lines 334-361)
+- **Trigger:** `src/providers/requestOrchestrator.ts` — the `[Snapshot] Proactive trigger` block (around lines 930-958)
 - **ContextBuilder:** `src/context/contextBuilder.ts`
 
 ---
@@ -318,9 +340,9 @@ This means snapshot summaries are pre-computed and available when ContextBuilder
 | Component | JS Heap | WASM / External |
 |-----------|---------|-----------------|
 | TokenService wrapper + glue | ~0.5 MB | — |
-| WASM linear memory (vocab + merges) | — | ~20-25 MB |
-| Temporary: JSON string during init | ~7.5 MB (freed) | — |
-| **Steady state** | **~0.5 MB** | **~20-25 MB** |
+| WASM linear memory (vocab + merges) | — | ~20-25 MB per loaded vocab |
+| Temporary: JSON string during init | ~7.8 MB (freed) | — |
+| **Steady state** | **~0.5 MB** | **~20-25 MB per loaded vocab** |
 
 ### Performance
 
@@ -338,8 +360,9 @@ This means snapshot summaries are pre-computed and available when ContextBuilder
 |------|------|
 | `deepseek_moby_wasm_bg.wasm` | ~1.5 MB |
 | `deepseek_moby_wasm.js` (glue) | ~3 KB |
-| `tokenizer.json.br` | 1.33 MB |
-| **Total VSIX** | **~3.9 MB compressed** |
+| `assets/vocabs/deepseek-v3.json.br` | ~1.40 MB |
+| `assets/vocabs/deepseek-v4.json.br` | ~1.37 MB |
+| **Total VSIX** | **~5.3 MB compressed** |
 
 ---
 
@@ -387,9 +410,10 @@ externals: [
 When DeepSeek releases a new model with a different vocabulary:
 
 1. Download the new `tokenizer.json` from HuggingFace
-2. `brotli -q 11 -o assets/tokenizer.json.br assets/tokenizer.json`
-3. Replace `packages/moby-wasm/assets/tokenizer.json.br`
-4. No Rust code changes needed — same HuggingFace JSON format
+2. `brotli -q 11 -o assets/vocabs/<vocab>.json.br tokenizer.json` (e.g. `deepseek-v4.json.br`)
+3. Drop it under `packages/moby-wasm/assets/vocabs/` (webpack copies the whole `vocabs/` dir to `dist/assets/vocabs/`)
+4. Point the model's registry `tokenizer` field at the new vocab name
+5. No Rust code changes needed — same HuggingFace JSON format, shared BPE binary
 
 ---
 
@@ -403,7 +427,7 @@ When DeepSeek releases a new model with a different vocabulary:
 | [src/deepseekClient.ts](../../../src/deepseekClient.ts) | `crossValidateTokens()` — runtime accuracy logging |
 | [src/extension.ts](../../../src/extension.ts) | WASM init + fallback logic at activation |
 | [packages/moby-wasm/src/lib.rs](../../../packages/moby-wasm/src/lib.rs) | Rust WASM glue (~50 lines) |
-| [packages/moby-wasm/assets/tokenizer.json.br](../../../packages/moby-wasm/assets/) | Brotli-compressed vocabulary (1.33 MB) |
+| [packages/moby-wasm/assets/vocabs/](../../../packages/moby-wasm/assets/vocabs/) | Per-model Brotli-compressed vocabs: `deepseek-v3.json.br` (~1.40 MB), `deepseek-v4.json.br` (~1.37 MB) |
 | [webpack.config.js](../../../webpack.config.js) | CopyPlugin + function external for WASM |
 | [tests/unit/services/tokenCounter.test.ts](../../../tests/unit/services/tokenCounter.test.ts) | EstimationTokenCounter + countRequestTokens tests |
 | [tests/unit/services/tokenService.test.ts](../../../tests/unit/services/tokenService.test.ts) | TokenService tests (WASM mocked) |
@@ -413,6 +437,6 @@ When DeepSeek releases a new model with a different vocabulary:
 
 ## Related Documentation
 
-- [Tokenizer Plan](../../plans/tokenizer.md) — Original implementation plan with design rationale
+- [Tokenizer Plan](../../plans/completed/tokenizer.md) — Original implementation plan with design rationale
 - [Chat Streaming](../integration/chat-streaming.md) — Request lifecycle where cross-validation runs
 - [Backend Architecture](backend-architecture.md) — ChatProvider orchestrator

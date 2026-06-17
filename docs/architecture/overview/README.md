@@ -10,8 +10,8 @@ DeepSeek Moby is a VS Code extension that provides AI-powered chat and code assi
 ┌─────────────────────────────────────────────────────────────────┐
 │                        VS Code Extension                         │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
-│  │ DeepSeek    │  │ Tavily      │  │ ConversationManager     │  │
-│  │ Client      │  │ Client      │  │ (Event Sourcing)        │  │
+│  │ DeepSeek    │  │ Web Search  │  │ ConversationManager     │  │
+│  │ Client      │  │ Registry    │  │ (Event Sourcing)        │  │
 │  └──────┬──────┘  └──────┬──────┘  └───────────┬─────────────┘  │
 │         │                │                     │                 │
 │         └────────────────┼─────────────────────┘                 │
@@ -21,7 +21,7 @@ DeepSeek Moby is a VS Code extension that provides AI-powered chat and code assi
 │              │  ┌─────────────────┐  │                           │
 │              │  │RequestOrchestrator│ │ ◄── Streaming, Tools     │
 │              │  │DiffManager      │  │ ◄── Edit modes, Diffs    │
-│              │  │WebSearchManager │  │ ◄── Tavily integration   │
+│              │  │WebSearchManager │  │ ◄── Web search registry  │
 │              │  │FileContextManager│ │ ◄── File selection       │
 │              │  │SettingsManager  │  │ ◄── Settings sync        │
 │              │  └─────────────────┘  │                           │
@@ -98,11 +98,11 @@ DeepSeek Moby is a VS Code extension that provides AI-powered chat and code assi
 
 | File | Description |
 |------|-------------|
-| [chatprovider-refactor.md](../../plans/chatprovider-refactor.md) | Event emitter extraction — 6 phases (complete) |
-| [context-management.md](../../plans/context-management.md) | Wire ContextBuilder into request flow (complete) |
-| [dead-code-cleanup.md](../../plans/dead-code-cleanup.md) | Cleanup status (complete) |
-| [backend-refactor.md](../../plans/backend-refactor.md) | Event Sourcing implementation plan |
-| [tokenizer.md](../../plans/tokenizer.md) | WASM tokenizer plan (complete) |
+| [chatprovider-refactor.md](../../plans/completed/chatprovider-refactor.md) | Event emitter extraction — 6 phases (complete) |
+| [context-management.md](../../plans/completed/context-management.md) | Wire ContextBuilder into request flow (complete) |
+| [dead-code-cleanup.md](../../plans/completed/dead-code-cleanup.md) | Cleanup status (complete) |
+| [backend-refactor.md](../../plans/completed/backend-refactor.md) | Event Sourcing implementation plan |
+| [tokenizer.md](../../plans/completed/tokenizer.md) | WASM tokenizer plan (complete) |
 
 ## Key Concepts
 

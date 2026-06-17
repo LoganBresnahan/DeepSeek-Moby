@@ -26,14 +26,14 @@ The tracing system provides structured event collection for debugging and AI-age
 │  ┌─────────────────────────────────────────────────────────────────────────┐    │
 │  │                         TraceCollector (Singleton)                       │    │
 │  │                                                                          │    │
-│  │  • Ring buffer (max 10,000 events)                                       │    │
+│  │  • Ring buffer (max 50,000 events)                                       │    │
 │  │  • Correlation registry (correlationId → event IDs)                      │    │
 │  │  • Span stack (for async operation tracking)                             │    │
 │  │  • Memory monitoring (estimateMemoryBytes, warnAtMemoryMB)               │    │
-│  │  • Export formats: JSON, JSONL, Pretty                                   │    │
+│  │  • Export formats: JSON, JSONL, Pretty, AI                               │    │
 │  └─────────────────────────────────────────────────────────────────────────┘    │
 │                          ▲                                                       │
-│                          │ mergeWebviewEvents()                                  │
+│                          │ importEvent() (per webview event)                     │
 │                          │                                                       │
 │  ┌─────────────────────────────────────────────────────────────────────────┐    │
 │  │                         chatProvider.ts                                  │    │
@@ -73,7 +73,7 @@ The tracing system provides structured event collection for debugging and AI-age
 │  │                    VirtualMessageGatewayActor                            │    │
 │  │                                                                          │    │
 │  │  • Sets correlationId on WebviewTracer when startResponse received       │    │
-│  │  • Traces actor bind/unbind events via VirtualListActor                  │    │
+│  │  • Clears it on endResponse (setExtensionCorrelationId)                  │    │
 │  └─────────────────────────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -127,7 +127,7 @@ Events from both extension and webview share correlation IDs for unified timelin
 2. **Extension sends `startResponse`** → includes `correlationId` in message
 3. **Webview receives `startResponse`** → `VirtualMessageGatewayActor` sets `correlationId` on `WebviewTracer`
 4. **Webview emits events** → uses extension's `correlationId` as fallback
-5. **Webview syncs to extension** → `TraceCollector.mergeWebviewEvents()` aligns timestamps
+5. **Webview syncs to extension** → `chatProvider.handleWebviewTraceEvents()` calls `TraceCollector.importEvent()` per event, preserving the original webview timestamp
 6. **Export trace** → chronologically sorted events from both sources
 
 ---
@@ -181,25 +181,34 @@ interface TraceEvent {
 
 ## Trace Categories
 
+Categories come from two source enums: `TraceCategory` (extension, `src/tracing/types.ts`) and `WebviewTraceCategory` (webview, `media/tracing/types.ts`). Tool/shell completion is not a separate category — it is recorded by ending the `tool.call` / `shell.execute` span.
+
 | Category | Source | Description |
 |----------|--------|-------------|
-| `api.request` | Extension | Outbound API call started |
-| `api.stream` | Extension | Streaming token/chunk received |
-| `api.response` | Extension | API call completed |
-| `tool.call` | Extension | Tool execution started |
-| `tool.result` | Extension | Tool execution completed |
-| `shell.execute` | Extension | Shell command started |
-| `shell.result` | Extension | Shell command completed |
-| `state.publish` | Webview | Pub/sub state published |
+| `user.input` | Both | User typed/submitted |
+| `api.request` | Extension | Outbound API call (DeepSeek/Tavily) |
+| `api.stream` | Extension | Streaming tokens |
+| `api.response` | Extension | Complete response |
+| `tool.call` | Extension | Tool invoked |
+| `shell.execute` | Extension | Shell command |
+| `session.create` | Extension | New session created |
+| `session.switch` | Extension | Switched to another session |
+| `session.fork` | Extension | Session forked |
+| `webview.resolve` | Extension | Webview view resolved (created/recreated) |
+| `webview.visible` | Extension | Webview visibility changed |
+| `command.check` | Extension | Command checked against rules |
+| `command.approval` | Extension | Approval requested/resolved |
+| `file.context` | Extension | File context operations (search, select, inject) |
+| `subagent.route` | Extension | Subagent role dispatched |
+| `state.publish` | Both | Pub/sub state published |
 | `state.subscribe` | Webview | Subscription handler triggered |
 | `actor.create` | Webview | Actor instantiated |
+| `actor.destroy` | Webview | Actor destroyed |
 | `actor.bind` | Webview | Pool actor bound to turn |
 | `actor.unbind` | Webview | Pool actor released |
-| `bridge.send` | Both | postMessage sent |
-| `bridge.receive` | Both | postMessage received |
-| `render.turn` | Webview | Turn rendered |
-| `session.create` | Extension | New session created |
-| `session.load` | Extension | Session loaded from history |
+| `bridge.send` | Webview | postMessage to extension |
+| `bridge.receive` | Webview | Message received from extension |
+| `user.click` | Webview | User clicked UI element |
 
 ---
 
@@ -210,6 +219,11 @@ interface TraceEvent {
 | `json` | Pretty-printed JSON array | Programmatic analysis, debugging |
 | `jsonl` | One JSON object per line | LLM analysis, log processing |
 | `pretty` | Human-readable with aggregation | Quick visual inspection |
+| `ai` | AI-optimized Markdown summary | Feeding a trace into an LLM for analysis |
+
+### AI Format
+
+The `ai` format (`export('ai')`, or `exportForAI(options)` for filtered/grouped output) produces a concise Markdown summary instead of raw events: a header with event count and duration, an **Overview** (time span, sources, error/warning counts), an **Event Categories** breakdown, **Errors** in full, **Key Events** (api.request/response, tool.call, shell.execute, session.*, command.*), and **Aggregated Events** for noisy categories (state.publish, api.stream). With `groupByFlow` (default), events are grouped by correlation ID into request flows.
 
 ### Pretty Format with Aggregation
 
@@ -250,7 +264,7 @@ The `pretty` format collapses consecutive repeated events for readability while 
 
 ```typescript
 interface TraceCollectorConfig {
-  maxBufferSize: number;     // Ring buffer size (default: 10,000)
+  maxBufferSize: number;     // Ring buffer size (default: 50,000)
   maxAgeMs: number;          // Time-based eviction (0 = disabled)
   maxPayloadSize: number;    // Truncate data > N bytes (default: 1000)
   warnAtMemoryMB: number;    // Emit warning at N MB (0 = disabled)
@@ -322,12 +336,12 @@ import { WebviewTracer } from './tracing/WebviewTracer';
 
 const tracer = WebviewTracer.getInstance();
 
-// Trace actor lifecycle
-tracer.traceActorCreate('MessageTurnActor', { turnId: 'turn-1' });
-tracer.traceActorBind('turn-1', 'actor-1');
+// Trace actor lifecycle (actorId first, then actor type / turn id)
+tracer.traceActorCreate('actor-1', 'MessageTurnActor');
+tracer.traceActorBind('actor-1', 'turn-1');
 
-// Trace state changes
-tracer.tracePublish('streaming.content', ['text']);
+// Trace state changes (source actor id first, then the published keys)
+tracer.tracePublish('actor-1', ['streaming.content']);
 ```
 
 ---
@@ -337,7 +351,7 @@ tracer.tracePublish('streaming.content', ['text']);
 | Test File | Tests | Coverage |
 |-----------|-------|----------|
 | `tests/unit/tracing/TraceCollector.test.ts` | 50+ | Ring buffer, spans, correlation, export, memory |
-| `tests/unit/tracing/WebviewTracer.test.ts` | 34 | Sync, calibration, correlation propagation, time drift diagnostics |
+| `tests/unit/tracing/WebviewTracer.test.ts` | 35 | Sync, calibration, correlation propagation, time drift diagnostics |
 
 ---
 
@@ -376,28 +390,18 @@ if (data.webviewSyncTime) {
 
 ### Diagnosing Time Drift
 
-Use the **"Moby: Trace Stats"** command to see time alignment diagnostics:
+Time drift is surfaced as a single logger warning, emitted by the `traceEvents`
+handler in `chatProvider.ts` whenever the extension/webview clock difference at
+sync time exceeds 1000 ms:
 
 ```
-=== TIME ALIGNMENT DIAGNOSTICS ===
-Current Extension Time: 2026-02-09T05:39:27.790Z
-
-Extension Events:
-  First: 2026-02-09T05:39:22.439Z
-  Last:  2026-02-09T05:39:27.780Z
-  Span:  5.34s
-
-Webview Events:
-  First: 2026-02-09T05:52:02.100Z
-  Last:  2026-02-09T05:52:02.771Z
-  Span:  0.67s
-
-Cross-Boundary Gap:
-  Gap: 754320ms (12.57 minutes)
-  (Extension last -> Webview first)
-
-*** WARNING: Large time gap detected! ***
+[Trace] Time drift detected: extension=2026-02-09T05:39:27.790Z webview=2026-02-09T05:52:02.100Z diff=-754310ms
 ```
+
+The warning is written to the extension logger (the "DeepSeek Moby" output
+channel); there is no dedicated "trace stats" command. The drift value is
+computed but not otherwise acted on — events are still imported with their
+original timestamps.
 
 ### Fixing WSL2 Clock Drift
 

@@ -1,5 +1,20 @@
 # Schematic Visualization
 
+## Implementation status (as of 2026-06-16)
+
+**Status: Diverged (partial).** None of the planned in-chat canvas / LLM diagram DSL / 3D / gesture work shipped. A different, simpler approach did ship: a phone-tethered drawing pad served over the LAN. (grep finds no `schematic`, `DiagramState`, `mediapipe`, `three.js`, `reactflow`, `gesture`, or `webcam` anywhere in `src/` or `media/`.)
+
+Shipped (a different design than this plan describes):
+- `src/providers/drawingServer.ts` — a zero-dependency Node `http` server that serves two touch pages to a phone: a freehand color **drawing canvas** (`DRAWING_HTML`, drawingServer.ts:47) producing a PNG, and an **ASCII art editor** with box/arrow/text/move tools, undo/redo, and layer ops (`ASCII_HTML`, drawingServer.ts:214). Phone POSTs to `/upload`; emits `onImageReceived` / `onAsciiReceived` (drawingServer.ts:826-827). Includes WSL2 LAN/port-forward helpers (drawingServer.ts:891-956).
+- Wiring: commands `moby.startDrawingServer` / `moby.stopDrawingServer` (package.json:616-623; extension.ts:213-214, 926-972). Received PNGs become chat image attachments and are recorded into the event stream via `recordDrawing` (chatProvider.ts:207-216); ASCII text is forwarded to the webview as `asciiDrawingReceived` (chatProvider.ts:217-223). Webview side: `media/actors/drawing-server/DrawingServerShadowActor.ts`.
+
+Not yet / differs:
+- Phase 1 (LLM-generated ASCII diagrams + syntax highlighting): the ASCII editor is **human-drawn on a phone**, not LLM-generated; no diagram syntax highlighting in chat.
+- Phase 2 (in-chat shape canvas, JSON `DiagramState` serialization, LLM referencing elements): not built — the shipped canvas lives on a phone browser, not an in-chat modal, and serializes to a PNG / plain ASCII text, not the `DiagramState` JSON in this doc.
+- Phase 3 (LLM `<diagram>` command output, real-time bidirectional/animated diagrams): not started — no `<diagram>` parser/emitter exists.
+- Phase 4 (Three.js / 3D): not started.
+- Phase 5 (webcam + MediaPipe hand tracking, gesture recognition): not started.
+
 ## Goal
 
 Develop a middle-ground communication layer between humans and LLMs using "visual" structure—diagrams, interactive shapes, and spatial representations—that transcends pure text while leveraging the cognitive advantages of structured visual reasoning.

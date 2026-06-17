@@ -1,0 +1,1 @@
+_Reconciled with code 2026-06-16: this is an empty placeholder — no voice plan was ever written, and no voice/speech/audio feature exists in the codebase (no matches for speechRecognition / getUserMedia / MediaRecorder / transcription in src, media, or package.json). Status: not-started._

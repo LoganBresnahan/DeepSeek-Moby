@@ -11,7 +11,7 @@ This document covers how the extension executes tools, handles shell commands, a
 
     DeepSeek API Response
            │
-           │ tool_use blocks OR <shell> tags
+           │ tool_calls OR <shell> tags
            ▼
     ┌──────────────────┐
     │  Tool Detection  │
@@ -30,8 +30,8 @@ This document covers how the extension executes tools, handles shell commands, a
 ┌─────────────────────────────┐
 │     Tool Executors          │
 │ ┌─────────┬─────────┬─────┐ │
-│ │read_file│write   │search│ │
-│ │         │_file   │_files│ │
+│ │read_file│write    │find │ │
+│ │         │_file    │_files│ │
 │ └─────────┴─────────┴─────┘ │
 └─────────────────────────────┘
              │
@@ -46,81 +46,118 @@ This document covers how the extension executes tools, handles shell commands, a
 
 ## Native Tool Types
 
-Tools defined for the DeepSeek API:
+Native tools are sent to the DeepSeek API in OpenAI tools format — every
+definition is wrapped as `{ type: 'function', function: { name, description,
+parameters } }`. The core read-only tools live in `workspaceTools` (in
+`src/tools/workspaceTools.ts`); write/edit/delete/shell/web-search tools are
+separate exports added conditionally by the orchestrator depending on model
+capabilities and settings.
+
+The full tool set:
+
+- **Core (always present):** `read_file`, `find_files`, `grep`,
+  `list_directory`, `file_metadata`
+- **Conditional:** `write_file`, `edit_file`, `delete_file`,
+  `delete_directory`, `run_shell` (only when the model's `shellProtocol` is
+  `native-tool`), `web_search` (only when web search is configured + in auto
+  mode), plus LSP tools when available.
+
+> Argument values arrive as JSON strings parsed from `toolCall.function.arguments`,
+> so numeric-looking params (e.g. `maxResults`, `startLine`) are declared as
+> `type: 'string'`.
 
 ### read_file
 
-Reads a file from the workspace.
+Reads a file from the workspace, optionally a line range.
 
 ```typescript
 {
-  name: 'read_file',
-  description: 'Read the contents of a file',
-  parameters: {
-    type: 'object',
-    properties: {
-      path: {
-        type: 'string',
-        description: 'Relative path to the file'
-      }
-    },
-    required: ['path']
+  type: 'function',
+  function: {
+    name: 'read_file',
+    description: 'Read the contents of a file in the workspace. Use this to examine source code, configuration files, or any text file.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'The relative path to the file from the workspace root'
+        },
+        startLine: { type: 'string' },  // optional, 1-indexed
+        endLine: { type: 'string' }     // optional, 1-indexed
+      },
+      required: ['path']
+    }
   }
 }
 ```
 
 ### write_file
 
-Creates or overwrites a file.
+Creates or overwrites a file (exported as `createFileTool`). The executor only
+returns an acknowledgment string — the orchestrator runs the approval flow and
+calls the `createFile` capability to perform the write.
 
 ```typescript
 {
-  name: 'write_file',
-  description: 'Write content to a file',
-  parameters: {
-    type: 'object',
-    properties: {
-      path: { type: 'string' },
-      content: { type: 'string' }
-    },
-    required: ['path', 'content']
+  type: 'function',
+  function: {
+    name: 'write_file',
+    description: 'Write a file with the given content. Creates the file if it does not exist; overwrites it entirely if it does.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string' },
+        content: { type: 'string' },
+        language: { type: 'string' },     // optional, diff-preview hint
+        description: { type: 'string' }    // optional
+      },
+      required: ['path', 'content']
+    }
   }
 }
 ```
 
 ### find_files
 
-Searches for files by pattern.
+Searches for files by name pattern (not contents — use `grep` for contents).
 
 ```typescript
 {
-  name: 'find_files',
-  description: 'Search for files matching a pattern',
-  parameters: {
-    type: 'object',
-    properties: {
-      pattern: { type: 'string' },
-      maxResults: { type: 'number' }
-    },
-    required: ['pattern']
+  type: 'function',
+  function: {
+    name: 'find_files',
+    description: 'Find files in the workspace by name pattern.',
+    parameters: {
+      type: 'object',
+      properties: {
+        pattern: { type: 'string' },
+        maxResults: { type: 'string' }  // default: 20
+      },
+      required: ['pattern']
+    }
   }
 }
 ```
 
 ### list_directory
 
-Lists files in a directory.
+Lists files and directories in a path.
 
 ```typescript
 {
-  name: 'list_directory',
-  description: 'List files in a directory',
-  parameters: {
-    type: 'object',
-    properties: {
-      path: { type: 'string' }
-    },
-    required: ['path']
+  type: 'function',
+  function: {
+    name: 'list_directory',
+    description: 'List files and directories in a given path.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string' },        // default: workspace root
+        recursive: { type: 'string' }    // "true" lists up to 3 levels deep
+      },
+      required: []
+    }
   }
 }
 ```
@@ -145,16 +182,16 @@ Lists files in a directory.
               │                               │
               ▼                               ▼
     ┌───────────────────┐          ┌───────────────────┐
-    │ Has tool_use?     │          │ Content only      │
+    │ Has tool_calls?   │          │ Content only      │
     │ (finish_reason:   │          │ (finish_reason:   │
-    │  tool_use)        │          │  stop)            │
+    │  tool_calls)      │          │  stop)            │
     └─────────┬─────────┘          └─────────┬─────────┘
               │                               │
               ▼                               ▼
     ┌───────────────────┐          ┌───────────────────┐
     │ Execute each tool │          │ Display content   │
-    │ in parallel or    │          │ END               │
-    │ sequence          │          └───────────────────┘
+    │ sequentially      │          │ END               │
+    │ (for-loop, await) │          └───────────────────┘
     └─────────┬─────────┘
               │
               ▼
@@ -179,54 +216,62 @@ Lists files in a directory.
 
 ### Code Implementation
 
+The tool loop lives on `RequestOrchestrator` (in `src/providers/requestOrchestrator.ts`),
+not `ChatProvider`. Streaming-tool-calls models (V4) use
+`runStreamingToolCallsLoop`; the older non-streaming probe path is `runToolLoop`.
+The iteration cap is read from the `moby.maxToolCalls` setting (default `25`;
+`>= 100` means unlimited).
+
 ```typescript
-// ChatProvider.runToolLoop()
-async runToolLoop(
-  messages: Message[],
-  maxIterations: number
-): Promise<void> {
-  let iteration = 0;
+// RequestOrchestrator.runStreamingToolCallsLoop() (simplified)
+const configuredLimit = config.get<number>('maxToolCalls') ?? 25;
+const maxIterations = configuredLimit >= 100 ? Infinity : configuredLimit;
+let iterations = 0;
 
-  while (iteration < maxIterations) {
-    // Call API with tools
-    const response = await this.deepSeekClient.chat({
-      messages,
-      tools: this.getToolDefinitions(),
-      stream: true
+while (iterations < maxIterations) {
+  iterations++;
+
+  // Stream the API call with the composed tools array.
+  const response = await this.deepSeekClient.streamChat(
+    currentMessages, onToken, systemPrompt, onReasoning, { tools, signal }
+  );
+
+  const toolCalls = response.tool_calls ?? [];
+
+  // Terminal turn — final answer. finish_reason is 'stop' (or no tool calls).
+  if (response.finish_reason !== 'tool_calls' || toolCalls.length === 0) {
+    break;
+  }
+
+  // Append the assistant turn carrying the tool calls.
+  currentMessages.push({
+    role: 'assistant',
+    content: response.content || '',
+    tool_calls: toolCalls,
+  });
+
+  // Dispatch each tool sequentially — one tool message per call,
+  // keyed by tool_call_id.
+  for (const toolCall of toolCalls) {
+    const dispatch = await this.dispatchToolCall(toolCall, signal);
+    currentMessages.push({
+      role: 'tool',
+      content: dispatch.result,
+      tool_call_id: toolCall.id,
     });
-
-    // Process streaming response
-    const result = await this.processStreamResponse(response);
-
-    // Check for tool calls
-    if (result.finishReason === 'tool_use' && result.toolCalls) {
-      // Execute tools
-      const toolResults = await this.executeTools(result.toolCalls);
-
-      // Append results to conversation
-      messages.push({
-        role: 'assistant',
-        content: result.content,
-        tool_calls: result.toolCalls
-      });
-
-      messages.push({
-        role: 'tool',
-        tool_results: toolResults
-      });
-
-      iteration++;
-    } else {
-      // No more tools, we're done
-      break;
-    }
   }
 }
 ```
 
-## Shell Command Execution (Reasoner)
+## Shell Command Execution
 
-The R1 Reasoner model uses `<shell>` tags instead of native tools.
+The R1 Reasoner model (`deepseek-reasoner`, `shellProtocol: 'xml-shell'`) can't
+use native tool calling, so it emits `<shell>` tags that the extension parses
+and executes. Native-tool models (the V4 family, `shellProtocol: 'native-tool'`)
+reach the **same** execution pipeline (`executeShellCommands` in
+`reasonerShellExecutor.ts`) through the `run_shell` tool. The default model is
+`deepseek-v4-pro-thinking`, so the native-tool path is the common one; the
+`<shell>` syntax below is R1-specific.
 
 ### Detection Pattern
 
@@ -239,20 +284,24 @@ npm run test
 
 ### Parsing
 
-```typescript
-// ChatProvider.parseShellCommands()
-parseShellCommands(content: string): ShellCommand[] {
-  const shellMatch = content.match(/<shell>([\s\S]*?)<\/shell>/);
-  if (!shellMatch) return [];
+`parseShellCommands` is a module-level export in `reasonerShellExecutor.ts`. It
+matches **all** `<shell>` blocks via a global regex and keeps each block's whole
+trimmed body as one command — it does not split on newlines into separate
+commands. Each result is `{ command, index }` (the index is the match position
+in the response); there is no `cwd` field on `ShellCommand`.
 
-  const commands = shellMatch[1]
-    .split('\n')
-    .map(line => line.trim())
-    .filter(line => line.length > 0)
-    .map(cmd => ({
-      command: cmd,
-      cwd: this.getWorkspaceRoot()
-    }));
+```typescript
+export function parseShellCommands(content: string): ShellCommand[] {
+  const commands: ShellCommand[] = [];
+  const shellRegex = /<shell>([\s\S]*?)<\/shell>/gi;
+
+  let match;
+  while ((match = shellRegex.exec(content)) !== null) {
+    const command = match[1].trim();
+    if (command) {
+      commands.push({ command, index: match.index });
+    }
+  }
 
   return commands;
 }
@@ -269,93 +318,125 @@ parseShellCommands(content: string): ShellCommand[] {
            │
            ▼
     ┌──────────────────┐
-    │ Check blocklist  │
-    │ (rm -rf, sudo,   │
-    │  format, etc.)   │
-    └────────┬─────────┘
-             │
-    ┌────────┴────────┐
-    │ Blocked?        │
-    ▼                 ▼
-   Yes               No
-    │                 │
-    ▼                 │
-┌─────────┐          │
-│ Check   │          │
-│ "Wild   │          │
-│ Side"   │          │
-│ enabled │          │
-└────┬────┘          │
-     │               │
- ┌───┴───┐           │
- │       │           │
-Yes      No          │
- │       │           │
- │       ▼           │
- │  ┌─────────┐      │
- │  │ REJECT  │      │
- │  │ command │      │
- │  └─────────┘      │
- │                   │
- └───────────────────┤
-                     ▼
-              ┌──────────────┐
-              │ EXECUTE      │
+    │ allowAllShell-   │  yes
+    │ Commands set?    ├────────────┐
+    └────────┬─────────┘            │
+             │ no                   │
+             ▼                      │
+    ┌──────────────────┐            │
+    │ CommandApproval- │            │
+    │ Manager rule:    │            │
+    │ allowed/blocked/ │            │
+    │ ask              │            │
+    └────────┬─────────┘            │
+     ┌───────┼────────┐             │
+  blocked   ask     allowed         │
+     │       │         │            │
+     ▼       ▼         │            │
+┌─────────┐ Prompt     │            │
+│ REJECT  │ user ──────┤            │
+│ command │ (deny→     │            │
+└─────────┘  reject)   │            │
+                       ▼            │
+            ┌──────────────────┐    │
+            │ validateCommand: │    │
+            │ user-approved    │    │
+            │ bypasses         │    │
+            │ BLOCKED_PATTERNS │    │
+            └────────┬─────────┘    │
+                     ▼              │
+              ┌──────────────┐      │
+              │ EXECUTE      │◄─────┘
               │ command      │
               └──────────────┘
 ```
 
+Approval is governed by `CommandApprovalManager` rules — each command matches a
+`CommandRule` (`type: 'allowed' | 'blocked'`, `source: 'default' | 'user'`)
+yielding a decision of `allowed`, `blocked`, or `ask`. The executor's
+`BLOCKED_PATTERNS` are a separate last-resort safety net for catastrophic
+operations; commands the user already approved (`approvalStatus` of
+`'user-allowed'` or `'auto'`) bypass them. The `moby.allowAllShellCommands`
+setting skips validation entirely.
+
 ### Blocklist
 
+`validateCommand` checks the command against `BLOCKED_PATTERNS` — an array of
+**regexes** (not lowercased substring matches) covering only catastrophic
+operations. User-approved commands and `allowAllShellCommands` skip the check.
+
 ```typescript
-const DANGEROUS_COMMANDS = [
-  'rm -rf',
-  'sudo',
-  'mkfs',
-  'dd if=',
-  'format',
-  ':(){:|:&};:',  // fork bomb
-  'chmod -R 777',
-  '> /dev/sda',
-  'mv /* ',
+const BLOCKED_PATTERNS: RegExp[] = [
+  /\brm\s+(-[rf]+\s+)+[\/~](?:\s|$|\/?\*?\s*$)/i,  // rm -rf of bare / or ~
+  /\bsudo\s/i,
+  /\bsu\s+-/i,             // su with login shell
+  /\bshutdown\b/i,
+  /\breboot\b/i,
+  /\bpoweroff\b/i,
+  /\bdd\s+.*of=\/dev\//i,  // dd writing to devices
+  /\bmkfs\b/i,             // formatting filesystems
 ];
 
-function isCommandSafe(cmd: string): boolean {
-  const lower = cmd.toLowerCase();
-  return !DANGEROUS_COMMANDS.some(dangerous =>
-    lower.includes(dangerous)
-  );
+export function validateCommand(
+  command: string,
+  allowAll: boolean = false,
+  approvalStatus?: ShellCommand['approvalStatus']
+): { valid: boolean; reason?: string } {
+  if (allowAll) return { valid: true };
+  if (approvalStatus === 'user-allowed' || approvalStatus === 'auto') {
+    return { valid: true };
+  }
+  for (const pattern of BLOCKED_PATTERNS) {
+    if (pattern.test(command)) {
+      return { valid: false, reason: 'Blocked: Potentially dangerous operation' };
+    }
+  }
+  return { valid: true };
 }
 ```
 
+> A separate `LONG_RUNNING_PATTERNS` list (servers, watch modes, REPLs) is also
+> checked — those commands are not executed; a result tells the model to ask the
+> user to run them manually.
+
 ### Execution
 
+`executeShellCommand` spawns the whole command string with `shell: true`
+(`resolveShell()` returns `true` on Unix → `/bin/sh`, or a resolved Git Bash
+path on Windows). `cwd` is the workspace root, not a per-command field. The
+default timeout is **10 seconds**, enforced manually via `setTimeout` that sends
+`SIGTERM` then `SIGKILL`.
+
 ```typescript
-// Execute shell command
-async executeShellCommand(cmd: ShellCommand): Promise<ShellResult> {
+export async function executeShellCommand(
+  command: string,
+  workspacePath: string,
+  options: { timeout?: number; signal?: AbortSignal; /* ... */ } = {}
+): Promise<ShellResult> {
+  const timeout = options.timeout ?? 10000;  // 10s default
+
+  // (validateCommand runs first — see Blocklist above)
+
   return new Promise((resolve) => {
-    const process = spawn('sh', ['-c', cmd.command], {
-      cwd: cmd.cwd,
-      timeout: 30000
+    const child = cp.spawn(command, {
+      cwd: workspacePath,
+      shell: resolveShell(),
+      env: { ...process.env },
     });
 
-    let output = '';
-    let error = '';
+    const timeoutId = setTimeout(() => {
+      child.kill('SIGTERM');
+      setTimeout(() => child.kill('SIGKILL'), 1000);
+      resolve({ command, output: '... (timed out)', success: false, executionTimeMs });
+    }, timeout);
 
-    process.stdout.on('data', (data) => {
-      output += data.toString();
-    });
+    let stdout = '', stderr = '';
+    child.stdout?.on('data', (d) => { stdout += d.toString(); });
+    child.stderr?.on('data', (d) => { stderr += d.toString(); });
 
-    process.stderr.on('data', (data) => {
-      error += data.toString();
-    });
-
-    process.on('close', (code) => {
-      resolve({
-        success: code === 0,
-        output: output || error,
-        exitCode: code
-      });
+    child.on('close', (code) => {
+      clearTimeout(timeoutId);
+      resolve({ command, output: stdout + stderr, success: code === 0, executionTimeMs });
     });
   });
 }
@@ -377,78 +458,39 @@ async executeShellCommand(cmd: ShellCommand): Promise<ShellResult> {
 └─────────────┴─────────────────────────────────────────────────────
 ```
 
-### Diff Creation
+### Diff Lifecycle
+
+The diff lifecycle lives in `DiffManager` (`src/providers/diffManager.ts`),
+extracted out of `ChatProvider`. It keeps active diffs in an
+`activeDiffs: Map<string, DiffMetadata>` and applies edits via
+`vscode.workspace.applyEdit`. `DiffMetadata` tracks `vscode.Uri` references for
+the proposed vs original content rather than raw content strings:
 
 ```typescript
-// ChatProvider.createDiff()
-async createDiff(
-  filePath: string,
-  newContent: string
-): Promise<DiffMetadata> {
-  const uri = vscode.Uri.file(filePath);
-  const diffId = `diff-${Date.now()}`;
-
-  // Get current content (if file exists)
-  let originalContent = '';
-  try {
-    const doc = await vscode.workspace.openTextDocument(uri);
-    originalContent = doc.getText();
-  } catch {
-    // New file
-  }
-
-  // Store diff metadata
-  const metadata: DiffMetadata = {
-    diffId,
-    filePath,
-    originalContent,
-    newContent,
-    status: 'pending',
-    timestamp: Date.now()
-  };
-
-  this.activeDiffs.set(diffId, metadata);
-
-  // Notify webview
-  this.notifyDiffListChanged();
-
-  return metadata;
+interface DiffMetadata {
+  proposedUri: vscode.Uri;
+  originalUri: vscode.Uri;
+  targetFilePath: string;
+  code: string;
+  language: string;
+  timestamp: number;
+  iteration: number;
+  diffId: string;
+  superseded?: boolean;
+  action?: 'created' | 'modified' | 'deleted';
 }
 ```
 
-### Diff Application
+`DiffManager` emits events (`onDiffListChanged`, `onCodeApplied`, etc.) that
+`ChatProvider` forwards to the webview. The serializable form sent to the
+webview is `DiffInfo`, which carries a `status` of
+`'pending' | 'applied' | 'rejected' | 'deleted' | 'expired'`.
 
-```typescript
-// ChatProvider.applyDiff()
-async applyDiff(diffId: string): Promise<void> {
-  const diff = this.activeDiffs.get(diffId);
-  if (!diff) return;
-
-  const uri = vscode.Uri.file(diff.filePath);
-
-  // Create or update file
-  const edit = new vscode.WorkspaceEdit();
-
-  try {
-    const doc = await vscode.workspace.openTextDocument(uri);
-    const fullRange = new vscode.Range(
-      doc.positionAt(0),
-      doc.positionAt(doc.getText().length)
-    );
-    edit.replace(uri, fullRange, diff.newContent);
-  } catch {
-    // New file
-    edit.createFile(uri, { overwrite: true });
-    edit.insert(uri, new vscode.Position(0, 0), diff.newContent);
-  }
-
-  await vscode.workspace.applyEdit(edit);
-
-  // Update status
-  diff.status = 'applied';
-  this.notifyDiffListChanged();
-}
-```
+Actual file writes for the `write_file` / `delete_file` / `delete_directory`
+tools go through the **capabilities layer** (`src/capabilities/files.ts`), thin
+wrappers over `vscode.workspace.fs` that resolve workspace-relative paths,
+enforce the workspace boundary, and (for `createFile`) `createDirectory` the
+parent before `writeFile`.
 
 ## Tool Result Display
 
@@ -517,119 +559,125 @@ async applyDiff(diffId: string): Promise<void> {
 
 ### Tool Execution Errors
 
+Tool dispatch is the module-level `executeToolCall(toolCall)` in
+`workspaceTools.ts`. It JSON-parses `toolCall.function.arguments`, switches on
+`toolCall.function.name`, and returns a **plain string** (not a `{ success,
+error }` object). Failures are returned as strings prefixed with `Error:` —
+callers (e.g. the orchestrator) treat a leading `Error:` as a failed tool.
+
 ```typescript
-async executeTool(tool: ToolCall): Promise<ToolResult> {
+export async function executeToolCall(toolCall: ToolCall): Promise<string> {
+  let args: Record<string, string>;
   try {
-    switch (tool.name) {
+    args = JSON.parse(toolCall.function.arguments);
+  } catch (e) {
+    return `Error: Invalid arguments - ${e}`;
+  }
+
+  // ... resolve workspace, dispatch LSP tools ...
+
+  try {
+    switch (toolCall.function.name) {
       case 'read_file':
-        return await this.readFile(tool.arguments.path);
-      case 'write_file':
-        return await this.writeFile(
-          tool.arguments.path,
-          tool.arguments.content
-        );
-      // ...
+        return await readFile(workspacePath, args.path, args.startLine, args.endLine);
+      case 'find_files':
+        return await searchFiles(workspacePath, args.pattern, args.maxResults);
+      // write_file/edit_file/delete_*/run_shell return an "Acknowledged: ..."
+      // string here — the orchestrator performs the actual approval + write.
+      default:
+        return `Error: Unknown function "${toolCall.function.name}"`;
     }
-  } catch (error) {
-    return {
-      success: false,
-      error: `Tool execution failed: ${error.message}`
-    };
+  } catch (error: any) {
+    return `Error executing ${toolCall.function.name}: ${error.message}`;
   }
 }
 ```
 
 ### Shell Command Errors
 
-```typescript
-// Timeout handling
-const process = spawn('sh', ['-c', cmd], {
-  timeout: 30000  // 30 second timeout
-});
+The timeout is enforced manually (Node's `spawn` `timeout` option is not used);
+on the `error` event the promise resolves with a failure `ShellResult` whose
+`output` is `Error: <message>`.
 
-process.on('error', (error) => {
+```typescript
+const child = cp.spawn(command, { cwd: workspacePath, shell: resolveShell(), env });
+
+// Manual 10s timeout (default) — SIGTERM then SIGKILL.
+const timeoutId = setTimeout(() => {
+  child.kill('SIGTERM');
+  setTimeout(() => child.kill('SIGKILL'), 1000);
+}, options.timeout ?? 10000);
+
+child.on('error', (error) => {
+  clearTimeout(timeoutId);
   resolve({
+    command,
+    output: `Error: ${error.message}`,
     success: false,
-    output: `Failed to execute: ${error.message}`,
-    exitCode: -1
+    executionTimeMs
   });
 });
 ```
 
-### File Permission Errors
+### File Creation
+
+File writes go through the `createFile` capability (`src/capabilities/files.ts`),
+which uses `vscode.workspace.fs` and `createDirectory`s the parent before
+writing. There is no recursive `writeFile`/`ensureDirectory` with `EACCES` /
+`ENOENT` branching — errors surface as a structured `CapabilityResult` with
+`status: 'failure'`.
 
 ```typescript
-async writeFile(path: string, content: string) {
+export async function createFile(
+  relativePath: string,
+  content: string
+): Promise<CapabilityResult> {
+  // ... resolve + workspace-boundary check ...
   try {
-    await vscode.workspace.fs.writeFile(
-      vscode.Uri.file(path),
-      Buffer.from(content)
-    );
-  } catch (error) {
-    if (error.code === 'EACCES') {
-      throw new Error(`Permission denied: ${path}`);
-    }
-    if (error.code === 'ENOENT') {
-      // Create parent directories
-      await this.ensureDirectory(dirname(path));
-      await this.writeFile(path, content);
-    }
-    throw error;
+    const parentDir = vscode.Uri.file(path.dirname(absolutePath));
+    await vscode.workspace.fs.createDirectory(parentDir);
+    await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(content));
+    return { status: 'success', filesAffected: [/* ... */] };
+  } catch (error: any) {
+    return { status: 'failure', error: `Failed to write ${relativePath}: ${error.message}`, filesAffected: [] };
   }
 }
 ```
 
 ## Performance Considerations
 
-### Parallel Tool Execution
+### Sequential Tool Execution
+
+Tool calls within an iteration are dispatched **strictly sequentially** — a
+`for` loop awaits each `dispatchToolCall` before starting the next. There is no
+parallel `Promise.all` execution of tools.
 
 ```typescript
-// Execute independent tools in parallel
-const results = await Promise.all(
-  toolCalls.map(tool => this.executeTool(tool))
-);
-```
-
-### File Content Caching
-
-```typescript
-// Cache recently read files
-private fileCache = new Map<string, { content: string; timestamp: number }>();
-
-async readFile(path: string): Promise<string> {
-  const cached = this.fileCache.get(path);
-  const now = Date.now();
-
-  // Cache valid for 5 seconds
-  if (cached && (now - cached.timestamp) < 5000) {
-    return cached.content;
-  }
-
-  const content = await vscode.workspace.fs.readFile(
-    vscode.Uri.file(path)
-  );
-  const text = content.toString();
-
-  this.fileCache.set(path, { content: text, timestamp: now });
-  return text;
+for (const toolCall of toolCalls) {
+  const dispatch = await this.dispatchToolCall(toolCall, signal);
+  currentMessages.push({ role: 'tool', content: dispatch.result, tool_call_id: toolCall.id });
 }
 ```
 
+### File Reads
+
+`read_file` reads from disk on **every** call via Node's `fs.readFileSync` —
+there is no content cache or TTL. The result is a formatted, line-numbered
+string with a header (`File: <path> (lines X-Y of N)`).
+
 ### Large File Handling
 
+`read_file` rejects files larger than 500KB with an error string that nudges the
+model to read a portion via `startLine`/`endLine`, rather than returning a
+placeholder.
+
 ```typescript
-const MAX_FILE_SIZE = 1024 * 1024; // 1MB
+const stats = fs.statSync(fullPath);
 
-async readFile(path: string): Promise<string> {
-  const stat = await vscode.workspace.fs.stat(
-    vscode.Uri.file(path)
-  );
-
-  if (stat.size > MAX_FILE_SIZE) {
-    return `[File too large: ${(stat.size / 1024).toFixed(1)}KB]`;
-  }
-
-  // Read file normally
+// Limit to 500KB
+if (stats.size > 500 * 1024) {
+  return `Error: File is too large (${Math.round(stats.size / 1024)}KB). ` +
+         `Use startLine/endLine to read a portion.`;
 }
 ```
 
@@ -638,17 +686,18 @@ async readFile(path: string): Promise<string> {
 ### Tool Execution Logging
 
 ```typescript
-logger.toolStart(tool.name, tool.arguments);
-const result = await this.executeTool(tool);
-logger.toolEnd(tool.name, result.success);
+logger.toolCall(toolCall.function.name);        // single arg
+const result = await executeToolCall(toolCall);
+logger.toolResult(toolCall.function.name, !result.startsWith('Error:'));
 ```
 
 ### Shell Command Logging
 
 ```typescript
-logger.shellExecute(cmd.command, cmd.cwd);
+logger.shellExecuting(command);  // command only (no cwd)
 // ... execute ...
-logger.shellResult(cmd.command, exitCode, output.substring(0, 200));
+// shellResult takes a boolean `success`, not an exit code.
+logger.shellResult(command, success, output);
 ```
 
 ### Common Issues

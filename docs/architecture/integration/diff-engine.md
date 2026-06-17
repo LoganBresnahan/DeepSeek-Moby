@@ -86,7 +86,7 @@ export function newHelper(): string {
 The regex pattern in `src/utils/diff.ts`:
 
 ```typescript
-const regex = /<{5,9}\s*SEARCH\s*\n([\s\S]*?)(?:\n)?={5,9}\s*AND\s*\n([\s\S]*?)(?:\n)?>{5,9}\s*REPLACE/g;
+const regex = /<{5,9}\s*SEARCH\s*\n([\s\S]*?)(?:\n)?={5,9}\s*\n([\s\S]*?)(?:\n)?>{5,9}\s*REPLACE/g;
 ```
 
 ### Sanitization
@@ -144,9 +144,9 @@ See `DiffEngine.applySearchReplace()` for implementation details.
     │          │                             │
     │          ▼                             │
     │     ┌─────────┐                        │
-    │     │ User    │                        │
-    │     │ prompt  │                        │
-    │     │ Accept? │                        │
+    │     │ Inline  │                        │
+    │     │ Accept /│                        │
+    │     │ Reject  │                        │
     │     └────┬────┘                        │
     │     ┌────┴────┐                        │
     │     │         │                        │
@@ -181,8 +181,8 @@ See `DiffEngine.applySearchReplace()` for implementation details.
 │          │  • Files can be reviewed before any changes                     │
 ├──────────┼─────────────────────────────────────────────────────────────────┤
 │          │  • Creates diff                                                 │
-│   ASK    │  • Shows VS Code dialog: "Apply changes to X?"                  │
-│    Q     │  • User responds Yes/No in dialog                               │
+│   ASK    │  • Auto-opens the diff editor (no native dialog)                │
+│    Q     │  • Accept/Reject via the inline webview buttons                 │
 │          │  • Good balance of safety and speed                             │
 │          │  • Interrupts workflow with each file                           │
 ├──────────┼─────────────────────────────────────────────────────────────────┤
@@ -213,11 +213,11 @@ See `DiffEngine.applySearchReplace()` for implementation details.
               │                  │                  │
               ▼                  ▼                  ▼
     ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
-    │ PendingChanges  │ │ MessageShadow   │ │ ChatProvider    │
-    │ ShadowActor     │ │ Actor           │ │ (extension)     │
-    │ subscribes      │ │ subscribes      │ │ delegates to    │
-    └─────────────────┘ └─────────────────┘ │ DiffManager     │
-                                            │ .setEditMode()  │
+    │ EditModeActor   │ │ VirtualList     │ │ ChatProvider    │
+    │ .setMode()      │ │ Actor           │ │ (extension)     │
+    │ publishes       │ │ .setEditMode()  │ │ delegates to    │
+    │ 'edit.mode'     │ │ (per-turn rows) │ │ DiffManager     │
+    └─────────────────┘ └─────────────────┘ │ .setEditMode()  │
                                             └─────────────────┘
 ```
 
@@ -251,42 +251,49 @@ See `DiffEngine.applySearchReplace()` for implementation details.
                          │
                          ▼
                 ┌───────────────────┐
-                │ createDiff(path,  │
-                │            content)│
+                │ showDiff(code,    │
+                │          language)│
                 └───────────────────┘
 ```
 
 ### Phase 2: Diff Creation
 
 ```typescript
-// DiffManager.createDiff()
-async createDiff(filePath: string, newContent: string): Promise<DiffMetadata> {
-  const diffId = `diff-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+// DiffManager.showDiff() — the diff-creation entry point.
+// `code` is the raw edit body, prefixed with a "# File: <path>" header;
+// `language` is the syntax hint for the diff editor.
+async showDiff(code: string, language: string): Promise<void> {
+  // Resolve the target file from the "# File:" header (absolute or
+  // workspace-relative), creating it on disk if it doesn't exist yet.
+  const targetPath = /* resolved from header or active editor */;
 
-  // Read original content (if file exists)
-  let originalContent = '';
-  try {
-    const uri = vscode.Uri.joinPath(this.workspaceRoot, filePath);
-    const doc = await vscode.workspace.openTextDocument(uri);
-    originalContent = doc.getText();
-  } catch {
-    // New file - no original content
-  }
+  // Per-file iteration counter (used in the diffId and the tab title).
+  const iteration = (this.fileEditCounts.get(targetPath) || 0) + 1;
+  this.fileEditCounts.set(targetPath, iteration);
+  const diffId = `${targetPath}-${Date.now()}-${iteration}`;
+
+  // Compute the proposed content by applying the search/replace blocks
+  // to the file's current text, then expose both sides via a virtual
+  // `deepseek-diff:` content provider for VS Code's diff editor.
+  const originalContent = document.getText();
+  const proposedContent = this.diffEngine.applyChanges(originalContent, cleanCode).content;
 
   const metadata: DiffMetadata = {
-    diffId,
-    filePath,
-    originalContent,
-    newContent,
-    status: 'pending',
-    timestamp: Date.now(),
-    iteration: this.currentIteration
+    proposedUri, originalUri, targetFilePath: targetPath,
+    code, language, timestamp: Date.now(), iteration, diffId,
+    superseded: false, action: isCreate ? 'created' : 'modified'
   };
 
-  this._activeDiffs.set(diffId, metadata);
-  return metadata;
+  // Keyed by the proposed URI string, NOT by diffId.
+  this.activeDiffs.set(proposedUri.toString(), metadata);
+  this.notifyDiffListChanged();
 }
 ```
+
+> Note: there is no `status` field on `DiffMetadata` — pending vs.
+> applied/rejected is tracked separately (see Diff Storage below). The
+> original content is never stored on the metadata; it is recomputed live
+> from disk whenever a diff is shown or accepted.
 
 ### Phase 3: Mode-Specific Handling
 
@@ -311,9 +318,9 @@ async createDiff(filePath: string, newContent: string): Promise<DiffMetadata> {
          │                  │                  │
          ▼                  ▼                  ▼
     ┌─────────────┐   ┌─────────────┐   ┌─────────────┐
-    │ Store diff  │   │ Store diff  │   │ Apply now   │
-    │ status:     │   │ Show dialog:│   │ status:     │
-    │ 'pending'   │   │ "Apply X?"  │   │ 'applied'   │
+    │ Store diff  │   │ Open diff + │   │ Apply now   │
+    │ status:     │   │ register    │   │ + record    │
+    │ 'pending'   │   │ approval    │   │ resolved    │
     └──────┬──────┘   └──────┬──────┘   └──────┬──────┘
            │                 │                 │
            ▼                 │                 │
@@ -333,8 +340,8 @@ async createDiff(filePath: string, newContent: string): Promise<DiffMetadata> {
                              │
                              ▼
                     ┌─────────────────┐
-                    │ notifyDiffList  │
-                    │ Changed()       │
+                    │ notifyDiff      │
+                    │ Resolved()      │
                     └─────────────────┘
 ```
 
@@ -345,15 +352,15 @@ async createDiff(filePath: string, newContent: string): Promise<DiffMetadata> {
 │                      User Decision Flow (Manual)                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 
-    Webview: PendingChangesShadowActor
+    Webview: MessageTurnActor (per-turn pending rows)
     ┌─────────────────────────────────────────────────────────────┐
     │  📁 Pending Changes (2)                                     │
     │  ┌─────────────────────────────────────────────────────────┐│
     │  │  src/utils/helper.ts              [Accept] [Reject]     ││
     │  │  Status: pending • Iteration #3                         ││
     │  ├─────────────────────────────────────────────────────────┤│
-    │  │  src/index.ts (superseded)        [View] [Dismiss]      ││
-    │  │  Status: pending • Iteration #1 • Newer version exists  ││
+    │  │  src/index.ts (superseded)        (no buttons)          ││
+    │  │  data-superseded="true" • Iteration #1 (dimmed row)     ││
     │  └─────────────────────────────────────────────────────────┘│
     └─────────────────────────────────────────────────────────────┘
                              │
@@ -363,7 +370,8 @@ async createDiff(filePath: string, newContent: string): Promise<DiffMetadata> {
     ┌─────────────────────────────────────────────────────────────┐
     │  vscode.postMessage({                                       │
     │    type: 'acceptSpecificDiff',                              │
-    │    diffId: 'diff-1234...'                                   │
+    │    diffId: 'src/utils/helper.ts-1700000000000-3',           │
+    │    filePath: 'src/utils/helper.ts'                          │
     │  })                                                         │
     └─────────────────────────────────────────────────────────────┘
                              │
@@ -378,12 +386,12 @@ async createDiff(filePath: string, newContent: string): Promise<DiffMetadata> {
                              │
                              ▼
     ┌─────────────────────────────────────────────────────────────┐
-    │  DiffManager.acceptSpecificDiff(diffId)                      │
-    │  1. Get diff metadata from _activeDiffs                     │
-    │  2. Create WorkspaceEdit                                    │
-    │  3. Apply edit to file                                      │
-    │  4. Update status to 'applied'                              │
-    │  5. Notify webview                                          │
+    │  DiffManager.acceptSpecificDiff(diffId)                     │
+    │  1. Find metadata in activeDiffs by diffId (scan)           │
+    │  2. Re-apply blocks vs current text (DiffEngine)            │
+    │  3. Full-range WorkspaceEdit + document.save()              │
+    │  4. Remove from activeDiffs, push to resolvedDiffs[]        │
+    │  5. notifyDiffResolved() → webview (returns outcome)        │
     └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -392,20 +400,28 @@ async createDiff(filePath: string, newContent: string): Promise<DiffMetadata> {
 ### In-Memory Structure
 
 ```typescript
-// DiffManager maintains active diffs
-private _activeDiffs: Map<string, DiffMetadata> = new Map();
+// DiffManager maintains active (pending) diffs, keyed by proposed URI string.
+private activeDiffs: Map<string, DiffMetadata> = new Map();
 
+// src/providers/types.ts
 interface DiffMetadata {
-  diffId: string;           // Unique identifier
-  filePath: string;         // Relative path in workspace
-  originalContent: string;  // Content before change
-  newContent: string;       // Proposed new content
-  status: 'pending' | 'applied' | 'rejected';
-  timestamp: number;        // When diff was created
-  iteration?: number;       // Tool loop iteration number
-  superseded?: boolean;     // Newer diff exists for same file
+  proposedUri: vscode.Uri;     // Virtual URI for the proposed-content side
+  originalUri: vscode.Uri;     // Virtual URI for the original-content side
+  targetFilePath: string;      // Path of the file being edited
+  code: string;                // Raw edit body (with "# File:" header)
+  language: string;            // Syntax hint for the diff editor
+  timestamp: number;           // When diff was created
+  iteration: number;           // Per-file edit count
+  diffId: string;              // `${targetFilePath}-${timestamp}-${iteration}`
+  superseded?: boolean;        // Newer diff exists for same file
+  action?: 'created' | 'modified' | 'deleted';
 }
 ```
+
+There is no `status` field on the metadata. `activeDiffs` only ever holds
+**pending** entries; once a diff is accepted or rejected it is removed from the
+map (and pushed onto `resolvedDiffs[]`). Status is communicated to the webview
+through a separate message path (see State Synchronization below).
 
 ### State Synchronization
 
@@ -417,23 +433,29 @@ interface DiffMetadata {
     Extension (DiffManager)                     Webview (Actors)
     ═══════════════════════                     ════════════════
 
-    _activeDiffs Map                            PendingChangesShadowActor
+    activeDiffs Map                             MessageTurnActor rows
     ┌──────────────────┐                        ┌──────────────────┐
-    │ diff-001:        │                        │ _files: [        │
+    │ diff-001:        │                        │ pending rows:    │
     │   path: a.ts     │    postMessage:        │   { id: diff-001 │
     │   status: pending│    diffListChanged     │     path: a.ts   │
-    │ diff-002:        │ ─────────────────────▶ │     status: ... }│
+    │ diff-002:        │ ─────────────────────▶ │     status:pend }│
     │   path: b.ts     │    { diffs: [...] }    │   { id: diff-002 │
-    │   status: applied│                        │     path: b.ts   │
-    └──────────────────┘                        │     status: ... }│
+    │   status: pending│                        │     path: b.ts   │
+    └──────────────────┘                        │     status:pend }│
                                                 │ ]                │
                                                 └──────────────────┘
 
-    On any change:
-    - DiffManager fires _onDiffListChanged event
+    On any change to the PENDING set:
+    - DiffManager fires _onDiffListChanged (diffs all have status 'pending')
     - ChatProvider subscribes → postMessage('diffListChanged')
-    - Webview reconciles with local state
-    - UI updates to reflect current state
+    - VirtualMessageGatewayActor reconciles the turn's pending rows
+
+    On accept / reject (status becomes 'applied' / 'rejected'):
+    - The diff is removed from activeDiffs and pushed to resolvedDiffs[]
+    - DiffManager fires _onAutoAppliedFilesChanged via notifyDiffResolved()
+      (auto-applied files also flow through this event)
+    - This is a SEPARATE message path — diffListChanged never carries a
+      non-pending status, and activeDiffs never holds an applied entry
 ```
 
 ## Superseding Logic
@@ -485,9 +507,8 @@ When the AI modifies the same file multiple times:
     │  src/index.ts                    [Accept] [Reject]  │
     │  Status: pending • Iteration #3                     │
     ├─────────────────────────────────────────────────────┤
-    │  src/index.ts (superseded)       [View] [Dismiss]   │
-    │  Status: pending • Iteration #1                     │
-    │  ⚠️ A newer version of this file exists            │
+    │  src/index.ts (superseded)       (no buttons)       │
+    │  Iteration #1 • data-superseded="true" (dimmed)     │
     └─────────────────────────────────────────────────────┘
 ```
 
@@ -498,23 +519,21 @@ When the AI modifies the same file multiple times:
 When user clicks on a pending file:
 
 ```typescript
-// DiffManager: Open VS Code's diff editor
-async focusSpecificDiff(diffId: string) {
-  const diff = this._activeDiffs.get(diffId);
-  if (!diff) return;
+// DiffManager: Re-open VS Code's diff editor for an existing diff.
+async focusSpecificDiff(diffId: string): Promise<void> {
+  // Linear scan over activeDiffs (keyed by URI, not diffId).
+  const metadata = Array.from(this.activeDiffs.values())
+    .find(m => m.diffId === diffId);
+  if (!metadata) return;
 
-  // Create URIs for diff view
-  const originalUri = vscode.Uri.parse(`diff-original:${diff.filePath}`);
-  const modifiedUri = vscode.Uri.joinPath(this.workspaceRoot, diff.filePath);
-
-  // Register content provider for original content
-  this.diffContentProvider.setContent(originalUri, diff.originalContent);
-
-  // Open diff editor
+  // The original/proposed virtual URIs (scheme `deepseek-diff:`) were
+  // created and registered when the diff was first shown, so we just
+  // reuse them here — no new content provider is registered.
+  const iterationLabel = metadata.iteration > 1 ? ` (${metadata.iteration})` : '';
   await vscode.commands.executeCommand('vscode.diff',
-    originalUri,
-    modifiedUri,
-    `${diff.filePath} (Original ↔ Modified)`
+    metadata.originalUri,
+    metadata.proposedUri,
+    `${metadata.targetFilePath}${iterationLabel} ↔ With Changes`
   );
 }
 ```
@@ -523,101 +542,94 @@ async focusSpecificDiff(diffId: string) {
 
 ```typescript
 // DiffManager.acceptSpecificDiff()
-async acceptSpecificDiff(diffId: string): Promise<boolean> {
-  const diff = this._activeDiffs.get(diffId);
-  if (!diff || diff.status !== 'pending') return false;
+async acceptSpecificDiff(diffId: string): Promise<DiffResolutionOutcome | null> {
+  // Find the pending metadata by diffId (linear scan).
+  const metadata = Array.from(this.activeDiffs.values())
+    .find(m => m.diffId === diffId);
+  if (!metadata) return null;
 
-  const uri = vscode.Uri.joinPath(this.workspaceRoot, diff.filePath);
+  // Superseded diffs can't be accepted — a newer edit replaced them.
+  if (metadata.superseded) {
+    this._onWarning.fire({ message: 'This version has been superseded by a newer edit.' });
+    return null;
+  }
+
+  // Resolve the file URI (absolute → workspace-relative → create), then
+  // re-apply the search/replace blocks against the file's CURRENT content
+  // (there is no stored `newContent` — it is recomputed live).
+  const document = await vscode.workspace.openTextDocument(fileUri);
+  const currentContent = document.getText();
+  const cleanCode = metadata.code.replace(/^#\s*File:.*\n/i, '');
+  const result = this.diffEngine.applyChanges(currentContent, cleanCode);
+
+  // Single full-range replace, then save.
   const edit = new vscode.WorkspaceEdit();
+  const fullRange = new vscode.Range(
+    document.positionAt(0),
+    document.positionAt(currentContent.length)
+  );
+  edit.replace(fileUri, fullRange, result.content);
+  await vscode.workspace.applyEdit(edit);
+  await document.save();
 
-  try {
-    // Check if file exists
-    const stat = await vscode.workspace.fs.stat(uri);
+  // Record the outcome and remove the diff from the active map.
+  // Status is pushed to the webview via notifyDiffResolved (NOT a
+  // `status='applied'` entry on diffListChanged).
+  this.resolvedDiffs.push({ /* filePath, status: 'applied', diffId, ... */ });
+  await this.closeSingleDiff(metadata);
+  this.notifyDiffResolved(metadata.targetFilePath, metadata.diffId, 'applied',
+    metadata.iteration, metadata.action);
 
-    // File exists - replace content
-    const doc = await vscode.workspace.openTextDocument(uri);
-    const fullRange = new vscode.Range(
-      doc.positionAt(0),
-      doc.positionAt(doc.getText().length)
-    );
-    edit.replace(uri, fullRange, diff.newContent);
-
-  } catch {
-    // File doesn't exist - create it
-    edit.createFile(uri, { overwrite: false });
-    edit.insert(uri, new vscode.Position(0, 0), diff.newContent);
-  }
-
-  // Apply the edit
-  const success = await vscode.workspace.applyEdit(edit);
-
-  if (success) {
-    diff.status = 'applied';
-    this._onDiffListChanged.fire({ diffs: this.getAllDiffs(), editMode: this._editMode });
-  }
-
-  return success;
+  return { filePath: metadata.targetFilePath, status: 'applied' };
 }
 ```
 
 ## Webview UI Components
 
-### PendingChangesShadowActor
+Pending changes are **not** a standalone shadow-DOM panel. They are rendered
+per conversation turn inside `MessageTurnActor` (the actor that owns one
+assistant turn), and they are driven by the `diffListChanged` / `pendingFileUpdate`
+messages handled in `VirtualMessageGatewayActor`. The edit mode itself lives in
+`EditModeActor` (which extends `EventStateActor`).
+
+### Pending rows in MessageTurnActor
 
 ```
-DOM Structure:
+DOM Structure (inside a turn's container):
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│ div[data-actor="pending"]                                                   │
-│   └── #shadow-root                                                          │
-│         ├── <style>...</style>                                              │
-│         └── <div class="pending-changes">                                   │
-│               ├── <div class="pending-header">                              │
-│               │     ├── <span class="icon">📁</span>                        │
-│               │     ├── <span>Pending Changes (2)</span>                    │
-│               │     └── <button class="collapse-btn">▼</button>             │
-│               │                                                             │
-│               └── <div class="pending-list">                                │
-│                     ├── <div class="pending-file" data-id="diff-001">       │
-│                     │     ├── <span class="file-path">src/index.ts</span>   │
-│                     │     ├── <span class="status">pending</span>           │
-│                     │     └── <div class="actions">                         │
-│                     │           ├── <button class="accept">Accept</button>  │
-│                     │           └── <button class="reject">Reject</button>  │
-│                     │                                                       │
-│                     └── <div class="pending-file superseded">               │
-│                           └── ...                                           │
+│ <div class="pending-changes">                                               │
+│   ├── header: "Pending Changes"  (or "Modified Files" in auto mode)         │
+│   │                                                                         │
+│   └── <div class="pending-item" data-status="pending" data-action="..">     │
+│         ├── <span class="pending-file" data-file-path="index.ts">…</span>   │
+│         ├── <button class="pending-btn accept-btn"                          │
+│         │           data-file-id="…" data-diff-id="…">Accept</button>       │
+│         └── <button class="pending-btn reject-btn"                          │
+│                     data-file-id="…" data-diff-id="…">Reject</button>       │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### State Management
+### Message handling
 
 ```typescript
-class PendingChangesShadowActor extends ShadowActor {
-  private _files: PendingFile[] = [];
-  private _editMode: 'manual' | 'ask' | 'auto' = 'manual';
-  private _collapsed = false;
+// VirtualMessageGatewayActor routes diff messages from the extension:
+//   case 'pendingFileUpdate':  → update a single pending row's status
+//   case 'diffListChanged':    → reconcile the turn's pending rows with the
+//                                latest set of pending diffs (status='pending')
+//
+// MessageTurnActor wires the Accept/Reject buttons via event delegation; on
+// click it invokes the host's onPendingFileAction(action, fileId, diffId, filePath)
+// callback, which posts { type: 'acceptSpecificDiff', diffId, filePath } (or
+// 'rejectSpecificDiff') back to the extension.
 
-  // Subscribe to state changes
-  protected subscriptionKeys = ['pending.*', 'toolbar.editMode'];
+// EditModeActor (media/actors/edit-mode/EditModeActor.ts) — extends EventStateActor
+class EditModeActor extends EventStateActor {
+  private _mode: EditMode = 'manual';
+  // publications: { 'edit.mode': () => this._mode }
+  // subscriptions: { 'edit.mode.set': (m) => this.handleModeSet(m) }
 
-  onStateChange(event: StateChangeEvent) {
-    if (event.changedKeys.includes('toolbar.editMode')) {
-      this._editMode = event.state['toolbar.editMode'];
-      this.updateUI();
-    }
-  }
-
-  // Called when diffListChanged message received
-  updateFiles(diffs: DiffInfo[]) {
-    this._files = diffs.map(d => ({
-      id: d.diffId,
-      path: d.filePath,
-      status: d.status,
-      iteration: d.iteration,
-      superseded: d.superseded
-    }));
-    this.render();
-  }
+  setMode(mode: EditMode): void { /* validate, store, publish 'edit.mode' */ }
+  getMode(): EditMode { return this._mode; }
 }
 ```
 
@@ -634,14 +646,15 @@ class PendingChangesShadowActor extends ShadowActor {
     1. AI calls write_file (via RequestOrchestrator)
            │
            ▼
-    2. DiffManager.createDiff()
+    2. DiffManager.showDiff()
            │ fires _onDiffListChanged event
            ▼
     3. ChatProvider subscribes → postMessage ─────▶ 4. diffListChanged
        { type: 'diffListChanged',                      │
          diffs: [...],                                 ▼
-         editMode: 'manual' }                    5. PendingChangesShadow
-                                                    Actor.updateFiles()
+         editMode: 'manual',                     5. VirtualMessageGateway
+         source: 'diff-status' }                    Actor reconciles the
+                                                    turn's pending rows
                                                        │
                                                        ▼
                                                  6. UI renders pending file
@@ -657,13 +670,21 @@ class PendingChangesShadowActor extends ShadowActor {
    10. File written to disk
            │
            ▼
-   11. Update status
+   11. Remove from activeDiffs,
+       push to resolvedDiffs[]
            │
            ▼
-   12. DiffManager fires event
+   12. DiffManager.notifyDiffResolved()
+       fires _onAutoAppliedFilesChanged
        ChatProvider → postMessage ─────────────────▶ 13. UI updates
        { type: 'diffListChanged',                        status to 'applied'
+         source: 'diff-engine',
          diffs: [{...status:'applied'}] }
+
+   Note: the PENDING list (_onDiffListChanged, source: 'diff-status')
+   only ever carries status 'pending'; resolved status arrives on this
+   separate _onAutoAppliedFilesChanged path (same 'diffListChanged'
+   message type, different `source`).
 ```
 
 ## Configuration
@@ -672,11 +693,11 @@ class PendingChangesShadowActor extends ShadowActor {
 
 ```json
 {
-  "deepseek.editMode": {
+  "moby.editMode": {
     "type": "string",
     "enum": ["manual", "ask", "auto"],
     "default": "manual",
-    "description": "How to handle AI-suggested file changes"
+    "description": "How to handle code edits from AI responses"
   }
 }
 ```
@@ -685,20 +706,23 @@ class PendingChangesShadowActor extends ShadowActor {
 
 ```typescript
 // ToolbarShadowActor cycles through modes
-cycleEditMode() {
-  const modes = ['manual', 'ask', 'auto'];
-  const currentIndex = modes.indexOf(this._editMode);
-  const nextIndex = (currentIndex + 1) % modes.length;
-  this._editMode = modes[nextIndex];
+handleEditModeClick() {
+  // Native-tool models (V3 chat, V4 family, native-tool customs) can't use
+  // Manual mode — exclude it from the cycle for them.
+  const supportsManual = this._supportsManualByModel.get(this._currentModel) ?? true;
+  const availableModes = supportsManual
+    ? EDIT_MODES
+    : EDIT_MODES.filter(m => m !== 'manual');
 
-  // Publish to actor system
-  this.publish({ 'toolbar.editMode': this._editMode });
+  const currentIndex = availableModes.indexOf(this._editMode);
+  const nextIndex = (currentIndex + 1) % availableModes.length;
+  const newMode = availableModes[nextIndex];
+  this._editMode = newMode;
 
-  // Notify extension
-  this.vscode.postMessage({
-    type: 'setEditMode',
-    mode: this._editMode
-  });
+  // Notify subscribers + extension
+  this._onEditModeChange?.(newMode);
+  this._vscode?.postMessage({ type: 'setEditMode', mode: newMode });
+  this.publish({ 'toolbar.editMode': newMode });
 }
 ```
 
@@ -719,20 +743,29 @@ Scenario: User edits file while diff is pending
     Meanwhile, AI created diff for same file
     ┌───────────────────────────┐
     │ diff-001: src/index.ts    │
-    │ status: pending           │
-    │ newContent: "function..." │
+    │ (pending, code stored as  │
+    │  SEARCH/REPLACE blocks)   │
     └───────────────────────────┘
 
     User clicks Accept:
     ┌───────────────────────────┐
-    │ CONFLICT DETECTED         │
+    │ Re-apply blocks against   │
+    │ the file's CURRENT text   │
+    │ (last-writer-wins; no     │
+    │  merge editor, no prompt) │
     │                           │
-    │ Options:                  │
-    │ • Overwrite user changes  │
-    │ • Open merge editor       │
-    │ • Cancel                  │
+    │ Only guard: DiffEngine    │
+    │ refuses if SEARCH-to-file │
+    │ similarity < 0.75 (stale) │
     └───────────────────────────┘
 ```
+
+There is no conflict-detection dialog or merge editor in the accept path:
+`acceptSpecificDiff` recomputes the result via `DiffEngine.applyChanges`
+against the file's current content and does a single full-range replace. The
+only staleness protection lives in `DiffEngine.applySearchReplace` — if the
+SEARCH content's similarity to the file drops below `0.75`, the block is marked
+stale and the edit is refused with a "re-read the file" message.
 
 ### Session Boundaries
 
@@ -750,13 +783,14 @@ When user switches session:
 ## Debugging
 
 ```javascript
-// Browser console
-window.actors.pending.getFiles()
-// → [{ id: 'diff-001', path: 'src/index.ts', status: 'pending', ... }]
-
-window.actors.pending.getEditMode()
+// Browser console — the registry exposes editMode, gateway, virtualList, etc.
+// (there is no window.actors.pending)
+window.actors.editMode.getMode()
 // → 'manual'
 
-// Extension debug console (DiffManager)
-this._activeDiffs.forEach((v, k) => console.log(k, v.status, v.filePath))
+window.actors.virtualList   // owns the per-turn MessageTurnActors (pending rows)
+
+// Extension debug console (DiffManager) — field is `activeDiffs` (no leading
+// underscore); DiffMetadata has no `.status`, and the path is `.targetFilePath`.
+this.activeDiffs.forEach((v, k) => console.log(k, v.superseded, v.targetFilePath))
 ```

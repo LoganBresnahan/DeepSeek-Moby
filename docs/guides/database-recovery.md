@@ -50,14 +50,14 @@ Run "Moby: Manage Database Encryption Key" to restore the key, or back up and de
 manually to start fresh.
 ```
 
-The file may contain real conversation history encrypted with a key Moby no longer has. Two paths forward:
+The file may contain real conversation history encrypted with a key Moby no longer has. The error hint points at the **Moby: Manage Database Encryption Key** command, but be aware of an important limitation: that command operates on an *already-open* database (it re-encrypts a working DB via `rekey`). It cannot open or decrypt a file that failed to decrypt, and because activation aborts before commands are registered, the command isn't even available after a failed startup. Recovery therefore hinges entirely on whether Moby still holds the original key:
 
 ```mermaid
 flowchart TD
-    A[Activation fails:<br/>file >4KB, undecryptable] --> B{Do you have<br/>the original key?}
-    B -- "yes (saved a backup)" --> C[Run command:<br/>Moby: Manage Database<br/>Encryption Key]
-    C --> D[Paste backup key]
-    D --> E[Activation succeeds,<br/>history restored]
+    A[Activation fails:<br/>file >4KB, undecryptable] --> B{Is the original key<br/>still present?}
+    B -- "yes (in keyring<br/>or db-key.txt)" --> C[Restore the key so<br/>activation can decrypt]
+    C --> D[Restart VS Code]
+    D --> E[Activation succeeds,<br/>history loads]
     B -- no --> F{Want to<br/>keep history?}
     F -- "no, accept loss" --> G[Manually delete<br/>moby.db]
     G --> H[Restart VS Code]
@@ -67,12 +67,14 @@ flowchart TD
 
 ### Path 1: Restore the encryption key
 
-1. Open Command Palette (`Cmd/Ctrl + Shift + P`).
-2. Run **Moby: Manage Database Encryption Key**.
-3. Paste the original encryption key (if you saved one).
-4. Restart VS Code or re-activate the extension.
+Moby derives the database key from VS Code SecretStorage (the OS keyring, under the secret `deepseek-moby.db-encryption-key`), falling back to a `db-key.txt` file in global storage when SecretStorage is unavailable. The DB only decrypts on the next activation if Moby can read back the *same* key it encrypted with.
 
-If your key was wiped from Keychain and you don't have a backup, this path is closed — there's no way to brute-force a SQLCipher key.
+1. If you exported a copy of the key earlier, put it back where Moby reads it: store it under `deepseek-moby.db-encryption-key` in SecretStorage, or place it in `db-key.txt` in the global-storage folder (paths below).
+2. Restart VS Code so activation re-runs with the restored key.
+
+The **Manage Database Encryption Key** command does *not* have a "paste the old key to decrypt" flow — its options are **Copy Current Key**, **Set Custom Key**, and **Generate New Key**, and the latter two only *re-encrypt a database that is already open*. So they can't rescue a file that won't decrypt, and the command can't run anyway once activation has aborted.
+
+If your key was wiped from the keyring and you don't have a backup, this path is closed — there's no way to brute-force a SQLCipher key.
 
 ### Path 2: Accept data loss, start fresh
 
@@ -113,7 +115,7 @@ A truly empty/garbage file shows zeros or random bytes. A real but undecryptable
 
 ## Preventing this
 
-- **Save your encryption key** when first activating Moby. The "Manage Database Encryption Key" command can export it; store somewhere safe (password manager, 1Password, etc.).
+- **Save your encryption key** when first activating Moby. The "Manage Database Encryption Key" command can copy the current key to your clipboard (**Copy Current Key**); store it somewhere safe (password manager, 1Password, etc.).
 - **Don't manually edit `moby.db`.** Use the extension's commands.
 - **Don't share the file across machines** — encryption key is per-machine by default. Use export/import flows if you need to migrate.
 

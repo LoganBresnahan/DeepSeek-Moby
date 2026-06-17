@@ -3,6 +3,21 @@
 **Status:** Phase 2 shipped (0.3.0) — orientation-only header. Phase 3 (selection chip) dropped: tool surface covers it. Phase 1 (instrumentation), Phase 4 (cleanups) pending.
 **Date:** 2026-05-01
 
+## Implementation status (as of 2026-06-16)
+
+**Partial — Phase 2 shipped as described; Phase 1 instrumentation and all Phase 4 cleanups (plus the summarization-UX fix) are still pending. Phase 3 correctly dropped.** (Repo at 0.4.0.)
+
+Shipped:
+- Phase 2 orientation-only editor header. `getEditorContext` returns exactly `Current File / Full Path / Language / Total Lines` and nothing else ([fileContextManager.ts:371-382](../../src/providers/fileContextManager.ts#L371-L382)). The FULL FILE CONTENT / RELATED FILES blocks, `findRelatedFiles`, the cursor line, and inline selection text are gone from src — only a history comment remains ([fileContextManager.ts:356-369](../../src/providers/fileContextManager.ts#L356-L369)).
+- Phase 3 (selection chip) is genuinely absent, matching the "dropped" decision — no chip/selection-injection plumbing exists.
+
+Not yet / differs:
+- Phase 1 instrumentation: not built. `buildSystemPrompt` ([requestOrchestrator.ts:1146-1244](../../src/providers/requestOrchestrator.ts#L1146-L1244)) emits no per-section token counts, and `ContextBuilder` still logs the old `N/budget | M dropped` line, not the `system=… editor=… relatedFiles=…` breakdown ([contextBuilder.ts:191-195](../../src/context/contextBuilder.ts#L191-L195)).
+- Phase 4 modified-files block: unchanged. `getModifiedFilesContext` still emits the full multi-line boilerplate with no cap and no one-line summary ([diffManager.ts:1457-1483](../../src/providers/diffManager.ts#L1457-L1483)).
+- Phase 4 snapshot `keyFacts`/`filesModified`: still produced and persisted ([SnapshotManager.ts:195-215](../../src/events/SnapshotManager.ts#L195-L215)) but ContextBuilder injects only `summary` ([contextBuilder.ts:171](../../src/context/contextBuilder.ts#L171)) — gap unresolved.
+- Phase 4 dead writes: `recordToolCall` / `recordToolResult` / `recordAssistantReasoning` are still called every turn ([requestOrchestrator.ts:981, 2446-2469](../../src/providers/requestOrchestrator.ts#L2446-L2469)). The `_unused` placeholder param remains on `recordAssistantMessage` ([ConversationManager.ts:507](../../src/events/ConversationManager.ts#L507)), and `contentIterations` is still in active use ([ConversationManager.ts:849-850](../../src/events/ConversationManager.ts#L849-L850)).
+- Summarization UX fix: not done. `drainQueue` drains silently with no per-drain toast ([chatProvider.ts:1171-1182](../../src/providers/chatProvider.ts#L1171-L1182)); the single `Queued — optimizing context...` statusMessage ([chatProvider.ts:513](../../src/providers/chatProvider.ts#L513)) still routes through the generic `status.message` slot ([VirtualMessageGatewayActor.ts:743-744](../../media/actors/message-gateway/VirtualMessageGatewayActor.ts#L743-L744)) — no `Summarizing context` activity badge.
+
 ## Context
 
 A review of what actually lands in the LLM request (system prompt + tools array + conversation messages + snapshots) surfaced a handful of noisy paths that aren't paying their token cost on agentic models. The same review turned up open questions around the snapshot / summarization UX and a few stale event-sourcing artifacts worth mentioning here so they don't get forgotten.

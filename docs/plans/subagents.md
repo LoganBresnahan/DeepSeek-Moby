@@ -3,6 +3,24 @@
 **Status:** Not started — design draft.
 **Date:** 2026-04-29
 
+## Implementation status (as of 2026-06-16)
+
+**Partial — Phase 1 + Phase 1 polish + Phase 1.75 shipped (`web-search-digest` end-to-end). Phases 1.85 and 2–7 not started.**
+
+Shipped:
+- Generic router + role abstraction: `src/subagents/router.ts` (SubagentRouter, per-modelId client cache, all fallback paths return `{routed: false, reason}`), `src/subagents/types.ts` (SubagentRole interface, RouteSkipReason), `src/subagents/roles/webSearchDigest.ts` (the only role module — prompt/parse/format + `maxResults` factory).
+- Both insertion points wired in `src/providers/webSearchManager.ts`: auto-mode `searchByQuery()` (router.ts:509) and manual-mode `searchForMessage()` (~line 354, the Phase 1 polish item), with the synthetic merged `WebSearchResponse` builder at the bottom of the file.
+- Capability axis + settings: `subagentRoles?: string[]` on `ModelCapabilities` (`src/models/registry.ts:140`); both `deepseek-v4-flash-thinking` (registry.ts:215) and `deepseek-v4-pro-thinking` (registry.ts:243) tagged `['web-search-digest']` (the Phase 1.75 "tag pro" item); `moby.subagents` + `moby.subagents.webSearchDigest.maxResults` schemas in `package.json:496`/`:512`.
+- Phase 1.75 non-thinking sub calls: `ChatOptions.thinkingMode` (`src/deepseekClient.ts:103`), `applyThinkingMode` disabled path (`deepseekClient.ts:320-353`), router forces `thinkingMode: 'disabled'` on every dispatch (router.ts:66-69).
+- Webview controls: checkbox/dropdown/slider in `media/actors/web-search/WebSearchPopupShadowActor.ts` (`renderSubagentSection`, ~line 319). Router instantiated in `src/extension.ts:150`.
+- Tests: `tests/unit/subagents/router.test.ts`, `tests/unit/subagents/roles/webSearchDigest.test.ts`.
+
+Not yet / differs:
+- The role's `shouldRoute` gates only on `results.length > 0`, not the planned `THRESHOLD_RESULT_COUNT > 5` / `THRESHOLD_TOTAL_BYTES > 3000` size thresholds — gating moved to the UI checkbox (see header comment in `webSearchDigest.ts:9-12`). Validation is hand-rolled in `parse()`, not zod as the plan describes.
+- Phase 1.85 main-loop thinking pill: no `moby.modelOptions.<id>.thinkingMode` setting in `package.json` and no toolbar pill — `applyThinkingMode` only honors the per-call override, not a persistent user setting.
+- Phase 2 `image-describe`: no `acceptsImages` field, no `imageDescribe.ts` role, no multimodal encoder, no image trigger in `read_file`.
+- Phases 3–7 not started: no `search-digest`/`file-summarize`/`tool-classify` role modules, no grep/`read_file`/`run_shell` routing, no local-model backend, no per-turn tool subsetting, no MCP extraction.
+
 ## Context
 
 The main agent loop pays for context twice: once when it sends a prompt and once when the model rebuilds working memory from that prompt. Several common operations don't need the main model's reasoning at all but currently consume its context:

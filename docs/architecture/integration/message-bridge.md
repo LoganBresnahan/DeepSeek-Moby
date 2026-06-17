@@ -26,7 +26,7 @@ The message bridge handles communication between the VS Code extension (Node.js)
 │                             │           (Browser)                 │
 │                             │                                     │
 │  ┌──────────────────────────┼────────────────────────────────┐   │
-│  │                          │        chat.ts                  │   │
+│  │                          │  VirtualMessageGatewayActor     │   │
 │  │                          ▼                                 │   │
 │  │  window.addEventListener('message', handler)               │   │
 │  │                                                            │   │
@@ -50,54 +50,61 @@ The message bridge handles communication between the VS Code extension (Node.js)
 this.diffManager.onDiffListChanged(d =>
   this._view?.webview.postMessage({ type: 'diffListChanged', ...d }));
 
-// Convenience helper used throughout ChatProvider:
-private post(type: string, data?: any): void {
-  this._view?.webview.postMessage({ type, ...data });
-}
+// There is no wrapper helper — every outbound send is a direct, inline
+// this._view?.webview.postMessage({ type, ...data }) call.
 
-// Receive messages from webview — thin delegations to managers
+// Receive messages from webview — most cases delegate to a manager,
+// though some add inline logic (sendMessage queuing during summarization,
+// accept/rejectSpecificDiff DB sync via conversationManager).
 webview.onDidReceiveMessage(async (data) => {
   switch (data.type) {
-    case 'sendMessage':
+    case 'sendMessage': {
+      // Queues the message and posts 'statusMessage' if summarizing
       const result = await this.requestOrchestrator.handleMessage(
         data.message, this.currentSessionId,
-        () => this.getEditorContext(), data.attachments
+        () => this.fileContextManager.getEditorContext(), data.attachments
       );
       this.currentSessionId = result.sessionId;
       break;
+    }
     case 'acceptSpecificDiff':
+      // Awaits the diff, then updates file-modified status in the DB
       await this.diffManager.acceptSpecificDiff(data.diffId);
       break;
     case 'toggleWebSearch':
-      this.webSearchManager.toggle(data.enabled);
+      await this.webSearchManager.toggle(data.enabled);
       break;
-    // ... each case is a single-line delegation
+    // ...
   }
 });
 ```
 
-### Webview Side (chat.ts)
+### Webview Side (chat.ts + VirtualMessageGatewayActor)
+
+`chat.ts` (`initializeActorSystem`) calls `acquireVsCodeApi()`, builds the actor
+system, and instantiates the `VirtualMessageGatewayActor` — passing it the
+`vscode` API. `chat.ts` itself registers no `'message'` listener and has no
+inbound switch; it only constructs actors and emits a few outbound messages
+(e.g. pending-file actions). The single inbound `window` listener and the entire
+extension→webview `switch` live in the gateway actor.
 
 ```typescript
-// Get VS Code API (can only call once!)
+// chat.ts — get VS Code API (can only call once!) and build actors
 const vscode = acquireVsCodeApi();
 
-// Send message to extension
+// Send message to extension (from chat.ts / actor callbacks)
 vscode.postMessage({
   type: 'sendMessage',
   message: 'Hello',
   attachments: []
 });
 
-// Receive messages from extension
+// VirtualMessageGatewayActor.setupMessageListener() registers the single
+// inbound listener; handleMessage(msg) routes every extension→webview message.
 window.addEventListener('message', (event) => {
   const msg = event.data;
-  switch (msg.type) {
-    case 'streamToken':
-      handleStreamToken(msg.token);
-      break;
-    // ...
-  }
+  if (!msg || !msg.type) return;
+  this.handleMessage(msg);   // private switch over msg.type
 });
 ```
 
@@ -109,12 +116,12 @@ window.addEventListener('message', (event) => {
 
 | Type | Payload | Purpose |
 |------|---------|---------|
-| `startResponse` | `{ messageId, isReasoner }` | Begin new AI response stream |
+| `startResponse` | `{ isReasoner, correlationId? }` | Begin new AI response stream |
 | `streamToken` | `{ token }` | Content chunk for display |
 | `streamReasoning` | `{ token }` | Thinking content (R1 model) |
 | `iterationStart` | `{ iteration }` | New reasoning iteration |
 | `endResponse` | `{ message }` | Stream complete |
-| `generationStopped` | - | User cancelled generation |
+| `generationStopped` | `{ userStopped }` | User cancelled generation |
 
 #### Tool Execution Messages
 
@@ -131,11 +138,8 @@ window.addEventListener('message', (event) => {
 
 | Type | Payload | Purpose |
 |------|---------|---------|
-| `pendingFileAdd` | `{ filePath, diffId, iteration }` | New file modification |
-| `pendingFileUpdate` | `{ fileId, status }` | File status change |
-| `pendingFileAccept` | `{ fileId }` | File accepted |
-| `pendingFileReject` | `{ fileId }` | File rejected |
-| `diffListChanged` | `{ diffs: [...], editMode }` | Full diff list sync |
+| `pendingFileUpdate` | `{ fileId, status }` | File status change (`pending`/`applied`/`rejected`/`superseded`/`deleted`/`expired`) |
+| `diffListChanged` | `{ diffs: [...], editMode, source }` | Full diff list sync (also carries file additions/accept/reject) |
 
 #### History & Chat Messages
 
@@ -164,7 +168,7 @@ window.addEventListener('message', (event) => {
 
 | Type | Payload | Purpose |
 |------|---------|---------|
-| `error` | `{ message }` | Display error |
+| `error` | `{ error }` | Display error (webview falls back to `message`) |
 | `warning` | `{ message }` | Display warning |
 | `statusMessage` | `{ message }` | Display info |
 
@@ -189,9 +193,9 @@ window.addEventListener('message', (event) => {
 
 | Type | Payload | Purpose |
 |------|---------|---------|
-| `acceptSpecificDiff` | `{ diffId }` | Accept file change |
-| `rejectSpecificDiff` | `{ diffId }` | Reject file change |
-| `focusDiff` | `{ diffId }` | Open diff in editor |
+| `acceptSpecificDiff` | `{ diffId, filePath }` | Accept file change |
+| `rejectSpecificDiff` | `{ diffId, filePath }` | Reject file change |
+| `focusFile` | `{ diffId, filePath }` | Open diff (or file if diff closed) |
 | `getOpenFiles` | - | Request open files list |
 | `searchFiles` | `{ query }` | Search workspace files |
 | `getFileContent` | `{ filePath }` | Get file for context |
@@ -231,7 +235,8 @@ window.addEventListener('message', (event) => {
 |------|---------|---------|
 | `toggleWebSearch` | `{ enabled }` | Enable/disable search |
 | `setSearchDepth` | `{ searchDepth }` | basic/advanced |
-| `setSearchesPerPrompt` | `{ searchesPerPrompt }` | Max searches |
+| `setCreditsPerPrompt` | `{ value }` | Credits/searches per prompt |
+| `setMaxResultsPerSearch` | `{ value }` | Max results per search |
 | `setCacheDuration` | `{ cacheDuration }` | Cache TTL minutes |
 | `clearSearchCache` | - | Clear search cache |
 
@@ -291,8 +296,8 @@ window.addEventListener('message', (event) => {
        │          status: 'pending'}]}    │
        │◀─────────────────────────────────│
        │                                  │
-       │ PendingChangesShadowActor        │
-       │ shows pending file               │
+       │ VirtualListActor renders the     │
+       │ pending file-modified segment    │
        │                                  │
        │ User clicks Accept               │
        │                                  │

@@ -27,24 +27,37 @@ Without Shadow DOM:                 With Shadow DOM:
 
 ## ShadowActor Base Class
 
-All Shadow DOM actors extend `ShadowActor`:
+All Shadow DOM actors extend `ShadowActor` (which itself extends `EventStateActor`):
 
 ```typescript
-abstract class ShadowActor {
-  protected shadow: ShadowRoot;
-  protected container: HTMLElement;
-  protected manager: EventStateManager;
+interface ShadowActorConfig {
+  manager: EventStateManager;
+  element: HTMLElement;
+  publications: PublicationMap;
+  subscriptions: SubscriptionMap;
+  styles: string;        // CSS scoped to this actor's shadow root
+  template?: string;     // optional initial HTML for the content root
+  shadowMode?: 'open' | 'closed';  // default 'open'
+}
 
-  // Subclasses define these
-  protected abstract actorId: string;
-  protected abstract publicationKeys: string[];
-  protected abstract subscriptionKeys: string[];
-  protected abstract styles(): string;
-  protected abstract render(): string;
+abstract class ShadowActor extends EventStateActor {
+  protected readonly shadow: ShadowRoot;
+  protected readonly contentRoot: HTMLElement; // <div class="shadow-content">
+  protected readonly manager: EventStateManager;
+
+  constructor(config: ShadowActorConfig);
+
+  // Concrete helper (not abstract): replaces contentRoot.innerHTML
+  protected render(html: string): void;
 }
 ```
 
-**Location**: [media/actors/ShadowActor.ts](../media/actors/ShadowActor.ts)
+Publication and subscription keys are derived from the config's `publications`/`subscriptions`
+maps by the `EventStateActor` base class (stored as frozen `private readonly` arrays); `actorId`
+is a `protected readonly` derived from the host element's id. Styles come from `config.styles` —
+there is no abstract `styles()` method.
+
+**Location**: [media/state/ShadowActor.ts](../../../media/state/ShadowActor.ts)
 
 ### Lifecycle
 
@@ -53,37 +66,30 @@ abstract class ShadowActor {
 │                    ShadowActor Lifecycle                    │
 └────────────────────────────────────────────────────────────┘
 
-   constructor(manager, container)
+   constructor(config)         Host element passed in via config
          │
          ▼
    ┌─────────────┐
-   │ createHost()│  Create wrapper div with data-actor attr
+   │attachShadow │  this.element.attachShadow({ mode })
+   │ ('open')    │  ('open' by default for inspectability)
+   └──────┬──────┘
+         │
+         ▼
+   ┌──────────────┐
+   │adoptedStyle  │  [baseSheet, actorSheet] — no <style>
+   │ Sheets       │  element is injected
+   └──────┬───────┘
+         │
+         ▼
+   ┌─────────────┐
+   │ contentRoot │  Create <div class="shadow-content">,
+   │  + template │  apply config.template if provided
    └──────┬──────┘
          │
          ▼
    ┌─────────────┐
-   │attachShadow │  mode: 'open' for debugging
-   │ ('open')    │
-   └──────┬──────┘
-         │
-         ▼
-   ┌─────────────┐
-   │injectStyles │  Insert <style> into shadow root
-   └──────┬──────┘
-         │
-         ▼
-   ┌─────────────┐
-   │  render()   │  Initial DOM render
-   └──────┬──────┘
-         │
-         ▼
-   ┌─────────────┐
-   │ register()  │  Register with EventStateManager
-   └──────┬──────┘
-         │
-         ▼
-   ┌─────────────┐
-   │bindEvents() │  Set up internal event handlers
+   │ register()  │  Scheduled via queueMicrotask() in the
+   │             │  EventStateActor constructor
    └─────────────┘
 ```
 
@@ -105,38 +111,44 @@ We need these to appear **in order** visually.
 
 ### The Solution
 
+Every interleaved container host carries `data-actor="turn"` (the actor's
+`actorName`); the content type is conveyed by the host `id` prefix
+(`message-…`, `thinking-…`, `shell-…`, etc.), not by differing `data-actor`
+values. The containers belong to a single `MessageTurnActor` and are appended
+to that turn's mount point inside `#chatMessages`.
+
 ```
 DOM Structure:
 ┌─────────────────────────────────────────────────────────────┐
 │ #chatMessages (light DOM container)                          │
 │                                                              │
 │  ┌───────────────────────────────────────────────────────┐  │
-│  │ div[data-actor="message"]                             │  │
-│  │   └── #shadow-root                                    │  │
-│  │         ├── <style>...</style>                        │  │
-│  │         └── <div class="message user">Hello</div>     │  │
+│  │ div#message-1-… [data-actor="turn"]                   │  │
+│  │   └── #shadow-root  (adoptedStyleSheets: [base,turn]) │  │
+│  │         └── <div class="container">                   │  │
+│  │               <div class="message user">Hello</div>   │  │
 │  └───────────────────────────────────────────────────────┘  │
 │                                                              │
 │  ┌───────────────────────────────────────────────────────┐  │
-│  │ div[data-actor="message"]                             │  │
+│  │ div#message-2-… [data-actor="turn"]                   │  │
 │  │   └── #shadow-root                                    │  │
 │  │         └── <div class="message assistant">...</div>  │  │
 │  └───────────────────────────────────────────────────────┘  │
 │                                                              │
 │  ┌───────────────────────────────────────────────────────┐  │
-│  │ div[data-actor="thinking"]                            │  │
+│  │ div#thinking-1-… [data-actor="turn"]                  │  │
 │  │   └── #shadow-root                                    │  │
 │  │         └── <div class="thinking">Deep thought...</   │  │
 │  └───────────────────────────────────────────────────────┘  │
 │                                                              │
 │  ┌───────────────────────────────────────────────────────┐  │
-│  │ div[data-actor="message"]                             │  │
+│  │ div#message-3-… [data-actor="turn"]                   │  │
 │  │   └── #shadow-root                                    │  │
 │  │         └── <div class="message assistant">More...</  │  │
 │  └───────────────────────────────────────────────────────┘  │
 │                                                              │
 │  ┌───────────────────────────────────────────────────────┐  │
-│  │ div[data-actor="shell"]                               │  │
+│  │ div#shell-1-… [data-actor="turn"]                     │  │
 │  │   └── #shadow-root                                    │  │
 │  │         └── <div class="shell-commands">...</div>     │  │
 │  └───────────────────────────────────────────────────────┘  │
@@ -159,74 +171,96 @@ Visual Order (matches DOM order):
 
 ### Creating Interleaved Segments
 
+Interleaved rendering is handled by a single `MessageTurnActor` (one actor per
+conversation turn) that extends `InterleavedShadowActor`. It creates each shadow
+container through the inherited `createContainer(idPrefix, options)`, and text
+segments specifically through `createTextSegment()`:
+
 ```typescript
-// MessageShadowActor creates new segments on demand
-class MessageShadowActor extends ShadowActor {
-  private segments: Map<string, { host: HTMLElement; shadow: ShadowRoot }>;
+// InterleavedShadowActor (base) creates shadow-encapsulated containers
+class InterleavedShadowActor extends EventStateActor {
+  protected containers: Map<string, ShadowContainer> = new Map();
+  protected idCounter = 0;
 
-  createSegment(): string {
-    const id = `segment-${Date.now()}`;
+  protected createContainer(idPrefix: string, options?): ShadowContainer {
+    this.idCounter++;
+    const id = `${idPrefix}-${this.idCounter}-${Date.now()}`;
+
     const host = document.createElement('div');
-    host.setAttribute('data-actor', 'message');
-    host.setAttribute('data-segment', id);
+    host.id = id;
+    host.setAttribute('data-actor', this.actorName); // 'turn' for MessageTurnActor
+    host.setAttribute('data-container-id', id);
 
-    const shadow = host.attachShadow({ mode: 'open' });
-    this.injectStyles(shadow);
+    const shadow = host.attachShadow({ mode: this.shadowMode });
+    shadow.adoptedStyleSheets = this._adoptedSheets; // [base, actor] — cached
 
-    // Append to shared container (chatMessages)
-    this.container.appendChild(host);
+    const content = document.createElement('div');
+    content.className = 'container';
+    shadow.appendChild(content);
 
-    this.segments.set(id, { host, shadow });
-    return id;
+    this.element.appendChild(host); // append to the actor's mount point
+    this.containers.set(id, { id, host, shadow, content, createdAt: Date.now() });
+    return container;
   }
+}
+
+// MessageTurnActor (actorName 'turn') creates a text segment via createContainer('message', ...)
+class MessageTurnActor extends InterleavedShadowActor {
+  createTextSegment(content = '', options?): string { /* ... */ }
 }
 ```
 
-### Segment Finalization
+### Segment Boundaries
 
-When text content is interrupted by tools/thinking:
+Text is the **sole** section delimiter. Interleaved thinking/tools/shell/pending
+content does **not** split text segments — those groups coalesce into their own
+shared containers. A new text segment is only started by `createTextSegment()`,
+which closes the active coalesced thinking/tool/pending groups so the next ones
+start fresh containers below the text:
 
 ```
             Text streaming...
                    │
-                   ▼
-        ┌─────────────────────┐
-        │ finalizeSegment()   │
-        │ • Mark complete     │
-        │ • Set flag: needs   │
-        │   new segment       │
-        └─────────────────────┘
-                   │
-                   ▼
-        Thinking/Tool content appears
-        (as sibling in DOM)
+                   ▼  (updateTextContent appends into the current
+                   │   text container; lazily creates one if none exists)
+        Thinking/Tool/Shell content appears
+        (coalesced into its own shadow container,
+         a sibling in DOM — text is NOT split)
                    │
                    ▼
         More text arrives...
                    │
                    ▼
-        ┌─────────────────────┐
-        │ resumeWithNewSeg()  │
-        │ • Create new host   │
-        │ • Continue text     │
-        └─────────────────────┘
+        ┌─────────────────────────┐
+        │ createTextSegment()     │
+        │ • Clears active         │
+        │   thinking/tool/pending │
+        │   groups (delimiter)    │
+        │ • Creates a new text    │
+        │   container             │
+        └─────────────────────────┘
 ```
 
 ## Style Injection
 
-Each actor defines its styles in a separate file:
+Each actor defines its styles in a separate file. The turn actor's CSS lives under
+`media/actors/turn/styles/`; most other actors use a `shadowStyles.ts` file:
 
 ```
 media/actors/
-  └── message/
-      ├── MessageShadowActor.ts
-      └── shadowStyles.ts         ◄─ CSS as string
+  ├── turn/
+  │   ├── MessageTurnActor.ts
+  │   └── styles/
+  │       └── index.ts             ◄─ exports `turnActorStyles` (CSS string)
+  └── input-area/
+      ├── InputAreaShadowActor.ts
+      └── shadowStyles.ts          ◄─ CSS as string
 ```
 
 ### shadowStyles.ts Pattern
 
 ```typescript
-export const messageShadowStyles = `
+export const inputAreaShadowStyles = `
   :host {
     display: block;
   }
@@ -251,19 +285,25 @@ export const messageShadowStyles = `
 Instead of injecting `<style>` elements into each shadow root, actors share pre-parsed `CSSStyleSheet` objects via `adoptedStyleSheets`:
 
 ```typescript
-// EventStateManager caches parsed stylesheets
-const baseSheet = manager.getShadowBaseSheet();           // Shared by ALL shadow actors
-const actorSheet = manager.getStyleSheet(css, 'Message'); // Cached per actor type
+// EventStateManager caches parsed stylesheets.
+// The actor-specific sheet is cached by class name (this.constructor.name).
+const baseSheet  = manager.getShadowBaseSheet();                       // ShadowActor base
+const actorSheet = manager.getStyleSheet(css, this.constructor.name);  // cached per actor type
 
 this.shadow.adoptedStyleSheets = [baseSheet, actorSheet];
 ```
+
+There are two base sheets: `ShadowActor` adopts `manager.getShadowBaseSheet()`, while
+`InterleavedShadowActor` (the turn/segment actor most of this doc describes) adopts
+`manager.getInterleavedBaseSheet()`. Both share actor-specific sheets via
+`manager.getStyleSheet(css, cacheKey)`.
 
 **Benefits:**
 - One parsed CSSOM tree shared across N shadow roots
 - Reduces memory: 100 actors × 3KB CSS = 3KB total (not 300KB)
 - No duplicate style parsing on each shadow root creation
 
-**Implementation details:** See [REMINDER.md Scalability section](../REMINDER.md#scalability--mitigations)
+**Implementation details:** See [REMINDER.md Scalability section](../../../REMINDER.md#scalability--mitigations)
 
 ### VS Code Theme Variables
 
@@ -300,33 +340,47 @@ Actors that render to a fixed container:
 
 ### Interleaved Actors
 
-Actors that create siblings in chatMessages:
+The interleaved layer is consolidated into a single `MessageTurnActor`
+(one per conversation turn). It creates a separate shadow container per
+content type internally:
 
 ```
 ┌─────────────────────────────────────────────┐
-│ MessageShadowActor                          │
-│ ThinkingShadowActor                         │
-│ ShellShadowActor                            │
-│ ToolCallsShadowActor                        │
-│ PendingChangesShadowActor                   │
+│ MessageTurnActor (one per turn)             │
+│   ├─ text segments                          │
+│   ├─ thinking iterations                    │
+│   ├─ tool call batches                      │
+│   ├─ shell command segments                 │
+│   ├─ command approvals                      │
+│   └─ pending file groups                    │
 │                                             │
-│ All share: <div id="chatMessages"></div>    │
+│ Managed by VirtualListActor over            │
+│   <div id="chatMessages"></div>             │
 └─────────────────────────────────────────────┘
 ```
+
+`VirtualListActor` pools and mounts the turn actors into `#chatMessages`;
+the per-type actors (ThinkingActor, ShellActor, ToolCallsActor,
+PendingChangesActor) no longer exist as separate classes.
 
 ### Overlay Actors
 
-Actors that float above everything:
+Actors that render modal/overlay UI from a fixed host appended to `document.body`:
 
 ```
 ┌─────────────────────────────────────────────┐
-│ InspectorShadowActor                        │
-│ HistoryShadowActor                          │
+│ HistoryShadowActor (extends ShadowActor)    │
 │                                             │
-│ Position: fixed, z-index: high              │
-│ Own host appended to document.body          │
+│ Host: fixed 0×0 div appended to body;       │
+│ renders a backdrop + modal into its         │
+│ content root.                               │
 └─────────────────────────────────────────────┘
 ```
+
+`InspectorShadowActor` is a **dev-mode-only** tool (`media/dev/inspector/`) that
+extends `EventStateActor` — not `ShadowActor` — and is loaded via injected
+`<script>` only when `moby.devMode` is enabled. It is not part of the production
+actor set and is not in `window.actors`.
 
 ## Debugging Shadow DOM
 
@@ -340,8 +394,9 @@ Actors that float above everything:
 ### Programmatic Access
 
 ```javascript
-// In browser console
-const host = document.querySelector('[data-actor="message"]');
+// In browser console — all interleaved hosts use data-actor="turn";
+// the content type is in the id prefix (message-/thinking-/shell-/…).
+const host = document.querySelector('[data-actor="turn"][id^="message-"]');
 const shadow = host.shadowRoot;
 console.log(shadow.innerHTML);
 ```
@@ -350,28 +405,38 @@ console.log(shadow.innerHTML);
 
 ```javascript
 // Exposed on window for debugging
-window.actorManager.getAllState();
-window.actors.message.getSegmentCount();
+window.actorManager.getAllState();   // actorManager is the EventStateManager
+
+// window.actors holds the live actor instances. Keys include:
+//   streaming, session, editMode, gateway, header, scroll, inputArea,
+//   statusPanel, toolbar, history, files, commandRules, systemPromptModal,
+//   commands, modelSelector, settings, drawingServer, planPopup,
+//   webSearchPopup, virtualList
+// (There is no per-message actor; turn actors are pooled inside virtualList.)
+window.actorManager.getState('turn.textSegmentCount'); // per-turn text-segment count
 ```
 
 ## Common Patterns
 
 ### Conditional Rendering
 
+`render(html)` is a concrete helper that replaces `contentRoot.innerHTML`:
+
 ```typescript
-protected render(): string {
+private update(): void {
   if (!this.isVisible) {
-    return ''; // Empty shadow root
+    this.render(''); // Empty content root
+    return;
   }
-  return `<div class="content">${this.content}</div>`;
+  this.render(`<div class="content">${this.content}</div>`);
 }
 ```
 
 ### DOM Updates
 
 ```typescript
-// Get element from shadow root
-const el = this.shadow.querySelector('.content');
+// Get element from shadow root (query() is shadow-scoped)
+const el = this.query<HTMLElement>('.content');
 if (el) {
   el.textContent = newContent;
 }
@@ -379,15 +444,12 @@ if (el) {
 
 ### Event Delegation
 
+Use the `delegate()` helper, which sets up delegation on the content root:
+
 ```typescript
-bindEvents(): void {
-  this.shadow.addEventListener('click', (e) => {
-    const target = e.target as HTMLElement;
-    if (target.matches('.action-btn')) {
-      this.handleAction(target.dataset.action);
-    }
-  });
-}
+this.delegate('click', '.action-btn', (event, matched) => {
+  this.handleAction(matched.dataset.action);
+});
 ```
 
 ## Migration Guide
@@ -396,8 +458,10 @@ Converting a light DOM component to Shadow Actor:
 
 1. Create `shadowStyles.ts` with component CSS
 2. Extend `ShadowActor` base class
-3. Define `actorId`, `publicationKeys`, `subscriptionKeys`
-4. Implement `styles()` returning CSS string
-5. Implement `render()` returning HTML string
-6. Move event handlers to `bindEvents()`
-7. Replace direct DOM queries with `this.shadow.querySelector()`
+3. In the constructor, call `super()` with a `ShadowActorConfig`: `manager`,
+   `element` (the host), `publications`, `subscriptions`, and `styles` (the CSS
+   string). Publication/subscription keys are derived from those maps.
+4. Render with `this.render(html)` (replaces the content root)
+5. Wire event handlers via `this.delegate(eventType, selector, handler)` or
+   `this.addShadowListener(...)`
+6. Replace direct DOM queries with `this.query()` / `this.queryAll()`

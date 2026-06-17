@@ -3,6 +3,21 @@
 **Status:** Parked — UX polish, not capability. Revisit after subagents + instrumentation land.
 **Date:** 2026-05-01
 
+## Implementation status (as of 2026-06-16)
+
+**Not started.** The plan is still parked; code does exactly the "before" behavior described in the Context section. No streaming render path, helper, or tests exist.
+
+Shipped (the pre-existing pipeline the plan builds on):
+- `extractCodeBlocks` + `hasIncompleteFence` exist (`media/utils/codeBlocks.ts:31,80`) and are imported by `formatContent` (`media/actors/turn/MessageTurnActor.ts:28`).
+- markdown-it prose render + closed-fence pre-extract into placeholders is live (`media/actors/turn/MessageTurnActor.ts:2192` `formatContent`, render at `:2291`).
+- The trailing-unclosed-fence guard the plan wants to remove is still in place — it **strips** the open fence, it does not render it: `withPlaceholders.replace(/```\w*(?:\n[\s\S]*)?$/, '')` (`media/actors/turn/MessageTurnActor.ts:2281`). "Generating code..." stays a turn-level label.
+
+Not yet / differs:
+- No `extractTrailingOpenFence` helper anywhere (grep: 0 hits).
+- No streaming code-block variant: no `code-block streaming` div, no `aria-disabled` button treatment. The only `.streaming` classes are the turn text-container and thinking/reasoning dropdown (`media/actors/turn/styles/index.ts:80,527`), not per-code-block.
+- Phases 1–3 (streaming render, throttled re-highlight, `# File:` re-inference) are all unbuilt. No tests reference streaming fences (grep over `tests/`: 0 hits).
+- **Path note:** the plan repeatedly points the new helper at `shared/parsing/codeBlocks.ts`, but the file `formatContent` actually imports is `media/utils/codeBlocks.ts`. Three copies of `codeBlocks.ts` exist (`src/utils/`, `media/utils/`, `shared/parsing/`); the webview pipeline uses the `media/utils` one.
+
 ## Context
 
 Today, when the model emits a fenced code block, the user sees nothing inline until the closing fence arrives. The pipeline at [MessageTurnActor.ts:formatContent](../../media/actors/turn/MessageTurnActor.ts) only extracts **complete** fences via `extractCodeBlocks`; trailing unclosed fences are stripped from the prose at line 2121 to prevent malformed-fence leak. The turn-level activity label says *"Generating code..."* / *"Writing X..."* but the message body itself is silent for the duration.

@@ -1,12 +1,14 @@
 # Testing Plan
 
+_Last reconciled with code 2026-06-16. Status notes below updated to match the current suite; the design/scenario tables are kept as-is._
+
 ## Overview
 
 Three testing layers:
 
-1. **CQRS Pipeline Tests** (happy-dom, vitest) — Fast, deterministic, runs in CI. Tests the data pipeline from event creation through consolidation, restore, and projection. **Status: Implemented** (`tests/events/pipeline.test.ts`, 38 tests passing).
-2. **Webview Rendering Tests** (Playwright + headless Chromium) — Fast, headless, no VS Code dependency. Loads the webview HTML in Chromium with a mocked VS Code API, replays CQRS event fixtures, and asserts DOM state. **Status: Smoke tests passing** (`tests/e2e/smoke.spec.ts`).
-3. **Full Integration Tests** (Playwright + VS Code via CDP) — Slower, requires display server. Launches the real VS Code Electron app, connects via Chrome DevTools Protocol, and tests the complete extension lifecycle. **Status: Working** (2 smoke tests passing, see Section 5).
+1. **CQRS Pipeline Tests** (happy-dom, vitest) — Fast, deterministic, runs in CI. Tests the data pipeline from event creation through consolidation, restore, and projection. **Status: Implemented** (`tests/events/pipeline.test.ts`, 56 tests passing — now includes a Section F "Streaming Simulation" group plus approval/tool-batch/code-block/drawing round-trips beyond the tables below). Run via `npm run test:events`.
+2. **Webview Rendering Tests** (Playwright + headless Chromium) — Fast, headless, no VS Code dependency. Loads the webview HTML in Chromium with a mocked VS Code API, replays CQRS events, and asserts DOM state. **Status: Implemented beyond smoke** — `tests/e2e/smoke.spec.ts` (3 tests) plus `tests/e2e/webview-rendering.spec.ts` (~39 tests) using the `replayHistory()` helper in `tests/e2e/helpers/replay.ts`.
+3. **Full Integration Tests** (Playwright + VS Code via CDP) — Slower, requires display server. Launches the real VS Code Electron app, connects via Chrome DevTools Protocol, and tests the complete extension lifecycle. **Status: Working and expanded** — `tests/e2e/vscode-integration.spec.ts` (~14 tests), `tests/e2e/chat-model-boot.spec.ts` (2 tests), and `tests/e2e/workflows.spec.ts` (~54 tests) using `tests/e2e/helpers/workflow.ts`. See Section 5.
 
 ---
 
@@ -18,7 +20,7 @@ Catch consolidation ordering, event loss, and status patching bugs without touch
 
 ### Test Location
 
-`tests/unit/events/pipeline.test.ts`
+`tests/events/pipeline.test.ts` (run with `npm run test:events`)
 
 ### Test Framework
 
@@ -376,27 +378,29 @@ VS Code's internal smoke tests ([test/automation/src/electron.ts](https://github
 
 ## Priority Order
 
-1. **CQRS Pipeline Tests** — Implemented. 38 tests passing. Covers data pipeline bugs.
-2. **Webview Rendering Tests** — Smoke tests passing. Next: build message replay helper and event fixtures.
-3. **Full Integration Tests** — Working. 2 smoke tests passing (workbench loads, extension activates). Next: webview iframe navigation for in-VS-Code UI testing.
+1. **CQRS Pipeline Tests** — Implemented. 56 tests passing. Covers data pipeline bugs.
+2. **Webview Rendering Tests** — Implemented. Message replay helper (`tests/e2e/helpers/replay.ts`, `replayHistory()`) is built and `tests/e2e/webview-rendering.spec.ts` (~39 tests) replays consolidated events and asserts DOM. Replay uses inline event arrays, not the `.events.json` fixture files originally envisioned in Section 3.
+3. **Full Integration Tests** — Working and expanded. `vscode-integration.spec.ts` (~14), `chat-model-boot.spec.ts` (2), and `workflows.spec.ts` (~54) drive the real extension via `tests/e2e/helpers/workflow.ts`.
 
 ## CI Integration
 
-CQRS pipeline tests and webview rendering tests can both run in CI:
+As actually wired, `.github/workflows/ci.yml` (and `release.yml`) run the vitest layers only:
 
 ```yaml
 # In .github/workflows/ci.yml
 - name: Run unit tests
   run: npm run test:unit
-- name: Run e2e tests
-  run: npm run test:e2e
+- name: Run event/pipeline tests
+  run: npm run test:events
 ```
 
-Full integration tests are manual — requires display server and VS Code binary.
+The Playwright e2e/webview tests (`npm run test:e2e`) are not yet wired into CI; they run locally. Full integration tests are manual — requires display server and VS Code binary.
 
 ---
 
-## 3. Response Recording & Replay (Future)
+## 3. Response Recording & Replay (Partially shipped)
+
+_Update 2026-06-16: CQRS event replay is implemented — `tests/e2e/helpers/replay.ts` exposes `replayHistory()`, and `tests/e2e/webview-rendering.spec.ts` feeds consolidated event arrays into the webview and asserts DOM. It differs from the design below: events are passed inline as arrays in the spec files rather than recorded to `tests/e2e/fixtures/*.events.json` (no fixtures directory exists yet)._
 
 ### Problem
 

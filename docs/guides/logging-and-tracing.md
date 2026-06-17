@@ -31,13 +31,13 @@ The logging system has **three tiers** spanning both the VS Code extension (Node
 │  ┌─────────────────────────────────────────────────────────────────────────┐    │
 │  │  Tier 1: Extension Logger (src/utils/logger.ts)                         │    │
 │  │  • Output: VS Code Output Channel ("DeepSeek Moby")                     │    │
-│  │  • Ring buffer: 5,000 entries (exportable)                              │    │
+│  │  • Ring buffer: 50,000 entries (exportable)                             │    │
 │  │  • Also emits traces to TraceCollector                                  │    │
 │  └─────────────────────────────────────────────────────────────────────────┘    │
 │                                                                                  │
 │  ┌─────────────────────────────────────────────────────────────────────────┐    │
 │  │  Tier 2: TraceCollector (src/tracing/TraceCollector.ts)                 │    │
-│  │  • Ring buffer: 10,000 events (exportable)                              │    │
+│  │  • Ring buffer: 50,000 events (exportable)                              │    │
 │  │  • Purpose: Structured events for AI debugging and analysis             │    │
 │  │  • Receives events from Extension Logger + Webview                      │    │
 │  └─────────────────────────────────────────────────────────────────────────┘    │
@@ -71,7 +71,7 @@ The logging system has **three tiers** spanning both the VS Code extension (Node
 │  ┌─────────────────────────────────────────────────────────────────────────┐    │
 │  │  Tier 3b: createLogger (media/logging/createLogger.ts)                  │    │
 │  │  • Output: Browser console + WebviewLogBuffer                           │    │
-│  │  • Buffer: 5,000 entries, syncs to WebviewLogStore every 5s (offset)   │    │
+│  │  • Buffer: 50,000 entries, syncs to WebviewLogStore every 5s (offset)   │    │
 │  └─────────────────────────────────────────────────────────────────────────┘    │
 │                                                                                  │
 │  ┌─────────────────────────────────────────────────────────────────────────┐    │
@@ -197,7 +197,7 @@ logger.modelChanged(model: string);
 
 ### Ring Buffer
 
-The Extension Logger maintains a 5,000-entry ring buffer. All logged messages (that pass the level filter) are captured in the buffer for later export.
+The Extension Logger maintains a 50,000-entry ring buffer. All logged messages (that pass the level filter) are captured in the buffer for later export.
 
 ```typescript
 // Get buffered entries
@@ -379,34 +379,34 @@ tracer.dispose();         // Clean up (stops timers)
 
 ### Trace Categories
 
+Two source enums define the categories: extension-side `TraceCategory` ([src/tracing/types.ts](../../src/tracing/types.ts)) and webview-side `WebviewTraceCategory` ([media/tracing/types.ts](../../media/tracing/types.ts)).
+
 | Category | Source | Description |
 |----------|--------|-------------|
 | `user.input` | Both | User typed/submitted message |
 | `user.click` | Webview | User clicked UI element |
-| `user.selection` | Both | User selected option |
 | `api.request` | Extension | Outbound API call started |
 | `api.stream` | Extension | Streaming chunk received |
 | `api.response` | Extension | API call completed |
-| `tool.call` | Extension | Tool execution started |
-| `tool.result` | Extension | Tool execution completed |
-| `shell.execute` | Extension | Shell command started |
-| `shell.result` | Extension | Shell command completed |
-| `state.publish` | Webview | Pub/sub state published |
+| `tool.call` | Extension | Tool invoked |
+| `shell.execute` | Extension | Shell command |
+| `state.publish` | Both | Pub/sub state published |
 | `state.subscribe` | Webview | Subscription handler triggered |
 | `actor.create` | Webview | Actor instantiated |
 | `actor.destroy` | Webview | Actor destroyed |
 | `actor.bind` | Webview | Pool actor bound to turn |
 | `actor.unbind` | Webview | Pool actor released |
-| `bridge.send` | Both | postMessage sent |
-| `bridge.receive` | Both | postMessage received |
-| `render.turn` | Webview | Turn rendered |
-| `render.segment` | Webview | Segment updated |
+| `bridge.send` | Webview | postMessage sent to extension |
+| `bridge.receive` | Webview | Message received from extension |
 | `session.create` | Extension | New session created |
-| `session.load` | Extension | Session loaded from history |
 | `session.switch` | Extension | Session switched |
-| `file.read` | Extension | File read operation |
-| `file.write` | Extension | File write operation |
-| `file.diff` | Extension | Diff shown |
+| `session.fork` | Extension | Session forked |
+| `webview.resolve` | Extension | Webview view resolved (created/recreated) |
+| `webview.visible` | Extension | Webview visibility changed |
+| `command.check` | Extension | Command checked against rules |
+| `command.approval` | Extension | Approval requested/resolved |
+| `file.context` | Extension | File context operations (search, select, inject) |
+| `subagent.route` | Extension | Subagent role dispatched |
 
 ---
 
@@ -525,10 +525,9 @@ The unified export system combines all three log sources (traces, extension logs
 
 | Command | Description |
 |---------|-------------|
-| `Moby: Export Logs (AI)` | Condensed, LLM-optimized format |
-| `Moby: Export Logs (Human)` | Full detail format |
+| `Moby: Export Logs` | Full detail (human) format — calls `UnifiedLogExporter.exportForHuman()` |
 
-Both commands open a new editor tab with three clearly separated sections.
+The command (id `moby.exportLogs`) opens a new editor tab with three clearly separated sections in the full/human format. The AI-optimized format is not wired to a command — it is only reachable programmatically via `UnifiedLogExporter.exportForAI()`.
 
 ### AI Format
 
@@ -548,9 +547,9 @@ The full format shows everything:
 
 | Source | Buffer Size | Location |
 |--------|-------------|----------|
-| Traces | 10,000 events | TraceCollector (extension) |
-| Extension Logs | 5,000 entries | Logger ring buffer (extension) |
-| Webview Logs | 5,000 entries | WebviewLogBuffer → WebviewLogStore |
+| Traces | 50,000 events | TraceCollector (extension) |
+| Extension Logs | 50,000 entries | Logger ring buffer (extension) |
+| Webview Logs | 50,000 entries (webview) → 5,000 (extension) | WebviewLogBuffer → WebviewLogStore |
 
 ### Programmatic Access
 
@@ -686,25 +685,27 @@ If running in WSL2, the extension (Linux) and webview (Windows/Chromium) may hav
 
 ### Extension Logger
 
-**VS Code Setting:** `deepseek.logLevel`
+**VS Code Setting:** `moby.logLevel` (default `WARN`)
 
 ```json
 {
-  "deepseek.logLevel": "DEBUG"  // DEBUG | INFO | WARN | ERROR | OFF
+  "moby.logLevel": "DEBUG"  // DEBUG | INFO | WARN | ERROR | OFF
 }
 ```
+
+Related settings: `moby.webviewLogLevel` (browser console level, default `WARN`) and `moby.tracing.enabled` (enable/disable trace collection, default `true`).
 
 ### TraceCollector
 
 ```typescript
 tracer.configure({
-  maxBufferSize: 10000,    // Max events before oldest are dropped
-  maxAgeMs: 1800000,       // Drop events older than 30 minutes (0 = disabled)
-  maxPayloadSize: 1000,    // Truncate data payloads > 1KB
-  warnAtMemoryMB: 50,      // Warn when memory exceeds 50MB
-  minLevel: 'info',        // Minimum level to trace
-  enabled: true,           // Enable/disable tracing
-  logToOutput: false       // Also log to extension output channel
+  maxBufferSize: 50000,    // Max events before oldest are dropped (default)
+  maxAgeMs: 0,             // Drop events older than N ms (0 = disabled, the default)
+  maxPayloadSize: 1000,    // Truncate data payloads > 1KB (default)
+  warnAtMemoryMB: 0,       // Warn when memory exceeds N MB (0 = disabled, the default)
+  minLevel: 'info',        // Minimum level to trace (default)
+  enabled: true,           // Enable/disable tracing (default)
+  logToOutput: false       // Also log to extension output channel (default)
 });
 ```
 
@@ -724,9 +725,12 @@ webviewTracer.configure({
 ```typescript
 import { setLogLevel, LogLevel } from '../logging';
 
-setLogLevel(LogLevel.WARN);  // Production default
-setLogLevel(LogLevel.DEBUG); // Development
+setLogLevel(LogLevel.WARN);   // Production default
+setLogLevel(LogLevel.DEBUG);  // Development
+setLogLevel(LogLevel.SILENT); // Disable all webview logging
 ```
+
+> Note: the webview `LogLevel` enum's disable level is `SILENT` (value 4), not `OFF`. (The extension-side `LogLevel` uses `OFF`.)
 
 ---
 
@@ -737,10 +741,10 @@ setLogLevel(LogLevel.DEBUG); // Development
 ```typescript
 // In chatProvider.ts
 
-// 1. Start the flow
-const correlationId = logger.apiRequest(model, messages.length, hasImages);
+// 1. Start the flow (returns the span ID; a correlation ID is generated internally)
+const spanId = logger.apiRequest(model, messages.length, hasImages);
 
-// 2. Pass correlation ID to webview
+// 2. Pass the correlation ID to the webview
 webview.postMessage({
   type: 'startResponse',
   correlationId: logger.getCurrentApiCorrelationId()
@@ -815,9 +819,9 @@ All context compression operations use the `[Snapshot]` tag prefix. These logs t
 | `[Snapshot] hasFreshSummary: FRESH/STALE` | DEBUG | `ConversationManager.ts` | Freshness check result |
 | `[Snapshot] ConversationManager.createSnapshot called` | INFO | `ConversationManager.ts` | Delegating to SnapshotManager |
 | `[Snapshot] maybeCreateSnapshot skipped` | DEBUG | `SnapshotManager.ts` | Not enough events since last snapshot |
-| `[Snapshot] Creating snapshot ...` | INFO | `SnapshotManager.ts` | Starting snapshot creation |
-| `[Snapshot] Snapshot created` | INFO | `SnapshotManager.ts` | Snapshot saved to DB |
-| `[Snapshot] Pruning snapshots (keep=N)` | DEBUG | `SnapshotManager.ts` | Old snapshots being removed |
+| `[Snapshot] Creating snapshot for session=...` | INFO | `SnapshotManager.ts` | Starting snapshot creation |
+| `[Snapshot] Created in {duration}ms` | INFO | `SnapshotManager.ts` | Snapshot saved to DB |
+| `[Snapshot] LLM summarize ({mode})` / `... complete in {duration}ms` | INFO | `SnapshotManager.ts` | LLM summarization start/finish |
 | `[ChatProvider] Summarization started — queuing enabled` | INFO | `chatProvider.ts` | Messages will be queued |
 | `[ChatProvider] Summarization completed — queuing disabled` | INFO | `chatProvider.ts` | Queue processing resumes |
 | `[ChatProvider] Message queued during summarization` | INFO | `chatProvider.ts` | User message added to queue |
@@ -836,7 +840,7 @@ All context compression operations use the `[Snapshot]` tag prefix. These logs t
 
 ### Logs Not Appearing in Output Channel
 
-1. Check log level: `deepseek.logLevel` setting may be too high
+1. Check log level: `moby.logLevel` setting may be too high
 2. Open the correct channel: View → Output → "DeepSeek Moby"
 3. Verify logger is imported correctly
 
@@ -916,18 +920,18 @@ Or in browser DevTools, uncheck "Verbose" in the Console filter.
 
 | Tier | Component | Output | Buffer | Use For |
 |------|-----------|--------|--------|---------|
-| 1 | Extension Logger | VS Code Output | 5,000 entries | Human-readable logs |
-| 2 | TraceCollector | In-memory buffer | 10,000 events | AI debugging, export |
+| 1 | Extension Logger | VS Code Output | 50,000 entries | Human-readable logs |
+| 2 | TraceCollector | In-memory buffer | 50,000 events | AI debugging, export |
 | 3a | WebviewTracer | Syncs to Tier 2 | 500 → Tier 2 | Actor/state tracing |
-| 3b | createLogger | Browser console | 5,000 → WebviewLogStore | Component debugging |
+| 3b | createLogger | Browser console | 50,000 → WebviewLogStore (5,000) | Component debugging |
 | 3c | EventStateLogger | Browser console | None | Pub/sub debugging |
 | - | UnifiedLogExporter | Editor tab | Combines all 3 | One-click export |
 
 **Key Points:**
 - Extension Logger (Tier 1) automatically emits traces to TraceCollector (Tier 2)
-- Extension Logger also captures entries in a 5,000-entry ring buffer
+- Extension Logger also captures entries in a 50,000-entry ring buffer
 - WebviewTracer (Tier 3a) syncs to TraceCollector every 5 seconds
 - createLogger (Tier 3b) pushes to WebviewLogBuffer, which syncs to WebviewLogStore every 5s (offset 2.5s)
 - Use `correlationId` to link events across the extension/webview boundary
-- Use `Moby: Export Logs (AI)` for LLM-optimized export, `Moby: Export Logs (Human)` for full detail
+- Use `Moby: Export Logs` for a full-detail (human) export; the AI-optimized format is only available programmatically via `UnifiedLogExporter.exportForAI()`
 - Export with `tracer.export('pretty')` for human reading, `tracer.export('jsonl')` for machine analysis

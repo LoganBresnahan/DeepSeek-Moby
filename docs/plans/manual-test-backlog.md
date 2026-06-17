@@ -1,5 +1,7 @@
 # Manual Test Backlog
 
+_Last reconciled with code 2026-06-16._
+
 Scenarios that have been implemented but not yet exercised in a VS Code dev host. Once a scenario has been walked through and passes, remove it from here (or move evergreen regressions into [test-scenarios.md](./test-scenarios.md)).
 
 **Purpose:** caught-up list of "what needs eyeballing before shipping." Not a comprehensive regression suite — that's [test-scenarios.md](./test-scenarios.md).
@@ -223,11 +225,11 @@ Scenarios that have been implemented but not yet exercised in a VS Code dev host
 
 ---
 
-## M14. SearXNG web-search provider (P1 — when implemented)
+## M14. SearXNG web-search provider (P1)
 
-**Why this matters:** covers Phase 2 of [web-search-providers.md](./web-search-providers.md). Validates that the provider abstraction works end-to-end with a non-Tavily backend, and that users can run the extension with zero cloud-search dependencies.
+**Why this matters:** covers Phase 2 of [web-search-providers.md](./completed/web-search-providers.md) (now marked completed). Validates that the provider abstraction works end-to-end with a non-Tavily backend, and that users can run the extension with zero cloud-search dependencies.
 
-**Status:** ⚠️ Not yet implemented. Remove the "when implemented" guard and run this scenario after Phase 2 ships.
+**Status (reconciled 2026-06-16):** the SearXNG provider has **shipped** — `SearxngClient` ([src/clients/searxngClient.ts](../../src/clients/searxngClient.ts)) is registered in [src/clients/webSearchProviderRegistry.ts:29](../../src/clients/webSearchProviderRegistry.ts), the `moby.webSearch.provider` enum includes `"searxng"`, and `moby.webSearch.searxng.endpoint`/`.engines` settings exist ([package.json:466-484](../../package.json)). Steps 1-9 and 12-14 below are now live and should be run. Steps 10-11 are still **not implemented**: there is no `nativeWebSearchEnable` translator, no `model-native` webSearch mode, and no "Search via" picker in the code — skip those two steps until that work lands.
 
 **Setup:**
 - Run a SearXNG instance locally. Easiest: `docker run -d --name searxng -p 8080:8080 searxng/searxng` (official image).

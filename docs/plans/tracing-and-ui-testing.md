@@ -1,5 +1,23 @@
 # Unified Tracing System & Automated UI Testing
 
+## Implementation status (as of 2026-06-16)
+
+**Partial / diverged — the tracing half shipped and grew beyond this plan; the bespoke UI-test runner (Part 2) was never built and is superseded by Playwright.**
+
+Shipped:
+- Phase 0 logging fixes: `useWallClock`, `resetTimer()`, and `showTimestamps: true`/`useWallClock: true` defaults all live (`media/state/types.ts:99,106`, `media/state/EventStateLogger.ts:28-29,40,55`).
+- Part 1 extension tracing: `src/tracing/TraceCollector.ts` implements ring buffer, `startFlow`/`startSpan`/`endSpan`/`trace`, `maxAgeMs` eviction, `maxPayloadSize` truncation, `estimateMemoryBytes`/`warnAtMemoryMB`, `getStats`, and `export`/`exportForAI` (json/jsonl/pretty) — 78 tests in `tests/unit/tracing/TraceCollector.test.ts`.
+- Logger integration emits traces for API/tool/shell/session/web-search (`src/utils/logger.ts:96-97,210-482`); also wired into `src/deepseekClient.ts`, `src/subagents/router.ts`, `src/providers/{webSearchManager,commandApprovalManager,requestOrchestrator}.ts` (categories `subagent.route`, `command.approval`, `command.check` go beyond the planned schema).
+- Part 1B webview logging: `media/logging/{logLevel,createLogger,index}.ts` and esbuild `pure: ['console.debug','console.log','console.info']` stripping (`scripts/build-media.js:39,157`).
+- Phase 2 webview tracing: `media/tracing/WebviewTracer.ts` (`webviewReady`, `forceSync`), integrated via `media/state/EventStateManager.ts:65-72,326,477` and `media/actors/virtual-list/VirtualListActor.ts:1084,1160,1385`; cross-boundary bridge in `src/providers/chatProvider.ts:944-1022` (`traceEvents`/`traceCalibration`/`requestTraceSync`/`traceSyncAck`, drift warning) — 35 tests in `tests/unit/tracing/WebviewTracer.test.ts`.
+- A `moby.tracing.enabled` user setting exists (`package.json:426`) — the plan's Action Item "Add tracing enabled user setting / off by default" is marked Pending below but is actually shipped.
+
+Not yet / differs:
+- Part 2 (Phases 3-5) UI test runner is **not started**: no `tests/ui/`, no `MockDeepSeekClient`, no `UITestRunner`, no ai/human `speedMode`/`typeDelay`, no `test:ui` script. (The only `createMockDeepSeekClient` is an inline unit-test helper in `tests/unit/providers/requestOrchestrator.test.ts:104`.)
+- UI testing instead **diverged** to Playwright e2e: `tests/e2e/{smoke,chat-model-boot,vscode-integration,webview-rendering,workflows}.spec.ts` with `test:e2e` scripts (`package.json:790-792`) — none of the plan's feature-test catalog format.
+- The webview→extension merge is `tracer.importEvent()` / `handleWebviewTraceEvents()` (`src/tracing/TraceCollector.ts:353`, `src/providers/chatProvider.ts:1449`), not the `mergeWebviewEvents()` named throughout this doc.
+- No trace export **commands** are registered in `package.json` (no "Export/Copy/View/Clear Trace", no "Trace Stats"); the collector exposes the export/stats methods, but the "Commands dropdown" UI in Phase 1 item 13 is not wired up.
+
 ## Overview
 
 This plan addresses two interconnected needs:

@@ -40,8 +40,8 @@
 
 ## Plans
 
-- [ChatProvider Refactor](plans/chatprovider-refactor.md) - Event emitter extraction (6 phases, complete)
-- [Context Management](plans/context-management.md) - Wire ContextBuilder into request flow (complete)
-- [Dead Code Cleanup](plans/dead-code-cleanup.md) - Cleanup status (complete)
-- [Backend Refactor](plans/backend-refactor.md) - Event Sourcing implementation plan
-- [WASM Tokenizer](plans/tokenizer.md) - Tokenizer implementation plan (complete)
+- [ChatProvider Refactor](plans/completed/chatprovider-refactor.md) - Event emitter extraction (6 phases, complete)
+- [Context Management](plans/completed/context-management.md) - Wire ContextBuilder into request flow (complete)
+- [Dead Code Cleanup](plans/completed/dead-code-cleanup.md) - Cleanup status (complete)
+- [Backend Refactor](plans/completed/backend-refactor.md) - Event Sourcing implementation plan
+- [WASM Tokenizer](plans/completed/tokenizer.md) - Tokenizer implementation plan (complete)

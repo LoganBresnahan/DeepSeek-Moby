@@ -9,20 +9,19 @@ Visual map of all actors and their relationships in the Unified Turn Architectur
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────┐
 │                                    HEADER                                        │
-│  ┌─────────┐ ┌─────────────────────────────────────────────────────────────────┐│
-│  │ Moby    │ │                      header-actions                             ││
-│  │ Icon    │ │  ┌──────────────┐ ┌─────────┐ ┌───────────┐ ┌────────┐ ┌──────┐││
-│  │ (static)│ │  │ Model Button │ │ History │ │ Inspector │ │Commands│ │ Gear │││
-│  └─────────┘ │  │ + popup      │ │  btn    │ │   btn     │ │  btn   │ │ btn  │││
-│              │  └──────┬───────┘ └────┬────┘ └─────┬─────┘ └───┬────┘ └──┬───┘││
-│              └─────────┼──────────────┼───────────┼────────────┼─────────┼────┘│
-│                        │              │           │            │         │      │
-│                        ▼              ▼           ▼            ▼         ▼      │
-│              ┌─────────────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐│
-│              │ModelSelector    │ │History  │ │Inspector│ │Commands │ │Settings ││
-│              │ShadowActor  ✅  │ │Shadow   │ │Shadow   │ │Shadow   │ │Shadow   ││
-│              │                 │ │Actor ✅ │ │Actor ✅ │ │Actor ✅ │ │Actor ✅ ││
-│              └─────────────────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘│
+│  ┌──────┐ ┌───────────────────────────────────────────────────────────────────┐│
+│  │ Moby │ │                       header-actions                              ││
+│  │ Icon │ │ ┌────────┐ ┌───────┐ ┌───────┐ ┌─────────┐ ┌────────┐ ┌──────┐    ││
+│  │(stat)│ │ │Drawing │ │ Model │ │History│ │Inspector│ │Commands│ │ Gear │    ││
+│  └──────┘ │ │  Pad   │ │ btn   │ │  btn  │ │btn (dev)│ │  btn   │ │ btn  │    ││
+│           │ └───┬────┘ └───┬───┘ └───┬───┘ └────┬────┘ └───┬────┘ └──┬───┘    ││
+│           └─────┼──────────┼─────────┼──────────┼──────────┼─────────┼────────┘│
+│                 │          │         │          │          │         │          │
+│                 ▼          ▼         ▼          ▼          ▼         ▼          │
+│           ┌─────────┐ ┌─────────┐ ┌───────┐ ┌─────────┐ ┌────────┐ ┌─────────┐ │
+│           │Drawing  │ │ModelSel │ │History│ │Inspector│ │Commands│ │Settings │ │
+│           │Server✅ │ │ector ✅ │ │Sh. ✅ │ │Shadow ✅│ │Sh.  ✅ │ │Shadow ✅│ │
+│           └─────────┘ └─────────┘ └───────┘ └─────────┘ └────────┘ └─────────┘ │
 │                                                                                  │
 │  ┌────────────────────────────────────────────────────────────────────────────┐ │
 │  │ #currentModelName ← Updated by HeaderActor (subscribes to session.model)   │ │
@@ -70,7 +69,8 @@ Visual map of all actors and their relationships in the Unified Turn Architectur
 │  │ ToolbarShadowActor ✅                                                      │ │
 │  │ - Edit mode buttons (Manual/Ask/Auto)                                      │ │
 │  │ - Files button → triggers FilesShadowActor                                │ │
-│  │ - Web search toggle                                                        │ │
+│  │ - Web search button → triggers WebSearchPopupShadowActor                  │ │
+│  │ - Plans button → triggers PlanPopupShadowActor                            │ │
 │  └────────────────────────────────────────────────────────────────────────────┘ │
 │                                                                                  │
 │  ┌────────────────────────────────────────────────────────────────────────────┐ │
@@ -83,8 +83,8 @@ Visual map of all actors and their relationships in the Unified Turn Architectur
 │  ┌────────────────────────────────────────────────────────────────────────────┐ │
 │  │ StatusPanelShadowActor ✅                                                  │ │
 │  │ - Moby icon                                                                │ │
-│  │ - Status text                                                              │ │
-│  │ - Token count display (future)                                             │ │
+│  │ - Activity text + messages                                                 │ │
+│  │ - Warnings + Logs button                                                   │ │
 │  └────────────────────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────────────────┘
 
@@ -124,6 +124,12 @@ Visual map of all actors and their relationships in the Unified Turn Architectur
 | CommandsShadowActor | Popup | commandsHost | Commands dropdown |
 | ModelSelectorShadowActor | Popup | modelHost | Model/settings popup |
 | SettingsShadowActor | Popup | settingsHost | Settings dropdown |
+| DrawingServerShadowActor | Popup | drawingServerActorHost | Drawing server start/stop + QR |
+| PlanPopupShadowActor | Popup | planPopupHost | Plan file management |
+| WebSearchPopupShadowActor | Popup | webSearchPopupHost | Web search settings |
+| CommandRulesModalActor | Modal | rulesHost | Command approval rules |
+| StatsModalActor | Modal | statsHost | Account usage stats |
+| SystemPromptModalActor | Modal | systemPromptHost | System prompt editor |
 
 ---
 
@@ -133,11 +139,11 @@ Visual map of all actors and their relationships in the Unified Turn Architectur
 ┌─────────────────────────────────────────────────────────────────────────────────┐
 │                              EXTENSION (VS Code)                                 │
 │                                                                                  │
-│   chatProvider.ts sends ~40 message types:                                       │
+│   chatProvider.ts sends ~60 message types:                                       │
 │     - Session: sessionCreated, sessionLoaded, modelChanged                       │
 │     - Streaming: startResponse, streamToken, streamReasoning, endResponse        │
 │     - Tools: shellExecuting, shellResults, toolCallsStart, toolCallsEnd          │
-│     - Files: diffListChanged, pendingFileAdd, openFiles, searchResults           │
+│     - Files: diffListChanged, showEditConfirm, openFiles, searchResults          │
 │     - Settings: settings, editModeSettings, webSearchToggled                     │
 │     - History: loadHistory, historySessions, clearChat                           │
 │     - Status: error, warning, statusMessage, generationStopped                   │
@@ -217,7 +223,9 @@ Visual map of all actors and their relationships in the Unified Turn Architectur
 
 ```
 media/actors/
+├── command-rules/     CommandRulesModalActor   ✅ USED (command approval rules)
 ├── commands/          CommandsShadowActor      ✅ USED
+├── drawing-server/    DrawingServerShadowActor ✅ USED (server start/stop + QR)
 ├── edit-mode/         EditModeActor            ✅ USED (edit mode state)
 ├── files/             FilesShadowActor         ✅ USED
 ├── header/            HeaderActor              ✅ USED (updates model name)
@@ -225,14 +233,18 @@ media/actors/
 ├── input-area/        InputAreaShadowActor     ✅ USED
 ├── message-gateway/   VirtualMessageGatewayActor ✅ USED (external boundary)
 ├── model-selector/    ModelSelectorShadowActor ✅ USED
+├── plans/             PlanPopupShadowActor     ✅ USED (plan file management)
 ├── scroll/            ScrollActor              ✅ USED
 ├── session/           SessionActor             ✅ USED (session state pub/sub)
 ├── settings/          SettingsShadowActor      ✅ USED
+├── stats/             StatsModalActor          ✅ USED (account usage stats)
 ├── status-panel/      StatusPanelShadowActor   ✅ USED
 ├── streaming/         StreamingActor           ✅ USED
+├── system-prompt/     SystemPromptModalActor   ✅ USED (system prompt editor)
 ├── toolbar/           ToolbarShadowActor       ✅ USED
 ├── turn/              MessageTurnActor         ✅ USED (unified turn rendering)
-└── virtual-list/      VirtualListActor         ✅ USED (pool + virtual rendering)
+├── virtual-list/      VirtualListActor         ✅ USED (pool + virtual rendering)
+└── web-search/        WebSearchPopupShadowActor ✅ USED (web search settings)
 
 media/dev/
 └── inspector/         InspectorShadowActor     ✅ USED (dev only)

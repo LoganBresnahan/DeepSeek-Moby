@@ -3,6 +3,24 @@
 **Status:** Phase 1 + Phase 2 shipped 2026-04-30. Phase 3a (global probe) shipped but being superseded by Phase 4 (per-language availability service). Phase 4 in progress.
 **Date:** 2026-04-29 (original) / 2026-04-30 (Phase 3 update) / 2026-05-01 (Phase 4 added)
 
+## Implementation status (as of 2026-06-16)
+
+**Shipped — all four phases landed, including Phase 4, which is no longer "in progress."** The Phase 3a `LspProbe` migration is complete: `lspProbe.ts` is gone and `LspAvailability` replaces it everywhere.
+
+Shipped:
+- All five tools — `outline`, `get_symbol_source`, `find_symbol`, `find_definition`, `find_references` — with schemas, dispatcher, position resolution, snippet formatting, and max-results truncation in [src/tools/lspTools.ts](../../../src/tools/lspTools.ts) (tool defs lines 36-183; dispatch `executeLspTool` line 679). Delegated from [src/tools/workspaceTools.ts:356](../../../src/tools/workspaceTools.ts#L356).
+- `lspTools?: boolean` capability axis on `ModelCapabilities` ([src/models/registry.ts:133](../../../src/models/registry.ts#L133)); enabled for `deepseek-chat`, `deepseek-v4-flash-thinking`, `deepseek-v4-pro-thinking` (lines 164/211/239); `deepseek-reasoner` (R1) correctly omits it. Validated in `validateEntry` (line 404).
+- Phase 4 `LspAvailability` per-language service ([src/services/lspAvailability.ts](../../../src/services/lspAvailability.ts)) with `discoverWorkspace`, `getDeclaredAvailability`, `reportToolResult` (consecutive-empty threshold, line 73), invalidators, and the `LspProbe` deletion done.
+- Orchestrator gating on `caps.lspTools && available.length > 0` in both paths ([requestOrchestrator.ts:3014, :3350](../../../src/providers/requestOrchestrator.ts#L3014)); per-language prompt declaration rendered via `renderLspDeclaration` (line 3646) into both `renderMinimalToolGuidance` + `renderStandardToolGuidance`.
+- Activation wiring + the (plan called it "optional, later") manual `Moby: Refresh LSP Availability` command ([src/extension.ts:232](../../../src/extension.ts#L232); package.json `moby.refreshLspAvailability` line 661). 5s LSP timeout via [src/utils/lspTimeout.ts](../../../src/utils/lspTimeout.ts).
+- Tests: 80 passing across [tests/unit/tools/lspTools.test.ts](../../../tests/unit/tools/lspTools.test.ts), [tests/unit/services/lspAvailability.test.ts](../../../tests/unit/services/lspAvailability.test.ts), [tests/unit/utils/lspTimeout.test.ts](../../../tests/unit/utils/lspTimeout.test.ts).
+
+Not yet / differs:
+- `LspAvailability` adds reactive recovery the plan didn't spec: `onDidChangeActiveTextEditor` retry probes and a `POST_DISCOVERY_RETRY_MS` cold-LSP retry timer ([lspAvailability.ts:155, :77](../../../src/services/lspAvailability.ts#L155)). A net add, not a regression.
+- `get_symbol_source` still accepts only `(path, symbol)`, not the `(file, line)` shape floated in Open Questions ([lspTools.ts:65-79](../../../src/tools/lspTools.ts#L65)).
+- Phase 3b telemetry/tuning and per-turn outline LRU cache remain parked (no code), as the plan intended.
+- Model lineup differs from the plan's rollout table: the registry has no separate non-thinking `deepseek-v4-flash`/`-pro` entries — V4 ships as the `-thinking` variants only ([registry.ts:189, :217](../../../src/models/registry.ts#L189)).
+
 ## Context
 
 Today the model navigates the codebase via byte-oriented tools — [`read_file`](../../src/tools/workspaceTools.ts#L36), [`find_files`](../../src/tools/workspaceTools.ts#L60), [`grep`](../../src/tools/workspaceTools.ts#L80), [`list_directory`](../../src/tools/workspaceTools.ts#L106), [`file_metadata`](../../src/tools/workspaceTools.ts#L126). These are correct but coarse. Three concrete problems show up in real turns:
