@@ -407,7 +407,7 @@ For contributors, see the full architecture documentation in `docs/architecture/
 
 Planned features for future releases:
 
-- **Expanded sub-agent routing** — Web-search digestion already offloads to a V4-Flash subagent (`src/subagents/`); more roles (search/file digest) and concurrent calls for complex tasks are planned
+- **Expanded sub-agent routing** — Web-search digestion already offloads to a subagent model of your choice (`src/subagents/`); more roles (search/file digest) and concurrent calls for complex tasks are planned
 - **Plugin system** — Extensible tool definitions for domain-specific workflows
 - **Per-turn lazy event load** — On-demand hydration of large session histories (deferred until real usage surfaces the need)
 
