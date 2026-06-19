@@ -149,7 +149,7 @@ Authoritative list of what must be covered, across `tests/unit/providers/{checkp
 
 ### editValidation.test.ts (Phase 2 — engine, ✅ real)
 - `discoverCheckCommand`: `.csproj`/`.sln` → `dotnet build`; package.json scripts (build→typecheck→test) → `npm run …`; Makefile (check→build) → `make …`; `Cargo.toml` → `cargo check`; `go.mod` → `go build ./...`; `.NET` preferred over package.json; unrecognised / unreadable / malformed → `null`
-- `classifyCheckOutcome` (delta-scoped): clean baseline + pass → clean; clean baseline + fail → regression; broken baseline → inconclusive (can't attribute); not-run / timed-out → inconclusive
+- `classifyCheckOutcome`: a passing post-edit check → clean (needs no baseline — the tree builds now); failing + clean baseline → regression; failing + non-clean baseline → inconclusive (can't attribute); not-run / timed-out → inconclusive
 
 ### validationGate.test.ts (Phase 2 — orchestration wiring, todo)
 - runs the discovered command via executeShellCommand under CommandApproval

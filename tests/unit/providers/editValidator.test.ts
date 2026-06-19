@@ -67,18 +67,18 @@ describe('EditValidator.validateBatch (ADR 0006, Phase 2)', () => {
     expect(runCommand).toHaveBeenCalledWith('npm run check', '/workspace', 1000, undefined);
   });
 
-  it('first batch has no baseline → inconclusive even when the check passes', async () => {
+  it('a passing check is clean even on the first batch (a pass needs no baseline)', async () => {
     const { validator, runCommand } = makeValidator({ runCommand: vi.fn(async () => pass) });
     const r = await validator.validateBatch(ROOT);
-    expect(r.verdict).toBe('inconclusive');
+    expect(r.verdict).toBe('clean');
     expect(runCommand).toHaveBeenCalledOnce();
   });
 
-  it('after a clean baseline, a passing check → clean', async () => {
+  it('a passing check on a later batch is also clean', async () => {
     const runCommand = vi.fn(async () => pass);
     const { validator } = makeValidator({ runCommand });
-    await validator.validateBatch(ROOT);           // establishes baseline (inconclusive)
-    const r = await validator.validateBatch(ROOT); // baseline now clean
+    await validator.validateBatch(ROOT);           // first batch — clean, sets baseline
+    const r = await validator.validateBatch(ROOT); // baseline clean
     expect(r.verdict).toBe('clean');
   });
 
@@ -136,13 +136,16 @@ describe('EditValidator.validateBatch (ADR 0006, Phase 2)', () => {
     expect(discover).toHaveBeenCalledTimes(2);
   });
 
-  it('resetTurn clears the baseline so the first batch of the next turn is inconclusive again', async () => {
-    const runCommand = vi.fn(async () => pass);
+  it('resetTurn clears the baseline so a failure can no longer be attributed', async () => {
+    const runCommand = vi.fn()
+      .mockResolvedValueOnce(pass)  // batch 1: clean, baseline now clean
+      .mockResolvedValueOnce(fail)  // batch 2: regression (clean→broken)
+      .mockResolvedValueOnce(fail); // batch 3 after reset: inconclusive (no baseline)
     const { validator } = makeValidator({ runCommand });
     await validator.validateBatch(ROOT);
-    expect((await validator.validateBatch(ROOT)).verdict).toBe('clean'); // baseline established
+    expect((await validator.validateBatch(ROOT)).verdict).toBe('regression');
 
     validator.resetTurn();
-    expect((await validator.validateBatch(ROOT)).verdict).toBe('inconclusive'); // baseline gone
+    expect((await validator.validateBatch(ROOT)).verdict).toBe('inconclusive');
   });
 });

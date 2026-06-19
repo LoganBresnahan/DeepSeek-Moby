@@ -127,17 +127,19 @@ export interface CheckResult {
 export type CheckVerdict = 'clean' | 'regression' | 'inconclusive';
 
 /**
- * Classify a batch's validation result, delta-scoped against the pre-batch
- * baseline. A `regression` (and only a regression) authorises a revert:
+ * Classify a batch's validation result. A `regression` (and only a regression)
+ * authorises a revert. The baseline is only consulted to *attribute a failure*
+ * — a passing post-edit check is proof the edit is fine and needs no baseline:
  *
- *  - The check didn't run or timed out  → inconclusive (no evidence).
- *  - The project was already broken      → inconclusive (can't attribute).
- *  - After-check passed                  → clean.
- *  - Baseline clean and after-check failed → regression (this batch broke it).
+ *  - The check didn't run or timed out      → inconclusive (no evidence).
+ *  - After-check passed                      → clean (the tree builds now).
+ *  - After-check failed, baseline was clean  → regression (this batch broke it).
+ *  - After-check failed, baseline not clean  → inconclusive (can't attribute;
+ *    the project was already broken, so reverting this batch wouldn't fix it).
  */
 export function classifyCheckOutcome(opts: { baselineClean: boolean; after: CheckResult }): CheckVerdict {
   const { baselineClean, after } = opts;
   if (!after.ran || after.timedOut) return 'inconclusive';
-  if (!baselineClean) return 'inconclusive';
-  return after.exitCode === 0 ? 'clean' : 'regression';
+  if (after.exitCode === 0) return 'clean';
+  return baselineClean ? 'regression' : 'inconclusive';
 }

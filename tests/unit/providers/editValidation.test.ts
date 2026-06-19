@@ -116,6 +116,10 @@ describe('editValidation — classifyCheckOutcome (ADR 0006, Phase 2)', () => {
     expect(classifyCheckOutcome({ baselineClean: true, after: { ran: true, exitCode: 0 } })).toBe('clean');
   });
 
+  it('passing check → clean even when the baseline is not clean (a pass needs no baseline)', () => {
+    expect(classifyCheckOutcome({ baselineClean: false, after: { ran: true, exitCode: 0 } })).toBe('clean');
+  });
+
   it('clean baseline + failing check → regression', () => {
     expect(classifyCheckOutcome({ baselineClean: true, after: { ran: true, exitCode: 1 } })).toBe('regression');
   });
