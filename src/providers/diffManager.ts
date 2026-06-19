@@ -15,6 +15,28 @@ import { FileContextManager } from './fileContextManager';
 import { extractCodeBlocks } from '../utils/codeBlocks';
 import { deleteFile as deleteFileCapability, deleteDirectory as deleteDirectoryCapability } from '../capabilities/files';
 
+/**
+ * A pre-edit snapshot of one file, used to revert a batch to last-good.
+ * See ADR 0006 (edit safety) layer 3 — docs/architecture/integration/edit-safety.md.
+ */
+interface FileCheckpoint {
+  uri: vscode.Uri;
+  originalContent: string;
+}
+
+/**
+ * An open auto-apply batch transaction: the pre-edit snapshots for every file
+ * touched in the batch, plus an ordered apply log. Opened by the orchestrator
+ * at the start of a tool-iteration's auto-apply batch and committed or reverted
+ * at the batch boundary (ADR 0006 layer 4). Snapshot capture in
+ * `applyCodeDirectlyForAutoMode` is a no-op until a transaction is open, so the
+ * apply path is unchanged when checkpointing is not active.
+ */
+interface EditTransaction {
+  files: Map<string, FileCheckpoint>;   // keyed by uri.fsPath; first touch snapshots
+  applied: Array<{ fsPath: string; description?: string }>;
+}
+
 export class DiffManager {
   // ── Events ──
 
@@ -54,6 +76,12 @@ export class DiffManager {
   private currentResponseFileChanges: Array<{ filePath: string; status: 'applied' | 'rejected' | 'pending'; iteration: number }> = [];
   private _failedAutoApplyCount = 0;
   private closingDiffsInProgress: number = 0;
+
+  // ── Edit transaction / checkpoint (ADR 0006 layers 3–4) ──
+  // Snapshots the pre-edit content of each file touched in an auto-apply batch
+  // so the whole batch can be reverted to last-good. null when no batch is open;
+  // snapshot capture in the apply path is a no-op until `beginEditTransaction`.
+  private _editTransaction: EditTransaction | null = null;
   private pendingApprovals = new Map<string, {
     resolve: (result: DiffApprovalResult) => void;
     filePath: string;
@@ -927,6 +955,88 @@ export class DiffManager {
    * @param skipNotification If true, don't send diffListChanged (caller handles batching)
    * @returns true if code was applied successfully
    */
+  // ── Edit transaction (checkpoint) — ADR 0006 layers 3–4 ──────────────────
+
+  /**
+   * Open an edit transaction for the current auto-apply batch. Idempotent — a
+   * no-op if one is already open, so it can be called defensively at a batch
+   * boundary. While open, `applyCodeDirectlyForAutoMode` snapshots each file's
+   * pre-edit content before mutating it.
+   */
+  beginEditTransaction(): void {
+    if (this._editTransaction) return;
+    this._editTransaction = { files: new Map(), applied: [] };
+  }
+
+  /** True while a batch transaction is open. */
+  get hasOpenEditTransaction(): boolean {
+    return this._editTransaction !== null;
+  }
+
+  /** fsPaths snapshotted in the open transaction (test/diagnostic visibility). */
+  get checkpointedPaths(): string[] {
+    return this._editTransaction ? [...this._editTransaction.files.keys()] : [];
+  }
+
+  /**
+   * Snapshot a file's pre-edit content into the open transaction, once per
+   * file. No-op when no transaction is open, so the apply path can call it
+   * unconditionally without changing behavior when checkpointing is inactive.
+   */
+  private snapshotForCheckpoint(uri: vscode.Uri, originalContent: string): void {
+    const tx = this._editTransaction;
+    if (!tx) return;
+    const key = uri.fsPath;
+    if (!tx.files.has(key)) {
+      tx.files.set(key, { uri, originalContent });
+    }
+  }
+
+  /** Record that a file was successfully written within the open transaction. */
+  private markAppliedInTransaction(fsPath: string, description?: string): void {
+    this._editTransaction?.applied.push({ fsPath, description });
+  }
+
+  /**
+   * Commit the batch: drop the snapshots and keep the on-disk writes. Call when
+   * the batch's edits have been accepted (post-validation in later phases).
+   */
+  commitEditTransaction(): void {
+    this._editTransaction = null;
+  }
+
+  /**
+   * Revert every file touched in the batch to its snapshotted pre-edit content,
+   * in reverse apply order, then close the transaction. Returns the fsPaths
+   * restored. Safe to call with no open transaction (returns []). A failure to
+   * restore one file is logged and does not abort the others.
+   */
+  async revertEditTransaction(): Promise<string[]> {
+    const tx = this._editTransaction;
+    if (!tx) return [];
+    const reverted: string[] = [];
+    // Reverse insertion order so later edits unwind before earlier ones.
+    const checkpoints = [...tx.files.values()].reverse();
+    for (const cp of checkpoints) {
+      try {
+        const document = await vscode.workspace.openTextDocument(cp.uri);
+        const edit = new vscode.WorkspaceEdit();
+        const fullRange = new vscode.Range(
+          document.positionAt(0),
+          document.positionAt(document.getText().length)
+        );
+        edit.replace(cp.uri, fullRange, cp.originalContent);
+        await vscode.workspace.applyEdit(edit);
+        await document.save();
+        reverted.push(cp.uri.fsPath);
+      } catch (error: any) {
+        logger.error(`[DiffManager] revertEditTransaction: failed to restore ${cp.uri.fsPath}: ${error?.message}`);
+      }
+    }
+    this._editTransaction = null;
+    return reverted;
+  }
+
   async applyCodeDirectlyForAutoMode(filePath: string, code: string, description?: string, skipNotification = false): Promise<boolean> {
     try {
       let fileUri: vscode.Uri | undefined;
@@ -1004,6 +1114,10 @@ export class DiffManager {
         return true;
       }
 
+      // Checkpoint the pre-edit content before mutating, so a batch revert can
+      // restore last-good (ADR 0006 layer 3). No-op until a transaction is open.
+      this.snapshotForCheckpoint(fileUri, currentContent);
+
       const edit = new vscode.WorkspaceEdit();
       const fullRange = new vscode.Range(
         document.positionAt(0),
@@ -1021,6 +1135,7 @@ export class DiffManager {
       logger.info(`[DiffManager] Auto mode: Applied changes to ${filePath} (iteration ${iteration})`);
 
       this.autoAppliedFiles.push({ filePath, timestamp: Date.now(), description });
+      this.markAppliedInTransaction(fileUri.fsPath, description);
 
       this.resolvedDiffs.push({
         filePath, timestamp: Date.now(), status: 'applied', iteration, diffId, action: 'modified'
