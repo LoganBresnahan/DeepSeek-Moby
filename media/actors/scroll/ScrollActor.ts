@@ -49,7 +49,6 @@ export class ScrollActor extends EventStateActor {
 
   // Event handlers
   private _scrollHandler: (() => void) | null = null;
-  private _mouseMoveHandler: (() => void) | null = null;
 
   // ResizeObserver for trailing scroll during content growth
   private _resizeObserver: ResizeObserver | null = null;
@@ -59,6 +58,11 @@ export class ScrollActor extends EventStateActor {
 
   // Track last scroll height to detect growth
   private _lastScrollHeight = 0;
+
+  // Track last scrollTop so a scroll event can tell a user drag-up (scrollTop
+  // decreased) apart from content growth pushing the bottom away (scrollTop steady).
+  // Programmatic follow only ever scrolls DOWN, so it never reads as a drag-up.
+  private _lastScrollTop = 0;
 
   // Debounce timer for scroll trailing
   private _trailTimer: ReturnType<typeof setTimeout> | null = null;
@@ -97,13 +101,7 @@ export class ScrollActor extends EventStateActor {
     };
 
     this._scrollContainer.addEventListener('scroll', this._scrollHandler);
-
-    // Mouse movement handler - disables auto-scroll when user moves mouse during streaming
-    this._mouseMoveHandler = () => {
-      this.handleMouseMove();
-    };
-
-    this._scrollContainer.addEventListener('mousemove', this._mouseMoveHandler);
+    this._lastScrollTop = this._scrollContainer.scrollTop;
 
     // Setup ResizeObserver to detect content height changes
     // This enables smooth trailing during streaming
@@ -174,47 +172,31 @@ export class ScrollActor extends EventStateActor {
     const heightShrunk = heightDelta < -20; // Significant shrink (more than 20px)
     this._lastScrollHeight = newScrollHeight;
 
-    // Check current position (content may have pushed us away from bottom)
-    const currentlyNearBottom = this.isNearBottom();
-    const atAbsoluteBottom = this.isAtAbsoluteBottom();
+    // Follow growing/shrinking content only while streaming and still engaged
+    // (_autoScroll is the single source of truth — it is cleared the moment the
+    // user scrolls up and restored when they return near the bottom). We no longer
+    // gate on a cached _nearBottom, which went stale when discrete content — a
+    // dropdown host, a new text container — was added in one jump rather than
+    // token-by-token, so those updates stopped sticking. Re-engaging is handled
+    // purely by handleScroll now, so a passive resize never snaps a reading user.
+    if (!this._isStreaming || !this._autoScroll) return;
 
-    // Re-engage auto-scroll only if the user is at the ABSOLUTE bottom (5px) but was
-    // marked as scrolled away. Using atAbsoluteBottom rather than the 100px nearBottom
-    // avoids snapping the viewport to the bottom when the user is merely *near* it.
-    if (this._isStreaming && this._userScrolled && atAbsoluteBottom) {
-      this._userScrolled = false;
-      this._autoScroll = true;
-      this._nearBottom = true;
-      this.publish({
-        'scroll.userScrolled': false,
-        'scroll.autoScroll': true
-      });
-  
-    }
-
-    // Handle content shrinking (jarring collapse)
-    // When content shrinks significantly and we're at/near bottom, smooth scroll to new bottom
-    if (heightShrunk && this._isStreaming && (this._nearBottom || currentlyNearBottom)) {
-      // Use smooth scroll to ease the visual jump
+    // Handle content shrinking (jarring collapse) — smooth-scroll to the new bottom.
+    if (heightShrunk) {
       this._scrollContainer.scrollTo({
         top: this._scrollContainer.scrollHeight,
         behavior: 'smooth'
       });
       this._nearBottom = true;
+      this._lastScrollTop = this._scrollContainer.scrollHeight;
       return;
     }
 
-    // Only trail if:
-    // 1. Content actually grew (not shrunk)
-    // 2. Auto-scroll is enabled (user hasn't scrolled up)
-    // 3. We were near the bottom (use cached value as content growth would push us away)
-    if (heightGrew && this._isStreaming && this._autoScroll && !this._userScrolled && this._nearBottom) {
+    if (heightGrew) {
       // Debounce to batch rapid updates during streaming
       if (this._trailTimer) {
         clearTimeout(this._trailTimer);
       }
-
-      // Use requestAnimationFrame for smooth trailing
       this._trailTimer = setTimeout(() => {
         this.trailScroll();
       }, 16); // ~60fps
@@ -225,11 +207,15 @@ export class ScrollActor extends EventStateActor {
    * Smoothly trail the scroll to follow growing content
    */
   private trailScroll(): void {
-    if (!this._scrollContainer) return;
+    // Re-check engagement at fire time: the user may have dragged up during the
+    // debounce window after this trail was queued. Without this guard the queued
+    // scroll would yank a now-reading user back to the bottom.
+    if (!this._scrollContainer || !this._autoScroll) return;
 
     // Use instant scroll during streaming for responsiveness
     // Smooth scroll can lag behind fast content
     this._scrollContainer.scrollTop = this._scrollContainer.scrollHeight;
+    this._lastScrollTop = this._scrollContainer.scrollTop;
     this._nearBottom = true;
   }
 
@@ -296,6 +282,9 @@ export class ScrollActor extends EventStateActor {
       } else {
         this._scrollContainer.scrollTop = request.position;
       }
+      // Sync the drag-up baseline to this programmatic target so the scroll event
+      // it triggers isn't misread as a user drag-up (which would disengage follow).
+      this._lastScrollTop = request.position;
     }
   }
 
@@ -303,68 +292,53 @@ export class ScrollActor extends EventStateActor {
   // Scroll Handling
   // ============================================
 
-  /**
-   * Handle mouse movement in chat container.
-   * During streaming, mouse movement disables auto-scroll to let user read content.
-   */
-  private handleMouseMove(): void {
-    // Only disable auto-scroll during streaming
-    if (!this._isStreaming) return;
-
-    // If already disabled, don't spam publishes
-    if (this._userScrolled) return;
-
-    // Disable auto-scroll when user moves mouse during streaming
-    this._userScrolled = true;
-    this._autoScroll = false;
-    this.publish({
-      'scroll.userScrolled': true,
-      'scroll.autoScroll': false
-    });
-
-  }
-
   private handleScroll(): void {
+    if (!this._scrollContainer) return;
+
+    const scrollTop = this._scrollContainer.scrollTop;
+    const prevScrollTop = this._lastScrollTop;
+    this._lastScrollTop = scrollTop;
+
     const nearBottom = this.isNearBottom();
     const wasNearBottom = this._nearBottom;
-
     this._nearBottom = nearBottom;
 
-    // Only track user scroll during streaming
+    // Auto-scroll intent only flips while streaming.
     if (this._isStreaming) {
-      // Re-engage auto-scroll when the user actively scrolls back toward the bottom.
-      // This is a USER-driven scroll gesture, so we use the forgiving 100px nearBottom
-      // threshold rather than the strict 5px absolute-bottom check: while content is
-      // still streaming the bottom is a moving target and a fling-to-bottom rarely lands
-      // within 5px, which is what broke sticky-follow. The PASSIVE content-resize
-      // re-engage in handleContentResize stays strict (atAbsoluteBottom) so growing
-      // content never snaps a user who is merely reading near the bottom.
-      if (nearBottom && this._userScrolled) {
-        this._userScrolled = false;
-        this._autoScroll = true;
-        this._nearBottom = true; // Force near-bottom state
+      // A genuine user drag-up is the ONLY thing that decreases scrollTop —
+      // content growth keeps it steady and programmatic follow only increases it.
+      // So scrolling up and away from the bottom is what disengages the follow.
+      const draggedUp = scrollTop < prevScrollTop - 1;
+      if (draggedUp && !nearBottom && this._autoScroll) {
+        this._autoScroll = false;
+        this._userScrolled = true;
         this.publish({
-          'scroll.userScrolled': false,
+          'scroll.autoScroll': false,
+          'scroll.userScrolled': true,
+          'scroll.nearBottom': false
+        });
+        return;
+      }
+
+      // Returning to within the 100px near-bottom band re-arms the follow. The band
+      // is forgiving because while content streams the bottom is a moving target and
+      // a fling rarely lands within a few pixels of it.
+      if (nearBottom && !this._autoScroll) {
+        this._autoScroll = true;
+        this._userScrolled = false;
+        this._nearBottom = true;
+        this.publish({
           'scroll.autoScroll': true,
+          'scroll.userScrolled': false,
           'scroll.nearBottom': true
         });
-    
+        return;
       }
     }
 
     if (wasNearBottom !== nearBottom && !this._userScrolled) {
       this.publish({ 'scroll.nearBottom': nearBottom });
     }
-  }
-
-  /**
-   * Check if at absolute bottom (within 5px tolerance for rounding)
-   */
-  private isAtAbsoluteBottom(): boolean {
-    if (!this._scrollContainer) return true;
-
-    const { scrollTop, scrollHeight, clientHeight } = this._scrollContainer;
-    return scrollHeight - scrollTop - clientHeight < 5;
   }
 
   /**
@@ -397,6 +371,10 @@ export class ScrollActor extends EventStateActor {
       this._scrollContainer.scrollTop = this._scrollContainer.scrollHeight;
     }
 
+    // Keep the drag-up baseline in sync. For the instant path scrollTop is now the
+    // bottom; for smooth it stays at the pre-animation value (which only increases as
+    // the animation runs), so neither reads as a user drag-up.
+    this._lastScrollTop = this._scrollContainer.scrollTop;
     this._nearBottom = true;
     this._userScrolled = false;
     this._autoScroll = true;
@@ -481,11 +459,6 @@ export class ScrollActor extends EventStateActor {
       this._scrollContainer.removeEventListener('scroll', this._scrollHandler);
     }
 
-    // Clean up mouse move handler
-    if (this._mouseMoveHandler && this._scrollContainer) {
-      this._scrollContainer.removeEventListener('mousemove', this._mouseMoveHandler);
-    }
-
     // Clean up ResizeObserver
     if (this._resizeObserver) {
       this._resizeObserver.disconnect();
@@ -506,7 +479,6 @@ export class ScrollActor extends EventStateActor {
 
     // Remove scroll button
     this._scrollHandler = null;
-    this._mouseMoveHandler = null;
     this._scrollContainer = null;
     super.destroy();
   }
