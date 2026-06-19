@@ -183,6 +183,7 @@ describe('Phase 3 Fidelity: live events == hydrated events round-trip', () => {
       cancelPendingApprovals: vi.fn(), registerShellModifiedFiles: vi.fn(),
       registerShellDeletedFiles: vi.fn(), getFailedAutoApplyCount: vi.fn(() => 0),
       resetFailedAutoApplyCount: vi.fn(),
+      beginEditTransaction: vi.fn(), commitEditTransaction: vi.fn(), revertEditTransaction: vi.fn(async () => []),
       onCodeApplied: vi.fn(noopDisposable), onEditRejected: vi.fn(noopDisposable),
     };
     const mockWebSearch = {

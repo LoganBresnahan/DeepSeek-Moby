@@ -193,6 +193,11 @@ function createMockDiffManager() {
     registerShellDeletedFiles: vi.fn(),
     getFailedAutoApplyCount: vi.fn(() => 0),
     resetFailedAutoApplyCount: vi.fn(),
+    // Edit-safety checkpoint transaction (ADR 0006) — the orchestrator opens
+    // one per auto-apply batch and commits at the batch boundary.
+    beginEditTransaction: vi.fn(),
+    commitEditTransaction: vi.fn(),
+    revertEditTransaction: vi.fn(async () => []),
     onCodeApplied: vi.fn(noopDisposable),
     onEditRejected: vi.fn(noopDisposable),
   };
@@ -972,6 +977,63 @@ describe('RequestOrchestrator', () => {
         true
       );
       expect(mockDiffManager.showDiff).not.toHaveBeenCalled();
+    });
+
+    // ADR 0006 (edit safety) — the auto-apply batch is wrapped in a checkpoint
+    // transaction: opened before dispatch, committed at the batch boundary.
+    it('opens and commits a checkpoint transaction for an auto-mode edit batch', async () => {
+      mockDiffManager.currentEditMode = 'auto';
+
+      let callCount = 0;
+      mockClient.chat.mockImplementation(async () => {
+        callCount++;
+        if (callCount === 1) {
+          return {
+            content: '',
+            tool_calls: [{
+              id: 'tc-1',
+              type: 'function',
+              function: {
+                name: 'edit_file',
+                arguments: JSON.stringify({ file: 'src/index.ts', edits: [edit], language: 'typescript' })
+              }
+            }]
+          };
+        }
+        return { content: 'Done', tool_calls: null };
+      });
+
+      await orchestrator.handleMessage('Edit the file', null, async () => '', undefined);
+
+      expect(mockDiffManager.beginEditTransaction).toHaveBeenCalled();
+      expect(mockDiffManager.commitEditTransaction).toHaveBeenCalled();
+    });
+
+    it('does not open a checkpoint transaction in manual mode', async () => {
+      mockDiffManager.currentEditMode = 'manual';
+
+      let callCount = 0;
+      mockClient.chat.mockImplementation(async () => {
+        callCount++;
+        if (callCount === 1) {
+          return {
+            content: '',
+            tool_calls: [{
+              id: 'tc-1',
+              type: 'function',
+              function: {
+                name: 'edit_file',
+                arguments: JSON.stringify({ file: 'src/index.ts', edits: [edit], language: 'typescript' })
+              }
+            }]
+          };
+        }
+        return { content: 'Done', tool_calls: null };
+      });
+
+      await orchestrator.handleMessage('Edit the file', null, async () => '', undefined);
+
+      expect(mockDiffManager.beginEditTransaction).not.toHaveBeenCalled();
     });
 
     // Regression: when the auto-apply reports failure (no clean match), the

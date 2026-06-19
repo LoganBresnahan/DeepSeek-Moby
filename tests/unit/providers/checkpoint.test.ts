@@ -92,6 +92,7 @@ vi.mock('../../../src/utils/logger', () => ({
 }));
 
 import { DiffManager } from '../../../src/providers/diffManager';
+import * as vscode from 'vscode';
 
 // diffEngine: applyChanges(current, code) writes `code` as the new full content.
 function createMockDiffEngine() {
@@ -212,5 +213,17 @@ describe('DiffManager — checkpoint / EditTransaction (ADR 0006, Phase 1)', () 
     expect(manager.checkpointedPaths).toEqual([]);
     expect(fileStore.get(A)).toBe('A-edited');
     expect(await manager.revertEditTransaction()).toEqual([]);
+  });
+
+  it('fails the edit without saving or false success when applyEdit is rejected', async () => {
+    // Simulate the editor rejecting the WorkspaceEdit (file locked / out of sync).
+    vi.mocked(vscode.workspace.applyEdit).mockResolvedValueOnce(false as any);
+    const before = manager.getFailedAutoApplyCount();
+
+    const ok = await manager.applyCodeDirectlyForAutoMode(A, 'A-edited', undefined, true);
+
+    expect(ok).toBe(false);
+    expect(fileStore.get(A)).toBe('A-original'); // not written
+    expect(manager.getFailedAutoApplyCount()).toBe(before + 1);
   });
 });

@@ -3215,6 +3215,16 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
 
       const batchStartIndex = iterationStartBatchSize;
 
+      // Open a checkpoint transaction for this iteration's auto-apply batch
+      // (ADR 0006 layers 3–4). Auto mode only — manual/ask edits don't go
+      // through applyCodeDirectlyForAutoMode, so they never snapshot. Committed
+      // at the batch settle point below (and the defensive close), so each
+      // iteration is its own all-or-nothing unit once Phase 2's validation adds
+      // the revert trigger.
+      if (this.diffManager.currentEditMode === 'auto') {
+        this.diffManager.beginEditTransaction();
+      }
+
       // Dispatch each tool call via the shared helper. Same UI status
       // lifecycle as runToolLoop: pending → running → done/error.
       for (let i = 0; i < toolCalls.length; i++) {
@@ -3273,6 +3283,12 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
         fileModifiedInBatch = false;
       }
 
+      // Settle the batch's checkpoint transaction. Phase 1: commit (keep the
+      // writes) — there is no transaction-level revert trigger yet. Phase 2
+      // inserts validation here: validate → commit on pass, revert on
+      // regression, before this point. Safe no-op when no transaction is open.
+      this.diffManager.commitEditTransaction();
+
       // Close the tool batch at the iteration boundary. Each streamChat
       // call is one "decision point" — its tool calls (one or many parallel)
       // belong in one dropdown; the next iteration's calls are a separate
@@ -3295,6 +3311,9 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
     if (toolContainerStarted) {
       this._onToolCallsEnd.fire();
     }
+    // Defensive — drop any checkpoint transaction left open by a mid-batch
+    // abort so it can't carry into the next turn. Safe no-op otherwise.
+    this.diffManager.commitEditTransaction();
 
     const limitReached = iterations >= maxIterations && maxIterations !== Infinity;
     return { allToolDetails, limitReached, budgetExceeded };
@@ -3482,6 +3501,12 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
       // Calculate batch-relative index for this iteration's tools
       const batchStartIndex = batchToolDetails.length - newTools.length;
 
+      // Open a checkpoint transaction for this iteration's auto-apply batch
+      // (ADR 0006 layers 3–4). Mirrors runStreamingToolCallsLoop; auto mode only.
+      if (this.diffManager.currentEditMode === 'auto') {
+        this.diffManager.beginEditTransaction();
+      }
+
       // Execute each tool call
       for (let i = 0; i < response.tool_calls.length; i++) {
         const toolCall = response.tool_calls[i];
@@ -3563,6 +3588,10 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
         fileModifiedInBatch = false;
       }
 
+      // Settle the batch's checkpoint transaction (ADR 0006). Phase 1 commits;
+      // Phase 2 inserts validate → commit/revert here. Safe no-op when closed.
+      this.diffManager.commitEditTransaction();
+
       // Close the tool batch at the iteration boundary. Mirrors
       // runStreamingToolCallsLoop — each non-streaming chat() call is one
       // "decision point" whose tools belong in one dropdown. Without this close,
@@ -3581,6 +3610,9 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
       this._onToolCallsEnd.fire();
       logger.info(`[Frontend] Sent toolCallsEnd (end of tool loop)`);
     }
+    // Defensive — drop any checkpoint transaction left open by a mid-batch
+    // abort so it can't carry into the next turn. Safe no-op otherwise.
+    this.diffManager.commitEditTransaction();
 
     const limitReached = iterations >= maxIterations && maxIterations !== Infinity;
     if (limitReached || budgetExceeded) {

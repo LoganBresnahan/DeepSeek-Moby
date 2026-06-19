@@ -958,13 +958,20 @@ export class DiffManager {
   // ── Edit transaction (checkpoint) — ADR 0006 layers 3–4 ──────────────────
 
   /**
-   * Open an edit transaction for the current auto-apply batch. Idempotent — a
-   * no-op if one is already open, so it can be called defensively at a batch
-   * boundary. While open, `applyCodeDirectlyForAutoMode` snapshots each file's
-   * pre-edit content before mutating it.
+   * Open a fresh edit transaction for the current auto-apply batch. Any stale
+   * transaction left open by a prior batch is discarded first (see body), so
+   * checkpoints never leak across batches or turns. While open,
+   * `applyCodeDirectlyForAutoMode` snapshots each file's pre-edit content
+   * before mutating it.
    */
   beginEditTransaction(): void {
-    if (this._editTransaction) return;
+    // Discard a stale transaction from a batch that aborted before commit/
+    // revert. Safe: its edits are already on disk and Phase 1 has no
+    // transaction-level revert trigger, so dropping the snapshots only forfeits
+    // a revert we were not going to perform — it does not corrupt anything.
+    if (this._editTransaction && this._editTransaction.files.size > 0) {
+      logger.warn(`[DiffManager] beginEditTransaction: discarding ${this._editTransaction.files.size} stale checkpoint(s) from an uncommitted batch`);
+    }
     this._editTransaction = { files: new Map(), applied: [] };
   }
 
@@ -1124,7 +1131,21 @@ export class DiffManager {
         document.positionAt(currentContent.length)
       );
       edit.replace(fileUri, fullRange, result.content);
-      await vscode.workspace.applyEdit(edit);
+
+      // Guard the WorkspaceEdit result (ADR 0006 layer 6, write-back). applyEdit
+      // can reject the change (file locked / out-of-sync); the old code ignored
+      // the boolean and saved + reported success regardless. Now a rejected edit
+      // is NOT saved and fails the apply, so RequestOrchestrator's re-read loop
+      // retries instead of a partial/failed write being reported as applied.
+      // (Full re-read content verification with editor save-transform tolerance
+      // lands with the Phase 2 validation gate.)
+      const applied = await vscode.workspace.applyEdit(edit);
+      if (!applied) {
+        logger.error(`[DiffManager] Auto mode: applyEdit rejected the change for ${filePath}; treating edit as failed (not saved)`);
+        this._failedAutoApplyCount++;
+        this._onWarning.fire({ message: `Code edit to ${filePath} could not be applied (the editor rejected the change). Re-read the file and try again.` });
+        return false;
+      }
       await document.save();
 
       const currentCount = this.fileEditCounts.get(filePath) || 0;
