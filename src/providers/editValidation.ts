@@ -9,10 +9,18 @@
  *    language parsers. A project with no recognised marker yields `null`
  *    (the gate becomes a no-op).
  *
+ *  - `normalizeErrors` extracts a line-shift-invariant SET of error signatures
+ *    from a tool's stdout/stderr (language-agnostic for toolchains that label
+ *    errors with the word "error": dotnet / tsc / cargo / clang / javac).
+ *
  *  - `classifyCheckOutcome` turns a before/after check result into a verdict.
- *    It is delta-scoped: a project that was already broken before the batch
- *    (`baselineClean === false`) is `inconclusive`, never a `regression`, so the
- *    gate never blames the model for pre-existing breakage.
+ *    It is *differential*: a regression is "this edit made the tree measurably
+ *    worse than it started" — a clean→broken exit transition, OR a NEW error
+ *    signature that wasn't in the baseline. A tree that was already broken and
+ *    gained no new errors is `held` (kept, not reverted); one that gained new
+ *    errors is a `regression` even from a broken start (the ratchet). The gate
+ *    never blames the model for pre-existing breakage, and works from any
+ *    starting state — it never assumes the tree was clean to begin with.
  *
  * Execution (running the command, approval, timeout) and the
  * commit/revert/halt policy live in the orchestrator; these functions stay
@@ -122,24 +130,91 @@ export interface CheckResult {
   timedOut?: boolean;
   /** Process exit code when `ran` and not `timedOut` (0 = success). */
   exitCode?: number;
+  /**
+   * Normalized error signatures parsed from the output (see `normalizeErrors`).
+   * Present when `ran`; used to diff a broken baseline against a broken after.
+   */
+  errors?: string[];
 }
 
-export type CheckVerdict = 'clean' | 'regression' | 'inconclusive';
+/**
+ * `clean`   — the tree builds (exit 0).
+ * `regression` — this edit made it measurably worse (clean→broken, or a new
+ *                error vs. the baseline). The only verdict that authorises a revert.
+ * `held`    — still broken, but this edit added no new errors; kept, not reverted.
+ * `inconclusive` — couldn't measure or couldn't attribute (no revert, commit).
+ */
+export type CheckVerdict = 'clean' | 'regression' | 'held' | 'inconclusive';
 
 /**
- * Classify a batch's validation result. A `regression` (and only a regression)
- * authorises a revert. The baseline is only consulted to *attribute a failure*
- * — a passing post-edit check is proof the edit is fine and needs no baseline:
+ * Extract a line-shift-invariant SET of error signatures from check output.
+ * Strips volatile source coordinates (line/column) so the SAME logical error
+ * compares equal after an edit shifts it down the file, and drops count/summary
+ * lines ("5 Error(s)", "Found 3 errors") so a changing count is not mistaken for
+ * a changing error. Keeps the file, error code, and message.
  *
- *  - The check didn't run or timed out      → inconclusive (no evidence).
- *  - After-check passed                      → clean (the tree builds now).
- *  - After-check failed, baseline was clean  → regression (this batch broke it).
- *  - After-check failed, baseline not clean  → inconclusive (can't attribute;
- *    the project was already broken, so reverting this batch wouldn't fix it).
+ * Language-agnostic for toolchains that print "error" on each diagnostic line
+ * (dotnet, tsc, cargo, clang/gcc, javac). Returns `[]` when no error lines are
+ * recognised — the caller treats an uncharacterisable failure as inconclusive
+ * rather than guessing (e.g. `go build`, which omits the word "error").
  */
-export function classifyCheckOutcome(opts: { baselineClean: boolean; after: CheckResult }): CheckVerdict {
-  const { baselineClean, after } = opts;
+export function normalizeErrors(output: string): string[] {
+  if (!output) return [];
+  const seen = new Set<string>();
+  for (const raw of output.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    // Drop count/summary lines — their numbers change without the errors changing.
+    if (/error\(s\)/i.test(line)) continue;            // dotnet "5 Error(s)"
+    if (/\b\d+\s+errors?\b/i.test(line)) continue;     // "Found 3 errors", "3 errors generated"
+    if (/could not compile/i.test(line)) continue;     // cargo "due to N previous errors"
+    // Keep only lines that look like an individual error.
+    if (!/\berror\b/i.test(line)) continue;
+    const normalized = line
+      .replace(/\((\d+),(\d+)\)/g, '')   // (line,col)
+      .replace(/\((\d+)\)/g, '')         // (line)
+      .replace(/:\d+:\d+:?/g, ':')       // :line:col:
+      .replace(/:\d+:/g, ':')            // :line:
+      .replace(/\s+/g, ' ')              // collapse whitespace
+      .trim();
+    if (normalized) seen.add(normalized.slice(0, 500));
+    if (seen.size >= 200) break;         // bound pathological output
+  }
+  return [...seen];
+}
+
+/**
+ * Classify a batch's validation result against the pre-edit baseline. A
+ * `regression` (and only a regression) authorises a revert.
+ *
+ *  - After didn't run / timed out                  → inconclusive (no evidence).
+ *  - After passed (exit 0)                          → clean (builds now, any start).
+ *  - After failed, no usable baseline               → inconclusive (can't attribute).
+ *  - After failed, baseline was clean               → regression (this edit broke it).
+ *  - After failed, baseline broken, a NEW error     → regression (made it worse).
+ *  - After failed, baseline broken, no new error    → held (no worse; kept).
+ *  - After failed but its errors can't be parsed,
+ *    or the baseline's can't                        → inconclusive (don't guess).
+ */
+export function classifyCheckOutcome(opts: { baseline: CheckResult | null; after: CheckResult }): CheckVerdict {
+  const { baseline, after } = opts;
+
+  // No usable AFTER measurement → no evidence.
   if (!after.ran || after.timedOut) return 'inconclusive';
+  // The tree builds now → clean, regardless of where it started.
   if (after.exitCode === 0) return 'clean';
-  return baselineClean ? 'regression' : 'inconclusive';
+
+  // After failed. Need a usable baseline to attribute the failure.
+  if (!baseline || !baseline.ran || baseline.timedOut) return 'inconclusive';
+  // Baseline was clean → this edit broke it (exit-code floor, no parsing needed).
+  if (baseline.exitCode === 0) return 'regression';
+
+  // Both baseline and after failed → differential on the error SETS.
+  const before = baseline.errors ?? [];
+  const now = after.errors ?? [];
+  // Can't characterise one side → don't guess; abstain (commit, no revert).
+  if (before.length === 0 || now.length === 0) return 'inconclusive';
+  const beforeSet = new Set(before);
+  const introducedNewError = now.some(e => !beforeSet.has(e));
+  return introducedNewError ? 'regression' : 'held';
 }

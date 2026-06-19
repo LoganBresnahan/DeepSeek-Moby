@@ -1,6 +1,6 @@
 # 0006. Edit safety: checkpoint, atomic batch, and post-apply validation
 
-**Status:** Proposed
+**Status:** Accepted — implemented (Phases 1–3). Layer 5 was refined during implementation: validation is *differential* (a normalized error-set diff) against a **pre-edit baseline probe**, so the gate works from any starting state, not only a clean one. See Layer 5.
 **Date:** 2026-06-19
 
 ## Context
@@ -69,7 +69,13 @@ After a batch applies and before commit, run the **project's own check command**
 
 - **Command discovery** (new `ProjectCheck` helper): map workspace markers → check command. `*.csproj`/`*.sln` → `dotnet build`; `package.json` with a `build`/`typecheck`/`test` script → the corresponding `npm run …`; `Makefile` with a `check`/`build` target → `make …`; `Cargo.toml` → `cargo check`; `go.mod` → `go build ./...`. No marker matched → **gate is a no-op** (commit + note; or halt per `onInconclusive`). This is delegation, not bundling — Moby ships the *mapping*, the project ships the *checker*.
 - **Execution**: run through `executeShellCommand` ([reasonerShellExecutor.ts:414](../../../src/tools/reasonerShellExecutor.ts#L414)) under the existing `CommandApprovalManager` (`checkCommand` → allowed/blocked/ask). A blocked or unapproved check command → gate is a no-op + surfaced, never a silent bypass. Hard timeout (default 60s, configurable); long-running/dev-server commands are already excluded by `isLongRunningCommand`.
-- **Delta, not absolute**: capture diagnostics/exit state **before** the batch and **after**. A *regression* = a new error attributable to a touched file (or a clean→broken transition in exit status). Pre-existing errors and errors in untouched files do **not** count — otherwise the gate would punish the model for problems it didn't create and revert-loop forever.
+- **Differential against a pre-edit baseline (no "assume clean")**: the gate **measures** the starting state rather than assuming it. `ensureBaseline` runs the check on the *pristine* tree before the turn's first edit applies (once per turn; read-only turns pay nothing), capturing exit state **and**, when broken, the error set. Each batch is classified against that baseline:
+  - **`clean`** — after builds (exit 0), regardless of start.
+  - **`regression`** (the only verdict that reverts) — a clean→broken exit transition, **or** a *new* normalized error that wasn't in the baseline.
+  - **`held`** — both broken but no new error (incl. *fewer* errors); committed, not reverted.
+  - **`inconclusive`** — no usable baseline, timeout, didn't run, or a failure whose errors can't be parsed.
+
+  Error comparison uses `normalizeErrors`, which strips source coordinates so a *shifted* error compares equal and drops count/summary lines, making it language-agnostic for toolchains that print `error` per diagnostic (dotnet/tsc/cargo/clang/javac); others (e.g. `go build`) degrade to inconclusive. This makes the gate a **monotonic ratchet from any starting state** — a model fixing a broken file ratchets its error set down (each step kept), and any batch that introduces a new error reverts, even from a broken start. Pre-existing errors never count against the model, so the gate can't revert-loop on breakage it didn't create. (The earlier draft assumed a clean baseline and was binary on exit code — it could neither attribute a single-edit turn nor protect a broken-start turn; both are fixed here.)
 
 ### Layer 6 — Revert-on-regression + autonomous retry
 
@@ -159,6 +165,7 @@ Rejected. It **mixes the edit modes**, and that breaks the mode contract. Choosi
 
 **Positive:**
 - The invariant holds end to end: every failure path reverts or asks; "applied" means "verified." A garbled REPLACE that compiles-breaks can no longer sit on disk reported as success.
+- **Works from any starting state.** The differential gate (Layer 5) measures the pre-edit baseline rather than assuming a clean tree, so it both attributes a *single-edit* turn (the common case) and protects a *broken-start* turn: it reverts only edits that make the tree measurably worse (a new error), and lets the model ratchet a broken file down toward clean (`held`) without false reverts. No "assume clean" assumption anywhere.
 - Kills the whack-a-mole amplifier — a bad fix reverts to last-good instead of layering onto a corrupted file and spawning the next bad fix.
 - No half-edited files: a batch is all-or-nothing.
 - Zero language knowledge added to Moby; the validation oracle is the user's own toolchain, gated by the approval system that already governs shell execution.
@@ -166,7 +173,8 @@ Rejected. It **mixes the edit modes**, and that breaks the mode contract. Choosi
 - Reuses existing machinery: the tool-batch lifecycle, `applyCodeDirectlyForAutoMode`'s `originalContent` read, the `maxFailedEditRetries` re-read loop, `handleAskModeDiff`, and `CommandApprovalManager`.
 
 **Negative / accepted costs:**
-- Latency: one project build per edit-batch in Auto mode. Mitigated by per-*batch* (not per-edit) validation, a configurable fast check command, and `validate: "off"`. Real, and the reason validation is config-gated while checkpointing is default-on.
+- Latency: one project build per edit-batch in Auto mode, plus **one pre-edit baseline build** at the start of each editing turn (the Layer 5 probe; read-only turns are unaffected, and it runs only once per turn). Mitigated by per-*batch* (not per-edit) validation, a configurable fast check command, and `validate: "off"`. Real, and the reason validation is config-gated while checkpointing is default-on.
+- The error-set diff is a heuristic: a toolchain that doesn't print `error` per diagnostic (e.g. `go build`) yields no comparable set, so a broken-start turn there degrades to `inconclusive` (commit + note) rather than the ratchet. Clean-start protection (exit-code floor) still holds everywhere. A wrong/missing parse degrades to no-op, never to a false revert.
 - `ProjectCheck` command discovery is a heuristic map; unusual projects need an explicit `moby.editSafety.validate` command. A wrong/missing command degrades to no-op, not to corruption.
 - In-memory checkpoints hold original content for the batch lifetime — bounded memory for very large files. Snapshots are released on commit/revert, so the batch-scoped lifetime keeps it bounded.
 - Auto mode can now **halt a turn** when edits won't converge (repair budget exhausted). That is a visible behavior change — but it is a clean stop with files at last-good, not a covert mode switch, and it only fires after autonomous retries are exhausted. Config-gated and recorded here rather than shipped silently.

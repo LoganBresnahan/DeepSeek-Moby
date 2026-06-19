@@ -26,6 +26,7 @@ import * as vscode from 'vscode';
 import {
   discoverCheckCommand,
   classifyCheckOutcome,
+  normalizeErrors,
   CheckCommand,
   CheckResult,
   CheckVerdict,
@@ -74,7 +75,8 @@ type CheckAttempt =
   | { kind: 'ran'; command: string; outcome: RunOutcome };
 
 export class EditValidator {
-  private _baselineClean = false;
+  // null = baseline not measured this turn; otherwise the pristine/last check.
+  private _baseline: CheckResult | null = null;
   /** True once the baseline has been measured this turn (pristine probe or a batch). */
   private _baselineProbed = false;
   // undefined = not resolved yet this turn; null = resolved to "no command".
@@ -84,17 +86,18 @@ export class EditValidator {
 
   /** Reset per-turn state. Call at the start of each user turn. */
   resetTurn(): void {
-    this._baselineClean = false;
+    this._baseline = null;
     this._baselineProbed = false;
     this._command = undefined;
   }
 
   /**
    * Establish the pre-edit baseline by running the check on the CURRENT tree,
-   * BEFORE the turn's first edit is applied. Idempotent per turn. A definitive
-   * pass/fail records whether the tree was clean going in; if the check can't
-   * run (disabled, no command, not approved, threw, timed out) the baseline
-   * stays unknown and a first-edit failure remains inconclusive — never a false
+   * BEFORE the turn's first edit is applied. Idempotent per turn. Records the
+   * tree's state going in — including the parsed error set when it's broken, so
+   * a later broken-vs-broken batch can be diffed. If the check can't run
+   * (disabled, no command, not approved, threw, timed out) the baseline stays
+   * unknown and a first-edit failure remains inconclusive — never a false
    * revert. Cheap to call before every edit: only the first one actually probes.
    *
    * Returns the probe status for logging: `clean`/`broken` when it ran,
@@ -104,15 +107,15 @@ export class EditValidator {
     if (this._baselineProbed) return 'skipped';
     const attempt = await this.runCheck(root, signal);
     if (attempt.kind !== 'ran') return 'unknown';
-    this._baselineClean = attempt.outcome.exitCode === 0 && !attempt.outcome.timedOut;
+    this._baseline = this.toCheckResult(attempt.outcome);
     this._baselineProbed = true;
-    return this._baselineClean ? 'clean' : 'broken';
+    return this._baseline.exitCode === 0 ? 'clean' : 'broken';
   }
 
   /**
    * Validate one editing batch against the baseline. Only a `regression`
-   * authorises a revert; `inconclusive`/`skipped` mean commit (the caller may
-   * halt on inconclusive per `onInconclusive`).
+   * authorises a revert; `held`/`inconclusive`/`skipped` mean commit (the caller
+   * may halt on inconclusive per `onInconclusive`).
    */
   async validateBatch(root: vscode.Uri, signal?: AbortSignal): Promise<BatchValidation> {
     const attempt = await this.runCheck(root, signal);
@@ -128,26 +131,44 @@ export class EditValidator {
 
     // The check ran to completion (pass or fail).
     const run = attempt.outcome;
-    const after: CheckResult = { ran: true, timedOut: run.timedOut, exitCode: run.exitCode };
-    const verdict = classifyCheckOutcome({ baselineClean: this._baselineClean, after });
+    const after = this.toCheckResult(run);
+    const verdict = classifyCheckOutcome({ baseline: this._baseline, after });
 
-    // Carry the baseline forward. clean → tree is clean; regression → caller
-    // reverts, so the tree is restored to its (clean) pre-batch state; otherwise
-    // the baseline is whatever the committed tree actually is.
-    const afterClean = !run.timedOut && run.exitCode === 0;
-    this._baselineClean = verdict === 'clean' || verdict === 'regression' ? true : afterClean;
+    // Carry the baseline forward. regression → caller reverts, so the tree
+    // returns to its pre-batch state (keep the old baseline); any other ran
+    // outcome leaves the committed tree as the new baseline (clean → empty
+    // errors; held/inconclusive → the after state, so the next batch diffs
+    // against the now-current errors).
+    if (!run.timedOut && verdict !== 'regression') {
+      this._baseline = after;
+    }
     this._baselineProbed = true;
 
-    // Give the "ran but couldn't act on it" inconclusive cases an accurate note
-    // so the log never reads as "no validation signal" when the check DID run.
+    // Give every non-revert outcome an accurate note so the log never reads as
+    // "no validation signal" when the check actually ran.
     let note: string | undefined;
-    if (verdict === 'inconclusive') {
+    let output: string | undefined;
+    if (verdict === 'regression') {
+      output = run.output;
+    } else if (verdict === 'held') {
+      note = `check "${attempt.command}" still failing, but this edit introduced no new errors — kept (the tree was already broken)`;
+    } else if (verdict === 'inconclusive') {
       note = run.timedOut
         ? `check "${attempt.command}" timed out`
-        : `check "${attempt.command}" is failing, but the tree was already failing before this edit — not attributed to this batch`;
+        : `check "${attempt.command}" is failing, but it couldn't be attributed to this edit (no comparable clean baseline)`;
     }
 
-    return { verdict, command: attempt.command, output: run.output, note };
+    return { verdict, command: attempt.command, output, note };
+  }
+
+  /** Build a CheckResult (with the parsed error set) from a completed run. */
+  private toCheckResult(run: RunOutcome): CheckResult {
+    return {
+      ran: true,
+      timedOut: run.timedOut,
+      exitCode: run.exitCode,
+      errors: run.timedOut || run.exitCode === 0 ? [] : normalizeErrors(run.output),
+    };
   }
 
   /**

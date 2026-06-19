@@ -30,7 +30,7 @@ vi.mock('vscode', () => ({
 }));
 
 import * as vscode from 'vscode';
-import { discoverCheckCommand, classifyCheckOutcome } from '../../../src/providers/editValidation';
+import { discoverCheckCommand, classifyCheckOutcome, normalizeErrors } from '../../../src/providers/editValidation';
 
 const ROOT = { fsPath: '/workspace' } as any as vscode.Uri;
 
@@ -111,28 +111,92 @@ describe('editValidation — discoverCheckCommand (ADR 0006, Phase 2)', () => {
   });
 });
 
-describe('editValidation — classifyCheckOutcome (ADR 0006, Phase 2)', () => {
+describe('editValidation — classifyCheckOutcome (ADR 0006, Phase 2 — differential)', () => {
+  const clean = { ran: true, exitCode: 0, errors: [] };
+
   it('clean baseline + passing check → clean', () => {
-    expect(classifyCheckOutcome({ baselineClean: true, after: { ran: true, exitCode: 0 } })).toBe('clean');
+    expect(classifyCheckOutcome({ baseline: clean, after: { ran: true, exitCode: 0, errors: [] } })).toBe('clean');
   });
 
-  it('passing check → clean even when the baseline is not clean (a pass needs no baseline)', () => {
-    expect(classifyCheckOutcome({ baselineClean: false, after: { ran: true, exitCode: 0 } })).toBe('clean');
+  it('passing check → clean even when the baseline was broken (a pass needs no baseline)', () => {
+    const baseline = { ran: true, exitCode: 1, errors: ['error CS1002'] };
+    expect(classifyCheckOutcome({ baseline, after: { ran: true, exitCode: 0, errors: [] } })).toBe('clean');
   });
 
-  it('clean baseline + failing check → regression', () => {
-    expect(classifyCheckOutcome({ baselineClean: true, after: { ran: true, exitCode: 1 } })).toBe('regression');
+  it('clean baseline + failing check → regression (exit-code floor, no parsing needed)', () => {
+    expect(classifyCheckOutcome({ baseline: clean, after: { ran: true, exitCode: 1, errors: [] } })).toBe('regression');
   });
 
-  it('broken baseline + failing check → inconclusive (cannot attribute)', () => {
-    expect(classifyCheckOutcome({ baselineClean: false, after: { ran: true, exitCode: 1 } })).toBe('inconclusive');
+  it('no baseline measured + failing check → inconclusive (cannot attribute)', () => {
+    expect(classifyCheckOutcome({ baseline: null, after: { ran: true, exitCode: 1, errors: ['error CS1002'] } })).toBe('inconclusive');
+  });
+
+  it('broken baseline + a NEW error → regression (the ratchet catches it even from a broken start)', () => {
+    const baseline = { ran: true, exitCode: 1, errors: ['a.cs: error CS1002: ; expected'] };
+    const after = { ran: true, exitCode: 1, errors: ['a.cs: error CS1002: ; expected', 'a.cs: error CS0103: missing'] };
+    expect(classifyCheckOutcome({ baseline, after })).toBe('regression');
+  });
+
+  it('broken baseline + only pre-existing errors → held (no worse; kept)', () => {
+    const baseline = { ran: true, exitCode: 1, errors: ['a.cs: error CS1002: ; expected', 'a.cs: error CS0103: missing'] };
+    const after = { ran: true, exitCode: 1, errors: ['a.cs: error CS1002: ; expected'] }; // one fixed, none added
+    expect(classifyCheckOutcome({ baseline, after })).toBe('held');
+  });
+
+  it('broken baseline + an unparseable failure (no error set) → inconclusive (do not guess)', () => {
+    const baseline = { ran: true, exitCode: 1, errors: ['a.cs: error CS1002'] };
+    const after = { ran: true, exitCode: 1, errors: [] }; // failed but nothing recognised
+    expect(classifyCheckOutcome({ baseline, after })).toBe('inconclusive');
   });
 
   it('check did not run → inconclusive', () => {
-    expect(classifyCheckOutcome({ baselineClean: true, after: { ran: false } })).toBe('inconclusive');
+    expect(classifyCheckOutcome({ baseline: clean, after: { ran: false } })).toBe('inconclusive');
   });
 
   it('check timed out → inconclusive (not a regression)', () => {
-    expect(classifyCheckOutcome({ baselineClean: true, after: { ran: true, timedOut: true } })).toBe('inconclusive');
+    expect(classifyCheckOutcome({ baseline: clean, after: { ran: true, timedOut: true } })).toBe('inconclusive');
+  });
+});
+
+describe('editValidation — normalizeErrors (ADR 0006, Phase 2 — error-set diff)', () => {
+  it('extracts a dotnet error and strips line/col so a shifted error compares equal', () => {
+    const at82 = normalizeErrors('/p/Slide.razor(82,13): error CS0103: The name \'X\' does not exist');
+    const at85 = normalizeErrors('/p/Slide.razor(85,13): error CS0103: The name \'X\' does not exist');
+    expect(at82).toEqual(at85);                 // line shift is invisible
+    expect(at82).toHaveLength(1);
+    expect(at82[0]).toContain('CS0103');
+    expect(at82[0]).not.toMatch(/\d+,\d+/);     // coordinates stripped
+  });
+
+  it('returns a SET — identical errors dedupe', () => {
+    const out = 'a.cs(1,1): error CS1: x\nb.cs(9,9): error CS1: x'; // same code+msg, different files
+    // Different files → distinct; same file+code+msg would collapse.
+    expect(normalizeErrors(out)).toHaveLength(2);
+    expect(normalizeErrors('a.cs(1,1): error CS1: x\na.cs(7,1): error CS1: x')).toHaveLength(1);
+  });
+
+  it('drops count/summary lines so a changing count is not a changing error', () => {
+    expect(normalizeErrors('    5 Error(s)')).toEqual([]);
+    expect(normalizeErrors('Found 3 errors in 2 files.')).toEqual([]);
+    expect(normalizeErrors('error: could not compile `app` due to 2 previous errors')).toEqual([]);
+  });
+
+  it('ignores non-error lines (warnings, build chatter)', () => {
+    const out = 'Determining projects to restore...\nwarning CS0168: unused\nBuild succeeded.';
+    expect(normalizeErrors(out)).toEqual([]);
+  });
+
+  it('returns [] when no line contains the word "error" (e.g. go build) → caller stays inconclusive', () => {
+    expect(normalizeErrors('./main.go:5:2: undefined: foo')).toEqual([]);
+  });
+
+  it('returns [] for empty output', () => {
+    expect(normalizeErrors('')).toEqual([]);
+  });
+
+  it('normalizes clang/javac :line:col: coordinates too', () => {
+    const a = normalizeErrors('foo.c:5:1: error: expected \';\'');
+    const b = normalizeErrors('foo.c:9:1: error: expected \';\'');
+    expect(a).toEqual(b);
   });
 });

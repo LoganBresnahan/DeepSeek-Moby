@@ -1,6 +1,6 @@
 # Improve file-corruption handling
 
-**Status:** Diagnosis complete. Remediation specified in [ADR 0006](../architecture/decisions/0006-edit-safety-checkpoint-and-validation.md) (reference: [edit-safety.md](../architecture/integration/edit-safety.md)); the latent SSE-buffering bug (item 6) is fixed.
+**Status:** Diagnosis complete. Remediation in [ADR 0006](../architecture/decisions/0006-edit-safety-checkpoint-and-validation.md) (reference: [edit-safety.md](../architecture/integration/edit-safety.md)) — **implemented (Phases 1–3)**: checkpoint, atomic batch, and the validation gate with *differential (error-set) attribution* against a pre-edit baseline now ship; the latent SSE-buffering bug (item 6) is fixed.
 **Date:** 2026-06-18 (diagnosis); 2026-06-19 (remediation spec)
 
 ## TL;DR
@@ -140,14 +140,16 @@ the trailing partial for the next chunk. Decode bytes through a streaming UTF-8 
    before the diff sees it. Yields a per-model, per-`reasoning_effort` corruption-rate
    metric and ends the misattribution to the diff path.
 
-2. **Add a post-apply validation gate — the actual missing layer.** After a batch of
-   edits applies, run the *project's own* check command (the `dotnet build` we already
-   run, discovered from workspace markers — no bundled language parsers) and, on *new*
-   errors, **revert to a checkpoint** and feed the scoped errors back to the model.
-   Makes "applied" mean "applied and verified" so a garbled REPLACE can't sit on disk
-   reported as success. Now fully specified — checkpoint, atomic batch, validation,
-   revert-on-regression, Auto→Ask demotion — in
-   [ADR 0006](../architecture/decisions/0006-edit-safety-checkpoint-and-validation.md)
+2. **Add a post-apply validation gate — the actual missing layer.** ✅ **Implemented.**
+   After a batch of edits applies, run the *project's own* check command (the `dotnet build`
+   we already run, discovered from workspace markers — no bundled language parsers) and,
+   on a *new* error versus the pre-edit baseline, **revert to a checkpoint** and feed the
+   scoped errors back to the model. Attribution is *differential* — a normalized error-set
+   diff against a baseline measured on the pristine tree — so it works from any starting
+   state (clean or already-broken) and reverts only edits that make the tree measurably
+   worse. Makes "applied" mean "applied and verified." Auto stays Auto: on an exhausted
+   repair budget the turn **halts** (never demotes to Ask — Alternative G). Specified and
+   built in [ADR 0006](../architecture/decisions/0006-edit-safety-checkpoint-and-validation.md)
    ([edit-safety.md](../architecture/integration/edit-safety.md)).
 
 3. **Attack the source.** Corruption tracks `deepseek-v4-pro` @ `reasoning_effort=max`.

@@ -2,7 +2,7 @@
 
 Reference for the fail-safe edit pipeline that wraps auto-mode file application. Decision record and rationale: [ADR 0006](../decisions/0006-edit-safety-checkpoint-and-validation.md). Diagnosis that motivated it: [improve-file-corruption.md](../../plans/improve-file-corruption.md). The underlying match/parse contract this builds on: [diff-engine.md](diff-engine.md).
 
-**Status:** Specified (ADR 0006, Proposed) — not yet implemented. This doc describes the target design; sections are marked *have* / *new* accordingly.
+**Status:** Implemented (ADR 0006, Phases 1–3). Checkpoint, atomic batch, the validation gate, **differential (error-set) attribution**, a **pre-edit baseline probe**, revert-on-regression, and terminal halt have landed. Phase 4 (content-embedded transport) remains a separate ADR; a few UI/restore follow-ups are still open (see ADR 0006 *Follow-ups*). Sections are marked *have* / *new* relative to the pre-ADR baseline.
 
 ## The invariant
 
@@ -40,6 +40,10 @@ Legend: ✅ have · ★ new (ADR 0006) · ⚠️ current gap.
 ```
   MODEL ─► ✅ SSE buffered framing ─► JSON.parse(args)
         │
+  ★ BASELINE PROBE — before the turn's FIRST edit, run the check on the pristine
+        tree (once/turn). Records clean | broken+error-set | unknown. This is what
+        lets a single-edit turn be attributed without assuming a clean start.
+        │
   ╭──────────── ATOMIC EDIT BATCH · one tool-iteration · ★ ───────────────
   │   ★ CHECKPOINT — snapshot each touched file (in-memory original content)
   │        ▼
@@ -49,12 +53,14 @@ Legend: ✅ have · ★ new (ADR 0006) · ⚠️ current gap.
   │   any hard-fail / verify-fail? ──► ★ REVERT batch ─► re-read nudge
   │        ▼ no
   │   ★ VALIDATE — project toolchain, approval-gated, timeout, run ONCE
-  │        discover check cmd · run via CommandApproval · diff diagnostics BEFORE vs AFTER
+  │        run via CommandApproval · classify AFTER vs the BASELINE error-set
   │        ▼
-  │   outcome ─┬─ no new errors ─────────► ★ COMMIT ─► emit "Modified Files" ─► SUCCESS ✅
-  │            ├─ new errors (regression)─► ★ REVERT ─► feed errors back ─► retry
-  │            │                            └─ budget exhausted ─► ★ HALT (files at last-good, surface)
-  │            └─ inconclusive ───────────► ★ COMMIT + one-time note (no oracle/timeout; Auto's default)
+  │   verdict ─┬─ clean (builds) ─────────► ★ COMMIT ─► emit "Modified Files" ─► SUCCESS ✅
+  │            ├─ held (still broken, no   ─► ★ COMMIT (ratchet: not worse than start)
+  │            │        NEW errors)
+  │            ├─ regression (clean→broken ─► ★ REVERT ─► feed errors back ─► retry
+  │            │   OR a new error appeared)    └─ budget exhausted ─► ★ HALT (files at last-good, surface)
+  │            └─ inconclusive ───────────► ★ COMMIT + one-time note (no oracle/timeout/unparseable)
   ╰───────────────────────────────────────────────────────────────────────
 ```
 
@@ -105,7 +111,24 @@ Moby ships the **mapping** from workspace markers to a check command; the projec
 Execution rules:
 - Runs through `executeShellCommand` under `CommandApprovalManager` (`checkCommand` → allowed/blocked/ask). Blocked/unapproved ⇒ gate no-op + surfaced, never a silent bypass.
 - Hard timeout (`validateTimeoutMs`, default 60s). Dev-servers/watch commands already excluded by `isLongRunningCommand`.
-- **Delta, not absolute**: compare diagnostics/exit state *before* the batch vs *after*. A regression = a *new* error attributable to a touched file (or clean→broken exit transition). Pre-existing errors and errors in untouched files do not count.
+- **Differential, not absolute**: a regression = the edit made the tree *measurably worse than it started*, never the mere presence of errors (see *Baseline & verdicts*).
+
+### Baseline & verdicts (no "assume clean")
+
+The gate never assumes the tree built before the turn. It **measures** it: `EditValidator.ensureBaseline` runs the check on the *pristine* tree before the turn's first auto edit applies (once per turn; read-only turns and non-editing tools pay nothing). That pre-edit measurement is the reference every batch is compared against, and it's what lets a **single-edit** turn be attributed at all — without it, the first edit of a turn has no clean baseline and a broken result would commit as `inconclusive` instead of reverting.
+
+When both the baseline and a post-edit check fail, exit codes are identical (`1` vs `1`) and tell you nothing, so we diff the **error sets**. `normalizeErrors(output)` extracts a line-shift-invariant set of error signatures: it strips source coordinates (`(82,13)`, `:5:1:`) so the *same* logical error compares equal after an edit moves it down the file, and drops count/summary lines (`5 Error(s)`, `Found 3 errors`) so a changing count isn't mistaken for a changing error. It's language-agnostic for toolchains that label each diagnostic with the word `error` (dotnet, tsc, cargo, clang/gcc, javac); toolchains that don't (e.g. `go build`) yield an empty set and fall back to inconclusive.
+
+`classifyCheckOutcome({ baseline, after })` → one of four verdicts:
+
+| Verdict | When | Action |
+|---|---|---|
+| `clean` | after builds (exit 0) — any starting state | commit ✅ |
+| `regression` | clean→broken, **or** a normalized error appears that wasn't in the baseline | **revert** + feed errors back + retry/halt |
+| `held` | both broken, but **no new** error vs. the baseline (incl. *fewer* errors) | commit (a "ratchet": never worse than the start) |
+| `inconclusive` | no usable baseline, timeout, didn't run, or a failure whose errors can't be parsed on either side | commit + one-time note (or halt per `onInconclusive`) |
+
+This makes the gate a **monotonic ratchet from any starting state**: a model fixing a broken file ratchets the error set down (each step `held`/`clean`, kept), and any batch that introduces a new error is reverted — even when the tree was already broken. The baseline carries forward across the turn (a `held`/committed batch becomes the new reference), and a `regression` keeps the pre-batch baseline since the caller reverts.
 
 ## Configuration (`moby.editSafety.*`)
 
@@ -149,7 +172,12 @@ Authoritative list of what must be covered, across `tests/unit/providers/{checkp
 
 ### editValidation.test.ts (Phase 2 — engine, ✅ real)
 - `discoverCheckCommand`: `.csproj`/`.sln` → `dotnet build`; package.json scripts (build→typecheck→test) → `npm run …`; Makefile (check→build) → `make …`; `Cargo.toml` → `cargo check`; `go.mod` → `go build ./...`; `.NET` preferred over package.json; unrecognised / unreadable / malformed → `null`
-- `classifyCheckOutcome`: a passing post-edit check → clean (needs no baseline — the tree builds now); failing + clean baseline → regression; failing + non-clean baseline → inconclusive (can't attribute); not-run / timed-out → inconclusive
+- `classifyCheckOutcome` (differential): passing after → clean (any start); clean baseline + failing → regression; broken baseline + a NEW error → regression; broken baseline + only pre-existing errors → held; failing with no comparable error-set (either side empty), no baseline, not-run, or timed-out → inconclusive
+- `normalizeErrors`: strips line/col so a shifted error compares equal; dedupes to a set; drops count/summary lines (`N Error(s)`, `Found N errors`, cargo `could not compile`); ignores non-error/warning lines; `[]` when no line says `error` (go-style) or output is empty; handles `:line:col:` (clang/javac)
+
+### editValidator.test.ts (Phase 2 — service, ✅ real)
+- `validateBatch`: off → skipped; no command / not-approved / threw → inconclusive (with note); pass → clean (carries the build output on regression)
+- `ensureBaseline`: clean pristine probe → first failing edit reverts (regression); broken pristine probe → same errors `held`, a line-shifted error `held`, a NEW error `regression`, fewer errors `held` + the baseline ratchets down; idempotent once/turn (`skipped`), reset by `resetTurn`; off / no-command / threw leave the baseline unknown (→ inconclusive, never a false revert)
 
 ### validationGate.test.ts (Phase 2 — orchestration wiring, todo)
 - runs the discovered command via executeShellCommand under CommandApproval

@@ -382,8 +382,15 @@ export class RequestOrchestrator {
       return false;
     }
 
-    // clean / skipped / inconclusive → keep the edits.
+    // clean / held / skipped / inconclusive → keep the edits.
     this.diffManager.commitEditTransaction();
+
+    if (result.verdict === 'held') {
+      // Tree was already broken at turn start; this edit added no new errors, so
+      // it's kept (not a regression). The ratchet only reverts edits that make a
+      // broken tree measurably worse.
+      logger.info(`[EditSafety] held — committed (${result.note ?? 'no new errors vs. the broken baseline'})`);
+    }
 
     if (result.verdict === 'inconclusive') {
       const detail = result.note ?? 'no validation signal';

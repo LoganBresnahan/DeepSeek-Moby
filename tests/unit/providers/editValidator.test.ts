@@ -150,12 +150,12 @@ describe('EditValidator.validateBatch (ADR 0006, Phase 2)', () => {
   });
 
   it('a ran-but-unattributable inconclusive carries a real note (not "no validation signal")', async () => {
-    // Broken baseline (no probe), then a failing batch — can't attribute.
+    // No baseline measured, then a failing batch — can't attribute.
     const runCommand = vi.fn(async () => fail);
     const { validator } = makeValidator({ runCommand });
     const r = await validator.validateBatch(ROOT);
     expect(r.verdict).toBe('inconclusive');
-    expect(r.note).toMatch(/already failing before this edit/);
+    expect(r.note).toMatch(/no comparable clean baseline/);
   });
 });
 
@@ -182,16 +182,49 @@ describe('EditValidator.ensureBaseline (ADR 0006, Phase 2 — pre-edit probe)', 
     expect(r.output).toMatch(/CS1002/);
   });
 
-  it('a broken pristine probe keeps a first failing edit inconclusive (no false blame)', async () => {
+  it('broken baseline + the SAME errors → held (kept, not reverted)', async () => {
+    const err = { exitCode: 1, timedOut: false, output: 'a.cs(10,5): error CS1002: ; expected' };
     const runCommand = vi.fn()
-      .mockResolvedValueOnce(fail)  // ensureBaseline: tree was ALREADY broken
-      .mockResolvedValueOnce(fail); // first batch still fails — not the model's fault
+      .mockResolvedValueOnce(err)   // ensureBaseline: tree was ALREADY broken
+      .mockResolvedValueOnce(err);  // first batch fails with the same error — no worse
     const { validator } = makeValidator({ runCommand });
 
     expect(await validator.ensureBaseline(ROOT)).toBe('broken');
-    const r = await validator.validateBatch(ROOT);
+    expect((await validator.validateBatch(ROOT)).verdict).toBe('held');
+  });
 
-    expect(r.verdict).toBe('inconclusive');
+  it('broken baseline + a line-SHIFTED same error → held (normalization ignores line moves)', async () => {
+    const runCommand = vi.fn()
+      .mockResolvedValueOnce({ exitCode: 1, timedOut: false, output: 'a.cs(10,5): error CS1002: ; expected' })
+      .mockResolvedValueOnce({ exitCode: 1, timedOut: false, output: 'a.cs(14,5): error CS1002: ; expected' });
+    const { validator } = makeValidator({ runCommand });
+
+    await validator.ensureBaseline(ROOT);
+    expect((await validator.validateBatch(ROOT)).verdict).toBe('held'); // same error, moved down — not a regression
+  });
+
+  it('broken baseline + a NEW error → regression (the ratchet reverts it even from a broken start)', async () => {
+    const runCommand = vi.fn()
+      .mockResolvedValueOnce({ exitCode: 1, timedOut: false, output: 'a.cs(10,5): error CS1002: ; expected' })
+      .mockResolvedValueOnce({ exitCode: 1, timedOut: false, output: 'a.cs(10,5): error CS1002: ; expected\nb.cs(3,1): error CS0103: SomeMethodThatDoesNotExist' });
+    const { validator } = makeValidator({ runCommand });
+
+    await validator.ensureBaseline(ROOT);
+    const r = await validator.validateBatch(ROOT);
+    expect(r.verdict).toBe('regression');
+    expect(r.output).toMatch(/CS0103/);
+  });
+
+  it('broken baseline + FEWER errors (progress) → held, and the baseline ratchets down', async () => {
+    const runCommand = vi.fn()
+      .mockResolvedValueOnce({ exitCode: 1, timedOut: false, output: 'a.cs(1,1): error CS1: x\na.cs(2,2): error CS2: y' }) // baseline: 2 errors
+      .mockResolvedValueOnce({ exitCode: 1, timedOut: false, output: 'a.cs(1,1): error CS1: x' })                          // fixed one → held
+      .mockResolvedValueOnce({ exitCode: 1, timedOut: false, output: 'a.cs(1,1): error CS1: x\nc.cs(9,9): error CS9: z' }); // re-introduces a 2nd → regression vs the ratcheted baseline
+    const { validator } = makeValidator({ runCommand });
+
+    await validator.ensureBaseline(ROOT);
+    expect((await validator.validateBatch(ROOT)).verdict).toBe('held');       // 2 → 1
+    expect((await validator.validateBatch(ROOT)).verdict).toBe('regression'); // 1 → 2 (new error vs. the now-current baseline)
   });
 
   it('a clean pristine probe + a passing first edit is clean', async () => {
