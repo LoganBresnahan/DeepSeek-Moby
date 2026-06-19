@@ -56,6 +56,9 @@ const { mockHttpClient, mockSecrets, mockConfigValues, mockReader } = vi.hoisted
       handlers,
       // Test helpers:
       pushData: (text: string) => handlers.data.forEach(h => h(Buffer.from(text))),
+      // Push raw bytes — lets a test split a frame (or a multibyte char) at an
+      // arbitrary byte boundary, which `pushData` (whole-string) cannot.
+      pushBytes: (buf: Buffer) => handlers.data.forEach(h => h(buf)),
       pushError: (err: Error) => handlers.error.forEach(h => h(err)),
       pushEnd: () => handlers.end.forEach(h => h()),
       reset: () => {
@@ -179,6 +182,40 @@ async function runStream(
   mockReader.pushData('data: [DONE]\n');
 
   return promise;
+}
+
+/**
+ * Kick off a streamChat call and wait until the stream handlers are attached,
+ * then hand back the pending promise so the test can drive raw chunk/byte
+ * boundaries by hand (pushData / pushBytes / pushEnd).
+ */
+async function beginStream(
+  client: DeepSeekClient,
+  messages: Message[],
+  callbacks: { onToken?: (t: string) => void; onReasoning?: (t: string) => void } = {}
+): Promise<{ promise: Promise<any> }> {
+  mockReader.reset();
+  const promise = client.streamChat(
+    messages,
+    callbacks.onToken ?? (() => {}),
+    undefined,
+    callbacks.onReasoning,
+    {}
+  );
+  await new Promise(resolve => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  // Wrapped in an object: returning the bare promise from an async fn would
+  // make `await beginStream(...)` recursively unwrap it and block on streamChat
+  // before any chunks are pushed.
+  return { promise };
+}
+
+/** One SSE `data:` frame (newline-terminated) for an OpenAI-style delta. */
+function frame(delta: any, opts: { finish_reason?: string } = {}): string {
+  const chunk: any = {
+    choices: [{ delta, ...(opts.finish_reason && { finish_reason: opts.finish_reason }) }]
+  };
+  return `data: ${JSON.stringify(chunk)}\n`;
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -439,6 +476,93 @@ describe('DeepSeekClient.streamChat — SSE accumulator', () => {
       );
 
       expect(result.content).toBe('ok');
+    });
+  });
+
+  describe('chunk-boundary framing (SSE buffering)', () => {
+    // Regression: fetch's ReadableStream delivers arbitrary byte chunks, so a
+    // single `data:` frame can be split across two chunks. The old per-chunk
+    // `split('\n')` with no carryover silently dropped such frames (the tail
+    // failed JSON.parse; the head of the next chunk no longer started with
+    // `data: `). These exercise the buffered, streaming-decoded framing.
+
+    it('reassembles a content frame split mid-line across two chunks', async () => {
+      const { promise } = await beginStream(client, [{ role: 'user', content: 'hi' }]);
+      const f = frame({ content: 'Hello' });
+      const cut = 20; // somewhere inside the JSON, before the newline
+      mockReader.pushData(f.slice(0, cut));
+      mockReader.pushData(f.slice(cut));
+      mockReader.pushData('data: [DONE]\n');
+      const result = await promise;
+
+      expect(result.content).toBe('Hello');
+    });
+
+    it('does not drop a tool-call args frame split mid-line (the corruption case)', async () => {
+      const { promise } = await beginStream(client, [{ role: 'user', content: 'edit' }]);
+      const args = '{"file":"a.ts","edits":[{"search":"x","replace":"y"}]}';
+      const f = frame({
+        tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: 'edit_file', arguments: args } }]
+      });
+      const cut = Math.floor(f.length / 2);
+      mockReader.pushData(f.slice(0, cut));
+      mockReader.pushData(f.slice(cut));
+      mockReader.pushData(frame({}, { finish_reason: 'tool_calls' }));
+      mockReader.pushData('data: [DONE]\n');
+      const result = await promise;
+
+      expect(result.tool_calls).toHaveLength(1);
+      expect(result.tool_calls![0].function.arguments).toBe(args);
+      expect(() => JSON.parse(result.tool_calls![0].function.arguments)).not.toThrow();
+    });
+
+    it('processes complete lines and carries the trailing partial to the next chunk', async () => {
+      const { promise } = await beginStream(client, [{ role: 'user', content: 'hi' }]);
+      const third = frame({ content: 'C' });
+      // chunk1: two whole frames + the front of a third
+      mockReader.pushData(frame({ content: 'A' }) + frame({ content: 'B' }) + third.slice(0, 12));
+      // chunk2: the rest of the third frame
+      mockReader.pushData(third.slice(12));
+      mockReader.pushData('data: [DONE]\n');
+      const result = await promise;
+
+      expect(result.content).toBe('ABC');
+    });
+
+    it('reassembles a multibyte UTF-8 char split across a byte boundary (no U+FFFD)', async () => {
+      const { promise } = await beginStream(client, [{ role: 'user', content: 'hi' }]);
+      // 🎲 is U+1F3B2 → 4 UTF-8 bytes; split the buffer 2 bytes into it.
+      const head = Buffer.from('data: {"choices":[{"delta":{"content":"', 'utf8');
+      const emoji = Buffer.from('🎲', 'utf8');
+      const tail = Buffer.from('"}}]}\n', 'utf8');
+      const full = Buffer.concat([head, emoji, tail]);
+      const splitAt = head.length + 2;
+      mockReader.pushBytes(full.subarray(0, splitAt));
+      mockReader.pushBytes(full.subarray(splitAt));
+      mockReader.pushData('data: [DONE]\n');
+      const result = await promise;
+
+      expect(result.content).toBe('🎲');
+      expect(result.content).not.toContain('�');
+    });
+
+    it('flushes a final frame that arrives without a trailing newline on stream end', async () => {
+      const { promise } = await beginStream(client, [{ role: 'user', content: 'hi' }]);
+      const f = frame({ content: 'tail' });
+      mockReader.pushData(f.replace(/\n$/, '')); // no terminating newline
+      mockReader.pushEnd();
+      const result = await promise;
+
+      expect(result.content).toBe('tail');
+    });
+
+    it('tolerates CRLF line endings and a CRLF-terminated [DONE]', async () => {
+      const { promise } = await beginStream(client, [{ role: 'user', content: 'hi' }]);
+      mockReader.pushData('data: ' + JSON.stringify({ choices: [{ delta: { content: 'crlf' } }] }) + '\r\n');
+      mockReader.pushData('data: [DONE]\r\n');
+      const result = await promise;
+
+      expect(result.content).toBe('crlf');
     });
   });
 });

@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixes — streamed responses no longer drop data on chunk boundaries
+
+- **An SSE frame split across a network chunk boundary was silently dropped.** `streamChat` decoded and `split('\n')` each `fetch` chunk in isolation with no carryover buffer, so when one `data:` frame straddled two chunks the truncated tail failed `JSON.parse` (swallowed) and the head of the next chunk no longer started with `data: ` — losing the whole delta (content, reasoning, or a tool-call argument fragment). A multibyte UTF-8 character split across a `Buffer` boundary also decoded to U+FFFD. The stream is now framed with a persistent line buffer and a streaming `TextDecoder` (which retains an incomplete trailing code point), processing only complete newline-terminated lines and flushing any trailing partial line on stream end; CRLF endings are tolerated. This is independent of the diff-engine corruption work — model garble applies via exact match — but is documented alongside it in [docs/plans/improve-file-corruption.md](docs/plans/improve-file-corruption.md). ([src/deepseekClient.ts](src/deepseekClient.ts))
+- 6 new regression tests: a content frame and a tool-call args frame each split mid-line across two chunks, complete-lines-plus-trailing-partial carryover, a multibyte char split across a byte boundary, a final frame without a trailing newline flushed on end, and CRLF framing. ([tests/unit/deepseekClient.streamChat.test.ts](tests/unit/deepseekClient.streamChat.test.ts))
+
 ## [0.4.1] - 2026-06-18
 
 ### Fixes — live "Modified Files" dropdown

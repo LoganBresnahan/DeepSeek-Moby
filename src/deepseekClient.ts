@@ -617,107 +617,134 @@ export class DeepSeekClient {
         // Start the inactivity timer
         resetInactivityTimer();
 
+        // SSE line framing. fetch's ReadableStream hands us arbitrary byte
+        // chunks: a single `data:` frame can be split across two chunks, and a
+        // multibyte UTF-8 character can straddle a chunk boundary. Decode with
+        // a streaming decoder (which holds an incomplete trailing code point
+        // until the next chunk) and buffer any partial trailing line until its
+        // terminating newline arrives. Without this, a frame split on a network
+        // boundary was silently dropped: the truncated tail failed JSON.parse
+        // and the head of the next chunk no longer started with `data: `.
+        const decoder = new TextDecoder('utf-8');
+        let sseBuffer = '';
+
+        const processSseLine = (rawLine: string) => {
+          if (resolved) return;
+          const line = rawLine.trim();  // tolerate trailing \r (CRLF) / stray ws
+          if (line === '' || !line.startsWith('data: ')) return;
+          const data = line.slice(6);
+
+          if (data === '[DONE]') {
+            if (!resolved) {
+              resolved = true;
+              clearInactivityTimer();
+              resolve({
+                content: fullResponse,
+                reasoning_content: fullReasoning || undefined,
+                tool_calls: finalizeToolCalls(),
+                finish_reason: finishReason,
+                usage: usage || {
+                  prompt_tokens: this.estimateTokens(JSON.stringify(requestMessages)),
+                  completion_tokens: this.estimateTokens(fullResponse),
+                  total_tokens: 0
+                }
+              });
+            }
+            return;
+          }
+
+          try {
+            const parsed = JSON.parse(data);
+            const choice = parsed.choices[0];
+            const delta = choice?.delta;
+
+            // Handle reasoning content (for deepseek-reasoner / V4-thinking).
+            // Always accumulate; the streaming callback is optional UI plumbing
+            // but the assembled result must include everything the model emitted.
+            if (delta?.reasoning_content) {
+              fullReasoning += delta.reasoning_content;
+              reasoningChunks++;
+              if (onReasoning) onReasoning(delta.reasoning_content);
+            }
+
+            // Handle regular content
+            if (delta?.content) {
+              fullResponse += delta.content;
+              contentChunks++;
+              onToken(delta.content);
+            }
+
+            // Phase 4.5 — accumulate tool-call deltas per-index. The
+            // first delta for a given index typically carries
+            // id/type/function.name; subsequent deltas only extend
+            // function.arguments. We never `JSON.parse` here — mid-
+            // stream args are usually invalid; the caller parses once
+            // we hand back the assembled ToolCall[].
+            if (Array.isArray(delta?.tool_calls)) {
+              for (const tcDelta of delta.tool_calls as Array<{
+                index?: number;
+                id?: string;
+                type?: string;
+                function?: { name?: string; arguments?: string };
+              }>) {
+                const idx = tcDelta.index ?? 0;
+                let acc = toolCallAcc.get(idx);
+                if (!acc) {
+                  acc = { id: '', type: 'function', name: '', argumentsStr: '' };
+                  toolCallAcc.set(idx, acc);
+                }
+                const hadIdAndName = !!(acc.id && acc.name);
+                if (tcDelta.id) acc.id = tcDelta.id;
+                if (tcDelta.function?.name) acc.name = tcDelta.function.name;
+                if (typeof tcDelta.function?.arguments === 'string') {
+                  acc.argumentsStr += tcDelta.function.arguments;
+                }
+                // Fire onToolCallStreaming once per index, the first
+                // moment we have BOTH id and name. Args may still be
+                // empty — the orchestrator uses this to render the
+                // tool name immediately rather than waiting for the
+                // full stream to resolve.
+                if (!hadIdAndName && acc.id && acc.name && options?.onToolCallStreaming) {
+                  options.onToolCallStreaming({
+                    id: acc.id,
+                    type: acc.type,
+                    function: { name: acc.name, arguments: '' },
+                  });
+                }
+              }
+            }
+
+            if (choice?.finish_reason) {
+              finishReason = choice.finish_reason;
+            }
+
+            // Capture usage if present
+            if (parsed.usage) {
+              usage = parsed.usage;
+            }
+          } catch (e) {
+            // Ignore parsing errors for partial data
+          }
+        };
+
         stream.on('data', (chunk: Buffer) => {
           // Reset inactivity timer on each data chunk
           resetInactivityTimer();
 
-          const lines = chunk.toString().split('\n').filter(line => line.trim() !== '');
+          // Append decoded text (the decoder retains a partial trailing code
+          // point) and process only complete, newline-terminated lines; the
+          // trailing partial line stays in sseBuffer for the next chunk.
+          sseBuffer += decoder.decode(chunk, { stream: true });
 
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              const data = line.slice(6);
-
-              if (data === '[DONE]') {
-                if (!resolved) {
-                  resolved = true;
-                  clearInactivityTimer();
-                  resolve({
-                    content: fullResponse,
-                    reasoning_content: fullReasoning || undefined,
-                    tool_calls: finalizeToolCalls(),
-                    finish_reason: finishReason,
-                    usage: usage || {
-                      prompt_tokens: this.estimateTokens(JSON.stringify(requestMessages)),
-                      completion_tokens: this.estimateTokens(fullResponse),
-                      total_tokens: 0
-                    }
-                  });
-                }
-                return;
-              }
-
-              try {
-                const parsed = JSON.parse(data);
-                const choice = parsed.choices[0];
-                const delta = choice?.delta;
-
-                // Handle reasoning content (for deepseek-reasoner / V4-thinking).
-                // Always accumulate; the streaming callback is optional UI plumbing
-                // but the assembled result must include everything the model emitted.
-                if (delta?.reasoning_content) {
-                  fullReasoning += delta.reasoning_content;
-                  reasoningChunks++;
-                  if (onReasoning) onReasoning(delta.reasoning_content);
-                }
-
-                // Handle regular content
-                if (delta?.content) {
-                  fullResponse += delta.content;
-                  contentChunks++;
-                  onToken(delta.content);
-                }
-
-                // Phase 4.5 — accumulate tool-call deltas per-index. The
-                // first delta for a given index typically carries
-                // id/type/function.name; subsequent deltas only extend
-                // function.arguments. We never `JSON.parse` here — mid-
-                // stream args are usually invalid; the caller parses once
-                // we hand back the assembled ToolCall[].
-                if (Array.isArray(delta?.tool_calls)) {
-                  for (const tcDelta of delta.tool_calls as Array<{
-                    index?: number;
-                    id?: string;
-                    type?: string;
-                    function?: { name?: string; arguments?: string };
-                  }>) {
-                    const idx = tcDelta.index ?? 0;
-                    let acc = toolCallAcc.get(idx);
-                    if (!acc) {
-                      acc = { id: '', type: 'function', name: '', argumentsStr: '' };
-                      toolCallAcc.set(idx, acc);
-                    }
-                    const hadIdAndName = !!(acc.id && acc.name);
-                    if (tcDelta.id) acc.id = tcDelta.id;
-                    if (tcDelta.function?.name) acc.name = tcDelta.function.name;
-                    if (typeof tcDelta.function?.arguments === 'string') {
-                      acc.argumentsStr += tcDelta.function.arguments;
-                    }
-                    // Fire onToolCallStreaming once per index, the first
-                    // moment we have BOTH id and name. Args may still be
-                    // empty — the orchestrator uses this to render the
-                    // tool name immediately rather than waiting for the
-                    // full stream to resolve.
-                    if (!hadIdAndName && acc.id && acc.name && options?.onToolCallStreaming) {
-                      options.onToolCallStreaming({
-                        id: acc.id,
-                        type: acc.type,
-                        function: { name: acc.name, arguments: '' },
-                      });
-                    }
-                  }
-                }
-
-                if (choice?.finish_reason) {
-                  finishReason = choice.finish_reason;
-                }
-
-                // Capture usage if present
-                if (parsed.usage) {
-                  usage = parsed.usage;
-                }
-              } catch (e) {
-                // Ignore parsing errors for partial data
-              }
+          while (true) {
+            const newlineIdx = sseBuffer.indexOf('\n');
+            if (newlineIdx === -1) break;
+            const line = sseBuffer.slice(0, newlineIdx);
+            sseBuffer = sseBuffer.slice(newlineIdx + 1);
+            processSseLine(line);
+            if (resolved) {
+              sseBuffer = '';
+              break;
             }
           }
         });
@@ -731,6 +758,14 @@ export class DeepSeekClient {
         });
 
         stream.on('end', () => {
+          // Flush any bytes the streaming decoder is still holding, then
+          // process a final line that arrived without a trailing newline.
+          sseBuffer += decoder.decode();
+          if (sseBuffer.length > 0) {
+            processSseLine(sseBuffer);
+            sseBuffer = '';
+          }
+
           // Always resolve if we have data, even if [DONE] wasn't received
           if (!resolved) {
             resolved = true;
