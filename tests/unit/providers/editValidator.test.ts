@@ -148,4 +148,103 @@ describe('EditValidator.validateBatch (ADR 0006, Phase 2)', () => {
     validator.resetTurn();
     expect((await validator.validateBatch(ROOT)).verdict).toBe('inconclusive');
   });
+
+  it('a ran-but-unattributable inconclusive carries a real note (not "no validation signal")', async () => {
+    // Broken baseline (no probe), then a failing batch — can't attribute.
+    const runCommand = vi.fn(async () => fail);
+    const { validator } = makeValidator({ runCommand });
+    const r = await validator.validateBatch(ROOT);
+    expect(r.verdict).toBe('inconclusive');
+    expect(r.note).toMatch(/already failing before this edit/);
+  });
+});
+
+describe('EditValidator.ensureBaseline (ADR 0006, Phase 2 — pre-edit probe)', () => {
+  let pass: RunOutcome;
+  let fail: RunOutcome;
+
+  beforeEach(() => {
+    pass = { exitCode: 0, timedOut: false, output: 'Build succeeded' };
+    fail = { exitCode: 1, timedOut: false, output: 'error CS1002: ; expected' };
+  });
+
+  it('a clean pristine probe lets the FIRST failing edit be caught as a regression', async () => {
+    // The bug this fixes: a single-edit turn whose one edit breaks the build.
+    const runCommand = vi.fn()
+      .mockResolvedValueOnce(pass)  // ensureBaseline: pristine tree is clean
+      .mockResolvedValueOnce(fail); // first (and only) batch: breaks the build
+    const { validator } = makeValidator({ runCommand });
+
+    expect(await validator.ensureBaseline(ROOT)).toBe('clean');
+    const r = await validator.validateBatch(ROOT);
+
+    expect(r.verdict).toBe('regression'); // would have been 'inconclusive' without the probe
+    expect(r.output).toMatch(/CS1002/);
+  });
+
+  it('a broken pristine probe keeps a first failing edit inconclusive (no false blame)', async () => {
+    const runCommand = vi.fn()
+      .mockResolvedValueOnce(fail)  // ensureBaseline: tree was ALREADY broken
+      .mockResolvedValueOnce(fail); // first batch still fails — not the model's fault
+    const { validator } = makeValidator({ runCommand });
+
+    expect(await validator.ensureBaseline(ROOT)).toBe('broken');
+    const r = await validator.validateBatch(ROOT);
+
+    expect(r.verdict).toBe('inconclusive');
+  });
+
+  it('a clean pristine probe + a passing first edit is clean', async () => {
+    const runCommand = vi.fn(async () => pass);
+    const { validator } = makeValidator({ runCommand });
+    await validator.ensureBaseline(ROOT);
+    expect((await validator.validateBatch(ROOT)).verdict).toBe('clean');
+  });
+
+  it('probes at most once per turn (idempotent), reset by resetTurn', async () => {
+    const runCommand = vi.fn(async () => pass);
+    const { validator } = makeValidator({ runCommand });
+    expect(await validator.ensureBaseline(ROOT)).toBe('clean');
+    expect(await validator.ensureBaseline(ROOT)).toBe('skipped');
+    expect(await validator.ensureBaseline(ROOT)).toBe('skipped');
+    expect(runCommand).toHaveBeenCalledOnce();
+
+    validator.resetTurn();
+    await validator.ensureBaseline(ROOT);
+    expect(runCommand).toHaveBeenCalledTimes(2);
+  });
+
+  it('a validateBatch already establishes the baseline, so a later ensureBaseline is a no-op', async () => {
+    const runCommand = vi.fn(async () => pass);
+    const { validator } = makeValidator({ runCommand });
+    await validator.validateBatch(ROOT); // first batch probes + sets baseline
+    await validator.ensureBaseline(ROOT); // must not re-run the check
+    expect(runCommand).toHaveBeenCalledOnce();
+  });
+
+  it('is a no-op when validation is off (no probe build)', async () => {
+    const { validator, runCommand } = makeValidator({ getConfig: () => ({ validate: 'off', timeoutMs: 1000 }) });
+    expect(await validator.ensureBaseline(ROOT)).toBe('unknown');
+    expect(runCommand).not.toHaveBeenCalled();
+  });
+
+  it('leaves the baseline unknown when no command can be discovered (probe cannot run)', async () => {
+    // No oracle → baseline stays unprobed → a first failing edit is inconclusive,
+    // and a subsequent discoverable run is unaffected.
+    const runCommand = vi.fn(async () => fail);
+    const { validator } = makeValidator({ discover: async () => null, runCommand });
+    await validator.ensureBaseline(ROOT);
+    expect(runCommand).not.toHaveBeenCalled();
+    expect((await validator.validateBatch(ROOT)).verdict).toBe('inconclusive');
+  });
+
+  it('does not establish a baseline from a probe that threw (stays unknown)', async () => {
+    const runCommand = vi.fn()
+      .mockRejectedValueOnce(new Error('spawn ENOENT')) // probe throws
+      .mockResolvedValueOnce(fail);                     // first batch fails
+    const { validator } = makeValidator({ runCommand });
+    await validator.ensureBaseline(ROOT);
+    // Baseline never established → failure can't be attributed → inconclusive.
+    expect((await validator.validateBatch(ROOT)).verdict).toBe('inconclusive');
+  });
 });

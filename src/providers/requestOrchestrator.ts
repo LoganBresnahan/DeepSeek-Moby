@@ -275,6 +275,32 @@ export class RequestOrchestrator {
   private _editSafetyDormantWarned = false;
 
   /**
+   * Establish the edit-safety baseline on the PRISTINE tree before the turn's
+   * first auto edit applies (ADR 0006 layer 5). Without this, the first edit of
+   * a turn has no clean baseline to attribute a build failure to, so even a
+   * clearly-broken single edit would commit as `inconclusive` instead of being
+   * reverted. Idempotent (the validator probes only once per turn) and a no-op
+   * outside auto mode / when checkpointing is disabled, so read-only turns and
+   * non-editing tool calls never pay for a build.
+   */
+  private async ensureEditBaseline(signal: AbortSignal): Promise<void> {
+    if (this.diffManager.currentEditMode !== 'auto') return;
+    const cfg = vscode.workspace.getConfiguration('moby');
+    if (!(cfg.get<boolean>('editSafety.checkpoint') ?? true)) return;
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+    if (!root) return;
+    try {
+      const status = await this.editValidator.ensureBaseline(root, signal);
+      // Only the first edit of a turn actually probes; don't spam the carried baseline.
+      if (status !== 'skipped') {
+        logger.info(`[EditSafety] baseline=${status} (probed before first edit)`);
+      }
+    } catch (e: any) {
+      logger.warn(`[EditSafety] baseline probe threw (continuing without a baseline): ${e?.message ?? e}`);
+    }
+  }
+
+  /**
    * Settle one auto-apply batch's checkpoint transaction (ADR 0006 layers 5–7).
    * Validates against the project's own toolchain and maps the verdict:
    *   clean / skipped / inconclusive(commit) → commit the batch
@@ -361,7 +387,7 @@ export class RequestOrchestrator {
 
     if (result.verdict === 'inconclusive') {
       const detail = result.note ?? 'no validation signal';
-      logger.info(`[EditSafety] inconclusive — committed without a validation signal (${detail})`);
+      logger.info(`[EditSafety] inconclusive — committed (${detail})`);
       // Surface a dormant gate once per turn: the discovered check command
       // exists but isn't approved, so post-apply validation is silently off.
       if (result.command && /not approved/.test(result.note ?? '') && !this._editSafetyDormantWarned) {
@@ -2781,6 +2807,8 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
               closesBatch = true;
             } else if (this.diffManager.currentEditMode === 'auto') {
               logger.info(`[RequestOrchestrator] Auto-applying code edit for: ${args.file}`);
+              // Measure the pre-edit baseline on the still-pristine tree (ADR 0006).
+              await this.ensureEditBaseline(signal);
               const applied = await this.diffManager.applyCodeDirectlyForAutoMode(args.file, code, args.description, true);
               if (applied) {
                 fileModified = true;
@@ -2847,6 +2875,8 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
           } else {
             // auto mode — checkpoint the pre-write state (ADR 0006) so the
             // edit-safety gate can revert this full-file write, then write.
+            // Measure the pre-edit baseline first, on the still-pristine tree.
+            await this.ensureEditBaseline(signal);
             await this.diffManager.snapshotPathForCheckpoint(args.path);
             const capResult = await createFileCapability(args.path, args.content);
             if (capResult.status === 'success') {
