@@ -20,6 +20,7 @@ import {
   containsCodeEdits,
   commandsCreateFiles,
   commandsDeleteFiles,
+  executeShellCommand,
   executeShellCommands,
   formatShellResultsForContext,
   getReasonerShellPrompt,
@@ -45,6 +46,7 @@ import type {
   ShellResultsEvent,
 } from './types';
 import type { CommandApprovalManager } from './commandApprovalManager';
+import { EditValidator, ApprovalState } from './editValidator';
 import type { SavedPromptManager } from './savedPromptManager';
 import type { PlanManager } from './planManager';
 
@@ -232,7 +234,146 @@ export class RequestOrchestrator {
       }
     });
 
+    // Edit-safety validation service (ADR 0006 layer 5). Deps are wired to the
+    // live vscode config, the command-approval system, and the shell executor.
+    this.editValidator = new EditValidator({
+      getConfig: () => {
+        const c = vscode.workspace.getConfiguration('moby');
+        return {
+          validate: c.get<string>('editSafety.validate') ?? 'auto',
+          timeoutMs: c.get<number>('editSafety.validateTimeoutMs') ?? 60000,
+        };
+      },
+      checkApproval: (command: string): ApprovalState => {
+        const allowAll = vscode.workspace.getConfiguration('moby').get<boolean>('allowAllShellCommands') ?? false;
+        if (allowAll) return 'allowed';
+        if (!this.commandApprovalManager) return 'ask'; // can't verify → inconclusive
+        return this.commandApprovalManager.checkCommand(command) as ApprovalState;
+      },
+      runCommand: async (command, cwd, timeoutMs, signal) => {
+        const res = await executeShellCommand(command, cwd, { timeout: timeoutMs, signal, approvalStatus: 'auto' });
+        // executeShellCommand RESOLVES (never rejects) on abort and on spawn
+        // failure. Both must be INCONCLUSIVE, never a regression — otherwise a
+        // user Stop or a missing toolchain (e.g. `dotnet` not on PATH) would
+        // revert the model's good edits. Throw so validateBatch's catch maps it
+        // to 'inconclusive' (commit, not revert).
+        if (signal?.aborted) throw new Error('validation aborted');
+        if (!res.success && /^Error: /.test(res.output)) throw new Error(`check command did not run: ${res.output}`);
+        const timedOut = !res.success && /timed out after \d+ms/.test(res.output);
+        return { exitCode: res.success ? 0 : 1, timedOut, output: res.output };
+      },
+    });
+
     this.wireStructuralRecorder();
+  }
+
+  /** Edit-safety validation service (ADR 0006). */
+  private editValidator: EditValidator;
+  /** Confirmed regressions this turn — drives the terminal-halt budget. */
+  private _editRepairAttempts = 0;
+  /** Whether the "validation is dormant (command not approved)" note fired this turn. */
+  private _editSafetyDormantWarned = false;
+
+  /**
+   * Settle one auto-apply batch's checkpoint transaction (ADR 0006 layers 5–7).
+   * Validates against the project's own toolchain and maps the verdict:
+   *   clean / skipped / inconclusive(commit) → commit the batch
+   *   regression → revert to last-good, feed the errors back, retry — or HALT
+   *                the turn once the repair budget is exhausted
+   *   inconclusive(halt) → commit but halt the turn
+   * Returns `true` when the caller should halt (break) the tool loop. Auto mode
+   * never demotes to Ask. `pushFeedback` injects a user message into the loop's
+   * own message array so the next iteration sees the failure.
+   */
+  private async settleEditBatch(
+    batchModifiedFiles: boolean,
+    signal: AbortSignal,
+    pushFeedback: (message: string) => void,
+  ): Promise<boolean> {
+    // Nothing to validate: no open transaction, not auto mode, no edits, or the
+    // transaction snapshotted nothing (an idempotent/no-op apply reports
+    // fileModified but writes no bytes — don't run a heavy build for it).
+    if (!this.diffManager.hasOpenEditTransaction
+        || this.diffManager.currentEditMode !== 'auto'
+        || !batchModifiedFiles
+        || this.diffManager.checkpointedPaths.length === 0) {
+      this.diffManager.commitEditTransaction();
+      return false;
+    }
+
+    const cfg = vscode.workspace.getConfiguration('moby');
+    if (!(cfg.get<boolean>('editSafety.checkpoint') ?? true)) {
+      this.diffManager.commitEditTransaction();
+      return false;
+    }
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+    if (!root) {
+      this.diffManager.commitEditTransaction();
+      return false;
+    }
+
+    let result;
+    try {
+      result = await this.editValidator.validateBatch(root, signal);
+    } catch (e: any) {
+      logger.error(`[EditSafety] validation threw, committing batch: ${e?.message ?? e}`);
+      this.diffManager.commitEditTransaction();
+      return false;
+    }
+
+    // A turn cancelled during validation must never be read as a regression —
+    // keep whatever was applied and stop quietly. (The runCommand adapter also
+    // makes an aborted run inconclusive; this is the authoritative guard for an
+    // abort that lands between the check finishing and acting on the verdict.)
+    if (signal.aborted) {
+      this.diffManager.commitEditTransaction();
+      return false;
+    }
+
+    logger.info(`[EditSafety] verdict=${result.verdict} command="${result.command ?? 'n/a'}"${result.note ? ` note="${result.note}"` : ''}`);
+
+    const onInconclusive = cfg.get<string>('editSafety.onInconclusive') ?? 'commit';
+    const maxRepair = cfg.get<number>('editSafety.maxRepairAttempts') ?? 3;
+    const trimmedOutput = (result.output ?? '').slice(-4000);
+
+    if (result.verdict === 'regression') {
+      const reverted = await this.diffManager.revertEditTransaction();
+      this._editRepairAttempts++;
+      logger.warn(`[EditSafety] REGRESSION — check "${result.command}" failed; reverted ${reverted.length} file(s) [${reverted.join(', ')}] (repair ${this._editRepairAttempts}/${maxRepair})`);
+      this._onWarning.fire({ message: `Edit reverted: the project check (\`${result.command}\`) failed after applying. Files restored to their last-good state.` });
+
+      if (this._editRepairAttempts > maxRepair) {
+        logger.warn(`[EditSafety] HALT — repair budget (${maxRepair}) exhausted; stopping the turn with files at last-good`);
+        this._onWarning.fire({ message: `Halted after ${maxRepair} failed repair attempts — the edits kept breaking \`${result.command}\`. Files are at their last-good state. Last error:\n${trimmedOutput}` });
+        return true;
+      }
+
+      pushFeedback(
+        `The code edit(s) you just made were REVERTED because the project check \`${result.command}\` failed after applying them:\n\n` +
+        `${trimmedOutput}\n\n` +
+        `The file(s) are back to their last-good state (your change was undone). Re-read the affected file(s) to see the current content, fix the cause of the error, and re-apply.`
+      );
+      return false;
+    }
+
+    // clean / skipped / inconclusive → keep the edits.
+    this.diffManager.commitEditTransaction();
+
+    if (result.verdict === 'inconclusive') {
+      const detail = result.note ?? 'no validation signal';
+      logger.info(`[EditSafety] inconclusive — committed without a validation signal (${detail})`);
+      // Surface a dormant gate once per turn: the discovered check command
+      // exists but isn't approved, so post-apply validation is silently off.
+      if (result.command && /not approved/.test(result.note ?? '') && !this._editSafetyDormantWarned) {
+        this._editSafetyDormantWarned = true;
+        this._onWarning.fire({ message: `Edit-safety validation is inactive: the project check \`${result.command}\` isn't approved. Run it once (or allow it in command rules) to enable post-apply validation.` });
+      }
+      if (onInconclusive === 'halt') {
+        this._onWarning.fire({ message: `Edit applied but could not be validated (${detail}); halting per moby.editSafety.onInconclusive = "halt".` });
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -542,6 +683,10 @@ export class RequestOrchestrator {
     // Clear processed code blocks and pending diffs for new conversation turn
     this.diffManager.clearProcessedBlocks();
     this.diffManager.clearPendingDiffs();
+    // Edit-safety: reset the per-turn validation baseline + repair budget.
+    this.editValidator.resetTurn();
+    this._editRepairAttempts = 0;
+    this._editSafetyDormantWarned = false;
     // Clear read files tracking and extract user intent
     this.fileContextManager.clearTurnTracking();
     this.fileContextManager.extractFileIntent(message);
@@ -3278,16 +3423,21 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
 
       globalToolIndex += toolCalls.length;
 
+      const batchModifiedFiles = fileModifiedInBatch;
       if (fileModifiedInBatch) {
         this.diffManager.emitAutoAppliedChanges();
         fileModifiedInBatch = false;
       }
 
-      // Settle the batch's checkpoint transaction. Phase 1: commit (keep the
-      // writes) — there is no transaction-level revert trigger yet. Phase 2
-      // inserts validation here: validate → commit on pass, revert on
-      // regression, before this point. Safe no-op when no transaction is open.
-      this.diffManager.commitEditTransaction();
+      // Settle the batch's checkpoint transaction (ADR 0006 layers 5–7):
+      // validate against the project toolchain → commit / revert+feedback /
+      // halt. Auto mode stays Auto (never demotes to Ask).
+      const editHalt = await this.settleEditBatch(
+        batchModifiedFiles,
+        signal,
+        (msg) => currentMessages.push({ role: 'user', content: msg }),
+      );
+      if (editHalt) break;
 
       // Close the tool batch at the iteration boundary. Each streamChat
       // call is one "decision point" — its tool calls (one or many parallel)
@@ -3583,14 +3733,19 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
       // so the Modified Files UI updates — but keep the batch open. Consecutive
       // tool calls with no streamed text between them should render as one
       // dropdown rather than fragmenting into "Used 1 tool" rows per file.
+      const batchModifiedFiles = fileModifiedInBatch;
       if (fileModifiedInBatch) {
         this.diffManager.emitAutoAppliedChanges();
         fileModifiedInBatch = false;
       }
 
-      // Settle the batch's checkpoint transaction (ADR 0006). Phase 1 commits;
-      // Phase 2 inserts validate → commit/revert here. Safe no-op when closed.
-      this.diffManager.commitEditTransaction();
+      // Settle the batch's checkpoint transaction (ADR 0006 layers 5–7).
+      const editHalt = await this.settleEditBatch(
+        batchModifiedFiles,
+        signal,
+        (msg) => toolMessages.push({ role: 'user', content: msg }),
+      );
+      if (editHalt) break;
 
       // Close the tool batch at the iteration boundary. Mirrors
       // runStreamingToolCallsLoop — each non-streaming chat() call is one

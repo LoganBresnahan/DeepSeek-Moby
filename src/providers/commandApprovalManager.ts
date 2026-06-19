@@ -56,6 +56,10 @@ const DEFAULT_ALLOWED: string[] = [
   'tsc', 'python -c', 'python3 -c',
   'cargo check', 'cargo test', 'cargo clippy',
   'go test', 'go vet', 'go build',
+  // Project checks used by the edit-safety validation gate (ADR 0006). These
+  // are build/verify operations comparable to the dev tools above, so the gate
+  // works out-of-the-box rather than sitting dormant until manually approved.
+  'dotnet build', 'make check', 'make build',
   'rg ', 'fd ',
 ];
 
