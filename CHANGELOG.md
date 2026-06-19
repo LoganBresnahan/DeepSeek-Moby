@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixes — live "Modified Files" dropdown
+
+- **The final auto-applied file could be missing from the live "Modified Files" dropdown** (it still showed correctly after a reload). The live dropdown is driven by a batched notification flushed at tool-batch boundaries, while restore replays the per-file `file-modified` structural events — so the last file's batch flush could be skipped before the turn ended, leaving the live dropdown one short. A final, idempotent `emitAutoAppliedChanges()` flush now runs before each end-of-response (normal / stop / error). It's incremental (`_lastNotifiedDiffIndex`), so it's a no-op when the tail was already sent, and it never touches the persisted events (restore is unaffected). Root cause and the planned single-source fix are documented as **Phase 3c** in [ADR 0003](docs/architecture/decisions/0003-events-table-sole-source-of-truth.md). ([src/providers/requestOrchestrator.ts](src/providers/requestOrchestrator.ts))
+
 ### Sessions open at the latest message
 
 - **Opening a chat now lands at the bottom (the most recent turn) instead of the top**, as if you'd scrolled all the way through. The wrinkle was the virtual list: off-screen turns carry an estimated height until they bind and measure, so the running total — and thus the true bottom — only settles as the tail turns render. `VirtualListActor.scrollToEnd()` jumps to the bottom, binds and measures the tail, and repeats synchronously until the height stabilizes, so the first paint is already pinned to the bottom with no top-then-jump flash. Called at the end of `handleLoadHistory`. ([media/actors/virtual-list/VirtualListActor.ts](media/actors/virtual-list/VirtualListActor.ts), [media/actors/message-gateway/VirtualMessageGatewayActor.ts](media/actors/message-gateway/VirtualMessageGatewayActor.ts))

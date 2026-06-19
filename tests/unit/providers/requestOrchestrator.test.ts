@@ -404,6 +404,16 @@ describe('RequestOrchestrator', () => {
       expect(events[0].content).toContain('Hello world');
       expect(events[0].editMode).toBe('manual');
     });
+
+    it('flushes auto-applied edits at end of response so the live Modified Files dropdown is not missing the last file', async () => {
+      // No-tool turn never hits the per-batch emitAutoAppliedChanges() flush
+      // (that is gated on fileModifiedInBatch), so this only passes via the
+      // end-of-response flush. emitAutoAppliedChanges is incremental/idempotent,
+      // so the extra call is a no-op when the tail was already sent.
+      await orchestrator.handleMessage('Hello', null, async () => '', undefined);
+
+      expect(mockDiffManager.emitAutoAppliedChanges).toHaveBeenCalled();
+    });
   });
 
   // ── Reasoner Model ──

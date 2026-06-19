@@ -887,6 +887,14 @@ export class RequestOrchestrator {
       // ADR 0003 Phase 3: webview no longer returns a consolidated event log —
       // the extension is the sole author of structural events. No receiver to prepare.
 
+      // Final flush of any auto-applied edits whose per-batch notification didn't
+      // fire before the turn ended. Incremental + idempotent (a no-op when the tail
+      // was already sent via emitAutoAppliedChanges() at the batch boundary), so the
+      // LIVE "Modified Files" dropdown stops missing the last file. Restore is driven
+      // by the per-file `file-modified` structural events; this only patches the live
+      // notification channel. See ADR 0003 for the proper single-source unification.
+      this.diffManager.emitAutoAppliedChanges();
+
       // Finalize response
       this._onEndResponse.fire({
         role: 'assistant',
@@ -992,6 +1000,9 @@ export class RequestOrchestrator {
         // Fire marker as a stream token so the live UI sees it via the normal token flow,
         // then fire endResponse so the streaming turn ends cleanly with the marker included.
         this._onStreamToken.fire({ token: `\n\n${marker}` });
+        // Flush any auto-applied edits not yet notified live (idempotent no-op
+        // otherwise) so a stopped turn still shows its Modified Files. See ADR 0003.
+        this.diffManager.emitAutoAppliedChanges();
         this._onEndResponse.fire({
           role: 'assistant',
           content: savedText,
@@ -1059,6 +1070,9 @@ export class RequestOrchestrator {
         // Surface the marker live too, so the user sees the cause of the
         // failure inline instead of a silent stop.
         this._onStreamToken.fire({ token: `\n\n${errorMarker}` });
+        // Flush any auto-applied edits not yet notified live (idempotent no-op
+        // otherwise) so an errored turn still shows its Modified Files. See ADR 0003.
+        this.diffManager.emitAutoAppliedChanges();
         this._onEndResponse.fire({
           role: 'assistant',
           content: savedText,
