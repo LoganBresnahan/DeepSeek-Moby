@@ -15,6 +15,7 @@ Short, dated records of significant architectural and behavioral decisions. Each
 | [0003](0003-events-table-sole-source-of-truth.md) | Events table is the sole source of truth for session history | Accepted | 2026-04-19 |
 | [0004](0004-r1-path-semantics-guards.md) | R1 path-semantics guards and model-specific guard policy | Accepted | 2026-04-20 |
 | [0005](0005-preserve-bundler-ts-module-resolution.md) | TypeScript module resolution: preserve + bundler | Accepted | 2026-04-26 |
+| [0006](0006-edit-safety-checkpoint-and-validation.md) | Edit safety: checkpoint, atomic batch, and post-apply validation | Proposed | 2026-06-19 |
 
 ## When to write an ADR
 

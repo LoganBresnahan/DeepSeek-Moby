@@ -1,7 +1,7 @@
 # Improve file-corruption handling
 
-**Status:** Diagnosis complete — remediation not started.
-**Date:** 2026-06-18
+**Status:** Diagnosis complete. Remediation specified in [ADR 0006](../architecture/decisions/0006-edit-safety-checkpoint-and-validation.md) (reference: [edit-safety.md](../architecture/integration/edit-safety.md)); the latent SSE-buffering bug (item 6) is fixed.
+**Date:** 2026-06-18 (diagnosis); 2026-06-19 (remediation spec)
 
 ## TL;DR
 
@@ -140,11 +140,15 @@ the trailing partial for the next chunk. Decode bytes through a streaming UTF-8 
    before the diff sees it. Yields a per-model, per-`reasoning_effort` corruption-rate
    metric and ends the misattribution to the diff path.
 
-2. **Add a post-apply validation gate — the actual missing layer.** After any successful
-   write/edit, run a cheap syntax/compile check (Razor + CSS parse, or the `dotnet build`
-   we already run) and, on *new* errors, feed back a constrained re-emit of only the
-   broken span. Makes "applied" mean "applied and still valid" so a garbled REPLACE can't
-   sit on disk reported as success.
+2. **Add a post-apply validation gate — the actual missing layer.** After a batch of
+   edits applies, run the *project's own* check command (the `dotnet build` we already
+   run, discovered from workspace markers — no bundled language parsers) and, on *new*
+   errors, **revert to a checkpoint** and feed the scoped errors back to the model.
+   Makes "applied" mean "applied and verified" so a garbled REPLACE can't sit on disk
+   reported as success. Now fully specified — checkpoint, atomic batch, validation,
+   revert-on-regression, Auto→Ask demotion — in
+   [ADR 0006](../architecture/decisions/0006-edit-safety-checkpoint-and-validation.md)
+   ([edit-safety.md](../architecture/integration/edit-safety.md)).
 
 3. **Attack the source.** Corruption tracks `deepseek-v4-pro` @ `reasoning_effort=max`.
    Re-run the same task at lower effort / lower temperature, and — if this is a
@@ -161,7 +165,8 @@ the trailing partial for the next chunk. Decode bytes through a streaming UTF-8 
 
 6. **Fix the latent SSE-buffering bug** at [deepseekClient.ts:624](../../src/deepseekClient.ts#L624)
    (see above). Independent of the corruption work; do it so the two failure classes stay
-   distinguishable.
+   distinguishable. ✅ **Done** — buffered line framing + streaming UTF-8 decode shipped on
+   branch `fix/sse-chunk-boundary-buffering` with 6 regression tests.
 
 ## References
 

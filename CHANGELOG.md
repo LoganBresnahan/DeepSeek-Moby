@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Docs — edit-safety design
+
+- **Specified a fail-safe wrapper around auto-mode file application** to close the *match-but-garbled* corruption case (a SEARCH that matches but a REPLACE the model emitted with dropped/mangled tokens — the diagnosis in [docs/plans/improve-file-corruption.md](docs/plans/improve-file-corruption.md)). The design adds checkpoint → atomic batch → post-apply validation against the *project's own* toolchain (no bundled language parsers) → revert-on-regression → Auto→Ask demotion, with the invariant "never leave a file worse than found, never report success on an edit that broke the build." Decision + alternatives in [ADR 0006](docs/architecture/decisions/0006-edit-safety-checkpoint-and-validation.md); reference + test matrix in [docs/architecture/integration/edit-safety.md](docs/architecture/integration/edit-safety.md). Cross-referenced from [diff-engine.md](docs/architecture/integration/diff-engine.md) and the README. Not yet implemented (ADR Proposed).
+
 ### Fixes — streamed responses no longer drop data on chunk boundaries
 
 - **An SSE frame split across a network chunk boundary was silently dropped.** `streamChat` decoded and `split('\n')` each `fetch` chunk in isolation with no carryover buffer, so when one `data:` frame straddled two chunks the truncated tail failed `JSON.parse` (swallowed) and the head of the next chunk no longer started with `data: ` — losing the whole delta (content, reasoning, or a tool-call argument fragment). A multibyte UTF-8 character split across a `Buffer` boundary also decoded to U+FFFD. The stream is now framed with a persistent line buffer and a streaming `TextDecoder` (which retains an incomplete trailing code point), processing only complete newline-terminated lines and flushing any trailing partial line on stream end; CRLF endings are tolerated. This is independent of the diff-engine corruption work — model garble applies via exact match — but is documented alongside it in [docs/plans/improve-file-corruption.md](docs/plans/improve-file-corruption.md). ([src/deepseekClient.ts](src/deepseekClient.ts))

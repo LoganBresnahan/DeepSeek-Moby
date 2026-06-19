@@ -2,6 +2,8 @@
 
 This document details the file modification system, including edit modes, diff creation, storage, and the pending changes workflow.
 
+> **Scope note.** This document covers the *match-and-apply* contract: how a SEARCH/REPLACE block is parsed, matched, and written. The strict matching and hard-fail policy described here guards the **no-match** path — it does **not** validate a REPLACE whose SEARCH *does* match. The fail-safe wrapper around auto-apply (checkpoint, atomic batch, post-apply validation, revert-on-regression, Auto→Ask demotion) that covers the *match-but-garbled* case is specified separately in [edit-safety.md](edit-safety.md) / [ADR 0006](../decisions/0006-edit-safety-checkpoint-and-validation.md). Changes to the strategies below must preserve, or explicitly update, the guarantees those layers depend on.
+
 ## Search/Replace Format
 
 The LLM uses an Aider-style search/replace format for precise code modifications. This format ensures reliable parsing even when the model output contains code with similar markers.
@@ -122,6 +124,14 @@ file content **unchanged**. In auto mode this propagates as an edit failure (see
 `DiffManager.applyCodeDirectlyForAutoMode` → `RequestOrchestrator`), so the model
 is told to re-read and resend a verbatim SEARCH — a non-match is never silently
 reported as applied.
+
+> **Boundary of this guarantee.** Strict matching + hard-fail protect against a
+> SEARCH that doesn't match. They do **not** check whether the REPLACE the model
+> emitted is itself correct: once a SEARCH matches (an append, a tiny search, a
+> whole-file rewrite), the REPLACE is written verbatim, garble and all. Catching
+> that case — model-emitted garble in a *matching* REPLACE — is the job of the
+> post-apply validation gate in [edit-safety.md](edit-safety.md) / [ADR 0006](../decisions/0006-edit-safety-checkpoint-and-validation.md),
+> not of these strategies.
 
 > **Removed: location/anchor matching.** A former 4th strategy reconstructed the
 > target region from a few distinctive "anchor" lines and wrote the REPLACE block
