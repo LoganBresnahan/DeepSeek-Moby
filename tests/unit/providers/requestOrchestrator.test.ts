@@ -964,6 +964,53 @@ describe('RequestOrchestrator', () => {
       expect(mockDiffManager.showDiff).not.toHaveBeenCalled();
     });
 
+    // Regression: when the auto-apply reports failure (no clean match), the
+    // model must be TOLD — with actionable guidance — not left thinking the
+    // edit landed. The tool-result message fed back into the next chat() call
+    // must carry the "did not match / re-read" guidance. This is the
+    // end-to-end payoff of DiffManager returning false on a non-match.
+    it('surfaces re-read guidance to the model when an auto edit_file fails to apply', async () => {
+      mockDiffManager.currentEditMode = 'auto';
+      // The apply layer reports failure (e.g. SEARCH text not verbatim).
+      mockDiffManager.applyCodeDirectlyForAutoMode.mockResolvedValue(false);
+
+      let callCount = 0;
+      mockClient.chat.mockImplementation(async () => {
+        callCount++;
+        if (callCount === 1) {
+          return {
+            content: '',
+            tool_calls: [{
+              id: 'tc-1',
+              type: 'function',
+              function: {
+                name: 'edit_file',
+                arguments: JSON.stringify({
+                  file: 'src/index.ts',
+                  edits: [edit],
+                  language: 'typescript'
+                })
+              }
+            }]
+          };
+        }
+        return { content: 'Done', tool_calls: null };
+      });
+
+      await orchestrator.handleMessage('Edit the file', null, async () => '', undefined);
+
+      // The tool result is appended as a { role: 'tool', content } message and
+      // sent on the next chat() call. Find it and assert it carries guidance.
+      const toolResultMessages = mockClient.chat.mock.calls
+        .flatMap((call: any[]) => (Array.isArray(call[0]) ? call[0] : []))
+        .filter((m: any) => m && m.role === 'tool' && typeof m.content === 'string');
+      const failureMsg = toolResultMessages.find((m: any) => m.content.includes('edit_file failed'));
+
+      expect(failureMsg).toBeDefined();
+      expect(failureMsg.content).toMatch(/did not match/i);
+      expect(failureMsg.content).toMatch(/re-read/i);
+    });
+
     it('should call handleAskModeDiff for edit_file in ask mode', async () => {
       mockDiffManager.currentEditMode = 'ask';
       mockDiffManager.waitForPendingApprovals.mockResolvedValue([{ approved: true, filePath: 'src/index.ts' }]);

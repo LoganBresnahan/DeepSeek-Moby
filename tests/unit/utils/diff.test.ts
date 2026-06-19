@@ -423,6 +423,80 @@ const x = 2;
       expect(result.content).toContain('line 49');
     });
   });
+
+  // Regression: the apply pipeline must never "almost match" a SEARCH block and
+  // splice the replacement into the wrong region. When no strategy can apply a
+  // block with high confidence it must HARD-FAIL (success=false, file returned
+  // verbatim) so the caller asks the model to resend — rather than producing a
+  // corrupted, half-spliced file. Guards the fuzzFactor=0 / location-floor=0.8
+  // tightening.
+  describe('strict matching (no silent splice)', () => {
+    it('refuses to apply a SEARCH whose remembered line does not match the file (no clobber)', () => {
+      // The SEARCH is nearly the whole file but ONE line is misremembered:
+      // the file has `this.turn = 'X';`, the SEARCH has `this.current = 'X';`.
+      // Similarity clears the stale gate, so the old engine reached anchor
+      // matching, reconstructed the region, and wrote the REPLACE block
+      // wholesale — CLOBBERING the file's real `this.turn` with the invented
+      // `this.current` (a line that never existed in the file). That is the
+      // exact corruption signature. With anchor matching removed and patch
+      // matching at fuzzFactor 0, this now hard-fails untouched.
+      const fileLines = [
+        'class Game {',
+        '  constructor(config) {',
+        '    this.config = config;',
+        '    this.board = emptyBoard();',
+        "    this.turn = 'X';",
+        '    this.over = false;',
+        '    this.moves = 0;',
+        '    this.history = [];',
+        '    this.listeners = [];',
+        '    this.theme = config.theme;',
+        '    this.size = config.size;',
+        '    this.winner = null;',
+        '    this.started = false;',
+        '  }',
+        '  start() {',
+        '    this.started = true;',
+        '  }',
+        '}',
+      ];
+      const original = fileLines.join('\n');
+
+      const searchLines = [...fileLines];
+      searchLines[4] = "    this.current = 'X';";       // misremembered line
+      const replaceLines = [...searchLines];
+      replaceLines[5] = '    this.over = true;';        // change adjacent to it
+
+      const result = engine.applySearchReplace(original, [
+        { search: searchLines.join('\n'), replace: replaceLines.join('\n') }
+      ]);
+
+      expect(result.success).toBe(false);
+      // File returned verbatim — the invented `this.current` must NOT appear,
+      // and the real `this.turn` must survive.
+      expect(result.content).toBe(original);
+      expect(result.content).toContain("this.turn = 'X';");
+      expect(result.content).not.toContain('this.current');
+    });
+
+    it('still applies an edit whose only difference from the file is indentation', () => {
+      // Over-tighten guard: legitimate whitespace-only drift must STILL apply
+      // (via the whitespace-normalized line strategy), preserving the file's
+      // original indentation. fuzzFactor=0 only removes *context* tolerance.
+      const original = '    if (ready) {\n        doWork();\n    }';
+      const blocks: SearchReplaceBlock[] = [
+        // SEARCH/REPLACE written with no indentation; the file is indented.
+        { search: 'if (ready) {\n    doWork();\n}', replace: 'if (ready) {\n    doWork();\n    cleanup();\n}' }
+      ];
+
+      const result = engine.applySearchReplace(original, blocks);
+
+      expect(result.success).toBe(true);
+      expect(result.content).toContain('cleanup();');
+      // Original indentation of the anchor line is preserved, not flattened.
+      expect(result.content).toMatch(/^ {4}if \(ready\) \{/);
+    });
+  });
 });
 
 describe('DiffEngine singleton export', () => {

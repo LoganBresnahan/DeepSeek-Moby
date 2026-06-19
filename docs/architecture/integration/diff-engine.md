@@ -96,16 +96,41 @@ Both SEARCH and REPLACE sections are sanitized to remove lines that are just con
 After sanitization:
 - If SEARCH is empty → prepend REPLACE to file (or create new file)
 - If SEARCH has content → find it in file and replace with REPLACE
-- If SEARCH can't be found → fallback strategies or edit fails
+- If SEARCH can't be matched → the block **hard-fails** (no force-apply)
 
-### Fallback Strategies
+### Match Strategies
 
-When exact search match fails, the DiffEngine tries these strategies in order:
+`DiffEngine.applySearchReplace()` tries strategies in order of reliability and
+**stops at the first that applies**. Every strategy inserts the REPLACE text
+verbatim and only ever replaces a region the SEARCH genuinely matches — a SEARCH
+that doesn't match the file is *refused*, not force-fit:
 
-1. **Exact match** - Direct string search for the SEARCH content
-2. **Fuzzy whitespace match** - Normalize whitespace, preserve indentation
-3. **Patch-based match** - Use jsdiff with fuzzFactor for context line mismatches
-4. **Location-based match** - Find anchor lines and use similarity scoring
+1. **Exact match** — direct substring search for the SEARCH content.
+2. **Whitespace-normalized line match** — compares lines after trimming, so pure
+   indentation drift still applies; the file's original indentation is preserved.
+3. **Patch-based match** — builds a unified diff (jsdiff) and applies it with
+   `fuzzFactor: 0` (strict context). `compareLine` still tolerates whitespace
+   differences, but context lines must otherwise match, so the patch will not
+   splice the change into an approximately-matching region.
+
+Before strategies 2–3 run, a **staleness gate** rejects the block when the
+SEARCH's line-similarity to the file is below `0.75` (the file likely changed
+since the model last read it).
+
+If no strategy matches, `applySearchReplace` returns `success: false` with the
+file content **unchanged**. In auto mode this propagates as an edit failure (see
+`DiffManager.applyCodeDirectlyForAutoMode` → `RequestOrchestrator`), so the model
+is told to re-read and resend a verbatim SEARCH — a non-match is never silently
+reported as applied.
+
+> **Removed: location/anchor matching.** A former 4th strategy reconstructed the
+> target region from a few distinctive "anchor" lines and wrote the REPLACE block
+> over it. Because it ignored whether the *rest* of the SEARCH matched, a single
+> misremembered line in the model's SEARCH could overwrite the file's real line
+> with a hallucinated one (e.g. `this.turn` → an invented `this.current`). Even a
+> high score threshold didn't prevent it — near-whole-file near-misses score high
+> on anchors. It was removed in favor of hard-failing, which hands the model a
+> clean retry signal instead of a corrupted file.
 
 See `DiffEngine.applySearchReplace()` for implementation details.
 
@@ -763,9 +788,11 @@ Scenario: User edits file while diff is pending
 There is no conflict-detection dialog or merge editor in the accept path:
 `acceptSpecificDiff` recomputes the result via `DiffEngine.applyChanges`
 against the file's current content and does a single full-range replace. The
-only staleness protection lives in `DiffEngine.applySearchReplace` — if the
-SEARCH content's similarity to the file drops below `0.75`, the block is marked
-stale and the edit is refused with a "re-read the file" message.
+protection lives in `DiffEngine.applySearchReplace`: if the SEARCH content's
+similarity to the file drops below `0.75`, the block is marked stale and refused
+with a "re-read the file" message; and even above that threshold, a block whose
+SEARCH cannot be matched by the strict strategies is refused (`success: false`,
+file unchanged) rather than force-applied to an approximate location.
 
 ### Session Boundaries
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixes — edit application no longer silently corrupts files
+
+- **Auto-applied edits could clobber a file and still report success.** The diff engine's last-resort *location/anchor* matching reconstructed the target region from a few distinctive lines and wrote the model's REPLACE block over it — so a single misremembered line in the SEARCH (e.g. `this.turn` rewritten as an invented `this.current`) overwrote the file's real line instead of being rejected. Compounding it, a total no-match hit the idempotent-skip path in `applyCodeDirectlyForAutoMode` and returned `true`, so the model was told the edit applied and never re-read — driving a retry-then-corrupt loop. Now: location/anchor matching is **removed**, patch matching runs at `fuzzFactor: 0` (strict context; only whitespace differences tolerated), and an unmatched block **hard-fails** (`success: false`, file unchanged) so `RequestOrchestrator` surfaces its "re-read and resend a verbatim SEARCH" guidance. ([src/utils/diff.ts](src/utils/diff.ts), [src/providers/diffManager.ts](src/providers/diffManager.ts), [src/providers/requestOrchestrator.ts](src/providers/requestOrchestrator.ts))
+- **Malformed `edit_file` payloads no longer masquerade as success.** A JSON parse failure on the tool arguments was logged and swallowed, leaving the generic tool acknowledgement in place; it now returns a parseable failure so the model resends. ([src/providers/requestOrchestrator.ts](src/providers/requestOrchestrator.ts))
+- 6 new regression tests covering the above: no-clobber on a misremembered SEARCH and whitespace-only edits still applying ([tests/unit/utils/diff.test.ts](tests/unit/utils/diff.test.ts)); no-match returns false, writes nothing, and increments the failed-apply count ([tests/unit/providers/diffManager.test.ts](tests/unit/providers/diffManager.test.ts)); auto `edit_file` surfaces the re-read guidance to the model on failure ([tests/unit/providers/requestOrchestrator.test.ts](tests/unit/providers/requestOrchestrator.test.ts)).
+
 ## [0.4.0] - 2026-06-17
 
 ### Subagent web-search digest

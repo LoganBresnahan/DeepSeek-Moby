@@ -33,7 +33,13 @@ export interface ApplyOptions {
 
 const DEFAULT_OPTIONS: ApplyOptions = {
   fuzzyMatch: true,
-  fuzzFactor: 3,  // Allow up to 3 lines of context mismatch
+  // Strict context: 0 allowed context-line mismatches. compareLine already
+  // tolerates whitespace differences, so this still applies legitimate edits
+  // whose only drift is indentation — but it stops the patch strategy from
+  // splicing a replacement into an approximately-matching (wrong) region,
+  // which is how near-miss SEARCH blocks used to corrupt files. A failed
+  // match now hard-fails up the stack so the model gets a clean retry signal.
+  fuzzFactor: 0,
 };
 
 /**
@@ -173,17 +179,17 @@ export class DiffEngine {
         continue;
       }
 
-      // Strategy 4: Location-based matching as last resort
-      logger.info(`[DiffEngine] Trying location-based match...`);
-      result = this.locationBasedReplace(content, block.search, block.replace);
-      if (result !== null) {
-        content = result;
-        appliedCount++;
-        logger.info(`[DiffEngine] Applied via location-based match`);
-        continue;
-      }
-
-      logger.info(`[DiffEngine] All match strategies failed for block`);
+      // Strategy 4 (location/anchor matching) was REMOVED. It reconstructed the
+      // target region from a few "anchor" lines and then wrote the REPLACE block
+      // wholesale over that region. That bypasses the core safety contract —
+      // "the SEARCH must actually match the file" — so when the model's SEARCH
+      // contained a misremembered line, anchor matching happily clobbered the
+      // file's real line with the hallucinated one (e.g. `this.turn` → an
+      // invented `this.current`). Even a high score threshold didn't prevent it,
+      // because near-whole-file near-misses score high on anchors. We now stop
+      // at the strict strategies above; an unmatched block hard-fails so the
+      // caller re-reads and resends verbatim SEARCH text.
+      logger.info(`[DiffEngine] No strict strategy matched block — refusing to guess a location`);
     }
 
     const hasStale = failedBlocks.some(f => f.reason === 'stale');
@@ -265,10 +271,12 @@ export class DiffEngine {
 
       logger.info(`[DiffEngine] Created patch (${patch.length} chars)`);
 
-      // Apply with fuzzFactor to allow context line mismatches
-      // Also use compareLine for whitespace-tolerant matching
+      // Apply with fuzzFactor for context tolerance (default 0 = strict; only
+      // whitespace differences are tolerated via compareLine below). A non-zero
+      // fuzzFactor would let context lines mismatch and splice the change into
+      // an approximately-matching region, so we keep it strict by default.
       const result = Diff.applyPatch(content, patch, {
-        fuzzFactor: this.options.fuzzFactor ?? 3,
+        fuzzFactor: this.options.fuzzFactor ?? 0,
         compareLine: (lineNumber, line, operation, patchContent) => {
           // Guard against undefined values (can happen in edge cases)
           if (line === undefined || patchContent === undefined) {
@@ -290,162 +298,6 @@ export class DiffEngine {
       logger.info(`[DiffEngine] patchBasedReplace error: ${e}`);
       return null;
     }
-  }
-
-  /**
-   * Location-based replacement using Patience-style anchor matching.
-   *
-   * Algorithm:
-   * 1. Find "anchor" lines - distinctive lines from SEARCH that appear exactly (trimmed) in the file
-   * 2. Find where those anchors appear in the file
-   * 3. Verify anchors appear in the same relative order
-   * 4. Use the anchor positions to determine the replacement region
-   * 5. Validate with jsdiff similarity scoring
-   */
-  private locationBasedReplace(content: string, search: string, replace: string): string | null {
-    const contentLines = content.split('\n');
-    const searchLines = search.split('\n');
-    const replaceLines = replace.split('\n');
-
-    // Build a map of trimmed content lines to their line numbers (for fast lookup)
-    const contentLineMap = new Map<string, number[]>();
-    contentLines.forEach((line, idx) => {
-      const trimmed = line.trim();
-      if (trimmed.length > 0) {
-        const existing = contentLineMap.get(trimmed) || [];
-        existing.push(idx);
-        contentLineMap.set(trimmed, existing);
-      }
-    });
-
-    // Find anchor lines from SEARCH - distinctive lines that exist in the file
-    // An anchor must: be substantial (>10 chars), exist in the file, and ideally be unique
-    interface Anchor {
-      searchLineIdx: number;
-      contentLineIdx: number;
-      line: string;
-      isUnique: boolean;
-    }
-
-    const anchors: Anchor[] = [];
-    const seenSearchLines = new Set<string>();
-
-    for (let i = 0; i < searchLines.length; i++) {
-      const trimmed = searchLines[i].trim();
-
-      // Skip short lines, empty lines, and duplicates within search
-      if (trimmed.length <= 10 || seenSearchLines.has(trimmed)) {
-        continue;
-      }
-      seenSearchLines.add(trimmed);
-
-      const contentPositions = contentLineMap.get(trimmed);
-      if (contentPositions && contentPositions.length > 0) {
-        // Prefer unique lines (appear only once in file)
-        const isUnique = contentPositions.length === 1;
-        anchors.push({
-          searchLineIdx: i,
-          contentLineIdx: contentPositions[0], // Will refine later if multiple
-          line: trimmed,
-          isUnique
-        });
-      }
-    }
-
-    logger.info(`[DiffEngine] Found ${anchors.length} anchor lines (${anchors.filter(a => a.isUnique).length} unique)`);
-
-    if (anchors.length === 0) {
-      logger.info(`[DiffEngine] Location match failed - no anchor lines found`);
-      return null;
-    }
-
-    // Sort anchors by their position in SEARCH
-    anchors.sort((a, b) => a.searchLineIdx - b.searchLineIdx);
-
-    // Find the best starting position by trying to match anchor order
-    // For each possible starting position of the first anchor, check if subsequent anchors follow
-    const firstAnchor = anchors[0];
-    const possibleStarts = contentLineMap.get(firstAnchor.line) || [];
-
-    let bestMatch: { startLine: number; endLine: number; score: number } | null = null;
-
-    for (const firstAnchorPos of possibleStarts) {
-      // Calculate expected start of the search block based on this anchor position
-      const expectedStart = firstAnchorPos - firstAnchor.searchLineIdx;
-
-      if (expectedStart < 0) continue;
-
-      // Check if other anchors follow in order
-      let anchorsInOrder = 1;
-      let lastContentPos = firstAnchorPos;
-
-      for (let i = 1; i < anchors.length; i++) {
-        const anchor = anchors[i];
-        const expectedPos = expectedStart + anchor.searchLineIdx;
-        const actualPositions = contentLineMap.get(anchor.line) || [];
-
-        // Check if this anchor exists at or near the expected position
-        const nearbyPos = actualPositions.find(pos =>
-          pos > lastContentPos && Math.abs(pos - expectedPos) <= 3
-        );
-
-        if (nearbyPos !== undefined) {
-          anchorsInOrder++;
-          lastContentPos = nearbyPos;
-        }
-      }
-
-      // Calculate match quality
-      const anchorScore = anchorsInOrder / anchors.length;
-
-      // Only consider if at least 60% of anchors are in order
-      if (anchorScore >= 0.6) {
-        const endLine = Math.min(expectedStart + searchLines.length, contentLines.length);
-
-        // Use jsdiff to compute actual similarity between regions
-        const windowContent = contentLines.slice(expectedStart, endLine).join('\n');
-        const diffScore = this.computeSimilarity(search, windowContent);
-
-        const combinedScore = (anchorScore * 0.6) + (diffScore * 0.4);
-
-        logger.info(`[DiffEngine] Candidate at line ${expectedStart}: anchors=${anchorScore.toFixed(2)}, diff=${diffScore.toFixed(2)}, combined=${combinedScore.toFixed(2)}`);
-
-        if (!bestMatch || combinedScore > bestMatch.score) {
-          bestMatch = { startLine: expectedStart, endLine, score: combinedScore };
-        }
-      }
-    }
-
-    if (!bestMatch || bestMatch.score < 0.5) {
-      logger.info(`[DiffEngine] Location match failed - best score ${bestMatch?.score.toFixed(2) || 0} below threshold`);
-      return null;
-    }
-
-    logger.info(`[DiffEngine] Best match at lines ${bestMatch.startLine}-${bestMatch.endLine} with score ${bestMatch.score.toFixed(2)}`);
-
-    // Detect indentation from original
-    const originalIndent = contentLines[bestMatch.startLine].match(/^(\s*)/)?.[1] || '';
-    const replaceBaseIndent = replaceLines[0]?.match(/^(\s*)/)?.[1] || '';
-
-    // Apply indentation to replacement
-    const indentedReplace = replaceLines.map((line, idx) => {
-      if (line.trim() === '') return line; // Keep empty lines as-is
-      if (idx === 0) {
-        return originalIndent + line.trimStart();
-      }
-      const lineIndent = line.match(/^(\s*)/)?.[1] || '';
-      const relativeIndent = lineIndent.length - replaceBaseIndent.length;
-      const newIndent = originalIndent + ' '.repeat(Math.max(0, relativeIndent));
-      return newIndent + line.trimStart();
-    });
-
-    // Replace the lines
-    const before = contentLines.slice(0, bestMatch.startLine);
-    const after = contentLines.slice(bestMatch.endLine);
-
-    logger.info(`[DiffEngine] Replacing lines ${bestMatch.startLine}-${bestMatch.endLine} with ${indentedReplace.length} lines`);
-
-    return [...before, ...indentedReplace, ...after].join('\n');
   }
 
   /**

@@ -60,7 +60,7 @@ Control how code changes are applied to your files:
 - **Ask (Q)** — Diffs auto-display in a side-by-side view. You confirm or reject each change
 - **Auto (A)** — Changes are applied immediately. A "Modified Files" dropdown shows what was changed
 
-All edits use a precise SEARCH/REPLACE format with multi-strategy matching (exact, fuzzy whitespace, patch-based, location-based fallback).
+All edits use a precise SEARCH/REPLACE format with strict multi-strategy matching (exact, fuzzy-whitespace, then a strict jsdiff patch). A SEARCH that can't be matched is refused — not force-applied to an approximate location — so the model re-reads and retries instead of corrupting the file.
 
 ### Web Search (Tavily or SearXNG)
 

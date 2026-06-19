@@ -455,6 +455,66 @@ describe('DiffManager', () => {
       expect(warnings[0].message).toContain('No matching code found');
       m.dispose();
     });
+
+    // Regression: a non-matching edit must report FAILURE, not silent success.
+    // Previously, when no block matched, the computed content equalled the
+    // current file, the idempotent-skip path fired, and the method returned
+    // `true` — telling the model the edit applied. That false success is the
+    // root of the retry-then-corrupt cascade. It must now return false, not
+    // write, and not emit a success onCodeApplied event.
+    it('returns false (not silent success) and does not write when no block matches', async () => {
+      const { manager: m, diffEngine: de } = createManager('auto');
+      // success=false AND content unchanged — the exact shape a total no-match
+      // produces in the real DiffEngine (content === original === currentContent).
+      de.applyChanges.mockReturnValue({
+        content: 'old content',
+        success: false,
+        message: 'No matching code found for search/replace blocks',
+      });
+
+      (vscode.workspace.fs.stat as any).mockResolvedValue({});
+      const codeAppliedEvents: CodeAppliedEvent[] = [];
+      m.onCodeApplied(e => codeAppliedEvents.push(e));
+
+      const mockDoc = {
+        uri: { toString: () => 'file:///workspace/src/app.ts', scheme: 'file' },
+        getText: () => 'old content',
+        positionAt: (o: number) => ({ line: 0, character: o }),
+        save: vi.fn(async () => true),
+      };
+      (vscode.workspace.openTextDocument as any).mockResolvedValue(mockDoc);
+
+      const result = await m.applyCodeDirectlyForAutoMode('src/app.ts', 'code');
+
+      expect(result).toBe(false);
+      expect(vscode.workspace.applyEdit).not.toHaveBeenCalled();
+      // Must NOT report an applied edit on failure.
+      expect(codeAppliedEvents.filter(e => e.success)).toHaveLength(0);
+      m.dispose();
+    });
+
+    it('increments failedAutoApplyCount when the diff engine reports failure', async () => {
+      const { manager: m, diffEngine: de } = createManager('auto');
+      de.applyChanges.mockReturnValue({
+        content: 'old content',
+        success: false,
+        message: 'No matching code found for search/replace blocks',
+      });
+
+      (vscode.workspace.fs.stat as any).mockResolvedValue({});
+      const mockDoc = {
+        uri: { toString: () => 'file:///workspace/src/app.ts', scheme: 'file' },
+        getText: () => 'old content',
+        positionAt: (o: number) => ({ line: 0, character: o }),
+        save: vi.fn(async () => true),
+      };
+      (vscode.workspace.openTextDocument as any).mockResolvedValue(mockDoc);
+
+      expect(m.getFailedAutoApplyCount()).toBe(0);
+      await m.applyCodeDirectlyForAutoMode('src/app.ts', 'code');
+      expect(m.getFailedAutoApplyCount()).toBe(1);
+      m.dispose();
+    });
   });
 
   // ── createNewFileForAutoMode (via applyCodeDirectlyForAutoMode new-file path) ──

@@ -2647,7 +2647,11 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
           logger.warn(`[RequestOrchestrator] edit_file called but no file in args`);
         }
       } catch (e) {
+        // Don't swallow: a malformed edit_file payload must NOT leave `result`
+        // as the generic executeToolCall acknowledgement (which reads as
+        // success). Surface a parseable failure so the model resends.
         logger.error(`[RequestOrchestrator] Failed to parse edit_file arguments: ${e}`);
+        result = `edit_file failed: could not parse the tool arguments as JSON (${e instanceof Error ? e.message : String(e)}). Resend the call with a valid 'file' and 'edits' array of {search, replace} pairs.`;
       }
     }
 

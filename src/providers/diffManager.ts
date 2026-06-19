@@ -980,8 +980,16 @@ export class DiffManager {
       }
 
       if (!result.success) {
-        logger.warn(`[DiffManager] Auto mode: Diff application had issues for ${filePath}: ${result.message}`);
-        this._onWarning.fire({ message: `Code edit may not have been applied correctly to ${filePath}: ${result.message || 'No matching code found'}` });
+        // No strategy matched. Do NOT fall through: the idempotent-skip below
+        // would see content === currentContent (nothing changed) and return
+        // `true`, telling the model the edit applied when it didn't. That false
+        // success is what drives the retry-with-broader-SEARCH → fuzzy-splice
+        // corruption cascade. Hard-fail instead so RequestOrchestrator surfaces
+        // its "re-read the file and resend verbatim SEARCH" guidance.
+        logger.warn(`[DiffManager] Auto mode: Diff application failed for ${filePath}: ${result.message}`);
+        this._onWarning.fire({ message: `Code edit could not be applied to ${filePath}: ${result.message || 'No matching code found'}` });
+        this._failedAutoApplyCount++;
+        return false;
       }
 
       // Idempotent-edit skip: if the computed new content matches what's
