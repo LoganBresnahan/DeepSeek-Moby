@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.4.1] - 2026-06-18
 
 ### Fixes — live "Modified Files" dropdown
 
