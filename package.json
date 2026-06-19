@@ -542,6 +542,34 @@
           "default": false,
           "markdownDescription": "**Developer Mode**: Enable dev tools for UI development. Shows a floating token editor panel (Ctrl+Shift+I) that allows real-time adjustment of spacing and style tokens across all shadow DOM components.",
           "scope": "window"
+        },
+        "moby.editSafety.checkpoint": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "**Edit safety — checkpoint**: In Auto mode, snapshot each file before an auto-applied edit so a batch can be reverted to its last-good state. Pure safety; invisible on the happy path. (ADR 0006)"
+        },
+        "moby.editSafety.validate": {
+          "type": "string",
+          "default": "auto",
+          "markdownDescription": "**Edit safety — post-apply validation**: After an Auto-mode edit batch, validate against the project's own toolchain. `auto` discovers the check command from workspace markers (dotnet build / npm run / make / cargo check / go build); `off` disables the gate; or set an explicit command string to run. A confirmed regression reverts the batch and feeds the errors back to the model."
+        },
+        "moby.editSafety.validateTimeoutMs": {
+          "type": "number",
+          "default": 60000,
+          "minimum": 1000,
+          "markdownDescription": "**Edit safety — validation timeout**: Hard timeout (ms) for the post-apply check command. A timeout is treated as inconclusive (not a regression)."
+        },
+        "moby.editSafety.maxRepairAttempts": {
+          "type": "number",
+          "default": 3,
+          "minimum": 0,
+          "markdownDescription": "**Edit safety — repair budget**: Autonomous revert-and-retry rounds on a confirmed regression before the turn halts. Auto mode stays Auto — it never demotes to per-edit approval."
+        },
+        "moby.editSafety.onInconclusive": {
+          "type": "string",
+          "enum": ["commit", "halt"],
+          "default": "commit",
+          "markdownDescription": "**Edit safety — inconclusive outcome**: When validation can't run (no check command discovered, timed out, or not approved): `commit` applies the edit with a note (Auto's default expectation); `halt` stops the turn instead. There is deliberately no 'ask' — Auto never becomes Ask."
         }
       }
     },

@@ -128,7 +128,7 @@ Contributed in `package.json` `contributes.configuration.properties`; read via `
 
 ## Test matrix
 
-Authoritative list of what must be covered. Pending scaffolding lives in `tests/unit/providers/{checkpoint,atomicBatch,validationGate,revert,terminalHalt}.test.ts` as `it.todo(...)` mirroring these rows; each becomes a real test as its phase lands. Harness conventions follow [diffManager.test.ts](../../../tests/unit/providers/diffManager.test.ts) and [requestOrchestrator.test.ts](../../../tests/unit/providers/requestOrchestrator.test.ts) (`vi.hoisted` `WorkingEventEmitter`, `vi.mock('vscode')`, factory mocks).
+Authoritative list of what must be covered, across `tests/unit/providers/{checkpoint,atomicBatch,editValidation,validationGate,revert,terminalHalt}.test.ts`. Real where a phase has landed (checkpoint, editValidation); `it.todo(...)` scaffolding elsewhere, converted as each phase lands. Harness conventions follow [diffManager.test.ts](../../../tests/unit/providers/diffManager.test.ts) and [requestOrchestrator.test.ts](../../../tests/unit/providers/requestOrchestrator.test.ts) (`vi.hoisted` `WorkingEventEmitter`, `vi.mock('vscode')`, factory mocks).
 
 ### checkpoint.test.ts (Phase 1)
 - snapshots original content before the first write to a file
@@ -147,17 +147,17 @@ Authoritative list of what must be covered. Pending scaffolding lives in `tests/
 - `emitAutoAppliedChanges` fires only after commit, never before revert
 - ask-mode early batch-close does not corrupt transaction state
 
-### validationGate.test.ts (Phase 2)
-- discovers `dotnet build` from a `.csproj`; `npm run build` from package.json; `make` from a Makefile
-- no marker → gate is a no-op (commit), per default config
-- check command routed through CommandApproval; blocked → no-op + surfaced, no bypass
-- timeout → inconclusive (not a false regression)
-- delta: a pre-existing error does not count as a regression
-- delta: a new error in a touched file counts as a regression
-- delta: a new error only in an untouched file does not count
-- clean build → commit
-- `validate: "off"` → gate skipped entirely
-- validation runs exactly once per batch, not per edit
+### editValidation.test.ts (Phase 2 — engine, ✅ real)
+- `discoverCheckCommand`: `.csproj`/`.sln` → `dotnet build`; package.json scripts (build→typecheck→test) → `npm run …`; Makefile (check→build) → `make …`; `Cargo.toml` → `cargo check`; `go.mod` → `go build ./...`; `.NET` preferred over package.json; unrecognised / unreadable / malformed → `null`
+- `classifyCheckOutcome` (delta-scoped): clean baseline + pass → clean; clean baseline + fail → regression; broken baseline → inconclusive (can't attribute); not-run / timed-out → inconclusive
+
+### validationGate.test.ts (Phase 2 — orchestration wiring, todo)
+- runs the discovered command via executeShellCommand under CommandApproval
+- blocked / unapproved command → no-op + surfaced, no silent bypass
+- no command → gate is a no-op (commit), per default `onInconclusive`
+- clean → commit; `validate: "off"` → skipped entirely
+- runs exactly once per batch, not per edit; timeout → inconclusive (no revert)
+- (future refinement) per-file attribution: a new error only in an untouched file does not count
 
 ### revert.test.ts (Phase 2)
 - a regression triggers `revert` to checkpoint
