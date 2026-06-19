@@ -252,9 +252,28 @@ export class ScrollActor extends EventStateActor {
         this._trailTimer = null;
       }
 
+      // If we were following the stream, snap to the true bottom once the
+      // end-of-stream re-renders settle. Finalizing the last markdown, dropping the
+      // streaming cursor, and completing the thinking/tool dropdowns nudge the height
+      // by a few px AFTER _isStreaming flips off, so the resize-driven follow ignores
+      // them and leaves the viewport a hair short of the bottom. Defer one frame so
+      // those synchronous re-renders + layout have applied.
+      const wasFollowing = this._autoScroll;
+
       // Reset user scrolled flag when streaming ends
       this._userScrolled = false;
       this.publish({ 'scroll.userScrolled': false });
+
+      if (wasFollowing) {
+        const settle = () => {
+          if (this._scrollContainer) this.scrollToBottom();
+        };
+        if (typeof requestAnimationFrame === 'function') {
+          requestAnimationFrame(settle);
+        } else {
+          setTimeout(settle, 0);
+        }
+      }
     }
 
     // Update button visibility

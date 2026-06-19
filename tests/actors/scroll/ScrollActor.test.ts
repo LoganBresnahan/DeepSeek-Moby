@@ -387,6 +387,41 @@ describe('ScrollActor', () => {
       expect(actor.isAutoScrollEnabled()).toBe(true);
     });
 
+    it('snaps to the true bottom when streaming ends while engaged', async () => {
+      startStreaming(); // engaged; initial scrollToBottom fires here
+      const spy = vi.spyOn(actor, 'scrollToBottom');
+
+      // End the stream. The end-of-stream re-renders nudge the height a few px after
+      // _isStreaming flips off, so we must re-snap to the bottom.
+      manager.handleStateChange({
+        source: 'streaming-actor',
+        state: { 'streaming.active': false },
+        changedKeys: ['streaming.active'],
+        publicationChain: [],
+        timestamp: Date.now()
+      });
+
+      await new Promise(resolve => setTimeout(resolve, 30)); // let the deferred settle fire
+      expect(spy).toHaveBeenCalled();
+    });
+
+    it('does not snap to the bottom when streaming ends after the user scrolled away', async () => {
+      startStreaming();
+      userScrollUpTo(400); // disengaged — reading above the bottom
+      const spy = vi.spyOn(actor, 'scrollToBottom');
+
+      manager.handleStateChange({
+        source: 'streaming-actor',
+        state: { 'streaming.active': false },
+        changedKeys: ['streaming.active'],
+        publicationChain: [],
+        timestamp: Date.now()
+      });
+
+      await new Promise(resolve => setTimeout(resolve, 30));
+      expect(spy).not.toHaveBeenCalled();
+    });
+
     it('does not re-engage on passive content resize alone while disengaged', async () => {
       startStreaming();
       userScrollUpTo(400); // disengaged, reading well above the bottom
