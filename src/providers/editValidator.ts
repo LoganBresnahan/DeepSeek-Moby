@@ -151,11 +151,11 @@ export class EditValidator {
     if (verdict === 'regression') {
       output = run.output;
     } else if (verdict === 'held') {
-      note = `check "${attempt.command}" still failing, but this edit introduced no new errors — kept (the tree was already broken)`;
+      note = `check '${attempt.command}' still failing, but this edit introduced no new errors — kept (the tree was already broken)`;
     } else if (verdict === 'inconclusive') {
       note = run.timedOut
-        ? `check "${attempt.command}" timed out`
-        : `check "${attempt.command}" is failing, but it couldn't be attributed to this edit (no comparable clean baseline)`;
+        ? `check '${attempt.command}' timed out`
+        : `check '${attempt.command}' is failing, but it couldn't be attributed to this edit (no comparable clean baseline)`;
     }
 
     return { verdict, command: attempt.command, output, note };
