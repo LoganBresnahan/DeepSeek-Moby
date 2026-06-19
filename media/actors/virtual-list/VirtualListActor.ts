@@ -1350,6 +1350,29 @@ export class VirtualListActor extends EventStateActor {
     }
   }
 
+  /**
+   * Scroll to the very bottom (most recent turn) — used when a session is opened so
+   * it lands at the latest message instead of the top.
+   *
+   * Off-screen turns carry an estimated height (`defaultTurnHeight`) until they bind
+   * and measure, so the running `_totalHeight` is only approximate. Jumping to the
+   * current bottom brings the tail turns into view, where binding measures their real
+   * height and corrects `_totalHeight` — which shifts the true bottom. We repeat
+   * synchronously until the height stabilizes (or a small cap), so the very first
+   * paint is already pinned to the bottom with no top-then-jump flash.
+   */
+  scrollToEnd(): void {
+    if (!this._scrollContainer) return;
+    let lastHeight = -1;
+    for (let pass = 0; pass < 8; pass++) {
+      this._scrollContainer.scrollTop = this._scrollContainer.scrollHeight;
+      this.updateVisibility(); // bind + measure the tail turns at the new position
+      this._scrollContainer.scrollTop = this._scrollContainer.scrollHeight;
+      if (this._totalHeight === lastHeight) break; // converged
+      lastHeight = this._totalHeight;
+    }
+  }
+
   // ============================================
   // Subscription Handlers
   // ============================================

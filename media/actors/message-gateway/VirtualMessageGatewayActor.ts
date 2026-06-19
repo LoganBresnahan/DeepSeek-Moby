@@ -1470,6 +1470,9 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       } catch (error) {
         log.warn(`[VirtualGateway] handleLoadHistory ERROR: ${error}`);
       }
+
+      // Open the restored session at the latest message, as if scrolled through.
+      virtualList.scrollToEnd();
     }
   }
 

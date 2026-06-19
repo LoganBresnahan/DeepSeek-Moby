@@ -99,6 +99,7 @@ function createMockVirtualListActor() {
     addDrawingSegment: vi.fn(),
     setEditMode: vi.fn(),
     clear: vi.fn(() => turns.clear()),
+    scrollToEnd: vi.fn(),
     destroy: vi.fn()
   };
 }
@@ -420,6 +421,8 @@ describe('VirtualMessageGatewayActor', () => {
       expect(mockActors.session.handleLoadHistory).toHaveBeenCalled();
       expect(mockActors.virtualList.clear).toHaveBeenCalled();
       expect(mockActors.virtualList.addTurn).toHaveBeenCalledTimes(2);
+      // Opens the restored session at the latest message, not the top.
+      expect(mockActors.virtualList.scrollToEnd).toHaveBeenCalled();
     });
 
     it('handles clearChat message', () => {

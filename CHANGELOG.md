@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Sessions open at the latest message
+
+- **Opening a chat now lands at the bottom (the most recent turn) instead of the top**, as if you'd scrolled all the way through. The wrinkle was the virtual list: off-screen turns carry an estimated height until they bind and measure, so the running total — and thus the true bottom — only settles as the tail turns render. `VirtualListActor.scrollToEnd()` jumps to the bottom, binds and measures the tail, and repeats synchronously until the height stabilizes, so the first paint is already pinned to the bottom with no top-then-jump flash. Called at the end of `handleLoadHistory`. ([media/actors/virtual-list/VirtualListActor.ts](media/actors/virtual-list/VirtualListActor.ts), [media/actors/message-gateway/VirtualMessageGatewayActor.ts](media/actors/message-gateway/VirtualMessageGatewayActor.ts))
+
 ### Fixes — edit application no longer silently corrupts files
 
 - **Auto-applied edits could clobber a file and still report success.** The diff engine's last-resort *location/anchor* matching reconstructed the target region from a few distinctive lines and wrote the model's REPLACE block over it — so a single misremembered line in the SEARCH (e.g. `this.turn` rewritten as an invented `this.current`) overwrote the file's real line instead of being rejected. Compounding it, a total no-match hit the idempotent-skip path in `applyCodeDirectlyForAutoMode` and returned `true`, so the model was told the edit applied and never re-read — driving a retry-then-corrupt loop. Now: location/anchor matching is **removed**, patch matching runs at `fuzzFactor: 0` (strict context; only whitespace differences tolerated), and an unmatched block **hard-fails** (`success: false`, file unchanged) so `RequestOrchestrator` surfaces its "re-read and resend a verbatim SEARCH" guidance. ([src/utils/diff.ts](src/utils/diff.ts), [src/providers/diffManager.ts](src/providers/diffManager.ts), [src/providers/requestOrchestrator.ts](src/providers/requestOrchestrator.ts))

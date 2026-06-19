@@ -614,6 +614,35 @@ describe('VirtualListActor', () => {
   });
 
   // ============================================
+  // Scroll-to-end Tests
+  // ============================================
+
+  describe('scrollToEnd', () => {
+    beforeEach(() => {
+      actor = new VirtualListActor(manager, scrollContainer, {
+        config: { defaultTurnHeight: 200, overscan: 1 }
+      });
+    });
+
+    it('scrolls the container to the bottom (opens a session at the latest turn)', () => {
+      for (let i = 0; i < 10; i++) {
+        actor.addTurn(`turn-${i}`, i % 2 === 0 ? 'user' : 'assistant');
+      }
+      // Content taller than the 500px viewport.
+      Object.defineProperty(scrollContainer, 'scrollHeight', { value: 2000, configurable: true });
+
+      actor.scrollToEnd();
+
+      // Landed at the bottom (browser clamps scrollTop to the max).
+      expect(scrollContainer.scrollTop).toBe(2000);
+    });
+
+    it('does not throw on an empty list', () => {
+      expect(() => actor.scrollToEnd()).not.toThrow();
+    });
+  });
+
+  // ============================================
   // Clear/Reset Tests
   // ============================================
 
