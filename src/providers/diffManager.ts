@@ -21,6 +21,9 @@ import { deleteFile as deleteFileCapability, deleteDirectory as deleteDirectoryC
  */
 interface FileCheckpoint {
   uri: vscode.Uri;
+  /** Did the file exist before this batch touched it? false ⇒ revert deletes it. */
+  existed: boolean;
+  /** Pre-edit content when `existed`; '' for a file created in this batch. */
   originalContent: string;
 }
 
@@ -995,8 +998,41 @@ export class DiffManager {
     if (!tx) return;
     const key = uri.fsPath;
     if (!tx.files.has(key)) {
-      tx.files.set(key, { uri, originalContent });
+      tx.files.set(key, { uri, existed: true, originalContent });
     }
+  }
+
+  /**
+   * Snapshot a file by path before a `write_file`-style full-file write, which
+   * goes through `createFileCapability` rather than `applyCodeDirectlyForAutoMode`
+   * and so never reaches `snapshotForCheckpoint`. Detects whether the file
+   * currently exists so a revert can either restore its content or delete a
+   * file this batch created. No-op when no transaction is open or the file was
+   * already snapshotted this batch.
+   */
+  async snapshotPathForCheckpoint(filePath: string): Promise<void> {
+    const tx = this._editTransaction;
+    if (!tx) return;
+    const uri = this.resolveFileUri(filePath);
+    if (!uri || tx.files.has(uri.fsPath)) return;
+    let existed = true;
+    let originalContent = '';
+    try {
+      const bytes = await vscode.workspace.fs.readFile(uri);
+      originalContent = Buffer.from(bytes).toString('utf8');
+    } catch {
+      existed = false; // new file — revert will delete it
+    }
+    tx.files.set(uri.fsPath, { uri, existed, originalContent });
+  }
+
+  /** Resolve a workspace-relative or absolute path to a Uri (for checkpointing). */
+  private resolveFileUri(filePath: string): vscode.Uri | undefined {
+    if (filePath.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(filePath)) {
+      return vscode.Uri.file(filePath);
+    }
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    return folder ? vscode.Uri.joinPath(folder.uri, filePath) : undefined;
   }
 
   /** Record that a file was successfully written within the open transaction. */
@@ -1026,15 +1062,20 @@ export class DiffManager {
     const checkpoints = [...tx.files.values()].reverse();
     for (const cp of checkpoints) {
       try {
-        const document = await vscode.workspace.openTextDocument(cp.uri);
-        const edit = new vscode.WorkspaceEdit();
-        const fullRange = new vscode.Range(
-          document.positionAt(0),
-          document.positionAt(document.getText().length)
-        );
-        edit.replace(cp.uri, fullRange, cp.originalContent);
-        await vscode.workspace.applyEdit(edit);
-        await document.save();
+        if (cp.existed) {
+          const document = await vscode.workspace.openTextDocument(cp.uri);
+          const edit = new vscode.WorkspaceEdit();
+          const fullRange = new vscode.Range(
+            document.positionAt(0),
+            document.positionAt(document.getText().length)
+          );
+          edit.replace(cp.uri, fullRange, cp.originalContent);
+          await vscode.workspace.applyEdit(edit);
+          await document.save();
+        } else {
+          // Created in this batch → delete to restore the "absent" state.
+          await vscode.workspace.fs.delete(cp.uri, { useTrash: false });
+        }
         reverted.push(cp.uri.fsPath);
       } catch (error: any) {
         logger.error(`[DiffManager] revertEditTransaction: failed to restore ${cp.uri.fsPath}: ${error?.message}`);

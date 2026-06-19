@@ -2845,7 +2845,9 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
               result = `Opened diff for ${args.path}. User will apply manually.`;
             }
           } else {
-            // auto mode — call capability directly
+            // auto mode — checkpoint the pre-write state (ADR 0006) so the
+            // edit-safety gate can revert this full-file write, then write.
+            await this.diffManager.snapshotPathForCheckpoint(args.path);
             const capResult = await createFileCapability(args.path, args.content);
             if (capResult.status === 'success') {
               this.fileContextManager.trackReadFile(args.path);

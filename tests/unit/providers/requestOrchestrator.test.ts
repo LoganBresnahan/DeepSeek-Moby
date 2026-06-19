@@ -198,6 +198,7 @@ function createMockDiffManager() {
     beginEditTransaction: vi.fn(),
     commitEditTransaction: vi.fn(),
     revertEditTransaction: vi.fn(async () => []),
+    snapshotPathForCheckpoint: vi.fn(async () => {}),
     onCodeApplied: vi.fn(noopDisposable),
     onEditRejected: vi.fn(noopDisposable),
   };

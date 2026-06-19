@@ -63,13 +63,17 @@ vi.mock('vscode', async (importOriginal) => {
         return true;
       }),
       fs: {
-        // stat resolves only for files that "exist" in the store.
+        // stat / readFile resolve only for files that "exist" in the store.
         stat: vi.fn(async (uri: any) => {
           if (fileStore.has(uri?.fsPath)) return {};
           throw new Error('ENOENT');
         }),
-        readFile: vi.fn(async (uri: any) => Buffer.from(fileStore.get(uri?.fsPath) ?? '')),
+        readFile: vi.fn(async (uri: any) => {
+          if (!fileStore.has(uri?.fsPath)) throw new Error('ENOENT');
+          return Buffer.from(fileStore.get(uri.fsPath) as string);
+        }),
         writeFile: vi.fn(async () => {}),
+        delete: vi.fn(async (uri: any) => { fileStore.delete(uri?.fsPath); }),
         createDirectory: vi.fn(async () => {}),
       },
     },
@@ -213,6 +217,34 @@ describe('DiffManager — checkpoint / EditTransaction (ADR 0006, Phase 1)', () 
     expect(manager.checkpointedPaths).toEqual([]);
     expect(fileStore.get(A)).toBe('A-edited');
     expect(await manager.revertEditTransaction()).toEqual([]);
+  });
+
+  // write_file path (ADR 0006): snapshotPathForCheckpoint detects existence so a
+  // revert restores an overwritten file or deletes a newly created one.
+  it('snapshotPathForCheckpoint restores an overwritten existing file on revert', async () => {
+    manager.beginEditTransaction();
+    await manager.snapshotPathForCheckpoint(A);   // A exists → snapshot content
+    fileStore.set(A, 'A-overwritten');            // simulate write_file overwrite
+    expect(manager.checkpointedPaths).toEqual([A]);
+
+    await manager.revertEditTransaction();
+    expect(fileStore.get(A)).toBe('A-original');
+  });
+
+  it('snapshotPathForCheckpoint deletes a newly created file on revert', async () => {
+    const NEW = '/workspace/new.ts';
+    manager.beginEditTransaction();
+    await manager.snapshotPathForCheckpoint(NEW); // NEW does not exist → existed:false
+    fileStore.set(NEW, 'created content');        // simulate write_file create
+    expect(manager.checkpointedPaths).toEqual([NEW]);
+
+    await manager.revertEditTransaction();
+    expect(fileStore.has(NEW)).toBe(false); // deleted, restoring "absent"
+  });
+
+  it('snapshotPathForCheckpoint is a no-op when no transaction is open', async () => {
+    await manager.snapshotPathForCheckpoint(A);
+    expect(manager.checkpointedPaths).toEqual([]);
   });
 
   it('fails the edit without saving or false success when applyEdit is rejected', async () => {
