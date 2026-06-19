@@ -899,12 +899,17 @@ export class MessageTurnActor extends InterleavedShadowActor {
     this.ensureRoleHeader();
     this._currentPendingGroup = null;
 
-    // Complete the previous thinking iteration (stops pulse animation). Render its
-    // group so the prior step shows as done.
+    // Complete the previous thinking iteration (stops pulse animation).
     const prev = this._thinkingIterations.get(this._currentThinkingIteration);
     if (prev && !prev.complete) {
       prev.complete = true;
-      this.renderThinkingGroup(prev.containerId);
+      // If prev is in the active (same-section) group, the coalesced append render
+      // below already redraws it as complete — skip the redundant re-render, which
+      // would otherwise disturb the body scroll twice. Only render here when prev
+      // belongs to a different (prior-section) container.
+      if (!this._activeThinkingGroup || prev.containerId !== this._activeThinkingGroup.containerId) {
+        this.renderThinkingGroup(prev.containerId);
+      }
     }
 
     this._currentThinkingIteration++;
@@ -1429,6 +1434,18 @@ export class MessageTurnActor extends InterleavedShadowActor {
     // Mark every current step as entered so future re-renders don't replay it.
     steps.forEach(s => this._enteredThinkingSteps.add(s.index));
 
+    // Preserve the reader's position in the scrollable body across the innerHTML
+    // replacement. Without this, adding a step (a new "blurb") recreates the body at
+    // scrollTop=0 and yanks a user who was reading earlier reasoning to the top. If
+    // they were following at the bottom, stay pinned to the bottom; otherwise keep
+    // their exact offset.
+    const prevBody = container.content.querySelector('.thinking-body') as HTMLElement | null;
+    const hadPrevBody = !!prevBody;
+    const prevScrollTop = prevBody ? prevBody.scrollTop : 0;
+    const prevAtBottom = prevBody
+      ? prevBody.scrollHeight - prevBody.scrollTop - prevBody.clientHeight < 30
+      : false;
+
     container.content.innerHTML = `
       <div class="thinking-header">
         <span class="thinking-toggle">${toggle}</span>
@@ -1438,6 +1455,13 @@ export class MessageTurnActor extends InterleavedShadowActor {
       </div>
       ${bodyHtml}
     `;
+
+    if (hadPrevBody) {
+      const newBody = container.content.querySelector('.thinking-body') as HTMLElement | null;
+      if (newBody) {
+        newBody.scrollTop = prevAtBottom ? newBody.scrollHeight : prevScrollTop;
+      }
+    }
   }
 
   private renderToolBatch(batchId: string, opts?: { animateNew?: boolean }): void {

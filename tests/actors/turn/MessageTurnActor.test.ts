@@ -819,6 +819,25 @@ describe('MessageTurnActor', () => {
       actor.completeThinkingIteration();
       expect(container.classList.contains('streaming')).toBe(false);
     });
+
+    it('preserves the reader scroll position when a new step is added (bug 2)', () => {
+      actor.startThinkingIteration();
+      actor.updateThinkingContent('First pass with a lot of reasoning to scroll through.');
+
+      const container = findContainers('thinking')[0];
+      const body = queryInShadow(container, '.thinking-body') as HTMLElement;
+      // happy-dom does no layout; define a tall body the reader has scrolled UP within.
+      Object.defineProperty(body, 'scrollHeight', { value: 1000, configurable: true });
+      Object.defineProperty(body, 'clientHeight', { value: 300, configurable: true });
+      body.scrollTop = 120;
+
+      // A new thinking blurb arrives. The body must keep the reader's position
+      // rather than snapping back to the top (scrollTop 0).
+      actor.startThinkingIteration();
+
+      const newBody = queryInShadow(container, '.thinking-body') as HTMLElement;
+      expect(newBody.scrollTop).toBe(120);
+    });
   });
 
   // An item appended to an already-visible coalesced dropdown gets a one-shot
