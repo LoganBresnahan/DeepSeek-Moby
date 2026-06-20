@@ -93,6 +93,19 @@ describe('EditValidator.validateBatch (ADR 0006, Phase 2)', () => {
     expect(r.output).toMatch(/CS1002/);
   });
 
+  it('a regression result carries the NORMALIZED error set (what per-file repair tracking diffs on)', async () => {
+    const runCommand = vi.fn()
+      .mockResolvedValueOnce(pass) // baseline clean
+      .mockResolvedValueOnce({ exitCode: 1, timedOut: false, output: 'a.cs(3,5): error CS1002: ; expected' });
+    const { validator } = makeValidator({ runCommand });
+    await validator.validateBatch(ROOT);
+    const r = await validator.validateBatch(ROOT);
+    expect(r.verdict).toBe('regression');
+    expect(r.errors).toHaveLength(1);
+    expect(r.errors?.[0]).toContain('CS1002');
+    expect(r.errors?.[0]).not.toMatch(/\d+,\d+/); // coordinates stripped → line-shift invariant
+  });
+
   it('a regression keeps the baseline clean (caller reverts to the clean tree)', async () => {
     const runCommand = vi.fn()
       .mockResolvedValueOnce(pass)  // baseline clean

@@ -308,6 +308,92 @@ describe('RequestOrchestrator', () => {
     __resetCustomModelsForTests();
   });
 
+  // ── Edit-safety: per-file repair halt wiring (ADR 0006 layer 7) ──
+  // Drives the private settle point directly. recordRepairRegression is unit-
+  // tested in editValidation.test.ts; this proves the ORCHESTRATION around it —
+  // that a regression's reverted files + error set are threaded in and that
+  // halt-vs-retry is decided correctly — the path that's hard to trigger live.
+  describe('settleEditBatch — per-file repair halt', () => {
+    function armAutoBatch(revertedFiles: string[]) {
+      mockDiffManager.currentEditMode = 'auto';
+      (mockDiffManager as any).hasOpenEditTransaction = true;
+      (mockDiffManager as any).checkpointedPaths = revertedFiles;
+      mockDiffManager.revertEditTransaction = vi.fn(async () => revertedFiles);
+      mockDiffManager.commitEditTransaction = vi.fn();
+    }
+    function stubVerdict(result: any) {
+      (orchestrator as any).editValidator.validateBatch = vi.fn().mockResolvedValue(result);
+    }
+    async function settleOnce(pushFeedback = vi.fn()) {
+      const signal = new AbortController().signal;
+      const halt = await (orchestrator as any).settleEditBatch(true, signal, pushFeedback);
+      return { halt, pushFeedback };
+    }
+    const regression = (file: string, code: string) => ({
+      verdict: 'regression', command: 'dotnet build', output: `${file}: error ${code}`, errors: [`${file}: error ${code}`],
+    });
+
+    it('reverts + retries on a regression, then HALTS on the same error maxRepairAttempts× in a row', async () => {
+      configStore.set('editSafety.maxRepairAttempts', 3);
+      armAutoBatch(['/ws/a.cs']);
+      stubVerdict(regression('a.cs', 'CS1'));
+
+      const r1 = await settleOnce();
+      expect(r1.halt).toBe(false);                              // streak 1 → retry
+      expect(mockDiffManager.revertEditTransaction).toHaveBeenCalled();
+      expect(r1.pushFeedback).toHaveBeenCalledOnce();           // error fed back
+
+      expect((await settleOnce()).halt).toBe(false);            // streak 2 → retry
+
+      const r3 = await settleOnce();
+      expect(r3.halt).toBe(true);                               // streak 3 → HALT
+      expect(r3.pushFeedback).not.toHaveBeenCalled();           // no retry once halted
+    });
+
+    it('does NOT halt when three DIFFERENT files each regress once', async () => {
+      configStore.set('editSafety.maxRepairAttempts', 3);
+      for (const [file, code] of [['/ws/a.cs', 'CS1'], ['/ws/b.cs', 'CS2'], ['/ws/c.cs', 'CS3']] as const) {
+        armAutoBatch([file]);
+        stubVerdict(regression(file, code));
+        expect((await settleOnce()).halt).toBe(false);          // independent files never accumulate
+      }
+    });
+
+    it('a CHANGING error on the same file resets the streak (never halts while progressing)', async () => {
+      configStore.set('editSafety.maxRepairAttempts', 2);
+      armAutoBatch(['/ws/a.cs']);
+      for (const code of ['CS1', 'CS2', 'CS3', 'CS4']) {
+        stubVerdict(regression('a.cs', code));                  // a different error each round
+        expect((await settleOnce()).halt).toBe(false);
+      }
+    });
+
+    it('clears the per-file budget when the turn boundary resets it', async () => {
+      configStore.set('editSafety.maxRepairAttempts', 2);
+      armAutoBatch(['/ws/a.cs']);
+      stubVerdict(regression('a.cs', 'CS1'));
+      expect((await settleOnce()).halt).toBe(false);            // streak 1
+      (orchestrator as any)._editRepairByFile.clear();          // what handleMessage does each turn
+      expect((await settleOnce()).halt).toBe(false);            // streak back to 1, not 2 → no halt
+    });
+
+    it('commits (no revert, no halt) on a clean verdict', async () => {
+      armAutoBatch(['/ws/a.cs']);
+      stubVerdict({ verdict: 'clean', command: 'dotnet build' });
+      expect((await settleOnce()).halt).toBe(false);
+      expect(mockDiffManager.commitEditTransaction).toHaveBeenCalled();
+      expect(mockDiffManager.revertEditTransaction).not.toHaveBeenCalled();
+    });
+
+    it('commits a held verdict (still broken, no new errors — kept, not reverted)', async () => {
+      armAutoBatch(['/ws/a.cs']);
+      stubVerdict({ verdict: 'held', command: 'dotnet build', note: 'no new errors' });
+      expect((await settleOnce()).halt).toBe(false);
+      expect(mockDiffManager.commitEditTransaction).toHaveBeenCalled();
+      expect(mockDiffManager.revertEditTransaction).not.toHaveBeenCalled();
+    });
+  });
+
   // ── Session Management ──
 
   describe('handleMessage - session management', () => {
