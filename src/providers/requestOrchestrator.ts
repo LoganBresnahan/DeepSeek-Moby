@@ -47,6 +47,7 @@ import type {
 } from './types';
 import type { CommandApprovalManager } from './commandApprovalManager';
 import { EditValidator, ApprovalState } from './editValidator';
+import { recordRepairRegression, FileRepairState } from './editValidation';
 import type { SavedPromptManager } from './savedPromptManager';
 import type { PlanManager } from './planManager';
 
@@ -269,8 +270,14 @@ export class RequestOrchestrator {
 
   /** Edit-safety validation service (ADR 0006). */
   private editValidator: EditValidator;
-  /** Confirmed regressions this turn — drives the terminal-halt budget. */
-  private _editRepairAttempts = 0;
+  /**
+   * Per-file repair tracking (ADR 0006 layer 7). Keyed by file path: each value
+   * holds that file's last regression error set + its consecutive same-error
+   * streak. A file halts the turn only when IT reproduces the same failure
+   * `maxRepairAttempts` times in a row — independent failures across different
+   * files never accumulate, and a file making progress (changing errors) resets.
+   */
+  private _editRepairByFile = new Map<string, FileRepairState>();
   /** Whether the "validation is dormant (command not approved)" note fired this turn. */
   private _editSafetyDormantWarned = false;
 
@@ -364,13 +371,17 @@ export class RequestOrchestrator {
 
     if (result.verdict === 'regression') {
       const reverted = await this.diffManager.revertEditTransaction();
-      this._editRepairAttempts++;
-      logger.warn(`[EditSafety] REGRESSION — check "${result.command}" failed; reverted ${reverted.length} file(s) [${reverted.join(', ')}] (repair ${this._editRepairAttempts}/${maxRepair})`);
+      // Per-file budget: a file halts the turn only when IT keeps failing with
+      // the SAME error (changing errors reset its streak; other files are
+      // independent). So N files each failing once never halts.
+      const { stuck, streaks } = recordRepairRegression(this._editRepairByFile, reverted, result.errors ?? [], maxRepair);
+      const streakStr = reverted.map(f => `${f}=${streaks[f]}`).join(', ') || 'n/a';
+      logger.warn(`[EditSafety] REGRESSION — check '${result.command}' failed; reverted ${reverted.length} file(s) [${reverted.join(', ')}] (same-error streak ${streakStr}, limit ${maxRepair})`);
       this._onWarning.fire({ message: `Edit reverted: the project check (\`${result.command}\`) failed after applying. Files restored to their last-good state.` });
 
-      if (this._editRepairAttempts > maxRepair) {
-        logger.warn(`[EditSafety] HALT — repair budget (${maxRepair}) exhausted; stopping the turn with files at last-good`);
-        this._onWarning.fire({ message: `Halted after ${maxRepair} failed repair attempts — the edits kept breaking \`${result.command}\`. Files are at their last-good state. Last error:\n${trimmedOutput}` });
+      if (stuck.length > 0) {
+        logger.warn(`[EditSafety] HALT — [${stuck.join(', ')}] kept failing with the same error ${maxRepair}× in a row; stopping the turn with files at last-good`);
+        this._onWarning.fire({ message: `Halted: ${stuck.join(', ')} kept breaking \`${result.command}\` with the same error after ${maxRepair} attempts. Files are at their last-good state. Last error:\n${trimmedOutput}` });
         return true;
       }
 
@@ -718,7 +729,7 @@ export class RequestOrchestrator {
     this.diffManager.clearPendingDiffs();
     // Edit-safety: reset the per-turn validation baseline + repair budget.
     this.editValidator.resetTurn();
-    this._editRepairAttempts = 0;
+    this._editRepairByFile.clear();
     this._editSafetyDormantWarned = false;
     // Clear read files tracking and extract user intent
     this.fileContextManager.clearTurnTracking();

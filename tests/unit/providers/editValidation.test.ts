@@ -30,7 +30,7 @@ vi.mock('vscode', () => ({
 }));
 
 import * as vscode from 'vscode';
-import { discoverCheckCommand, classifyCheckOutcome, normalizeErrors } from '../../../src/providers/editValidation';
+import { discoverCheckCommand, classifyCheckOutcome, normalizeErrors, errorSetsEqual, recordRepairRegression, FileRepairState } from '../../../src/providers/editValidation';
 
 const ROOT = { fsPath: '/workspace' } as any as vscode.Uri;
 
@@ -198,5 +198,66 @@ describe('editValidation — normalizeErrors (ADR 0006, Phase 2 — error-set di
     const a = normalizeErrors('foo.c:5:1: error: expected \';\'');
     const b = normalizeErrors('foo.c:9:1: error: expected \';\'');
     expect(a).toEqual(b);
+  });
+});
+
+describe('editValidation — errorSetsEqual (ADR 0006, Phase 2 — repair tracking)', () => {
+  it('is order-independent', () => {
+    expect(errorSetsEqual(['a', 'b'], ['b', 'a'])).toBe(true);
+  });
+  it('differs on length', () => {
+    expect(errorSetsEqual(['a'], ['a', 'b'])).toBe(false);
+  });
+  it('differs on members', () => {
+    expect(errorSetsEqual(['a', 'b'], ['a', 'c'])).toBe(false);
+  });
+  it('two empty sets are equal', () => {
+    expect(errorSetsEqual([], [])).toBe(true);
+  });
+});
+
+describe('editValidation — recordRepairRegression (ADR 0006, Phase 2 — per-file halt)', () => {
+  const LIMIT = 3;
+  let tracker: Map<string, FileRepairState>;
+  beforeEach(() => { tracker = new Map(); });
+
+  it('three different files each failing ONCE never halts (the per-file fix)', () => {
+    // The exact weird flow we set out to prevent under the old turn-global count.
+    expect(recordRepairRegression(tracker, ['a.cs'], ['a.cs: error CS1'], LIMIT).stuck).toEqual([]);
+    expect(recordRepairRegression(tracker, ['b.cs'], ['b.cs: error CS2'], LIMIT).stuck).toEqual([]);
+    expect(recordRepairRegression(tracker, ['c.cs'], ['c.cs: error CS3'], LIMIT).stuck).toEqual([]);
+  });
+
+  it('one file failing with the SAME error `limit` times in a row is stuck', () => {
+    const errs = ['a.cs: error CS1: x'];
+    expect(recordRepairRegression(tracker, ['a.cs'], errs, LIMIT).stuck).toEqual([]); // streak 1
+    expect(recordRepairRegression(tracker, ['a.cs'], errs, LIMIT).stuck).toEqual([]); // streak 2
+    const third = recordRepairRegression(tracker, ['a.cs'], errs, LIMIT);
+    expect(third.streaks['a.cs']).toBe(3);
+    expect(third.stuck).toEqual(['a.cs']);                                            // streak 3 → halt
+  });
+
+  it('a CHANGING error set resets the streak — a file working through different bugs is never halted', () => {
+    expect(recordRepairRegression(tracker, ['a.cs'], ['a.cs: error CS1'], LIMIT).stuck).toEqual([]);
+    expect(recordRepairRegression(tracker, ['a.cs'], ['a.cs: error CS2'], LIMIT).stuck).toEqual([]); // changed → reset to 1
+    const r = recordRepairRegression(tracker, ['a.cs'], ['a.cs: error CS3'], LIMIT);                 // changed again → 1
+    expect(r.streaks['a.cs']).toBe(1);
+    expect(r.stuck).toEqual([]);
+  });
+
+  it('keyed per file — an interleaved failure on another file does not break the streak', () => {
+    const aErr = ['a.cs: error CS1'];
+    recordRepairRegression(tracker, ['a.cs'], aErr, LIMIT);                 // a streak 1
+    recordRepairRegression(tracker, ['b.cs'], ['b.cs: error CS9'], LIMIT);  // b streak 1 (between a's failures)
+    recordRepairRegression(tracker, ['a.cs'], aErr, LIMIT);                 // a streak 2 (NOT reset by b)
+    const r = recordRepairRegression(tracker, ['a.cs'], aErr, LIMIT);
+    expect(r.streaks['a.cs']).toBe(3);
+    expect(r.stuck).toEqual(['a.cs']);
+  });
+
+  it('order-independent error sets count as the SAME failure (streak continues)', () => {
+    recordRepairRegression(tracker, ['a.cs'], ['e1', 'e2'], LIMIT);
+    const r = recordRepairRegression(tracker, ['a.cs'], ['e2', 'e1'], LIMIT); // same set, reordered
+    expect(r.streaks['a.cs']).toBe(2);
   });
 });

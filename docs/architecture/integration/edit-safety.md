@@ -75,7 +75,7 @@ Legend: ✅ have · ★ new (ADR 0006) · ⚠️ current gap.
 | 4 | **Atomic batch** (commit/revert at batch close) | ★ new | `_onToolCallsEnd` [requestOrchestrator.ts:3287](../../../src/providers/requestOrchestrator.ts#L3287) |
 | 5 | **Validation gate** (project toolchain, delta) | ★ new | new `ProjectCheck` + `executeShellCommand` [reasonerShellExecutor.ts:414](../../../src/tools/reasonerShellExecutor.ts#L414) |
 | 6 | **Revert-on-regression** + feedback + write-back verify | ★ new | revert ⇒ re-read loop [requestOrchestrator.ts:2345](../../../src/providers/requestOrchestrator.ts#L2345) |
-| 7 | **Bounded autonomy + terminal halt** (no mode switch) | ★ new | retry budget `maxFailedEditRetries` [requestOrchestrator.ts:1475](../../../src/providers/requestOrchestrator.ts#L1475) |
+| 7 | **Bounded autonomy + terminal halt** (no mode switch; **per-file** same-error budget) | ★ new | `recordRepairRegression` per-file streak in `settleEditBatch` |
 | 8 | **Success-report gate** (report only after commit) | ★ new | `sendCodeAppliedStatus` [diffManager.ts:1041](../../../src/providers/diffManager.ts#L1041) |
 
 The keystone is **layer 3**: the checkpoint is what makes layers 5–7 safe to act on. Validation *detects* a regression; the checkpoint makes the response *reversible*.
@@ -137,7 +137,7 @@ This makes the gate a **monotonic ratchet from any starting state**: a model fix
 | `checkpoint` | `true` | Snapshot + atomic batch + revert-on-regression. Pure safety; invisible on the happy path. |
 | `validate` | `"auto"` | `"auto"` discover a command; `"off"` skip; or an explicit command string. |
 | `validateTimeoutMs` | `60000` | Hard timeout for the check command. |
-| `maxRepairAttempts` | `3` | Autonomous revert-and-retry rounds on a confirmed regression before the turn halts (reuses `maxFailedEditRetries`). |
+| `maxRepairAttempts` | `3` | **Per-file** budget: consecutive **same-error** reverts for one file before the turn halts. Independent failures across files don't accumulate; a changing error resets the file's streak. |
 | `onInconclusive` | `"commit"` | No oracle / timeout / unapproved: `"commit"` apply + note (Auto's default); `"halt"` stop the turn. No "ask" — Auto never becomes Ask. |
 
 Contributed in `package.json` `contributes.configuration.properties`; read via `getConfiguration('moby')` (same pattern as `moby.subagents`).
@@ -174,6 +174,7 @@ Authoritative list of what must be covered, across `tests/unit/providers/{checkp
 - `discoverCheckCommand`: `.csproj`/`.sln` → `dotnet build`; package.json scripts (build→typecheck→test) → `npm run …`; Makefile (check→build) → `make …`; `Cargo.toml` → `cargo check`; `go.mod` → `go build ./...`; `.NET` preferred over package.json; unrecognised / unreadable / malformed → `null`
 - `classifyCheckOutcome` (differential): passing after → clean (any start); clean baseline + failing → regression; broken baseline + a NEW error → regression; broken baseline + only pre-existing errors → held; failing with no comparable error-set (either side empty), no baseline, not-run, or timed-out → inconclusive
 - `normalizeErrors`: strips line/col so a shifted error compares equal; dedupes to a set; drops count/summary lines (`N Error(s)`, `Found N errors`, cargo `could not compile`); ignores non-error/warning lines; `[]` when no line says `error` (go-style) or output is empty; handles `:line:col:` (clang/javac)
+- `errorSetsEqual` / `recordRepairRegression` (per-file halt): order-independent set equality; three different files each failing once → no halt; one file failing the SAME error `limit`× in a row → stuck; a changing error set resets the streak; per-file keying survives an interleaved failure on another file
 
 ### editValidator.test.ts (Phase 2 — service, ✅ real)
 - `validateBatch`: off → skipped; no command / not-approved / threw → inconclusive (with note); pass → clean (carries the build output on regression)
@@ -197,8 +198,8 @@ Authoritative list of what must be covered, across `tests/unit/providers/{checkp
 
 ### terminalHalt.test.ts (Phase 3)
 - a confirmed regression triggers revert + autonomous retry (no Ask prompt is shown)
-- retries are bounded by `maxRepairAttempts`
-- on repair-budget exhaustion the turn halts: files left reverted at last-good
+- retries are bounded **per file** by `maxRepairAttempts` consecutive same-error reverts (see `recordRepairRegression` in editValidation.test.ts); independent failures across files don't halt
+- on a file's same-error budget exhaustion the turn halts: files left reverted at last-good
 - the halt status clearly reports what failed and that the file was reverted
 - inconclusive (no check command discovered) → commit + one-time note, no halt, no revert
 - inconclusive (validation timeout) → commit + note, no halt, no revert (default `onInconclusive: "commit"`)

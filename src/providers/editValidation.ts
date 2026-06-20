@@ -218,3 +218,46 @@ export function classifyCheckOutcome(opts: { baseline: CheckResult | null; after
   const introducedNewError = now.some(e => !beforeSet.has(e));
   return introducedNewError ? 'regression' : 'held';
 }
+
+/** Order-independent equality of two normalized error sets. */
+export function errorSetsEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const set = new Set(a);
+  return b.every(e => set.has(e));
+}
+
+/** Per-file repair state: the last regression's error set + its consecutive same-error streak. */
+export interface FileRepairState {
+  lastErrors: string[];
+  streak: number;
+}
+
+/**
+ * Record a regression against the per-file repair tracker and report which
+ * files are now STUCK — failed with the SAME error set `limit` times in a row.
+ *
+ * Keyed PER FILE so the halt signal is "this *file* isn't converging," never
+ * "the turn failed N times": three different files each failing once must not
+ * halt the turn. A file whose error set CHANGED since its last regression resets
+ * to a streak of 1 — progress earns a fresh budget — so a file working through
+ * a sequence of *different* bugs is never halted, while one reproducing the
+ * *same* failure is. (Because `normalizeErrors` keeps the file path in each
+ * signature, different files inherently produce different sets.) Mutates `tracker`.
+ */
+export function recordRepairRegression(
+  tracker: Map<string, FileRepairState>,
+  files: string[],
+  errors: string[],
+  limit: number,
+): { stuck: string[]; streaks: Record<string, number> } {
+  const stuck: string[] = [];
+  const streaks: Record<string, number> = {};
+  for (const file of files) {
+    const prev = tracker.get(file);
+    const streak = prev && errorSetsEqual(prev.lastErrors, errors) ? prev.streak + 1 : 1;
+    tracker.set(file, { lastErrors: errors, streak });
+    streaks[file] = streak;
+    if (streak >= limit) stuck.push(file);
+  }
+  return { stuck, streaks };
+}

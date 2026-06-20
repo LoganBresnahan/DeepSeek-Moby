@@ -64,6 +64,8 @@ export interface BatchValidation {
   output?: string;
   /** Human/log explanation for skipped / inconclusive outcomes. */
   note?: string;
+  /** Normalized error signatures from this batch's check — drives per-file repair tracking. */
+  errors?: string[];
 }
 
 /** Outcome of resolving + approving + running the check once. */
@@ -158,7 +160,7 @@ export class EditValidator {
         : `check '${attempt.command}' is failing, but it couldn't be attributed to this edit (no comparable clean baseline)`;
     }
 
-    return { verdict, command: attempt.command, output, note };
+    return { verdict, command: attempt.command, output, note, errors: after.errors };
   }
 
   /** Build a CheckResult (with the parsed error set) from a completed run. */

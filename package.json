@@ -563,7 +563,7 @@
           "type": "number",
           "default": 3,
           "minimum": 0,
-          "markdownDescription": "**Edit safety — repair budget**: Autonomous revert-and-retry rounds on a confirmed regression before the turn halts. Auto mode stays Auto — it never demotes to per-edit approval."
+          "markdownDescription": "**Edit safety — per-file repair budget**: how many times a single file may revert with the *same* build error in a row before the turn halts. Failures across different files don't accumulate, and a changing error resets the count. Auto mode stays Auto — it never demotes to per-edit approval."
         },
         "moby.editSafety.onInconclusive": {
           "type": "string",
