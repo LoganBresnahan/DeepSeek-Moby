@@ -4,7 +4,7 @@
 </p>
 
 <h1 align="center">DeepSeek Moby</h1>
-<h2 align="center">v0.4.1</h2>
+<h2 align="center">v0.5.0</h2>
 
 <p align="center">
   <sub><em>Core functionality is validated on the maintainer's primary development environment; coverage across the full matrix of operating systems, VS Code versions, shell environments, and model configurations is still expanding. Bug reports and reproduction steps are welcome via the <a href="https://github.com/LoganBresnahan/DeepSeek-Moby/issues">issue tracker</a>.</em></sub>
