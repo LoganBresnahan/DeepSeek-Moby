@@ -1,6 +1,6 @@
 # 0009. Active-plan recency pinning (context salience)
 
-**Status:** Proposed
+**Status:** Accepted — implemented as specified, with three refinements noted inline. (1) The in-turn re-pin (Decision item 3) is **change-driven with a fade backstop**: it re-pins when the step pointer moves *or* after `PLAN_REMINDER_FADE_ITERS` (6) unchanged iterations, because a pure change-gate never fires when the model is mid-step and hasn't ticked a box — the exact drift case. (2) The change-gate is implemented as a **reminder-string diff** (`getActivePlanReminder()` output vs. the last pinned text) rather than a separately tracked integer pointer — any change in step or remaining items re-pins, and there is no second pointer to drift. (3) The re-pin is wired into **both** agentic loops (`runStreamingToolCallsLoop` and the legacy `runToolLoop`), mirroring how ADR 0011 covered both paths; the recency seed (item 2) sits before pipeline selection, so it already covers every path.
 **Date:** 2026-06-20
 
 ## Context
@@ -68,7 +68,13 @@ Split the plan's two jobs — **orientation** (the full goals/approach, read onc
 
    This is short by construction (a step count + the *remaining* items, never the prose), so it costs little and never duplicates the orientation copy.
 
-3. **Re-pin the reminder across iterations within a turn.** The recency anchor above only fixes iteration 1 — by iteration 15 it has the same fade problem as the system prompt. So, mirroring the settle-point callback at [requestOrchestrator.ts:3485-3489](../../../src/providers/requestOrchestrator.ts#L3485), re-push the *current* `getActivePlanReminder()` as a fresh `user` message at the iteration boundary when an active plan exists, **only when the step pointer has changed** since it was last emitted (debounced — see Alternative D for why not every iteration). The reminder is recomputed from `PlanManager` each time, so it always reflects the live step.
+3. **Re-pin the reminder across iterations within a turn — change-driven, with a fade backstop.** The recency anchor above only fixes iteration 1 — by iteration 15 it has the same fade problem as the system prompt. So, mirroring the settle-point callback at [requestOrchestrator.ts:3659-3664](../../../src/providers/requestOrchestrator.ts#L3659), re-push the *current* `getActivePlanReminder()` as a fresh `user` message at the iteration boundary when an active plan exists. The re-pin fires when **either**:
+   - **the step pointer has changed** since it was last emitted (the model checked a box, so the derived reminder text differs) — the primary, change-driven trigger; or
+   - **`PLAN_REMINDER_FADE_ITERS` (6) iterations have elapsed since the last pin with no change** — a fade backstop.
+
+   The backstop is load-bearing, not belt-and-suspenders. A pure change-gate has a failure mode that is *exactly the drift this ADR targets*: the reminder is pinned once at iteration 1, and if the model then fails to tick a box (the precise behaviour of a model losing the plan), the pointer never moves, the gate never fires, and the recency copy decays back into the middle of a long turn — reproducing the 914pm drift. The mechanism cannot depend solely on the discipline (ticking boxes) whose absence it exists to correct. The backstop re-anchors the reminder on a slow cadence so salience is restored even when the pointer is stuck. It is distinct from the rejected Alternative D: it re-pins the **terse** reminder (a step count + remaining items), not the full plan, and 6 iterations is a floor, not a fixed clock — a change resets the counter, so a steadily-advancing turn never hits it.
+
+   The change-gate is implemented as a **string diff** of `getActivePlanReminder()`'s output against the last pinned text (`_lastPlanReminder`), not a separately tracked pointer integer — so any change in step *or* remaining items re-pins, and there is no second source to drift from `PlanManager`. The reminder is recomputed from `PlanManager` each iteration, so it always reflects the live step. The seed (item 2) primes `_lastPlanReminder` so the first iteration boundary doesn't redundantly re-pin identical text.
 
 4. **Let the agent advance the pointer by checking off steps.** "Step N of M" is meaningful only if it moves. The model already edits files via `edit_file`; checking a box (`[ ]` → `[x]`) in `.moby-plans/<name>` is an ordinary edit it can make. `PlanManager.getActivePlanReminder()` parses the checklist (GitHub-style `[ ]`/`[x]`, or numbered `## Steps`) and derives `current step = first unchecked`, `M = total`. Because the plan file is mutated as work progresses, the *changing* content is what stays salient — the reminder is never stale boilerplate. No new tool is introduced; this is a documented convention plus a parser in `PlanManager`.
 
@@ -100,14 +106,15 @@ Rejected as overkill. It adds a model call (latency + cost) on the hot agentic p
 
 Push the full plan back into the message stream every K iterations regardless of state.
 
-Rejected as noisy. A fixed cadence re-emits identical text even when nothing changed (the model is mid-step), training it to ignore the repetition, and it re-pays the full-plan token cost of Alternative B on a timer. The decision instead re-pins only the *terse* reminder and only **when the step pointer actually moves** — change-driven, not clock-driven, so a re-emit always carries new information.
+Rejected as noisy. A fixed cadence re-emits **the whole plan** every K iterations, re-paying the full-plan token cost of Alternative B on a timer and training the model to ignore the repetition when nothing changed. The decision is change-driven first — a re-pin normally carries new information (the pointer moved). The fade backstop (Decision item 3) *does* re-pin on an elapsed-iteration floor, but the two differ on both axes that made D noisy: the backstop re-pins only the **terse** reminder (not the prose), and the floor is a *reset-on-change* counter (not a fixed clock), so a turn that keeps advancing never triggers it — only a turn where the pointer is genuinely stuck for 6 iterations pays the small terse cost, which is precisely when re-anchoring is worth it.
 
 ## Consequences
 
 **Positive:**
 - The plan's current step stays salient at the model's decision point through long multi-iteration turns; the model stops forgetting the goal mid-turn. The 914pm drift (skipped/ re-done steps, premature completion) is the target failure.
 - One source of truth: the full prose lives once (system prompt); the recency block is *derived* from the same `PlanManager` state, so head and tail can't contradict.
-- Cheap by construction — the recency reminder is a step count plus the *remaining* items, not the prose; re-pins are change-gated, so a steady-state iteration adds nothing.
+- Cheap by construction — the recency reminder is a step count plus the *remaining* items, not the prose; re-pins are change-gated, so a steady-state *advancing* iteration adds nothing. The fade backstop adds at most one terse re-pin per 6 stuck iterations.
+- Robust against the model failing to tick boxes — the fade backstop re-anchors salience even when the step pointer is stuck, so the mechanism does not silently depend on the very discipline (checking off steps) it exists to reinforce.
 - The plan file becomes a live checklist the agent ticks off, which doubles as user-visible progress in `.moby-plans/<name>` and keeps the salient content *changing* (so it reads as state, not boilerplate).
 - Reuses the existing recency-injection hook (the settle-point callback at [requestOrchestrator.ts:3485](../../../src/providers/requestOrchestrator.ts#L3485)) and the existing selected-files append site — no new orchestration surface.
 
@@ -140,6 +147,7 @@ Framework is **vitest**, following the in-memory-`vscode`-mock pattern in [tests
 
 **Unit — in-turn re-pin (extend the streaming-tool-calls describe at [requestOrchestrator.test.ts:2172](../../../tests/unit/providers/requestOrchestrator.test.ts#L2172)):**
 - Drive a multi-iteration `StreamingToolCalls` loop (the existing Phase 4.5 harness in that describe) with an active plan; assert that across simulated iterations the current reminder is re-pushed into `currentMessages` **when the step pointer changes** and is **not** re-pushed on an iteration where it didn't change (the change-gate from Decision item 3). This parallels how `settleEditBatch` feedback injection is unit-tested via the `pushFeedback` callback at [requestOrchestrator.test.ts:327-331](../../../tests/unit/providers/requestOrchestrator.test.ts#L327).
+- **Fade backstop:** drive the loop with an active plan whose pointer **never** changes (the model ticks no box) and assert the reminder is re-pinned again after `PLAN_REMINDER_FADE_ITERS` iterations — i.e. the change-gate alone would leave it pinned once, but the backstop re-anchors it. This is the regression guard for the "model loses the plan and stops checking boxes" case the backstop exists to cover.
 
 **Integration — persistence across a turn:**
 - Add `tests/actors/plans/active-plan-recency.test.ts` (new; the `tests/actors/plans/` dir already holds [PlanPopupShadowActor.test.ts](../../../tests/actors/plans/PlanPopupShadowActor.test.ts)) exercising the end-to-end shape: an active plan with a checklist, a turn that checks off a step mid-loop, and an assertion that a later iteration's request carries the *updated* `step N of M`. Keep model interaction mocked; this is a request-shape contract, not a live-model test.

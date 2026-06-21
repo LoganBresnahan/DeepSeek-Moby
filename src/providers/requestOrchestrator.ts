@@ -121,6 +121,12 @@ function shouldIgnoreWatcherPath(relativePath: string): boolean {
   return false;
 }
 
+/** ADR 0009: re-pin the active-plan reminder after this many iterations with an
+ *  unchanged step pointer (the fade backstop). The change-gate handles the
+ *  common case; this floor re-anchors salience when the model is mid-step and
+ *  hasn't ticked a box, so a stuck pointer can't let the reminder decay. */
+const PLAN_REMINDER_FADE_ITERS = 6;
+
 export class RequestOrchestrator {
   // ── Events (streaming) ──
   private readonly _onStartResponse = new vscode.EventEmitter<StartResponseEvent>();
@@ -296,6 +302,14 @@ export class RequestOrchestrator {
    *  build-regression at most once per turn — bounded even when the iteration
    *  cap is Infinity (the user's "unlimited" maxToolCalls config). */
   private _verifyRegressionReinjected = false;
+  /** ADR 0009: the last active-plan reminder text pinned at recency this turn —
+   *  seeded when the reminder is injected at request build, updated on each
+   *  in-turn re-pin. Null at turn start. Drives the change-gate: an unchanged
+   *  reminder isn't re-pinned (unless the fade backstop fires). */
+  private _lastPlanReminder: string | null = null;
+  /** ADR 0009: iterations since the plan reminder was last re-pinned. Drives the
+   *  fade backstop (`PLAN_REMINDER_FADE_ITERS`); reset to 0 on every pin. */
+  private _planReminderStaleIters = 0;
 
   /**
    * Establish the edit-safety baseline on the PRISTINE tree before the turn's
@@ -831,6 +845,9 @@ export class RequestOrchestrator {
     this._editRepairByFile.clear();
     this._editSafetyDormantWarned = false;
     this._verifyRegressionReinjected = false;
+    // ADR 0009: reset the active-plan recency-reminder tracker for the new turn.
+    this._lastPlanReminder = null;
+    this._planReminderStaleIters = 0;
     // Clear read files tracking and extract user intent
     this.fileContextManager.clearTurnTracking();
     this.fileContextManager.extractFileIntent(message);
@@ -1077,6 +1094,26 @@ export class RequestOrchestrator {
           if (lastMsg.role === 'user') {
             lastMsg.content = lastMsg.content + selectedFilesContext;
             logger.info(`[RequestOrchestrator] Selected files context injected into user message`);
+          }
+        }
+      }
+
+      // ADR 0009: pin a terse "current step N of M + remaining" reminder for the
+      // active plan at recency (the tail of the last user message), immediately
+      // after the selected-files block. The full plan stays at primacy in the
+      // system prompt for orientation; this small steering copy keeps the step
+      // the model is on salient next to its live action. Seed the in-turn
+      // re-pin tracker so the first iteration boundary doesn't re-pin identical
+      // text.
+      if (this.planManager) {
+        const planReminder = await this.planManager.getActivePlanReminder();
+        if (planReminder && historyMessages.length > 0) {
+          const lastMsg = historyMessages[historyMessages.length - 1];
+          if (lastMsg.role === 'user') {
+            lastMsg.content = lastMsg.content + planReminder;
+            this._lastPlanReminder = planReminder;
+            this._planReminderStaleIters = 0;
+            logger.info(`[RequestOrchestrator] Active-plan reminder pinned at recency`);
           }
         }
       }
@@ -3663,6 +3700,10 @@ than assert a possibly-stale fact as current.
       );
       if (editHalt) break;
 
+      // ADR 0009: keep the active plan's current step salient at the next
+      // decision point (change-driven, with a fade backstop).
+      await this.maybeRepinPlanReminder((msg) => currentMessages.push({ role: 'user', content: msg }));
+
       // Close the tool batch at the iteration boundary. Each streamChat
       // call is one "decision point" — its tool calls (one or many parallel)
       // belong in one dropdown; the next iteration's calls are a separate
@@ -3691,6 +3732,34 @@ than assert a possibly-stale fact as current.
 
     const limitReached = iterations >= maxIterations && maxIterations !== Infinity;
     return { allToolDetails, limitReached, budgetExceeded };
+  }
+
+  /**
+   * ADR 0009: re-pin the active-plan reminder at the model's decision point.
+   *
+   * Change-driven — re-pin when the derived reminder text differs from the last
+   * one pinned (the model checked a box, so the step pointer moved). Fade
+   * backstop — re-pin after `PLAN_REMINDER_FADE_ITERS` unchanged iterations so
+   * salience doesn't decay when the model is mid-step and hasn't ticked a box
+   * (the change-gate alone would never fire — the precise drift this guards).
+   *
+   * Recomputed from `PlanManager` each call, so it always reflects the live
+   * checklist. No-op without a plan manager or an active plan. Called at the
+   * iteration boundary of each agentic loop; `push` appends the fresh `user`
+   * message to that loop's message array.
+   */
+  private async maybeRepinPlanReminder(push: (msg: string) => void): Promise<void> {
+    if (!this.planManager) return;
+    const reminder = await this.planManager.getActivePlanReminder();
+    if (!reminder) return;
+    this._planReminderStaleIters++;
+    const changed = reminder !== this._lastPlanReminder;
+    if (changed || this._planReminderStaleIters >= PLAN_REMINDER_FADE_ITERS) {
+      push(reminder);
+      this._lastPlanReminder = reminder;
+      this._planReminderStaleIters = 0;
+      logger.info(`[RequestOrchestrator] Active-plan reminder re-pinned (${changed ? 'step changed' : 'fade backstop'})`);
+    }
   }
 
   // ── Private: Tool Loop ──
@@ -3977,6 +4046,11 @@ than assert a possibly-stale fact as current.
         (msg) => toolMessages.push({ role: 'user', content: msg }),
       );
       if (editHalt) break;
+
+      // ADR 0009: keep the active plan's current step salient at the next
+      // decision point (change-driven, with a fade backstop). Parity with
+      // runStreamingToolCallsLoop.
+      await this.maybeRepinPlanReminder((msg) => toolMessages.push({ role: 'user', content: msg }));
 
       // Close the tool batch at the iteration boundary. Mirrors
       // runStreamingToolCallsLoop — each non-streaming chat() call is one

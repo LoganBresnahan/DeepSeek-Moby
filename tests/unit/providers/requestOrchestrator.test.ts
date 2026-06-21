@@ -780,9 +780,11 @@ describe('RequestOrchestrator', () => {
 
       it('places the temporal block before the active-plans section', async () => {
         // planManager is not injected by the shared beforeEach; stub it so the
-        // active-plans section renders, then assert ordering.
+        // active-plans section renders, then assert ordering. getActivePlanReminder
+        // is also stubbed (ADR 0009 reads it at request build).
         (orchestrator as any).planManager = {
-          getActivePlansContext: vi.fn(async () => '\n--- ACTIVE PLANS ---\nStep 1 of 3\n')
+          getActivePlansContext: vi.fn(async () => '\n--- ACTIVE PLANS ---\nStep 1 of 3\n'),
+          getActivePlanReminder: vi.fn(async () => '')
         };
 
         await orchestrator.handleMessage('Hello', null, async () => '', undefined);
@@ -868,6 +870,142 @@ describe('RequestOrchestrator', () => {
       const messagesArg = mockClient.buildContext.mock.calls[0][0];
       const lastUserMsg = messagesArg[messagesArg.length - 1];
       expect(lastUserMsg.content).toContain('src/app.ts');
+    });
+
+    // ── Active-plan recency pinning (ADR 0009) ──
+
+    const FULL_PLAN = '\n--- ACTIVE PLANS ---\nThe following plans...\n## deck.md\n## Steps\n- [x] Scaffold\n- [ ] Wire diagram\n--- END PLANS ---\n';
+    const TERSE_REMINDER = '\n--- ACTIVE PLAN (reminder) ---\ndeck.md — step 2 of 2\nRemaining:\n[ ] 2. Wire diagram\n(full plan and completed steps are in the system prompt)\n--- END ACTIVE PLAN ---\n';
+
+    function stubPlanManager(reminder: string, full = FULL_PLAN) {
+      (orchestrator as any).planManager = {
+        getActivePlansContext: vi.fn(async () => full),
+        getActivePlanReminder: vi.fn(async () => reminder),
+      };
+    }
+
+    it('pins the terse plan reminder into the last user message (recency)', async () => {
+      stubPlanManager(TERSE_REMINDER);
+
+      await orchestrator.handleMessage('Hello', null, async () => '', undefined);
+
+      const messagesArg = mockClient.buildContext.mock.calls[0][0];
+      const lastUserMsg = messagesArg[messagesArg.length - 1];
+      expect(lastUserMsg.content).toContain('ACTIVE PLAN (reminder)');
+      expect(lastUserMsg.content).toContain('step 2 of 2');
+    });
+
+    it('keeps the full plan in the system prompt (primacy), reminder out of it', async () => {
+      stubPlanManager(TERSE_REMINDER);
+
+      await orchestrator.handleMessage('Hello', null, async () => '', undefined);
+
+      const systemPrompt = mockClient.streamChat.mock.calls[0][2] as string;
+      expect(systemPrompt).toContain('--- ACTIVE PLANS ---');
+      // The terse steering copy must NOT be in the system prompt — it lives at recency.
+      expect(systemPrompt).not.toContain('ACTIVE PLAN (reminder)');
+    });
+
+    it('does not duplicate the full plan prose across the two positions', async () => {
+      stubPlanManager(TERSE_REMINDER);
+
+      await orchestrator.handleMessage('Hello', null, async () => '', undefined);
+
+      const systemPrompt = mockClient.streamChat.mock.calls[0][2] as string;
+      const messagesArg = mockClient.buildContext.mock.calls[0][0];
+      const lastUserMsg = messagesArg[messagesArg.length - 1].content as string;
+
+      const combined = systemPrompt + '\n' + lastUserMsg;
+      const fullPlanOccurrences = combined.split('--- ACTIVE PLANS ---').length - 1;
+      expect(fullPlanOccurrences).toBe(1); // prose appears exactly once (system prompt only)
+      // ...while the terse reminder is present at recency, not in the system prompt.
+      expect(lastUserMsg).toContain('ACTIVE PLAN (reminder)');
+    });
+
+    it('tracks PlanManager — a changed step shows up in the next turn', async () => {
+      const reminders = [
+        '\n--- ACTIVE PLAN (reminder) ---\ndeck.md — step 1 of 2\n--- END ACTIVE PLAN ---\n',
+        '\n--- ACTIVE PLAN (reminder) ---\ndeck.md — step 2 of 2\n--- END ACTIVE PLAN ---\n',
+      ];
+      let i = 0;
+      (orchestrator as any).planManager = {
+        getActivePlansContext: vi.fn(async () => FULL_PLAN),
+        getActivePlanReminder: vi.fn(async () => reminders[i]),
+      };
+
+      i = 0;
+      await orchestrator.handleMessage('first', 'session-1', async () => '', undefined);
+      const firstMsgs = mockClient.buildContext.mock.calls[0][0];
+      expect(firstMsgs[firstMsgs.length - 1].content).toContain('step 1 of 2');
+
+      i = 1;
+      await orchestrator.handleMessage('second', 'session-1', async () => '', undefined);
+      const secondCall = mockClient.buildContext.mock.calls.at(-1)!;
+      expect(secondCall[0][secondCall[0].length - 1].content).toContain('step 2 of 2');
+    });
+  });
+
+  // ── In-turn re-pin: change-gate + fade backstop (ADR 0009 item 3) ──
+
+  describe('maybeRepinPlanReminder', () => {
+    function stubReminder(fn: () => Promise<string>) {
+      (orchestrator as any).planManager = { getActivePlanReminder: vi.fn(fn) };
+    }
+
+    it('re-pins when the reminder text changes (step pointer moved)', async () => {
+      stubReminder(async () => 'step 2');
+      (orchestrator as any)._lastPlanReminder = 'step 1'; // seeded at request build
+      (orchestrator as any)._planReminderStaleIters = 0;
+
+      const pushed: string[] = [];
+      await (orchestrator as any).maybeRepinPlanReminder((m: string) => pushed.push(m));
+
+      expect(pushed).toEqual(['step 2']);
+      expect((orchestrator as any)._lastPlanReminder).toBe('step 2');
+      expect((orchestrator as any)._planReminderStaleIters).toBe(0);
+    });
+
+    it('does NOT re-pin an unchanged reminder inside the fade window', async () => {
+      stubReminder(async () => 'step 1');
+      (orchestrator as any)._lastPlanReminder = 'step 1';
+      (orchestrator as any)._planReminderStaleIters = 0;
+
+      const pushed: string[] = [];
+      await (orchestrator as any).maybeRepinPlanReminder((m: string) => pushed.push(m));
+
+      expect(pushed).toEqual([]);
+      expect((orchestrator as any)._planReminderStaleIters).toBe(1); // counter advanced
+    });
+
+    it('fade backstop re-pins after PLAN_REMINDER_FADE_ITERS unchanged iterations', async () => {
+      // The regression guard for "model loses the plan and stops ticking boxes":
+      // the pointer never moves, the change-gate never fires, yet salience is
+      // still re-anchored on the floor.
+      stubReminder(async () => 'step 1');
+      (orchestrator as any)._lastPlanReminder = 'step 1';
+      (orchestrator as any)._planReminderStaleIters = 0;
+
+      const pushed: string[] = [];
+      for (let n = 0; n < 6; n++) {
+        await (orchestrator as any).maybeRepinPlanReminder((m: string) => pushed.push(m));
+      }
+
+      expect(pushed).toEqual(['step 1']); // exactly one re-pin, on the 6th iteration
+      expect((orchestrator as any)._planReminderStaleIters).toBe(0); // reset after the backstop
+    });
+
+    it('is a no-op without a plan manager', async () => {
+      (orchestrator as any).planManager = undefined;
+      const pushed: string[] = [];
+      await (orchestrator as any).maybeRepinPlanReminder((m: string) => pushed.push(m));
+      expect(pushed).toEqual([]);
+    });
+
+    it('is a no-op when there is no active plan (empty reminder)', async () => {
+      stubReminder(async () => '');
+      const pushed: string[] = [];
+      await (orchestrator as any).maybeRepinPlanReminder((m: string) => pushed.push(m));
+      expect(pushed).toEqual([]);
     });
   });
 
@@ -2486,6 +2624,51 @@ describe('RequestOrchestrator', () => {
       expect(mockClient.streamChat).toHaveBeenCalledTimes(2);
       // Tool batch lifecycle fired in order.
       expect(mockClient.chat).not.toHaveBeenCalled();
+    });
+
+    it('re-pins the active-plan reminder into the loop as the step advances (ADR 0009 wiring)', async () => {
+      // PlanManager returns a fresh reminder each consult, simulating the model
+      // checking off a box between iterations (the step pointer moves).
+      let n = 0;
+      (orchestrator as any).planManager = {
+        getActivePlansContext: vi.fn(async () => '\n--- ACTIVE PLANS ---\nfull plan body\n--- END PLANS ---\n'),
+        getActivePlanReminder: vi.fn(async () => `\n--- ACTIVE PLAN (reminder) ---\nstep ${++n}\n--- END ACTIVE PLAN ---\n`),
+      };
+
+      // Snapshot, AT CALL TIME, the reminder-bearing user messages each
+      // streamChat call receives (the messages array is mutated in place across
+      // iterations, so we must read it synchronously inside the mock).
+      const seen: string[][] = [];
+      let call = 0;
+      mockClient.streamChat.mockImplementation(async (messages: any[], onToken: (t: string) => void) => {
+        seen.push(
+          messages
+            .filter(m => m.role === 'user' && typeof m.content === 'string' && m.content.includes('ACTIVE PLAN (reminder)'))
+            .map(m => m.content as string)
+        );
+        call++;
+        if (call <= 2) {
+          onToken('working');
+          return {
+            content: 'working',
+            tool_calls: [{ id: `c${call}`, type: 'function' as const, function: { name: 'read_file', arguments: '{"path":"a.ts"}' } }],
+            finish_reason: 'tool_calls',
+          };
+        }
+        onToken('done');
+        return { content: 'done', finish_reason: 'stop' };
+      });
+
+      await orchestrator.handleMessage('go', 'session-1', async () => '', undefined);
+
+      // Iteration 1 saw only the seeded reminder (merged into the user message).
+      expect(seen[0]).toHaveLength(1);
+      expect(seen[0][0]).toContain('step 1');
+      // By the terminal iteration the loop has re-pinned the advancing step as
+      // separate user messages — more than just the seed, latest pointer present.
+      const last = seen[seen.length - 1];
+      expect(last.length).toBeGreaterThan(1);
+      expect(last.some(c => c.includes('step 3'))).toBe(true);
     });
 
     it('reasoning_content surfaces during the tool-decision phase (the whole point of 4.5)', async () => {
