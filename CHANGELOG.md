@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Interrupting a generation no longer kills the new turn or races a second backend loop (ADR 0008)
+
+Closes the on-stage interrupt failure: interrupting a running generation left the new turn's UI dead (`shellExecuting: NO CURRENT TURN ID — dropping message`) and, worse, let **two model loops run concurrently** and race on the same `write_file`, clobbering a file down to an empty shell. Two coordinated fixes:
+
+- **Awaited teardown serialization.** `stopGeneration()` is now async and fires `generationStopped` only **after** the in-flight loop reaches its `finally` (a per-turn teardown signal resolved there). The webview's stop→`generationStopped`→send interrupt flow therefore can't begin the next turn while the prior loop is still unwinding, and the `sendMessage` handler also tears down + awaits any in-flight turn before starting (covering a bare concurrent send with no preceding stop). Only one `handleMessage` loop ever runs — the concurrent-`write_file` race is closed at the source. ([src/providers/requestOrchestrator.ts](src/providers/requestOrchestrator.ts), [src/providers/chatProvider.ts](src/providers/chatProvider.ts))
+- **Request-scoped lifecycle events.** Every turn now carries a `requestId`; the chatProvider relay stamps it on the `startResponse` / `endResponse` / `shellExecuting` messages (read synchronously at fire time, so a dying request's late event carries its *own* id). The webview (`VirtualMessageGatewayActor`) routes turn state by it: a late `endResponse` from a **superseded** request is ignored instead of clearing the live turn, and a superseded shell event is dropped quietly instead of logging the misleading `NO CURRENT TURN ID`. This is defense-in-depth + diagnostics layered on top of the serialization. ([media/actors/message-gateway/VirtualMessageGatewayActor.ts](media/actors/message-gateway/VirtualMessageGatewayActor.ts))
+- Decision + alternatives: [ADR 0008](docs/architecture/decisions/0008-request-scoped-stream-lifecycle-and-interrupt-teardown.md); reference: [docs/plans/interrupt-lifecycle.md](docs/plans/interrupt-lifecycle.md).
+- Tests: teardown ordering (`generationStopped` fires only after the loop's `finally`) ([tests/unit/providers/requestOrchestrator.test.ts](tests/unit/providers/requestOrchestrator.test.ts)) and requestId scoping — stale end is a no-op, matching end clears, a superseded shell is not routed, version-skew back-compat ([tests/actors/message-gateway/VirtualMessageGatewayActor.test.ts](tests/actors/message-gateway/VirtualMessageGatewayActor.test.ts)).
+
 ### Verification-gated turn completion (ADR 0011)
 
 A turn can no longer report **done** on a broken build or an empty/missing deliverable. This extends ADR 0006's invariant ("never report success on an edit that broke the build") from the edit-*batch* boundary to the *turn-completion* boundary, and closes the exact `914pm` failure: `Slide3Demo.razor` was clobbered down to an empty `<div>`, which **compiles fine**, so the build verdict was `clean` and the turn completed "successfully" — the user had to ask to restore it the next session. Build-pass ≠ artifact-produced.

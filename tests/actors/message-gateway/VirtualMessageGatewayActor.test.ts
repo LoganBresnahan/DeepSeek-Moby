@@ -224,6 +224,52 @@ describe('VirtualMessageGatewayActor', () => {
     });
   });
 
+  // ── ADR 0008: requestId scoping ──
+  // Late lifecycle events from a SUPERSEDED request must not touch the live turn.
+  describe('requestId scoping (ADR 0008)', () => {
+    it('ignores a stale endResponse from a superseded request (keeps the live turn)', () => {
+      // req-1 streams, then an interrupt opens req-2's turn…
+      dispatchMessage({ type: 'startResponse', messageId: 'm1', requestId: 'req-1' });
+      dispatchMessage({ type: 'startResponse', messageId: 'm2', requestId: 'req-2' });
+      expect(gateway.currentTurnId).toBe('turn-2');
+
+      // …then req-1's trailing endResponse arrives late. It must be ignored.
+      dispatchMessage({ type: 'endResponse', message: { content: 'A' }, requestId: 'req-1' });
+
+      expect(gateway.currentTurnId).toBe('turn-2');         // live turn survives
+      expect(mockActors.streaming.endStream).not.toHaveBeenCalled();
+      expect(mockActors.virtualList.endStreamingTurn).not.toHaveBeenCalled();
+    });
+
+    it('ends the turn on a matching endResponse (regression guard)', () => {
+      dispatchMessage({ type: 'startResponse', messageId: 'm1', requestId: 'req-1' });
+      dispatchMessage({ type: 'endResponse', message: { content: 'A' }, requestId: 'req-1' });
+
+      expect(gateway.currentTurnId).toBe(null);
+      expect(mockActors.virtualList.endStreamingTurn).toHaveBeenCalled();
+    });
+
+    it('still ends the turn when no requestId is present (version-skew back-compat)', () => {
+      dispatchMessage({ type: 'startResponse', messageId: 'm1' });  // no requestId
+      dispatchMessage({ type: 'endResponse', message: { content: 'A' } });
+
+      expect(gateway.currentTurnId).toBe(null);
+    });
+
+    it('does not route a superseded request\'s shell event to the live turn', () => {
+      dispatchMessage({ type: 'startResponse', messageId: 'm1', requestId: 'req-1' });
+      dispatchMessage({ type: 'startResponse', messageId: 'm2', requestId: 'req-2' });
+
+      // A late shell from the dead req-1 must not render into turn-2.
+      dispatchMessage({ type: 'shellExecuting', commands: [{ command: 'rm -rf x' }], requestId: 'req-1' });
+      expect(mockActors.virtualList.createShellSegment).not.toHaveBeenCalled();
+
+      // …but the current request's shell still renders normally.
+      dispatchMessage({ type: 'shellExecuting', commands: [{ command: 'ls' }], requestId: 'req-2' });
+      expect(mockActors.virtualList.createShellSegment).toHaveBeenCalledWith('turn-2', [{ command: 'ls' }]);
+    });
+  });
+
   describe('thinking/reasoning flow', () => {
     it('defers thinking bubble until first reasoning token', () => {
       dispatchMessage({ type: 'startResponse', messageId: 'msg-1' });

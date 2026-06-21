@@ -281,7 +281,9 @@ export class ChatProvider implements vscode.WebviewViewProvider {
 
     // RequestOrchestrator → webview
     this.requestOrchestrator.onStartResponse(d => {
-      this._view?.webview.postMessage({ type: 'startResponse', ...d });
+      // ADR 0008: stamp the in-flight request id so the webview routes turn
+      // state by identity. Read here = read at fire time (the emitter is sync).
+      this._view?.webview.postMessage({ type: 'startResponse', ...d, requestId: this.requestOrchestrator.currentRequestId });
     });
     // Batch tokens before sending to webview (reduces ~20,000 postMessages to ~200-400).
     // Tokens accumulate for up to 50ms, then flush as a single concatenated message.
@@ -331,7 +333,10 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       // Flush any pending batched tokens before signaling end
       flushContentTokens();
       flushReasoningTokens();
-      this._view?.webview.postMessage({ type: 'endResponse', message: d });
+      // ADR 0008: stamp the request id (top-level, like start/shell) so the
+      // webview can ignore a superseded request's late end instead of clearing
+      // the live turn.
+      this._view?.webview.postMessage({ type: 'endResponse', message: d, requestId: this.requestOrchestrator.currentRequestId });
     });
     this.requestOrchestrator.onGenerationStopped(() => {
       // Discard any pending tokens — don't flush partial content when user stops.
@@ -373,7 +378,9 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     this.requestOrchestrator.onShellExecuting(d => {
       // Flush tokens so text before shell command renders first
       flushContentTokens();
-      this._view?.webview.postMessage({ type: 'shellExecuting', commands: d.commands });
+      // ADR 0008: stamp the request id so a superseded request's late shell
+      // event is ignored quietly instead of logging "NO CURRENT TURN ID".
+      this._view?.webview.postMessage({ type: 'shellExecuting', commands: d.commands, requestId: this.requestOrchestrator.currentRequestId });
     });
     this.requestOrchestrator.onShellResults(d => {
       this._view?.webview.postMessage({ type: 'shellResults', results: d.results });

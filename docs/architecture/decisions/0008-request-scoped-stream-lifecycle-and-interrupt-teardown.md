@@ -1,6 +1,6 @@
 # 0008. Request-scoped stream lifecycle and interrupt teardown
 
-**Status:** Proposed
+**Status:** Accepted — implemented. Three refinements vs. this text: (1) the teardown is serialized by deferring `generationStopped` until the loop's `finally` (which matches the webview's existing stop→`generationStopped`→send flow) plus a `sendMessage` `isGenerating` guard, rather than the `sendMessage` handler awaiting `stopGeneration` directly (it does not call it today); (2) `requestId` is stamped at the **chatProvider relay** from a single `currentRequestId` getter rather than on the event types + every fire site — equivalent because the orchestrator's `EventEmitter.fire()` is synchronous, so the relay reads the id at the instant of the fire (a dying request's late `endResponse` still carries its own id); (3) the webview ignores a superseded request's shell event by identity **regardless of whether a turn is open** (the ADR scoped it to the no-turn case), matching the `endResponse` guard. The structural-event-stream tagging (Follow-ups) remains deferred.
 **Date:** 2026-06-20
 
 ## Context

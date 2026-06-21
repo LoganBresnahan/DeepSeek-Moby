@@ -199,6 +199,12 @@ export class RequestOrchestrator {
    *  while the prior loop is still unwinding — the window the concurrent
    *  write_file race needed. */
   private _teardownDeferred: { promise: Promise<void>; resolve: () => void } | null = null;
+  /** ADR 0008: unique id for the in-flight request. The chatProvider relay reads
+   *  it (synchronously, at fire time) to stamp the lifecycle events the webview
+   *  routes by, so a superseded request's late events are ignored by identity
+   *  rather than killing the live turn. */
+  private _currentRequestId: string | null = null;
+  private _requestCounter = 0;
   // Queue for shell commands detected inline during streaming (legacy — being replaced by interrupt-and-resume)
   private _pendingInlineShellCommands: Array<{ command: string }> = [];
   // Track commands already executed inline (to avoid re-execution in batch)
@@ -910,6 +916,9 @@ export class RequestOrchestrator {
     this._userInitiatedStop = false;
     // ADR 0008: a fresh teardown signal for this turn, resolved in the finally.
     this._teardownDeferred = this.makeDeferred();
+    // ADR 0008: a fresh request id, minted BEFORE the startResponse fire below so
+    // the relay stamps this turn's events with it from the first event on.
+    this._currentRequestId = `req-${++this._requestCounter}`;
 
     // Get the current correlation ID for cross-boundary tracing
     const correlationId = logger.getCurrentCorrelationId();
@@ -1412,6 +1421,12 @@ export class RequestOrchestrator {
   /** Check if a request is currently in progress. */
   isGenerating(): boolean {
     return this.abortController !== null;
+  }
+
+  /** ADR 0008: the in-flight request's id, read by the chatProvider relay to
+   *  stamp lifecycle events. Reflects the most-recently-started turn. */
+  get currentRequestId(): string | null {
+    return this._currentRequestId;
   }
 
   /**

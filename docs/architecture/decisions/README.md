@@ -17,7 +17,7 @@ Short, dated records of significant architectural and behavioral decisions. Each
 | [0005](0005-preserve-bundler-ts-module-resolution.md) | TypeScript module resolution: preserve + bundler | Accepted | 2026-04-26 |
 | [0006](0006-edit-safety-checkpoint-and-validation.md) | Edit safety: checkpoint, atomic batch, and post-apply validation | Accepted | 2026-06-19 |
 | [0007](0007-system-prompt-temporal-grounding.md) | System-prompt temporal grounding: standing date + staleness directive | Accepted | 2026-06-20 |
-| [0008](0008-request-scoped-stream-lifecycle-and-interrupt-teardown.md) | Request-scoped stream lifecycle and interrupt teardown | Proposed | 2026-06-20 |
+| [0008](0008-request-scoped-stream-lifecycle-and-interrupt-teardown.md) | Request-scoped stream lifecycle and interrupt teardown | Accepted | 2026-06-20 |
 | [0009](0009-active-plan-recency-pinning.md) | Active-plan recency pinning (context salience) | Proposed | 2026-06-20 |
 | [0010](0010-web-search-query-ledger-and-cache.md) | Web-search query ledger and near-duplicate cache | Accepted | 2026-06-20 |
 | [0011](0011-verification-gated-turn-completion.md) | Verification-gated turn completion | Accepted | 2026-06-20 |

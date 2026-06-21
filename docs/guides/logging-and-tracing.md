@@ -609,6 +609,19 @@ The extension and webview have independent `performance.now()` baselines. On exp
 
 If running in WSL2, the extension (Linux) and webview (Windows/Chromium) may have different system clocks. See [Troubleshooting](#troubleshooting) for details.
 
+### `requestId` vs. `correlationId` (don't conflate them)
+
+`startResponse` / `endResponse` / `shellExecuting` cross the boundary carrying **two** ids with different jobs ([ADR 0008](../architecture/decisions/0008-request-scoped-stream-lifecycle-and-interrupt-teardown.md)):
+
+| | `correlationId` | `requestId` |
+|---|---|---|
+| **Purpose** | **Tracing** — stitch one logical flow's events across extension + webview | **Control** — route and gate live turn state in the webview |
+| **Lifecycle** | may be **sampled, disabled, or absent** (`correlationId \|\| undefined`) | **always present** while a turn is in flight |
+| **Set by** | `tracer.startFlow()` | minted per turn in `requestOrchestrator`; stamped by the chatProvider relay from `currentRequestId` (read synchronously at fire time) |
+| **Used for** | `WebviewTracer` correlation, unified export timeline | the webview ignores a **superseded** request's late `endResponse`/`shellExecuting` instead of killing the live turn |
+
+They are deliberately separate: tracing can be turned off or re-scoped without affecting turn routing. Don't overload one for the other.
+
 ---
 
 ## Export Formats
