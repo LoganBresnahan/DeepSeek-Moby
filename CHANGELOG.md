@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-21
+
 ### Temporal grounding now covers data you *write*, not just answers you give (ADR 0013)
 
 A traced run built an app and populated it with **stale** real-world data (an old World Cup), calling `web_search` zero times — and the miss happened at the very first iteration, with the ADR 0007 temporal directive already fresh at the top of the prompt. So it wasn't salience decay; it was **task misclassification** — the model filed "seed this app with real-world facts" as a coding task, not as a time-sensitive lookup.
