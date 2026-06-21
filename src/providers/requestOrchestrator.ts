@@ -193,6 +193,12 @@ export class RequestOrchestrator {
   // Tracks whether the current abort was user-initiated (vs backend error).
   // Determines which marker is shown: *[User interrupted]* vs *[Generation stopped]*.
   private _userInitiatedStop = false;
+  /** ADR 0008: resolves when the in-flight turn reaches its `finally` (teardown
+   *  complete). stopGeneration awaits this before firing generationStopped, so
+   *  the webview's stop→generationStopped→send flow can't begin the next turn
+   *  while the prior loop is still unwinding — the window the concurrent
+   *  write_file race needed. */
+  private _teardownDeferred: { promise: Promise<void>; resolve: () => void } | null = null;
   // Queue for shell commands detected inline during streaming (legacy — being replaced by interrupt-and-resume)
   private _pendingInlineShellCommands: Array<{ command: string }> = [];
   // Track commands already executed inline (to avoid re-execution in batch)
@@ -902,6 +908,8 @@ export class RequestOrchestrator {
     this.abortController = new AbortController();
     let signal = this.abortController.signal;
     this._userInitiatedStop = false;
+    // ADR 0008: a fresh teardown signal for this turn, resolved in the finally.
+    this._teardownDeferred = this.makeDeferred();
 
     // Get the current correlation ID for cross-boundary tracing
     const correlationId = logger.getCurrentCorrelationId();
@@ -1386,9 +1394,19 @@ export class RequestOrchestrator {
         logger.info(`[Buffer] RESET in finally block (cleanup)`);
         this.contentBuffer.reset();
       }
+      // ADR 0008: teardown complete — release any awaiting stopGeneration so the
+      // gating generationStopped (and thus the next turn) only proceeds now.
+      this._teardownDeferred?.resolve();
     }
 
     return { sessionId };
+  }
+
+  /** A resolvable promise. ADR 0008: backs the per-turn teardown signal. */
+  private makeDeferred(): { promise: Promise<void>; resolve: () => void } {
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => { resolve = r; });
+    return { promise, resolve };
   }
 
   /** Check if a request is currently in progress. */
@@ -1396,9 +1414,19 @@ export class RequestOrchestrator {
     return this.abortController !== null;
   }
 
-  /** Abort current request. */
-  stopGeneration(): void {
+  /**
+   * Abort the current request and resolve once it has fully torn down.
+   *
+   * ADR 0008: `generationStopped` is fired only AFTER the in-flight loop reaches
+   * its `finally`, so the webview's stop→generationStopped→send sequence cannot
+   * start the next turn while the prior loop is still alive. This closes the
+   * two-loops-overlap window that the concurrent `write_file` race needed.
+   */
+  async stopGeneration(): Promise<void> {
     this._userInitiatedStop = true;
+    // Capture the running turn's teardown BEFORE aborting (abort nulls the
+    // controller; a later turn can't replace the deferred until we fire below).
+    const teardown = this._teardownDeferred?.promise ?? Promise.resolve();
     if (this.abortController) {
       this.abortController.abort();
       this.abortController = null;
@@ -1406,6 +1434,7 @@ export class RequestOrchestrator {
     }
     this.diffManager.cancelPendingApprovals();
     this.commandApprovalManager?.cancelPendingApproval();
+    await teardown;
     this._onGenerationStopped.fire();
   }
 

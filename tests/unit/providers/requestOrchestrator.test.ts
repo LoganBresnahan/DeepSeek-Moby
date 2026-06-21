@@ -1091,22 +1091,48 @@ describe('RequestOrchestrator', () => {
   // ── stopGeneration ──
 
   describe('stopGeneration', () => {
-    it('should fire onGenerationStopped', () => {
+    // ADR 0008: stopGeneration is now async — it fires onGenerationStopped only
+    // after the in-flight loop's teardown resolves. With no active request the
+    // teardown is an already-resolved promise, so the fire is one microtask away.
+    it('should fire onGenerationStopped', async () => {
       const events: void[] = [];
       orchestrator.onGenerationStopped(() => events.push(undefined));
 
-      orchestrator.stopGeneration();
+      await orchestrator.stopGeneration();
 
       expect(events).toHaveLength(1);
     });
 
-    it('should fire onGenerationStopped even without active request', () => {
+    it('should fire onGenerationStopped even without active request', async () => {
       const events: void[] = [];
       orchestrator.onGenerationStopped(() => events.push(undefined));
 
-      orchestrator.stopGeneration();
+      await orchestrator.stopGeneration();
 
       expect(events).toHaveLength(1);
+    });
+
+    it('defers generationStopped until the in-flight turn has torn down (ADR 0008)', async () => {
+      const order: string[] = [];
+      orchestrator.onGenerationStopped(() => order.push('generationStopped'));
+
+      // Simulate an in-flight turn: a pending teardown deferred + an active
+      // controller, exactly as handleMessage sets up at turn start.
+      const deferred = (orchestrator as any).makeDeferred();
+      (orchestrator as any)._teardownDeferred = deferred;
+      (orchestrator as any).abortController = new AbortController();
+
+      const stop = orchestrator.stopGeneration(); // aborts, then awaits teardown
+      await Promise.resolve();
+      // Teardown is still pending → generationStopped must NOT have fired yet.
+      expect(order).not.toContain('generationStopped');
+
+      order.push('teardown');
+      deferred.resolve();                          // what handleMessage's finally does
+      await stop;
+
+      // generationStopped fires only AFTER teardown — the serialization guarantee.
+      expect(order).toEqual(['teardown', 'generationStopped']);
     });
   });
 
