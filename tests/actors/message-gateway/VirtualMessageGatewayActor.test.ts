@@ -105,7 +105,7 @@ function createMockVirtualListActor() {
 }
 
 function createMockInputAreaActor() {
-  return { destroy: vi.fn() };
+  return { appendText: vi.fn(), destroy: vi.fn() };
 }
 
 function createMockToolbarActor() {
@@ -823,29 +823,29 @@ describe('VirtualMessageGatewayActor', () => {
       expect((mockActors.virtualList as any).addDrawingSegment).not.toHaveBeenCalled();
     });
 
-    it('handles asciiDrawingReceived by creating user turn and sending message', () => {
+    it('stages asciiDrawingReceived in the composer instead of auto-sending it', () => {
       dispatchMessage({
         type: 'asciiDrawingReceived',
         text: '┌──┐\n│Hi│\n└──┘',
         timestamp: 1700000000000
       });
 
-      // Should create a visible user turn with the ASCII art
-      expect(mockActors.virtualList.addTurn).toHaveBeenCalledWith(
-        expect.stringContaining('turn-ascii-'),
-        'user',
-        expect.objectContaining({ timestamp: expect.any(Number) })
-      );
-      expect(mockActors.virtualList.addTextSegment).toHaveBeenCalledWith(
-        expect.stringContaining('turn-ascii-'),
-        '```\n┌──┐\n│Hi│\n└──┘\n```'
+      // The code-fenced diagram is appended into the input box, focused.
+      expect(mockActors.inputArea.appendText).toHaveBeenCalledWith(
+        '```\n┌──┐\n│Hi│\n└──┘\n```',
+        { focus: true }
       );
 
-      // Should also send to extension for LLM processing
-      expect(mockVSCode.postMessage).toHaveBeenCalledWith({
-        type: 'sendMessage',
-        message: '```\n┌──┐\n│Hi│\n└──┘\n```'
-      });
+      // It is NOT auto-sent and does NOT create its own chat turn — that
+      // happens through the normal send path when the user is ready.
+      expect(mockVSCode.postMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'sendMessage' })
+      );
+      expect(mockActors.virtualList.addTurn).not.toHaveBeenCalledWith(
+        expect.stringContaining('turn-ascii-'),
+        expect.anything(),
+        expect.anything()
+      );
     });
 
     it('ignores asciiDrawingReceived with no text', () => {
@@ -854,12 +854,8 @@ describe('VirtualMessageGatewayActor', () => {
         timestamp: 1700000000000
       });
 
+      expect(mockActors.inputArea.appendText).not.toHaveBeenCalled();
       expect(mockVSCode.postMessage).not.toHaveBeenCalled();
-      expect(mockActors.virtualList.addTurn).not.toHaveBeenCalledWith(
-        expect.stringContaining('turn-ascii-'),
-        expect.anything(),
-        expect.anything()
-      );
     });
 
     it('publishes drawingServerState to manager', () => {

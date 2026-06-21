@@ -71,6 +71,48 @@ describe('InputAreaShadowActor', () => {
       expect(textarea.value).toBe('Programmatic value');
     });
 
+    it('appendText sets the value when the composer is empty', () => {
+      actor.appendText('```\ndiagram\n```');
+
+      const textarea = element.shadowRoot?.querySelector('textarea') as HTMLTextAreaElement;
+      expect(textarea.value).toBe('```\ndiagram\n```');
+      expect(actor.getValue()).toBe('```\ndiagram\n```');
+    });
+
+    it('appendText appends below existing text with a blank-line separator', () => {
+      actor.setValue('explain this:');
+      actor.appendText('```\ndiagram\n```');
+
+      expect(actor.getValue()).toBe('explain this:\n\n```\ndiagram\n```');
+    });
+
+    it('appendText focuses the textarea and puts the cursor at the end', () => {
+      const textarea = element.shadowRoot?.querySelector('textarea') as HTMLTextAreaElement;
+      const focusSpy = vi.spyOn(textarea, 'focus');
+
+      actor.appendText('art');
+
+      expect(focusSpy).toHaveBeenCalled();
+      expect(textarea.selectionStart).toBe('art'.length);
+    });
+
+    it('appendText with { focus: false } stages without focusing', () => {
+      const textarea = element.shadowRoot?.querySelector('textarea') as HTMLTextAreaElement;
+      const focusSpy = vi.spyOn(textarea, 'focus');
+
+      actor.appendText('art', { focus: false });
+
+      expect(focusSpy).not.toHaveBeenCalled();
+      expect(actor.getValue()).toBe('art');
+    });
+
+    it('appendText ignores empty text', () => {
+      actor.setValue('keep me');
+      actor.appendText('');
+
+      expect(actor.getValue()).toBe('keep me');
+    });
+
     it('focuses textarea', () => {
       const textarea = element.shadowRoot?.querySelector('textarea') as HTMLTextAreaElement;
       const focusSpy = vi.spyOn(textarea, 'focus');

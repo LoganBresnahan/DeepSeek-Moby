@@ -435,6 +435,25 @@ export class InputAreaShadowActor extends ShadowActor {
     this.query<HTMLTextAreaElement>('textarea')?.focus();
   }
 
+  /**
+   * Append text to the composer (blank-line separated if it isn't empty),
+   * then place the cursor at the end. Used to stage external content — e.g. an
+   * ASCII diagram from the drawing server — as a draft for the user to review
+   * and edit, instead of auto-sending it. Pass `{ focus: false }` to stage
+   * without stealing focus.
+   */
+  appendText(text: string, opts?: { focus?: boolean }): void {
+    if (!text) return;
+    const existing = this._value;
+    const next = existing.trim().length > 0 ? `${existing}\n\n${text}` : text;
+    this.setValue(next);
+    if (opts?.focus !== false) {
+      const textarea = this.query<HTMLTextAreaElement>('textarea');
+      textarea?.focus();
+      textarea?.setSelectionRange(next.length, next.length);
+    }
+  }
+
   getState(): InputAreaState {
     return {
       value: this._value,

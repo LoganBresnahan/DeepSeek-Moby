@@ -1358,21 +1358,19 @@ export class VirtualMessageGatewayActor extends EventStateActor {
   }
 
   private handleAsciiDrawingReceived(msg: { type: string; [key: string]: unknown }): void {
-    const { virtualList } = this._actors;
+    const { inputArea } = this._actors;
     const text = msg.text as string;
     if (!text) return;
 
     const codeFenced = '```\n' + text + '\n```';
 
-    // Create a visible user turn showing the ASCII art in the chat stream
-    const turnId = `turn-ascii-${Date.now()}`;
-    virtualList.addTurn(turnId, 'user', { timestamp: Date.now() });
-    virtualList.addTextSegment(turnId, codeFenced);
+    // Stage the diagram in the composer for the user to review/edit (and add a
+    // prompt around) before sending — instead of auto-sending it as its own
+    // turn. Appends below anything already typed; the normal send path then
+    // creates the turn and ships it when the user is ready.
+    inputArea.appendText(codeFenced, { focus: true });
 
-    // Send to extension as a regular user message (stored in history, sent to LLM)
-    this._vscode.postMessage({ type: 'sendMessage', message: codeFenced });
-
-    log.info(`ASCII diagram received, added to turn ${turnId}`);
+    log.info('ASCII diagram staged in composer (not auto-sent)');
   }
 
   // ============================================

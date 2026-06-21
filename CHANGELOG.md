@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### ASCII diagrams land in the composer instead of auto-sending; drawing page hidden
+
+- **A diagram from the phone now stages in the input box for review.** Previously an ASCII diagram sent from the drawing-pad phone page was code-fenced and **auto-sent** as its own turn the instant it arrived. It now **appends into the composer** (below anything already typed, blank-line separated, focused) so you can wrap a prompt around it and send when ready. Adds `InputAreaShadowActor.appendText()`; the ASCII handler stages instead of posting `sendMessage`. ([media/actors/input-area/InputAreaShadowActor.ts](media/actors/input-area/InputAreaShadowActor.ts), [media/actors/message-gateway/VirtualMessageGatewayActor.ts](media/actors/message-gateway/VirtualMessageGatewayActor.ts))
+- **The color drawing page is hidden until image support exists.** The drawing pad renders an image in chat but it is never sent to the model (no multimodal support yet) — a dead end. The "Draw Mode" button is removed from the ASCII editor and the `/draw` route redirects to it, both gated behind a single `IMAGE_MODE_ENABLED` flag so the page (`DRAWING_HTML`) is retained and re-enabling is a one-line flip. ([src/providers/drawingServer.ts](src/providers/drawingServer.ts))
+
 ### Active-plan recency pinning — the current step stays next to the live action (ADR 0009)
 
 Closes the `914pm` plan-drift: with an active plan in `.moby-plans/`, the model followed it for the first few iterations of a long agentic turn, then began improvising — skipping a step, re-doing a completed one, and declaring "done" with checklist items untouched. The plan was in context the *whole time*; the failure was **salience, not absence**. The active plan was injected only into the system prompt (primacy), where it stays frozen at the head while 15+ iterations of reasoning and tool output pile between it and the model's current decision — classic "lost in the middle".
