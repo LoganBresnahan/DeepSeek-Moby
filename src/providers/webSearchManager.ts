@@ -24,6 +24,43 @@ export interface SearchProgress {
   total: number;
 }
 
+/**
+ * Tiny closed-class stopword set (ADR 0010). Deliberately NOT a content-word
+ * stemmer — only function words that don't change a query's target. Lets
+ * normalizeQueryKey collapse trivial rephrasings ("what is the X" ≈ "X").
+ */
+const QUERY_STOPWORDS = new Set([
+  'the', 'a', 'an', 'of', 'for', 'in', 'on', 'to', 'is', 'are', 'was', 'were',
+  'what', 'how', 'when', 'where', 'who', 'why', 'which', 'and', 'or', 'do', 'does'
+]);
+
+/**
+ * Normalize a search query into a cache/ledger key (ADR 0010, Layer 1a).
+ *
+ * Conservative on purpose: a wrong normalization must degrade to a cache MISS
+ * (re-fetch, harmless), never to a wrong-answer cache HIT. We lowercase, turn
+ * punctuation/symbols into spaces (so "salah/worldcup2026" === "salah
+ * worldcup2026"), collapse whitespace, and strip a tiny stopword set.
+ *
+ * We deliberately DO NOT token-sort. Word order can be semantically
+ * load-bearing ("dog bites man" !== "man bites dog"), and the dominant trace
+ * pathology (filler-word and punctuation rephrasings of the SAME target) is
+ * already collapsed without sorting. This diverges intentionally from the
+ * ADR's illustrative snippet, whose `.sort()` would fail the ADR's own
+ * most-important negative test (order-distinct queries must not collide).
+ */
+export function normalizeQueryKey(query: string): string {
+  const normalized = query
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')   // punctuation/symbols → space
+    .split(/\s+/)
+    .filter(t => t && !QUERY_STOPWORDS.has(t))
+    .join(' ');
+  // If stripping left nothing (a degenerate all-stopword query), fall back to
+  // the trimmed raw query so distinct degenerate queries don't collide.
+  return normalized || query.toLowerCase().trim();
+}
+
 export class WebSearchManager {
   // ── Events ──
 
@@ -53,10 +90,17 @@ export class WebSearchManager {
     cacheDuration: 15,
     maxResultsPerSearch: 5
   };
-  private cache = new Map<string, { results: string; timestamp: number }>();
+  private cache = new Map<string, { results: string; timestamp: number; routedDigest?: boolean; resultCount?: number }>();
   /** Most recent user prompt — used as task context for subagent digestion.
    *  The orchestrator updates this at the top of each turn. Empty until set. */
   private recentUserPrompt = '';
+  /** Per-turn record of web searches the model issued this turn (ADR 0010,
+   *  Layer 2). Keyed by NORMALIZED query so trivial rephrasings collapse to a
+   *  single entry; `query` keeps the original text for display. Reset at the
+   *  turn boundary in setRecentUserPrompt(). The orchestrator appends
+   *  renderSearchLedger() to the web_search tool result so the model sees what
+   *  it has already searched and declines redundant calls. */
+  private searchLedger = new Map<string, { query: string; note: string }>();
 
   constructor(
     private readonly registry: WebSearchProviderRegistry,
@@ -67,6 +111,42 @@ export class WebSearchManager {
    *  the orchestrator at the start of each turn. */
   setRecentUserPrompt(prompt: string): void {
     this.recentUserPrompt = prompt;
+    // ADR 0010 Layer 2: the search ledger is per-turn. The orchestrator calls
+    // this once at the top of each turn (next to fileContextManager
+    // .clearTurnTracking()), so it is the natural reset boundary.
+    this.searchLedger.clear();
+  }
+
+  /** Record a search into the per-turn ledger (ADR 0010). Idempotent on the
+   *  normalized key: a near-duplicate that maps to an existing entry does not
+   *  overwrite it — the first real outcome for that target wins this turn. */
+  private recordSearch(normKey: string, query: string, note: string): void {
+    if (!this.searchLedger.has(normKey)) {
+      this.searchLedger.set(normKey, { query, note });
+    }
+  }
+
+  /** One-line ledger outcome for a result count. A zero-result note doubles as
+   *  a dead-end signal so the model stops re-querying a target with nothing. */
+  private searchOutcomeNote(resultCount: number): string {
+    return resultCount > 0
+      ? `${resultCount} result${resultCount === 1 ? '' : 's'}`
+      : '0 results (nothing found; try a different source)';
+  }
+
+  /** Render the per-turn search ledger for injection into the model's context
+   *  (ADR 0010, Layer 2). Returns '' when no searches have run this turn. The
+   *  orchestrator appends this to the web_search tool result — the system
+   *  prompt is built once per turn and so cannot carry the running ledger. */
+  renderSearchLedger(): string {
+    if (this.searchLedger.size === 0) return '';
+    const MAX = 20;
+    const entries = [...this.searchLedger.values()];
+    const lines = entries.slice(0, MAX).map(e => `  • "${e.query}" → ${e.note}`);
+    if (entries.length > MAX) {
+      lines.push(`  • …and ${entries.length - MAX} more`);
+    }
+    return `\n\nSEARCHES THIS TURN (do not repeat — reuse these results):\n${lines.join('\n')}\n`;
   }
 
   /** Read the user-tunable digest output cap from VS Code settings. The
@@ -293,8 +373,9 @@ export class WebSearchManager {
 
     const callCount = this.computeApiCallCount();
 
-    // Cache key incorporates settings so changed settings don't serve stale results
-    const cacheKey = `${message.toLowerCase().trim()}|credits=${this.settings.creditsPerPrompt}|maxResults=${this.settings.maxResultsPerSearch}|depth=${this.settings.searchDepth}`;
+    // Cache key incorporates settings so changed settings don't serve stale
+    // results. ADR 0010: normalize the query so trivial rephrasings collapse.
+    const cacheKey = `${normalizeQueryKey(message)}|credits=${this.settings.creditsPerPrompt}|maxResults=${this.settings.maxResultsPerSearch}|depth=${this.settings.searchDepth}`;
     const cached = this.cache.get(cacheKey);
 
     // Check cache with TTL (cacheDuration is in minutes)
@@ -379,10 +460,14 @@ export class WebSearchManager {
         logger.info(`[WebSearch] Manual-mode results digested by subagent`);
       }
 
-      // Cache the results
+      // Cache the results (incl. whether a digest was routed and the result
+      // count, so a near-duplicate hit can skip the subagent and refresh the
+      // per-turn ledger without re-fetching — ADR 0010 Layer 1b).
       this.cache.set(cacheKey, {
         results: webSearchContext,
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        routedDigest,
+        resultCount: totalResults
       });
 
       this._onSearchComplete.fire({ context: webSearchContext });
@@ -483,17 +568,26 @@ export class WebSearchManager {
       return 'Error: Tavily API key not configured. Web search is unavailable.';
     }
 
-    // Cache key with 'tool|' prefix to distinguish from manual searches
-    const cacheKey = `tool|${query.toLowerCase().trim()}|depth=${this.settings.searchDepth}|maxResults=${this.settings.maxResultsPerSearch}`;
+    // Cache key with 'tool|' prefix to distinguish from manual searches.
+    // ADR 0010 Layer 1a: normalize the query so trivial rephrasings of the
+    // same target collapse onto one key instead of sailing past as misses.
+    const normKey = normalizeQueryKey(query);
+    const cacheKey = `tool|${normKey}|depth=${this.settings.searchDepth}|maxResults=${this.settings.maxResultsPerSearch}`;
     const cached = this.cache.get(cacheKey);
 
     if (cached) {
       const ttlMs = this.settings.cacheDuration * 60 * 1000;
       if (Date.now() - cached.timestamp < ttlMs) {
-        logger.info(`[WebSearch] Tool-triggered cache hit for: "${query.substring(0, 50)}"`);
+        // ADR 0010 Layer 1b: a hit returns the stored (post-digest) string and
+        // reaches neither the provider nor the subagent router.
+        logger.info(`[WebSearch] Tool-triggered cache hit for: "${query.substring(0, 50)}" (served cached digest; skipped provider + subagent)`);
         tracer.trace('state.publish', 'webSearch.toolSearch.cacheHit', {
-          data: { query: query.substring(0, 80) }
+          data: { query: query.substring(0, 80), routedDigest: cached.routedDigest === true }
         });
+        // Ledger: reflect the search this turn even when the hit comes from a
+        // cross-turn cache entry (the ledger resets per turn; the cache has a
+        // 15-min TTL), so the model still sees it already asked.
+        this.recordSearch(normKey, query, this.searchOutcomeNote(cached.resultCount ?? 0));
         return cached.results;
       }
       this.cache.delete(cacheKey);
@@ -531,8 +625,11 @@ export class WebSearchManager {
 
       this.cache.set(cacheKey, {
         results: formatted,
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        routedDigest,
+        resultCount: response.results.length
       });
+      this.recordSearch(normKey, query, this.searchOutcomeNote(response.results.length));
 
       logger.info(`[WebSearch] Tool-triggered search complete: ${response.results.length} results${routedDigest ? ' (digested by subagent)' : ''}`);
       tracer.trace('state.publish', 'webSearch.toolSearch.complete', {
@@ -544,6 +641,8 @@ export class WebSearchManager {
       tracer.trace('state.publish', 'webSearch.toolSearch.error', {
         data: { query: query.substring(0, 80), error: error.message }
       });
+      // Ledger the error too — a dead end the model should not keep retrying.
+      this.recordSearch(normKey, query, `error: ${error.message}`);
       return `Error: Web search failed — ${error.message}`;
     }
   }

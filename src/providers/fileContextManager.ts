@@ -10,6 +10,7 @@ import * as vscode from 'vscode';
 import { logger } from '../utils/logger';
 import { tracer } from '../tracing';
 import { OpenFilesEvent, FileSearchResultsEvent, FileContentEvent } from './types';
+import { resolveWorkspacePath } from '../utils/workspacePaths';
 
 export class FileContextManager {
   // ── Events ──
@@ -134,7 +135,11 @@ export class FileContextManager {
         return;
       }
 
-      const absolutePath = vscode.Uri.joinPath(workspaceFolder.uri, filePath);
+      // ADR 0012: resolve against the workspace root AND any nested project
+      // roots, so attaching a path that's relative to a subdirectory project
+      // (e.g. `Program.cs` when the `.csproj` lives in `app/`) still finds it.
+      const absolutePath = (await resolveWorkspacePath(filePath))
+        ?? vscode.Uri.joinPath(workspaceFolder.uri, filePath);
       const content = await vscode.workspace.fs.readFile(absolutePath);
       const textContent = Buffer.from(content).toString('utf8');
 

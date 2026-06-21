@@ -570,6 +570,11 @@
           "enum": ["commit", "halt"],
           "default": "commit",
           "markdownDescription": "**Edit safety — inconclusive outcome**: When validation can't run (no check command discovered, timed out, or not approved): `commit` applies the edit with a note (Auto's default expectation); `halt` stops the turn instead. There is deliberately no 'ask' — Auto never becomes Ask."
+        },
+        "moby.editSafety.verifyOnStop": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "**Edit safety — verify on stop**: At turn completion (Auto mode), don't accept a model-declared \"done\" when the last build verdict was a regression or when a file the turn just wrote reads back empty. Re-consults the ADR 0006 build verdict and adds a language-agnostic artifact-presence check, giving the model one bounded repair pass. Bounded by the per-file repair budget — no new loop. (ADR 0011)"
         }
       }
     },

@@ -413,6 +413,182 @@ describe('PlanManager', () => {
     });
   });
 
+  // ── getActivePlansContext — maxChars cap (ADR 0009 item 1) ──
+
+  describe('getActivePlansContext maxChars cap', () => {
+    async function activate(name: string, body: string) {
+      fsStore.set(`/workspace/.moby-plans/${name}`, body);
+      fsStore.set('/workspace/.moby-plans/.plans.json', JSON.stringify({ activePlans: [name] }));
+      await manager.refresh();
+    }
+
+    it('truncates an over-long plan body and appends a pointer marker', async () => {
+      const longBody = '# Big Plan\n' + 'x'.repeat(5000);
+      await activate('big.md', longBody);
+
+      const context = await manager.getActivePlansContext({ maxChars: 1500 });
+
+      expect(context).toContain('… (truncated; full plan in .moby-plans/big.md)');
+      // The full 5000-char body must not survive verbatim.
+      expect(context).not.toContain('x'.repeat(5000));
+      expect(context.length).toBeLessThan(longBody.length);
+    });
+
+    it('applies the default cap when no maxChars is passed', async () => {
+      await activate('big.md', '# Big Plan\n' + 'x'.repeat(5000));
+
+      const context = await manager.getActivePlansContext();
+
+      expect(context).toContain('… (truncated; full plan in .moby-plans/big.md)');
+    });
+
+    it('leaves a short plan unchanged (no marker)', async () => {
+      await activate('small.md', '# Small Plan\n\n## Steps\n- [ ] do the thing');
+
+      const context = await manager.getActivePlansContext({ maxChars: 1500 });
+
+      expect(context).toContain('do the thing');
+      expect(context).not.toContain('truncated');
+    });
+
+    it('maxChars: 0 disables the cap (legacy behaviour)', async () => {
+      const longBody = '# Big Plan\n' + 'y'.repeat(3000);
+      await activate('big.md', longBody);
+
+      const context = await manager.getActivePlansContext({ maxChars: 0 });
+
+      expect(context).toContain('y'.repeat(3000));
+      expect(context).not.toContain('truncated');
+    });
+  });
+
+  // ── getActivePlanReminder — terse recency steering copy (ADR 0009 item 2) ──
+
+  describe('getActivePlanReminder', () => {
+    async function activate(name: string, body: string) {
+      fsStore.set(`/workspace/.moby-plans/${name}`, body);
+      fsStore.set('/workspace/.moby-plans/.plans.json', JSON.stringify({ activePlans: [name] }));
+      await manager.refresh();
+    }
+
+    it('derives step N of M from a [ ]/[x] checklist and lists only remaining', async () => {
+      await activate('deck.md', [
+        '# Build Deck',
+        '',
+        '## Steps',
+        '- [x] Scaffold',
+        '- [x] Theme',
+        '- [ ] Wire Slide3 feedback-loop diagram',
+        '- [ ] Lifecycle slide',
+        '- [ ] Close slide',
+        '- [ ] Polish',
+        '- [ ] Rehearse',
+      ].join('\n'));
+
+      const reminder = await manager.getActivePlanReminder();
+
+      expect(reminder).toContain('--- ACTIVE PLAN (reminder) ---');
+      expect(reminder).toContain('deck.md — step 3 of 7');
+      // Remaining lists the unchecked items with their positions...
+      expect(reminder).toContain('[ ] 3. Wire Slide3 feedback-loop diagram');
+      expect(reminder).toContain('[ ] 4. Lifecycle slide');
+      // ...and NOT the completed ones.
+      expect(reminder).not.toContain('Scaffold');
+      expect(reminder).not.toContain('Theme');
+    });
+
+    it('parses a numbered ## Steps checklist to the same pointer', async () => {
+      await activate('deck.md', [
+        '## Steps',
+        '1. [x] Scaffold',
+        '2. [x] Theme',
+        '3. [ ] Wire diagram',
+        '4. [ ] Lifecycle',
+        '5. [ ] Close',
+        '6. [ ] Polish',
+        '7. [ ] Rehearse',
+      ].join('\n'));
+
+      const reminder = await manager.getActivePlanReminder();
+
+      expect(reminder).toContain('deck.md — step 3 of 7');
+      expect(reminder).toContain('[ ] 3. Wire diagram');
+    });
+
+    it('degrades a plain numbered list (no checkboxes) to step 1 of M, all remaining', async () => {
+      await activate('deck.md', [
+        '## Steps',
+        '1. Scaffold',
+        '2. Theme',
+        '3. Wire diagram',
+      ].join('\n'));
+
+      const reminder = await manager.getActivePlanReminder();
+
+      expect(reminder).toContain('deck.md — step 1 of 3');
+      expect(reminder).toContain('[ ] 1. Scaffold');
+      expect(reminder).toContain('[ ] 3. Wire diagram');
+    });
+
+    it('names a free-form plan but emits no step pointer, and never throws', async () => {
+      await activate('notes.md', '# Notes\n\nJust some prose about the goal. No checklist here.');
+
+      const reminder = await manager.getActivePlanReminder();
+
+      expect(reminder).toContain('active plan: notes.md');
+      expect(reminder).not.toContain('step ');
+    });
+
+    it('treats the empty new-plan template as free-form (no bogus pointer)', async () => {
+      // The createPlan template emits `## Steps\n\n1. ` with an empty item.
+      await activate('fresh.md', '# fresh\n\n## Goals\n\n- \n\n## Steps\n\n1. \n');
+
+      const reminder = await manager.getActivePlanReminder();
+
+      expect(reminder).toContain('active plan: fresh.md');
+      expect(reminder).not.toContain('step ');
+    });
+
+    it('reports all-complete when every box is checked', async () => {
+      await activate('deck.md', '## Steps\n- [x] A\n- [x] B');
+
+      const reminder = await manager.getActivePlanReminder();
+
+      expect(reminder).toContain('deck.md — all 2 steps checked');
+      expect(reminder).not.toContain('Remaining:');
+    });
+
+    it('caps the remaining list and collapses the overflow to a count', async () => {
+      const items = Array.from({ length: 9 }, (_, i) => `- [ ] item ${i + 1}`);
+      await activate('deck.md', '## Steps\n' + items.join('\n'));
+
+      const reminder = await manager.getActivePlanReminder();
+
+      expect(reminder).toContain('deck.md — step 1 of 9');
+      expect(reminder).toContain('[ ] 6. item 6');
+      expect(reminder).not.toContain('[ ] 7. item 7'); // capped at 6 shown
+      expect(reminder).toContain('… (+3 more)');
+    });
+
+    it('returns empty string when there is no active plan', async () => {
+      fsStore.set('/workspace/.moby-plans/inactive.md', '## Steps\n- [ ] x');
+      fsStore.set('/workspace/.moby-plans/.plans.json', JSON.stringify({ activePlans: [] }));
+      await manager.refresh();
+
+      expect(await manager.getActivePlanReminder()).toBe('');
+    });
+
+    it('returns empty string when there is no workspace', async () => {
+      const vscodeModule = await import('vscode');
+      const original = (vscodeModule.workspace as any).workspaceFolders;
+      (vscodeModule.workspace as any).workspaceFolders = undefined;
+
+      expect(await manager.getActivePlanReminder()).toBe('');
+
+      (vscodeModule.workspace as any).workspaceFolders = original;
+    });
+  });
+
   // ── activePlanCount ──
 
   describe('activePlanCount', () => {

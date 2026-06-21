@@ -20,7 +20,7 @@ vi.mock('vscode', async (importOriginal) => {
   return { ...original, EventEmitter: WorkingEventEmitter };
 });
 
-import { WebSearchManager } from '../../../src/providers/webSearchManager';
+import { WebSearchManager, normalizeQueryKey } from '../../../src/providers/webSearchManager';
 import type { SearchProgress } from '../../../src/providers/webSearchManager';
 
 // ── TavilyClient mock ──
@@ -835,6 +835,139 @@ describe('WebSearchManager', () => {
       const result = await m.searchForMessage('q');
 
       expect(result).toContain('Web search results for: "q"');
+    });
+  });
+
+  // ── ADR 0010 Layer 1a — query normalization (pure function) ──
+
+  describe('normalizeQueryKey (ADR 0010 Layer 1a)', () => {
+    it('collapses filler words and punctuation onto one key', () => {
+      expect(normalizeQueryKey('what is the worldcup2026 schedule'))
+        .toBe(normalizeQueryKey('worldcup2026 schedule'));
+      expect(normalizeQueryKey('salah/worldcup2026'))
+        .toBe(normalizeQueryKey('salah worldcup2026'));
+    });
+
+    it('preserves word order — does NOT token-sort (the key negative)', () => {
+      // Word order can be semantically load-bearing; a token-sort would wrongly
+      // merge these. This is the ADR's most important guard.
+      expect(normalizeQueryKey('dog bites man'))
+        .not.toBe(normalizeQueryKey('man bites dog'));
+    });
+
+    it('falls back to the raw query when normalization empties it', () => {
+      // Degenerate all-stopword queries must not all collapse onto one '' key.
+      expect(normalizeQueryKey('the a an')).not.toBe(normalizeQueryKey('is are was'));
+    });
+  });
+
+  // ── ADR 0010 Layer 1 — normalized cache key + digest reuse ──
+
+  describe('searchByQuery — normalized cache key + digest reuse (ADR 0010 Layer 1)', () => {
+    it('treats a trivial rephrasing as a cache hit (true positive)', async () => {
+      await manager.searchByQuery('worldcup2026 schedule');
+      await manager.searchByQuery('what is the worldcup2026 schedule');
+      expect(mockTavily.search).toHaveBeenCalledTimes(1);
+    });
+
+    it('treats a punctuation-only difference as a cache hit', async () => {
+      await manager.searchByQuery('salah worldcup2026');
+      await manager.searchByQuery('salah/worldcup2026');
+      expect(mockTavily.search).toHaveBeenCalledTimes(1);
+    });
+
+    it('does NOT collide order-distinct queries sharing a token bag (true negative)', async () => {
+      await manager.searchByQuery('dog bites man');
+      await manager.searchByQuery('man bites dog');
+      // Distinct word order → distinct keys → two real fetches.
+      expect(mockTavily.search).toHaveBeenCalledTimes(2);
+    });
+
+    it('a normalized near-duplicate hit skips BOTH the provider and the subagent', async () => {
+      const router = { route: vi.fn().mockResolvedValue({ routed: true, digest: 'DIGEST' }) };
+      const m = new WebSearchManager(createMockRegistry(mockTavily) as any, router as any);
+
+      await m.searchByQuery('worldcup2026 schedule');
+      await m.searchByQuery('what is the worldcup2026 schedule'); // normalized hit
+
+      expect(mockTavily.search).toHaveBeenCalledTimes(1); // provider once
+      expect(router.route).toHaveBeenCalledTimes(1);      // subagent once
+    });
+
+    it('still partitions the cache by settings even for an identical normalized query', async () => {
+      await manager.searchByQuery('worldcup2026 schedule');
+      manager.updateSettings({ maxResultsPerSearch: 10 });
+      await manager.searchByQuery('what is the worldcup2026 schedule');
+      expect(mockTavily.search).toHaveBeenCalledTimes(2); // settings change re-fetches
+    });
+
+    it('re-fetches a near-duplicate after clearCache()', async () => {
+      await manager.searchByQuery('worldcup2026 schedule');
+      manager.clearCache();
+      await manager.searchByQuery('what is the worldcup2026 schedule');
+      expect(mockTavily.search).toHaveBeenCalledTimes(2);
+    });
+
+    it('expired entries re-fetch even for a normalized near-duplicate', async () => {
+      manager.updateSettings({ cacheDuration: 0 }); // always expired
+      await manager.searchByQuery('worldcup2026 schedule');
+      await manager.searchByQuery('what is the worldcup2026 schedule');
+      expect(mockTavily.search).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  // ── ADR 0010 Layer 2 — per-turn search ledger ──
+
+  describe('per-turn search ledger (ADR 0010 Layer 2)', () => {
+    it('lists each distinct search with its result count', async () => {
+      await manager.searchByQuery('typescript 5.7 release');
+      await manager.searchByQuery('vitest config options');
+      const ledger = manager.renderSearchLedger();
+      expect(ledger).toContain('SEARCHES THIS TURN');
+      expect(ledger).toContain('typescript 5.7 release');
+      expect(ledger).toContain('vitest config options');
+      expect(ledger).toContain('2 results'); // mock returns 2 results
+    });
+
+    it('collapses near-duplicates onto a single ledger entry', async () => {
+      await manager.searchByQuery('worldcup2026 schedule');
+      await manager.searchByQuery('what is the worldcup2026 schedule');
+      const ledger = manager.renderSearchLedger();
+      expect((ledger.match(/•/g) ?? [])).toHaveLength(1);
+    });
+
+    it('flags a zero-result search as a dead end', async () => {
+      mockTavily.search = vi.fn(async (query: string) => ({
+        results: [], answer: undefined, query, responseTime: 10
+      })) as any;
+      await manager.searchByQuery('kickoffapi free tier');
+      const ledger = manager.renderSearchLedger();
+      expect(ledger).toContain('0 results');
+      expect(ledger).toContain('nothing found');
+    });
+
+    it('records an errored search as a dead end (does not silently drop it)', async () => {
+      mockTavily.search = vi.fn(async () => { throw new Error('Rate limit exceeded'); }) as any;
+      await manager.searchByQuery('worldcup2026 standings');
+      const ledger = manager.renderSearchLedger();
+      expect(ledger).toContain('error: Rate limit exceeded');
+    });
+
+    it('is empty before any search and after a turn reset (setRecentUserPrompt)', async () => {
+      expect(manager.renderSearchLedger()).toBe('');
+      await manager.searchByQuery('typescript 5.7 release');
+      expect(manager.renderSearchLedger()).not.toBe('');
+      manager.setRecentUserPrompt('next turn message'); // top-of-turn boundary
+      expect(manager.renderSearchLedger()).toBe('');
+    });
+
+    it('still ledgers a search served from a cross-turn cache hit', async () => {
+      await manager.searchByQuery('typescript 5.7 release'); // populates cache + ledger
+      manager.setRecentUserPrompt('new turn');               // resets ledger, NOT cache
+      await manager.searchByQuery('typescript 5.7 release'); // cache hit this turn
+      const ledger = manager.renderSearchLedger();
+      expect(ledger).toContain('typescript 5.7 release');    // ledgered again this turn
+      expect(mockTavily.search).toHaveBeenCalledTimes(1);    // but no re-fetch
     });
   });
 

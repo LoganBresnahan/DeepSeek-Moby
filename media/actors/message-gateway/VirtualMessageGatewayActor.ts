@@ -73,6 +73,10 @@ export class VirtualMessageGatewayActor extends EventStateActor {
 
   /** Current turn ID during streaming */
   private _currentTurnId: string | null = null;
+  /** ADR 0008: the request id of the turn currently being rendered. Set on
+   *  startResponse; used to ignore lifecycle events from superseded requests
+   *  (a late end/shell from an interrupted request must not touch the live turn). */
+  private _currentRequestId: string | null = null;
 
   /** Last streaming turn ID - used for late-arriving messages like diffListChanged */
   private _lastStreamingTurnId: string | null = null;
@@ -879,6 +883,8 @@ export class VirtualMessageGatewayActor extends EventStateActor {
 
     const turnId = `turn-${++this._messageCounter}`;
     this._currentTurnId = turnId;
+    // ADR 0008: bind this turn to its request so superseded events can be filtered.
+    this._currentRequestId = (msg.requestId as string | undefined) ?? null;
 
     // Create fresh event log for this turn
     this._turnLogs.delete(turnId);
@@ -966,6 +972,15 @@ export class VirtualMessageGatewayActor extends EventStateActor {
   private handleEndResponse(msg: { type: string; [key: string]: unknown }): void {
     const { streaming, virtualList } = this._actors;
 
+    // ADR 0008: a late end from a SUPERSEDED request must not clear the live
+    // turn. Ignore it by identity. (When requestId is absent — a version-skewed
+    // extension — this falls through to today's unconditional behavior.)
+    const reqId = msg.requestId as string | undefined;
+    if (reqId && this._currentRequestId && reqId !== this._currentRequestId) {
+      log.debug(`endResponse from superseded request ${reqId} — ignored (current ${this._currentRequestId})`);
+      return;
+    }
+
     log.debug(`endResponse: ending stream`);
 
     // ADR 0003 Phase 3: the webview no longer ships its consolidated event log
@@ -1005,7 +1020,16 @@ export class VirtualMessageGatewayActor extends EventStateActor {
     const { virtualList } = this._actors;
     const commands = msg.commands as Array<{ command: string; description?: string }>;
 
+    // ADR 0008: ignore a superseded request's shell event by identity — whether
+    // or not a turn is open — so it can never touch the live turn.
+    const reqId = msg.requestId as string | undefined;
+    if (reqId && this._currentRequestId && reqId !== this._currentRequestId) {
+      log.debug(`shellExecuting from superseded request ${reqId} — ignored`);
+      return;
+    }
     if (!this._currentTurnId) {
+      // A no-turn event from the CURRENT (or an untagged) request is the genuine
+      // bug this warning was always meant to catch.
       log.warn(`shellExecuting: NO CURRENT TURN ID - dropping message!`);
       return;
     }
@@ -1334,21 +1358,19 @@ export class VirtualMessageGatewayActor extends EventStateActor {
   }
 
   private handleAsciiDrawingReceived(msg: { type: string; [key: string]: unknown }): void {
-    const { virtualList } = this._actors;
+    const { inputArea } = this._actors;
     const text = msg.text as string;
     if (!text) return;
 
     const codeFenced = '```\n' + text + '\n```';
 
-    // Create a visible user turn showing the ASCII art in the chat stream
-    const turnId = `turn-ascii-${Date.now()}`;
-    virtualList.addTurn(turnId, 'user', { timestamp: Date.now() });
-    virtualList.addTextSegment(turnId, codeFenced);
+    // Stage the diagram in the composer for the user to review/edit (and add a
+    // prompt around) before sending — instead of auto-sending it as its own
+    // turn. Appends below anything already typed; the normal send path then
+    // creates the turn and ships it when the user is ready.
+    inputArea.appendText(codeFenced, { focus: true });
 
-    // Send to extension as a regular user message (stored in history, sent to LLM)
-    this._vscode.postMessage({ type: 'sendMessage', message: codeFenced });
-
-    log.info(`ASCII diagram received, added to turn ${turnId}`);
+    log.info('ASCII diagram staged in composer (not auto-sent)');
   }
 
   // ============================================

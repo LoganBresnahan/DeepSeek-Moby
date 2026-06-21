@@ -41,6 +41,16 @@ const MAX_BODY_SIZE = 5 * 1024 * 1024;
 const DEFAULT_PORT = 0;
 
 /**
+ * Image/drawing mode is hidden until multimodal image support lands. The phone
+ * can draw a picture and it renders in chat, but it is never sent to the model
+ * — a dead end. While this is `false`, the "Draw Mode" button is omitted from
+ * the ASCII editor and the `/draw` route redirects there instead of serving the
+ * drawing page. `DRAWING_HTML` / `serveDrawingPage` are kept intact; flip this
+ * to `true` (and wire image send) to bring it back.
+ */
+const IMAGE_MODE_ENABLED = false;
+
+/**
  * HTML page served to the phone browser.
  * Provides a full-screen canvas with touch drawing and a send button.
  */
@@ -260,7 +270,7 @@ const ASCII_HTML = `<!DOCTYPE html>
     <button onclick="undo()" title="Undo">&#8617;</button>
     <button onclick="redo()" title="Redo">&#8618;</button>
     <button onclick="clearGrid()" title="Clear All">&#10006;</button>
-    <button onclick="location.href='/draw'" title="Draw Mode">&#9998;</button>
+    ${IMAGE_MODE_ENABLED ? `<button onclick="location.href='/draw'" title="Draw Mode">&#9998;</button>` : ''}
     <button class="btn-send" id="sendBtn" onclick="send()" title="Send">&#9654;</button>
   </div>
   <div class="grid-wrap" id="gridWrap">
@@ -1054,7 +1064,14 @@ export class DrawingServer {
     }
 
     if (req.method === 'GET' && req.url === '/draw') {
-      this.serveDrawingPage(res);
+      if (IMAGE_MODE_ENABLED) {
+        this.serveDrawingPage(res);
+      } else {
+        // Hidden until multimodal image support — send users to the working
+        // ASCII editor instead of a dead-end page whose output is never sent.
+        res.writeHead(302, { Location: '/' });
+        res.end();
+      }
       return;
     }
 

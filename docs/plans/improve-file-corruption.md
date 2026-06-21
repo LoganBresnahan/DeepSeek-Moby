@@ -152,6 +152,16 @@ the trailing partial for the next chunk. Decode bytes through a streaming UTF-8 
    built in [ADR 0006](../architecture/decisions/0006-edit-safety-checkpoint-and-validation.md)
    ([edit-safety.md](../architecture/integration/edit-safety.md)).
 
+   **Extended to the turn boundary ([ADR 0011](../architecture/decisions/0011-verification-gated-turn-completion.md)). ✅ Implemented.**
+   The batch gate above catches "applied but broke the build." It does **not** catch
+   *build-pass ≠ artifact-produced*: in the `914pm` trace `Slide3Demo.razor` was clobbered
+   to an empty `<div>`, which **compiles fine**, so the verdict was `clean` and the turn
+   completed "successfully" (the user had to ask to restore it the next session). ADR 0011
+   re-consults the last batch verdict at the loop's *terminal stop* and adds a
+   language-agnostic **artifact-presence check** — a file the turn just wrote that reads
+   back empty holds the turn open for one bounded repair pass. So "done" now means "built
+   and the deliverables are present + non-empty," not just "the last edit compiled."
+
 3. **Attack the source.** Corruption tracks `deepseek-v4-pro` @ `reasoning_effort=max`.
    Re-run the same task at lower effort / lower temperature, and — if this is a
    local/quantized serve — a higher-precision quant. Localized double-escapes and dropped

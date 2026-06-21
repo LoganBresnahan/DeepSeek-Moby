@@ -105,7 +105,7 @@ function createMockVirtualListActor() {
 }
 
 function createMockInputAreaActor() {
-  return { destroy: vi.fn() };
+  return { appendText: vi.fn(), destroy: vi.fn() };
 }
 
 function createMockToolbarActor() {
@@ -221,6 +221,52 @@ describe('VirtualMessageGatewayActor', () => {
       expect(mockActors.virtualList.endStreamingTurn).toHaveBeenCalled();
       expect(gateway.phase).toBe('idle');
       expect(gateway.currentTurnId).toBe(null);
+    });
+  });
+
+  // ── ADR 0008: requestId scoping ──
+  // Late lifecycle events from a SUPERSEDED request must not touch the live turn.
+  describe('requestId scoping (ADR 0008)', () => {
+    it('ignores a stale endResponse from a superseded request (keeps the live turn)', () => {
+      // req-1 streams, then an interrupt opens req-2's turn…
+      dispatchMessage({ type: 'startResponse', messageId: 'm1', requestId: 'req-1' });
+      dispatchMessage({ type: 'startResponse', messageId: 'm2', requestId: 'req-2' });
+      expect(gateway.currentTurnId).toBe('turn-2');
+
+      // …then req-1's trailing endResponse arrives late. It must be ignored.
+      dispatchMessage({ type: 'endResponse', message: { content: 'A' }, requestId: 'req-1' });
+
+      expect(gateway.currentTurnId).toBe('turn-2');         // live turn survives
+      expect(mockActors.streaming.endStream).not.toHaveBeenCalled();
+      expect(mockActors.virtualList.endStreamingTurn).not.toHaveBeenCalled();
+    });
+
+    it('ends the turn on a matching endResponse (regression guard)', () => {
+      dispatchMessage({ type: 'startResponse', messageId: 'm1', requestId: 'req-1' });
+      dispatchMessage({ type: 'endResponse', message: { content: 'A' }, requestId: 'req-1' });
+
+      expect(gateway.currentTurnId).toBe(null);
+      expect(mockActors.virtualList.endStreamingTurn).toHaveBeenCalled();
+    });
+
+    it('still ends the turn when no requestId is present (version-skew back-compat)', () => {
+      dispatchMessage({ type: 'startResponse', messageId: 'm1' });  // no requestId
+      dispatchMessage({ type: 'endResponse', message: { content: 'A' } });
+
+      expect(gateway.currentTurnId).toBe(null);
+    });
+
+    it('does not route a superseded request\'s shell event to the live turn', () => {
+      dispatchMessage({ type: 'startResponse', messageId: 'm1', requestId: 'req-1' });
+      dispatchMessage({ type: 'startResponse', messageId: 'm2', requestId: 'req-2' });
+
+      // A late shell from the dead req-1 must not render into turn-2.
+      dispatchMessage({ type: 'shellExecuting', commands: [{ command: 'rm -rf x' }], requestId: 'req-1' });
+      expect(mockActors.virtualList.createShellSegment).not.toHaveBeenCalled();
+
+      // …but the current request's shell still renders normally.
+      dispatchMessage({ type: 'shellExecuting', commands: [{ command: 'ls' }], requestId: 'req-2' });
+      expect(mockActors.virtualList.createShellSegment).toHaveBeenCalledWith('turn-2', [{ command: 'ls' }]);
     });
   });
 
@@ -777,29 +823,29 @@ describe('VirtualMessageGatewayActor', () => {
       expect((mockActors.virtualList as any).addDrawingSegment).not.toHaveBeenCalled();
     });
 
-    it('handles asciiDrawingReceived by creating user turn and sending message', () => {
+    it('stages asciiDrawingReceived in the composer instead of auto-sending it', () => {
       dispatchMessage({
         type: 'asciiDrawingReceived',
         text: '┌──┐\n│Hi│\n└──┘',
         timestamp: 1700000000000
       });
 
-      // Should create a visible user turn with the ASCII art
-      expect(mockActors.virtualList.addTurn).toHaveBeenCalledWith(
-        expect.stringContaining('turn-ascii-'),
-        'user',
-        expect.objectContaining({ timestamp: expect.any(Number) })
-      );
-      expect(mockActors.virtualList.addTextSegment).toHaveBeenCalledWith(
-        expect.stringContaining('turn-ascii-'),
-        '```\n┌──┐\n│Hi│\n└──┘\n```'
+      // The code-fenced diagram is appended into the input box, focused.
+      expect(mockActors.inputArea.appendText).toHaveBeenCalledWith(
+        '```\n┌──┐\n│Hi│\n└──┘\n```',
+        { focus: true }
       );
 
-      // Should also send to extension for LLM processing
-      expect(mockVSCode.postMessage).toHaveBeenCalledWith({
-        type: 'sendMessage',
-        message: '```\n┌──┐\n│Hi│\n└──┘\n```'
-      });
+      // It is NOT auto-sent and does NOT create its own chat turn — that
+      // happens through the normal send path when the user is ready.
+      expect(mockVSCode.postMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'sendMessage' })
+      );
+      expect(mockActors.virtualList.addTurn).not.toHaveBeenCalledWith(
+        expect.stringContaining('turn-ascii-'),
+        expect.anything(),
+        expect.anything()
+      );
     });
 
     it('ignores asciiDrawingReceived with no text', () => {
@@ -808,12 +854,8 @@ describe('VirtualMessageGatewayActor', () => {
         timestamp: 1700000000000
       });
 
+      expect(mockActors.inputArea.appendText).not.toHaveBeenCalled();
       expect(mockVSCode.postMessage).not.toHaveBeenCalled();
-      expect(mockActors.virtualList.addTurn).not.toHaveBeenCalledWith(
-        expect.stringContaining('turn-ascii-'),
-        expect.anything(),
-        expect.anything()
-      );
     });
 
     it('publishes drawingServerState to manager', () => {

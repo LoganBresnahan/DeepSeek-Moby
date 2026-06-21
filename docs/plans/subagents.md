@@ -82,6 +82,8 @@ The tradeoff: tool-routing is less flexible. The main model can't say "this is a
 
 **Insertion point:** inside `webSearchManager.searchByQuery()` ([src/providers/webSearchManager.ts](../../src/providers/webSearchManager.ts)) — between the raw `WebSearchResponse` returned by the provider and `formatSearchResults()`. Keeps router inside the manager that owns web-search formatting; orchestrator stays unaware.
 
+> **Cache short-circuit (ADR 0010).** A cache hit returns the stored *post-digest* string and reaches **neither** the provider **nor** the router, so the per-search digest cost is **not** paid on duplicates. Before ADR 0010 the cache key was exact-match (`query.toLowerCase().trim()`), so trivially-rephrased near-duplicates missed the cache and re-ran both the fetch and the digest; the key is now normalized ([`normalizeQueryKey`](../../src/providers/webSearchManager.ts)) so near-duplicates hit and skip the subagent entirely. See [ADR 0010](../architecture/decisions/0010-web-search-query-ledger-and-cache.md) and [docs/guides/web-search.md](../guides/web-search.md).
+
 ### `search-digest`
 
 **Trigger:** `grep` results exceed a threshold (default: > 10 matches OR > 2KB of result text).

@@ -50,76 +50,22 @@ import { EditValidator, ApprovalState } from './editValidator';
 import { recordRepairRegression, FileRepairState } from './editValidation';
 import type { SavedPromptManager } from './savedPromptManager';
 import type { PlanManager } from './planManager';
+import {
+  shouldIgnoreWatcherPath,
+  findProjectRoots,
+  toWorkspaceRelativeRoots,
+} from '../utils/workspacePaths';
 
-// ── File Watcher Ignore Patterns ──
-// Directories to always ignore at any depth in the file tree.
-// Covers dependency, cache, and tooling directories across all major languages.
-const WATCHER_IGNORE_SEGMENTS = new Set([
-  // VCS
-  '.git', '.svn', '.hg', 'CVS',
-  // JavaScript/TypeScript
-  'node_modules', '.next', '.nuxt', '.svelte-kit', '.turbo',
-  '.parcel-cache', '.cache', '.vite', '.npm', 'bower_components',
-  'jspm_packages', 'web_modules', '.yarn', '.pnpm-store',
-  'coverage', '.nyc_output', '.eslintcache', 'storybook-static',
-  // Python
-  '__pycache__', '.venv', 'venv', '.tox', '.nox',
-  '.mypy_cache', '.pytest_cache', '.ruff_cache', '.hypothesis',
-  '.pybuilder', '.eggs', 'htmlcov', '.ipynb_checkpoints',
-  // Java/Kotlin
-  '.gradle', '.idea', '.kotlin', '.konan',
-  // C/C++
-  'CMakeFiles', '.ccache', 'vcpkg_installed', '_deps',
-  // C#/.NET
-  '.vs', 'TestResults', 'packages',
-  // Go (module cache is global, not in-project)
-  // Rust
-  // (target/ is root-only below)
-  // PHP
-  '.phpunit.cache',
-  // Ruby
-  '.bundle', '.yardoc', '_yardoc',
-  // Swift/Objective-C
-  'Pods', 'Carthage', 'DerivedData', '.swiftpm', 'xcuserdata',
-  // Dart/Flutter
-  '.dart_tool',
-  // Elixir/Erlang
-  'deps', '_build', '.elixir_ls', '.fetch', 'ebin',
-  '_checkouts', '.rebar', '.rebar3', '.eunit',
-  // Haskell
-  '.stack-work', '.cabal-sandbox', '.hpc',
-  // Scala
-  '.bloop', '.metals', '.bsp',
-  // Perl
-  'blib', 'cover_db',
-  // Lua
-  'lua_modules', '.luarocks',
-  // R
-  'renv', 'packrat', '.Rproj.user', 'rsconnect',
-  // Lisp/Scheme
-  'compiled',
-  // OS
-  '.DS_Store',
-]);
+// File-watcher ignore patterns + project-root discovery live in
+// utils/workspacePaths (ADR 0012). `shouldIgnoreWatcherPath` is now
+// project-root-aware: pass `this._projectRoots` so build dirs under a *nested*
+// project root (e.g. `app/obj/`, `app/bin/Debug/`) are recognised too.
 
-// Directories to ignore only at workspace root (could be legitimate subdirectories deeper)
-const WATCHER_IGNORE_ROOT_DIRS = new Set([
-  'dist', 'build', 'Build', 'out', 'output',
-  'target', 'vendor', 'bin', 'obj',
-  'Debug', 'Release', 'artifacts',
-  'tmp', 'pkg', 'doc', 'docs',
-  'local', 'inc',
-]);
-
-/** Check if a relative path should be ignored by the file watcher. */
-function shouldIgnoreWatcherPath(relativePath: string): boolean {
-  const segments = relativePath.split(/[\\/]/);
-  for (const seg of segments) {
-    if (WATCHER_IGNORE_SEGMENTS.has(seg)) return true;
-  }
-  if (segments.length > 0 && WATCHER_IGNORE_ROOT_DIRS.has(segments[0])) return true;
-  return false;
-}
+/** ADR 0009: re-pin the active-plan reminder after this many iterations with an
+ *  unchanged step pointer (the fade backstop). The change-gate handles the
+ *  common case; this floor re-anchors salience when the model is mid-step and
+ *  hasn't ticked a box, so a stuck pointer can't let the reminder decay. */
+const PLAN_REMINDER_FADE_ITERS = 6;
 
 export class RequestOrchestrator {
   // ── Events (streaming) ──
@@ -193,6 +139,18 @@ export class RequestOrchestrator {
   // Tracks whether the current abort was user-initiated (vs backend error).
   // Determines which marker is shown: *[User interrupted]* vs *[Generation stopped]*.
   private _userInitiatedStop = false;
+  /** ADR 0008: resolves when the in-flight turn reaches its `finally` (teardown
+   *  complete). stopGeneration awaits this before firing generationStopped, so
+   *  the webview's stop→generationStopped→send flow can't begin the next turn
+   *  while the prior loop is still unwinding — the window the concurrent
+   *  write_file race needed. */
+  private _teardownDeferred: { promise: Promise<void>; resolve: () => void } | null = null;
+  /** ADR 0008: unique id for the in-flight request. The chatProvider relay reads
+   *  it (synchronously, at fire time) to stamp the lifecycle events the webview
+   *  routes by, so a superseded request's late events are ignored by identity
+   *  rather than killing the live turn. */
+  private _currentRequestId: string | null = null;
+  private _requestCounter = 0;
   // Queue for shell commands detected inline during streaming (legacy — being replaced by interrupt-and-resume)
   private _pendingInlineShellCommands: Array<{ command: string }> = [];
   // Track commands already executed inline (to avoid re-execution in batch)
@@ -280,6 +238,23 @@ export class RequestOrchestrator {
   private _editRepairByFile = new Map<string, FileRepairState>();
   /** Whether the "validation is dormant (command not approved)" note fired this turn. */
   private _editSafetyDormantWarned = false;
+  /** ADR 0011: one-shot guard so the verify-on-stop gate re-injects a trailing
+   *  build-regression at most once per turn — bounded even when the iteration
+   *  cap is Infinity (the user's "unlimited" maxToolCalls config). */
+  private _verifyRegressionReinjected = false;
+  /** ADR 0009: the last active-plan reminder text pinned at recency this turn —
+   *  seeded when the reminder is injected at request build, updated on each
+   *  in-turn re-pin. Null at turn start. Drives the change-gate: an unchanged
+   *  reminder isn't re-pinned (unless the fade backstop fires). */
+  private _lastPlanReminder: string | null = null;
+  /** ADR 0009: iterations since the plan reminder was last re-pinned. Drives the
+   *  fade backstop (`PLAN_REMINDER_FADE_ITERS`); reset to 0 on every pin. */
+  private _planReminderStaleIters = 0;
+  /** ADR 0012: workspace-relative project roots (dirs holding a build marker).
+   *  Refreshed at turn start; threaded into `shouldIgnoreWatcherPath` so build
+   *  output under a *nested* project root is filtered out of the file-change
+   *  pipeline and the verification gate. */
+  private _projectRoots: string[] = [];
 
   /**
    * Establish the edit-safety baseline on the PRISTINE tree before the turn's
@@ -418,6 +393,102 @@ export class RequestOrchestrator {
       }
     }
     return false;
+  }
+
+  /**
+   * ADR 0011: verification gate at the terminal stop boundary of the agentic
+   * loops. Returns feedback to inject (the caller pushes it and `continue`s the
+   * loop) or `null` to accept the stop. Extends ADR 0006 — it re-consults the
+   * last build verdict and adds a language-agnostic artifact-presence check; it
+   * introduces no new validation oracle and yields to 0006's terminal halt.
+   *
+   * Bounded by the SAME budgets 0006 owns (the per-file `_editRepairByFile`
+   * tracker) plus a one-shot guard for the regression re-inject — so it can't
+   * loop even when the iteration cap is Infinity (the user's unlimited config).
+   * Only gates AUTO mode: manual/ask edits aren't auto-committed by the loop and
+   * 0006's verdict machinery only runs in auto.
+   */
+  private async verifyTurnCompletion(signal: AbortSignal): Promise<string | null> {
+    const cfg = vscode.workspace.getConfiguration('moby');
+    if (!(cfg.get<boolean>('editSafety.verifyOnStop') ?? true)) return null;
+    if (signal.aborted) return null;
+    if (this.diffManager.currentEditMode !== 'auto') return null;
+
+    const maxRepair = cfg.get<number>('editSafety.maxRepairAttempts') ?? 3;
+
+    // ── Half 1: re-consult the last build verdict (hole 1) ──
+    // A trailing no-edit "done" iteration after a final batch that regressed:
+    // 0006 already reverted + fed back once; had it halted (stuck) the loop
+    // would have broken and we'd never be here. Give one more bounded nudge,
+    // at most once per turn (the one-shot guard bounds it under Infinity).
+    if (this.editValidator.getLastVerdict() === 'regression' && !this._verifyRegressionReinjected) {
+      this._verifyRegressionReinjected = true;
+      const batch = this.editValidator.getLastBatch();
+      const output = (batch?.output ?? '').slice(-4000);
+      logger.info('[VerifyOnStop] Last build verdict was a regression at stop — re-injecting once.');
+      return `You ended the turn, but the project check \`${batch?.command ?? 'build'}\` was still failing after your last edit:\n\n${output}\n\nFix the cause and finish — do not end the turn on a broken build.`;
+    }
+
+    // ── Half 2: language-agnostic artifact-presence check (hole 2) ──
+    // Build-pass ≠ artifact-produced: the empty/clobbered-but-compiles case (the
+    // traced empty-Slide3Demo failure). We flag only PRESENT-but-empty files,
+    // not missing ones — a missing file is ambiguous (an intentional delete, or
+    // a path we couldn't resolve), and flagging it would spuriously hold turns
+    // open. An empty file the turn just wrote is a near-certain failure.
+    const targets = Array.from(new Set(
+      this.diffManager.getFileChanges()
+        .filter(c => c.status === 'applied')
+        .map(c => c.filePath)
+        // ADR 0012: a deliverable is source, not generated build output. Drop
+        // `obj/`, `bin/Debug/`, … (incl. under a nested project root) so the gate
+        // never holds a turn open chasing an empty MSBuild cache file — the
+        // false-positive seen on a subdirectory `dotnet` project. Paths here are
+        // mixed absolute (model edits) / workspace-relative (shell-modified);
+        // normalise to relative before the ignore check.
+        .filter(p => {
+          const isAbsolute = p.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(p);
+          const rel = isAbsolute ? vscode.workspace.asRelativePath(p, false) : p;
+          return !shouldIgnoreWatcherPath(rel, this._projectRoots);
+        })
+    ));
+    if (targets.length === 0) return null;
+
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+    const emptyFiles: string[] = [];
+    for (const p of targets) {
+      const text = await this.readArtifactText(root, p);
+      if (text !== null && text.trim().length === 0) emptyFiles.push(p);
+    }
+    if (emptyFiles.length === 0) return null;
+
+    // Bound by the per-file repair budget (no new counter): a file that reads
+    // empty `maxRepair` times in a row is "stuck" — stop re-injecting and warn.
+    const { stuck } = recordRepairRegression(
+      this._editRepairByFile, emptyFiles, ['__artifact_empty__'], maxRepair,
+    );
+    const actionable = emptyFiles.filter(p => !stuck.includes(p));
+    if (actionable.length === 0) {
+      this._onWarning.fire({ message: `Completed, but ${emptyFiles.join(', ')} ${emptyFiles.length === 1 ? 'is' : 'are'} empty — the deliverable may not have been produced.` });
+      logger.warn(`[VerifyOnStop] Accepting stop with empty deliverable(s) after ${maxRepair} attempts: ${emptyFiles.join(', ')}`);
+      return null;
+    }
+    logger.info(`[VerifyOnStop] Empty deliverable(s) at stop — re-injecting: ${actionable.join(', ')}`);
+    return `You reported completion, but ${actionable.join(', ')} ${actionable.length === 1 ? 'is' : 'are'} empty. ` +
+      `Re-read ${actionable.length === 1 ? 'it' : 'them'} and produce the intended content, then finish.`;
+  }
+
+  /** Read a turn-modified file as text for the artifact check. Returns null when
+   *  the file is missing/unreadable (treated as "not empty" — see the caller's
+   *  rationale). Paths from `getFileChanges` are workspace-relative. */
+  private async readArtifactText(root: vscode.Uri | undefined, filePath: string): Promise<string | null> {
+    try {
+      const isAbsolute = filePath.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(filePath);
+      const uri = isAbsolute || !root ? vscode.Uri.file(filePath) : vscode.Uri.joinPath(root, filePath);
+      const data = await vscode.workspace.fs.readFile(uri);
+      return Buffer.from(data).toString('utf8');
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -731,6 +802,16 @@ export class RequestOrchestrator {
     this.editValidator.resetTurn();
     this._editRepairByFile.clear();
     this._editSafetyDormantWarned = false;
+    this._verifyRegressionReinjected = false;
+    // ADR 0009: reset the active-plan recency-reminder tracker for the new turn.
+    this._lastPlanReminder = null;
+    this._planReminderStaleIters = 0;
+    // ADR 0012: refresh project roots so build-output filtering + edit-safety
+    // discovery are scoped to where the project actually lives (handles a
+    // project created in a prior turn under a subdirectory). Fire-and-forget;
+    // the BFS is cheap and a stale-empty list only misses nested non-.NET build
+    // dirs for one turn (.NET obj/bin are caught structurally regardless).
+    void this.refreshProjectRoots();
     // Clear read files tracking and extract user intent
     this.fileContextManager.clearTurnTracking();
     this.fileContextManager.extractFileIntent(message);
@@ -814,6 +895,11 @@ export class RequestOrchestrator {
     this.abortController = new AbortController();
     let signal = this.abortController.signal;
     this._userInitiatedStop = false;
+    // ADR 0008: a fresh teardown signal for this turn, resolved in the finally.
+    this._teardownDeferred = this.makeDeferred();
+    // ADR 0008: a fresh request id, minted BEFORE the startResponse fire below so
+    // the relay stamps this turn's events with it from the first event on.
+    this._currentRequestId = `req-${++this._requestCounter}`;
 
     // Get the current correlation ID for cross-boundary tracing
     const correlationId = logger.getCurrentCorrelationId();
@@ -972,6 +1058,26 @@ export class RequestOrchestrator {
           if (lastMsg.role === 'user') {
             lastMsg.content = lastMsg.content + selectedFilesContext;
             logger.info(`[RequestOrchestrator] Selected files context injected into user message`);
+          }
+        }
+      }
+
+      // ADR 0009: pin a terse "current step N of M + remaining" reminder for the
+      // active plan at recency (the tail of the last user message), immediately
+      // after the selected-files block. The full plan stays at primacy in the
+      // system prompt for orientation; this small steering copy keeps the step
+      // the model is on salient next to its live action. Seed the in-turn
+      // re-pin tracker so the first iteration boundary doesn't re-pin identical
+      // text.
+      if (this.planManager) {
+        const planReminder = await this.planManager.getActivePlanReminder();
+        if (planReminder && historyMessages.length > 0) {
+          const lastMsg = historyMessages[historyMessages.length - 1];
+          if (lastMsg.role === 'user') {
+            lastMsg.content = lastMsg.content + planReminder;
+            this._lastPlanReminder = planReminder;
+            this._planReminderStaleIters = 0;
+            logger.info(`[RequestOrchestrator] Active-plan reminder pinned at recency`);
           }
         }
       }
@@ -1298,9 +1404,19 @@ export class RequestOrchestrator {
         logger.info(`[Buffer] RESET in finally block (cleanup)`);
         this.contentBuffer.reset();
       }
+      // ADR 0008: teardown complete — release any awaiting stopGeneration so the
+      // gating generationStopped (and thus the next turn) only proceeds now.
+      this._teardownDeferred?.resolve();
     }
 
     return { sessionId };
+  }
+
+  /** A resolvable promise. ADR 0008: backs the per-turn teardown signal. */
+  private makeDeferred(): { promise: Promise<void>; resolve: () => void } {
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => { resolve = r; });
+    return { promise, resolve };
   }
 
   /** Check if a request is currently in progress. */
@@ -1308,9 +1424,25 @@ export class RequestOrchestrator {
     return this.abortController !== null;
   }
 
-  /** Abort current request. */
-  stopGeneration(): void {
+  /** ADR 0008: the in-flight request's id, read by the chatProvider relay to
+   *  stamp lifecycle events. Reflects the most-recently-started turn. */
+  get currentRequestId(): string | null {
+    return this._currentRequestId;
+  }
+
+  /**
+   * Abort the current request and resolve once it has fully torn down.
+   *
+   * ADR 0008: `generationStopped` is fired only AFTER the in-flight loop reaches
+   * its `finally`, so the webview's stop→generationStopped→send sequence cannot
+   * start the next turn while the prior loop is still alive. This closes the
+   * two-loops-overlap window that the concurrent `write_file` race needed.
+   */
+  async stopGeneration(): Promise<void> {
     this._userInitiatedStop = true;
+    // Capture the running turn's teardown BEFORE aborting (abort nulls the
+    // controller; a later turn can't replace the deferred until we fire below).
+    const teardown = this._teardownDeferred?.promise ?? Promise.resolve();
     if (this.abortController) {
       this.abortController.abort();
       this.abortController = null;
@@ -1318,6 +1450,7 @@ export class RequestOrchestrator {
     }
     this.diffManager.cancelPendingApprovals();
     this.commandApprovalManager?.cancelPendingApproval();
+    await teardown;
     this._onGenerationStopped.fire();
   }
 
@@ -1422,13 +1555,50 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
     // prior assistant turns in history — they'll otherwise emit a
     // web_search tool call this turn despite the tool not being in the
     // schema. Telling them explicitly stops the loop.
+    // `today` is computed once per prompt build, regardless of whether web
+    // search ran, so the temporal block (below) and the web-search header
+    // (when present) share a single source of truth for the date. See ADR 0007.
+    const today = new Date().toLocaleDateString('en-US', {
+      weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
+    });
+
     const webSearchContext = await this.webSearchManager.searchForMessage(message);
     if (webSearchContext) {
-      const today = new Date().toLocaleDateString('en-US', {
-        weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
-      });
       systemPrompt += `\n\n--- WEB SEARCH RESULTS (${today}) ---\n${webSearchContext}\n--- END WEB SEARCH RESULTS ---\n\nThese results were retrieved for you. Use them to answer the user's question — do not call the web_search tool, it is unavailable this turn.\n`;
     }
+
+    // ── 4.5 Temporal context (always present) ──
+    // Standing date + staleness directive. See ADR 0007. Present on every turn
+    // — search or not — so the model has a clock and a "your knowledge may be
+    // stale" rule before it decides whether it even needs to search, rather
+    // than only when a manual-mode web search happened to pre-fetch results.
+    // The "may be out of date" wording is deliberately model-agnostic (no
+    // hard-coded cutoff) since Moby runs an open model registry.
+    //
+    // ADR 0013 (Lever B): the data-seeding clause reframes "populate this app
+    // with real-world facts" AS a time-sensitive lookup. The 4:26pm miss was a
+    // task-CLASSIFICATION failure at iteration 1 — the directive was already
+    // fresh at primacy and the model still seeded stale World-Cup data, because
+    // it filed "seed app data" as a coding task, not a lookup. An adversarial
+    // design pass rejected re-pinning the (static) date at recency as the fix
+    // (it re-states wording the model already ignored, and dilutes the dynamic
+    // plan reminder sharing that slot); the leverage is in the primacy wording.
+    systemPrompt += `
+--- TEMPORAL CONTEXT ---
+Today's date is ${today}.
+Your training data has a cutoff and may be out of date. For time-sensitive
+facts — current events, live scores/standings, prices, the latest version of
+a library or tool, who currently holds an office or title — do NOT answer from
+memory. Call web_search first and prefer fresh results over your prior
+knowledge. If web_search is unavailable this turn, say what you'd verify rather
+than assert a possibly-stale fact as current.
+This rule covers DATA you write, not just answers you give the user: seeding,
+populating, or hard-coding real-world facts — team rosters, fixtures, standings
+or results, prices, release versions, officeholders — into a source or data
+file IS a time-sensitive lookup. Verify with web_search before writing such
+data; do not seed it from memory.
+--- END TEMPORAL CONTEXT ---
+`;
 
     // ── 5. Active plans ──
     if (this.planManager) {
@@ -1568,7 +1738,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
         );
         const trackChange = (uri: vscode.Uri) => {
           const relativePath = vscode.workspace.asRelativePath(uri, false);
-          if (!shouldIgnoreWatcherPath(relativePath)) {
+          if (!shouldIgnoreWatcherPath(relativePath, this._projectRoots)) {
             modifiedFiles.add(relativePath);
           }
         };
@@ -1576,7 +1746,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
         shellFileWatcher.onDidCreate(trackChange);
         shellFileWatcher.onDidDelete((uri: vscode.Uri) => {
           const relativePath = vscode.workspace.asRelativePath(uri, false);
-          if (!shouldIgnoreWatcherPath(relativePath)) {
+          if (!shouldIgnoreWatcherPath(relativePath, this._projectRoots)) {
             deletedFiles.add(relativePath);
             modifiedFiles.delete(relativePath);
           }
@@ -1872,7 +2042,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
                 shellFileWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(workspacePath, '**/*'));
                 const trackChange = (uri: vscode.Uri) => {
                   const relativePath = vscode.workspace.asRelativePath(uri, false);
-                  if (!shouldIgnoreWatcherPath(relativePath)) { modifiedFiles.add(relativePath); }
+                  if (!shouldIgnoreWatcherPath(relativePath, this._projectRoots)) { modifiedFiles.add(relativePath); }
                 };
                 shellFileWatcher.onDidChange(trackChange);
                 shellFileWatcher.onDidCreate(trackChange);
@@ -2046,7 +2216,7 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
                 );
                 const trackChange = (uri: vscode.Uri) => {
                   const relativePath = vscode.workspace.asRelativePath(uri, false);
-                  if (!shouldIgnoreWatcherPath(relativePath)) {
+                  if (!shouldIgnoreWatcherPath(relativePath, this._projectRoots)) {
                     modifiedFiles.add(relativePath);
                   }
                 };
@@ -2455,6 +2625,10 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
             // Add full result to context
             resultsContext += `\n--- Web Search Results for: "${q.query}" ---\n${searchResult}\n--- End Web Search Results ---\n`;
           }
+          // ADR 0010 Layer 2: surface the per-turn search ledger once after the
+          // batch so the reasoner sees its own search history and stops
+          // re-issuing near-duplicates.
+          resultsContext += this.webSearchManager.renderSearchLedger();
 
           // Notify frontend of web search results
           this._onShellResults.fire({ results: webResults });
@@ -2750,6 +2924,12 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
       } catch (e: any) {
         result = `Error: Failed to execute web search — ${e.message}`;
       }
+      // ADR 0010 Layer 2: append the per-turn search ledger so the model sees
+      // what it has already searched this turn and declines redundant calls.
+      // The system prompt is built once per turn and can't carry the running
+      // ledger, so it rides on the tool result instead — visible right at the
+      // point the model decides whether to search again.
+      result += this.webSearchManager.renderSearchLedger();
     } else {
       result = await executeToolCall(toolCall);
     }
@@ -2979,13 +3159,13 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
               );
               const trackChange = (uri: vscode.Uri) => {
                 const rel = vscode.workspace.asRelativePath(uri, false);
-                if (!shouldIgnoreWatcherPath(rel)) modifiedFiles.add(rel);
+                if (!shouldIgnoreWatcherPath(rel, this._projectRoots)) modifiedFiles.add(rel);
               };
               shellFileWatcher.onDidChange(trackChange);
               shellFileWatcher.onDidCreate(trackChange);
               shellFileWatcher.onDidDelete((uri: vscode.Uri) => {
                 const rel = vscode.workspace.asRelativePath(uri, false);
-                if (!shouldIgnoreWatcherPath(rel)) {
+                if (!shouldIgnoreWatcherPath(rel, this._projectRoots)) {
                   deletedFiles.add(rel);
                   modifiedFiles.delete(rel);
                 }
@@ -3326,9 +3506,18 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
 
       const toolCalls = response.tool_calls ?? [];
 
-      // Terminal turn — model produced its final answer. Loop ends.
+      // Terminal turn — model produced its final answer. Loop ends, UNLESS the
+      // verification gate (ADR 0011) holds it open: a "done" that sits on a
+      // broken build or an empty deliverable gets one bounded repair pass. The
+      // `iterations < maxIterations` guard means a continue at the cap accepts
+      // the stop rather than pushing feedback the loop would never act on.
       if (response.finish_reason !== 'tool_calls' || toolCalls.length === 0) {
         logger.info(`[StreamingToolCalls] Iteration ${iterations} terminal (finish_reason=${response.finish_reason ?? 'unknown'}, tool_calls=${toolCalls.length})`);
+        const verifyFeedback = await this.verifyTurnCompletion(signal);
+        if (verifyFeedback && iterations < maxIterations) {
+          currentMessages.push({ role: 'user', content: verifyFeedback });
+          continue;
+        }
         break;
       }
 
@@ -3489,6 +3678,10 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
       );
       if (editHalt) break;
 
+      // ADR 0009: keep the active plan's current step salient at the next
+      // decision point (change-driven, with a fade backstop).
+      await this.maybeRepinPlanReminder((msg) => currentMessages.push({ role: 'user', content: msg }));
+
       // Close the tool batch at the iteration boundary. Each streamChat
       // call is one "decision point" — its tool calls (one or many parallel)
       // belong in one dropdown; the next iteration's calls are a separate
@@ -3517,6 +3710,48 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
 
     const limitReached = iterations >= maxIterations && maxIterations !== Infinity;
     return { allToolDetails, limitReached, budgetExceeded };
+  }
+
+  /**
+   * ADR 0009: re-pin the active-plan reminder at the model's decision point.
+   *
+   * Change-driven — re-pin when the derived reminder text differs from the last
+   * one pinned (the model checked a box, so the step pointer moved). Fade
+   * backstop — re-pin after `PLAN_REMINDER_FADE_ITERS` unchanged iterations so
+   * salience doesn't decay when the model is mid-step and hasn't ticked a box
+   * (the change-gate alone would never fire — the precise drift this guards).
+   *
+   * Recomputed from `PlanManager` each call, so it always reflects the live
+   * checklist. No-op without a plan manager or an active plan. Called at the
+   * iteration boundary of each agentic loop; `push` appends the fresh `user`
+   * message to that loop's message array.
+   */
+  private async maybeRepinPlanReminder(push: (msg: string) => void): Promise<void> {
+    if (!this.planManager) return;
+    const reminder = await this.planManager.getActivePlanReminder();
+    if (!reminder) return;
+    this._planReminderStaleIters++;
+    const changed = reminder !== this._lastPlanReminder;
+    if (changed || this._planReminderStaleIters >= PLAN_REMINDER_FADE_ITERS) {
+      push(reminder);
+      this._lastPlanReminder = reminder;
+      this._planReminderStaleIters = 0;
+      logger.info(`[RequestOrchestrator] Active-plan reminder re-pinned (${changed ? 'step changed' : 'fade backstop'})`);
+    }
+  }
+
+  /** ADR 0012: (re)discover the workspace's project root(s) — a cheap bounded
+   *  BFS that stops at the first marker on each branch. Refreshed at turn start.
+   *  The result scopes build-output filtering and edit-safety discovery so a
+   *  project living in a subdirectory is handled like a root-level one. */
+  private async refreshProjectRoots(): Promise<void> {
+    const ws = vscode.workspace.workspaceFolders?.[0];
+    if (!ws) { this._projectRoots = []; return; }
+    try {
+      this._projectRoots = toWorkspaceRelativeRoots(await findProjectRoots(ws.uri));
+    } catch {
+      this._projectRoots = [];
+    }
   }
 
   // ── Private: Tool Loop ──
@@ -3619,8 +3854,15 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
         }
       }
 
-      // If no tool calls, we're done with the tool loop
+      // If no tool calls, we're done with the tool loop — UNLESS the verification
+      // gate (ADR 0011) holds it open for one bounded repair pass (broken build
+      // or empty deliverable). Mirrors runStreamingToolCallsLoop.
       if (!response.tool_calls || response.tool_calls.length === 0) {
+        const verifyFeedback = await this.verifyTurnCompletion(signal);
+        if (verifyFeedback && iterations < maxIterations) {
+          toolMessages.push({ role: 'user', content: verifyFeedback });
+          continue;
+        }
         break;
       }
 
@@ -3796,6 +4038,11 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
         (msg) => toolMessages.push({ role: 'user', content: msg }),
       );
       if (editHalt) break;
+
+      // ADR 0009: keep the active plan's current step salient at the next
+      // decision point (change-driven, with a fade backstop). Parity with
+      // runStreamingToolCallsLoop.
+      await this.maybeRepinPlanReminder((msg) => toolMessages.push({ role: 'user', content: msg }));
 
       // Close the tool batch at the iteration boundary. Mirrors
       // runStreamingToolCallsLoop — each non-streaming chat() call is one

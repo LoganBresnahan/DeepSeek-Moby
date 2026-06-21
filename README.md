@@ -122,6 +122,7 @@ Create and manage plan files that are injected into every request:
 - Toggle plans active/inactive — only active plans are included in context
 - Multiple plans can be active simultaneously
 - Plans are regular Markdown files — edit them in VS Code with full editor features
+- **Write your plan as a checklist** — `- [ ]` items or a numbered `## Steps` list — and Moby tracks your progress through a long agentic turn: the full plan goes in the system prompt for orientation, and a terse "current step N of M + remaining items" reminder is pinned next to the model's live action so it doesn't drift off-plan mid-turn. Moby checks items off (`[ ]` → `[x]`) as it completes them, so the plan file doubles as live progress. (See [active-plan context](docs/architecture/integration/active-plan-context.md).)
 
 ### Custom System Prompts
 

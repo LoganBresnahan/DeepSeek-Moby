@@ -221,6 +221,7 @@ function createMockWebSearchManager() {
     updateSettings: vi.fn(),
     setRecentUserPrompt: vi.fn(),
     getDigestMaxResults: vi.fn(() => 5),
+    renderSearchLedger: vi.fn(() => ''), // ADR 0010: per-turn search ledger
   };
 }
 
@@ -391,6 +392,132 @@ describe('RequestOrchestrator', () => {
       expect((await settleOnce()).halt).toBe(false);
       expect(mockDiffManager.commitEditTransaction).toHaveBeenCalled();
       expect(mockDiffManager.revertEditTransaction).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── Verify-on-stop gate (ADR 0011) ──
+  // Drives verifyTurnCompletion directly with stubbed verdict + file state.
+  // readArtifactText is stubbed so no real fs is touched (the vscode mock here
+  // has no workspace.fs). recordRepairRegression runs for real over the real
+  // _editRepairByFile, so the per-file budget bound is exercised end to end.
+  describe('verifyTurnCompletion — verify-on-stop gate (ADR 0011)', () => {
+    const signal = new AbortController().signal;
+    function stubVerdict(verdict: any, batch: any = null) {
+      (orchestrator as any).editValidator.getLastVerdict = vi.fn(() => verdict);
+      (orchestrator as any).editValidator.getLastBatch = vi.fn(() => batch);
+    }
+    function stubFiles(paths: string[]) {
+      mockDiffManager.getFileChanges = vi.fn(() =>
+        paths.map(p => ({ filePath: p, status: 'applied' as const, iteration: 1 })));
+    }
+    function stubReads(map: Record<string, string | null>) {
+      (orchestrator as any).readArtifactText = vi.fn(async (_root: any, p: string) =>
+        (p in map ? map[p] : null));
+    }
+    beforeEach(() => { mockDiffManager.currentEditMode = 'auto'; });
+
+    it('regression verdict at stop → re-injects the build errors, once per turn', async () => {
+      stubVerdict('regression', { command: 'dotnet build', output: 'a.cs: error CS1002' });
+      stubFiles([]);
+      const first = await (orchestrator as any).verifyTurnCompletion(signal);
+      expect(first).toContain('still failing');
+      expect(first).toContain('CS1002');
+      // One-shot guard: a second consult this turn does not re-inject again.
+      expect(await (orchestrator as any).verifyTurnCompletion(signal)).toBeNull();
+    });
+
+    it('clean verdict + non-empty artifact → accepts the stop (null)', async () => {
+      stubVerdict('clean');
+      stubFiles(['Components/Slides/Slide3Demo.razor']);
+      stubReads({ 'Components/Slides/Slide3Demo.razor': '<div>content</div>' });
+      expect(await (orchestrator as any).verifyTurnCompletion(signal)).toBeNull();
+    });
+
+    it('clean build but EMPTY deliverable → holds the turn open (the Slide3Demo case)', async () => {
+      stubVerdict('clean');
+      stubFiles(['Components/Slides/Slide3Demo.razor']);
+      stubReads({ 'Components/Slides/Slide3Demo.razor': '   \n  ' }); // whitespace only
+      const fb = await (orchestrator as any).verifyTurnCompletion(signal);
+      expect(fb).toContain('Slide3Demo.razor');
+      expect(fb).toContain('empty');
+    });
+
+    it('build-output artifacts are not deliverables — empty obj/.cache never holds the turn (ADR 0012)', async () => {
+      // The 304pm-trace false positive: `dotnet build` wrote empty MSBuild cache
+      // files under a NESTED obj/, which the gate treated as empty deliverables
+      // and re-injected 3× before giving up. They must be filtered out entirely.
+      stubVerdict('clean');
+      stubFiles([
+        'worldCupWebApp/obj/Debug/net10.0/worldCupWebApp.MvcApplicationPartsAssemblyInfo.cache',
+        'worldCupWebApp/obj/Debug/net10.0/swae.build.ex.cache',
+      ]);
+      stubReads({
+        'worldCupWebApp/obj/Debug/net10.0/worldCupWebApp.MvcApplicationPartsAssemblyInfo.cache': '',
+        'worldCupWebApp/obj/Debug/net10.0/swae.build.ex.cache': '',
+      });
+      // Every "deliverable" is build output → filtered → nothing to verify → accept.
+      expect(await (orchestrator as any).verifyTurnCompletion(signal)).toBeNull();
+    });
+
+    it('still flags a real empty deliverable while ignoring build artifacts beside it', async () => {
+      stubVerdict('clean');
+      stubFiles([
+        'worldCupWebApp/bin/Debug/net10.0/app.dll',  // build artifact → ignored
+        'worldCupWebApp/Models/Team.cs',             // real source, empty → flagged
+      ]);
+      stubReads({
+        'worldCupWebApp/bin/Debug/net10.0/app.dll': '',
+        'worldCupWebApp/Models/Team.cs': '',
+      });
+      const fb = await (orchestrator as any).verifyTurnCompletion(signal);
+      expect(fb).toContain('Team.cs');
+      expect(fb).not.toContain('app.dll');
+    });
+
+    it('an empty deliverable stops re-injecting after maxRepairAttempts (bounded + warns)', async () => {
+      configStore.set('editSafety.maxRepairAttempts', 2);
+      stubVerdict('clean');
+      stubFiles(['x.razor']);
+      stubReads({ 'x.razor': '' });
+      const warnings: string[] = [];
+      orchestrator.onWarning(w => warnings.push(w.message));
+      expect(await (orchestrator as any).verifyTurnCompletion(signal)).toContain('empty'); // 1 → re-inject
+      expect(await (orchestrator as any).verifyTurnCompletion(signal)).toBeNull();          // 2 → stuck → accept
+      expect(warnings.some(w => /empty/.test(w))).toBe(true);
+    });
+
+    it('inconclusive verdict + present artifact → accepts (no false continuation)', async () => {
+      stubVerdict('inconclusive');
+      stubFiles(['x.ts']);
+      stubReads({ 'x.ts': 'export const x = 1;' });
+      expect(await (orchestrator as any).verifyTurnCompletion(signal)).toBeNull();
+    });
+
+    it('a missing file is NOT flagged (ambiguous: could be an intentional delete)', async () => {
+      stubVerdict('clean');
+      stubFiles(['deleted.ts']);
+      stubReads({ 'deleted.ts': null }); // read returns null = missing/unreadable
+      expect(await (orchestrator as any).verifyTurnCompletion(signal)).toBeNull();
+    });
+
+    it('verifyOnStop=false disables the gate entirely', async () => {
+      configStore.set('editSafety.verifyOnStop', false);
+      stubVerdict('regression', { command: 'build', output: 'err' });
+      stubFiles(['x.ts']);
+      stubReads({ 'x.ts': '' });
+      expect(await (orchestrator as any).verifyTurnCompletion(signal)).toBeNull();
+    });
+
+    it('is a no-op outside auto mode', async () => {
+      mockDiffManager.currentEditMode = 'manual';
+      stubVerdict('regression', { command: 'build', output: 'err' });
+      expect(await (orchestrator as any).verifyTurnCompletion(signal)).toBeNull();
+    });
+
+    it('no edits this turn → nothing to verify (null)', async () => {
+      stubVerdict('clean');
+      stubFiles([]);
+      expect(await (orchestrator as any).verifyTurnCompletion(signal)).toBeNull();
     });
   });
 
@@ -643,6 +770,125 @@ describe('RequestOrchestrator', () => {
       // Reasoner prompt includes shell command instructions
       expect(systemPromptArg).toContain('shell');
     });
+
+    // ── Temporal grounding (ADR 0007) ──
+    // The standing date + staleness directive must be present on EVERY turn,
+    // not only when a manual-mode web search pre-fetched results. These pin the
+    // status-quo gap fix (date was trapped inside the `if (webSearchContext)`
+    // branch) and the insertion point (before active plans).
+    describe('temporal grounding (ADR 0007)', () => {
+      it('includes the temporal block on a normal turn with no web search', async () => {
+        // searchForMessage defaults to '' (falsy) → no web-search section.
+        await orchestrator.handleMessage('Hello', null, async () => '', undefined);
+
+        const sp = mockClient.streamChat.mock.calls[0][2];
+        expect(sp).toContain('TEMPORAL CONTEXT');
+        // Staleness-directive keywords — the load-bearing behavioral cue.
+        expect(sp).toContain('out of date');
+        expect(sp).toContain('time-sensitive');
+        expect(sp).toContain('web_search');
+      });
+
+      it('reframes data-seeding as a time-sensitive lookup (ADR 0013, Lever B)', async () => {
+        // The 4:26pm regression: the model seeded an app with stale real-world
+        // data because it filed "populate this app" as a coding task, not a
+        // lookup. The primacy clause must name DATA the model *writes*, not just
+        // answers it gives, so the directive is recognised as applicable.
+        await orchestrator.handleMessage('Hello', null, async () => '', undefined);
+
+        const sp = mockClient.streamChat.mock.calls[0][2];
+        expect(sp).toContain('seeding');
+        // The keyword that makes the rule bite on written data.
+        expect(sp).toMatch(/IS a time-sensitive lookup/i);
+        expect(sp).toMatch(/do not seed it from memory/i);
+      });
+
+      it('renders today\'s date deterministically under a mocked clock', async () => {
+        // Fake only Date so setTimeout/microtasks in handleMessage still run.
+        // Noon-local avoids the UTC-midnight→previous-day TZ edge.
+        const fixed = new Date(2026, 5, 20, 12, 0, 0);
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(fixed);
+        try {
+          await orchestrator.handleMessage('Hello', null, async () => '', undefined);
+
+          const sp = mockClient.streamChat.mock.calls[0][2];
+          // Compute the expected string the same way buildSystemPrompt does,
+          // from the same instant, so the assertion is TZ/locale-independent.
+          const expected = fixed.toLocaleDateString('en-US', {
+            weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
+          });
+          expect(sp).toContain(`Today's date is ${expected}`);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('places the temporal block before the active-plans section', async () => {
+        // planManager is not injected by the shared beforeEach; stub it so the
+        // active-plans section renders, then assert ordering. getActivePlanReminder
+        // is also stubbed (ADR 0009 reads it at request build).
+        (orchestrator as any).planManager = {
+          getActivePlansContext: vi.fn(async () => '\n--- ACTIVE PLANS ---\nStep 1 of 3\n'),
+          getActivePlanReminder: vi.fn(async () => '')
+        };
+
+        await orchestrator.handleMessage('Hello', null, async () => '', undefined);
+
+        const sp = mockClient.streamChat.mock.calls[0][2];
+        const temporalIdx = sp.indexOf('TEMPORAL CONTEXT');
+        const plansIdx = sp.indexOf('ACTIVE PLANS');
+        expect(temporalIdx).toBeGreaterThan(-1);
+        expect(plansIdx).toBeGreaterThan(-1);
+        expect(temporalIdx).toBeLessThan(plansIdx);
+      });
+
+      it('uses a single date source shared with the web-search header', async () => {
+        mockWebSearch.searchForMessage.mockResolvedValue('Web result: live standings');
+
+        await orchestrator.handleMessage('Hello', null, async () => '', undefined);
+
+        const sp = mockClient.streamChat.mock.calls[0][2];
+        // The hoisted `today` feeds both the WEB SEARCH RESULTS header and the
+        // temporal block — guards against reintroducing a second `new Date()`.
+        const headerDate = sp.match(/WEB SEARCH RESULTS \(([^)]+)\)/)?.[1];
+        expect(headerDate).toBeTruthy();
+        expect(sp).toContain(`Today's date is ${headerDate}`);
+      });
+
+      it('includes the temporal block on the reasoner path', async () => {
+        mockClient.isReasonerModel.mockReturnValue(true);
+
+        await orchestrator.handleMessage('Hello', null, async () => '', undefined);
+
+        const sp = mockClient.streamChat.mock.calls[0][2];
+        expect(sp).toContain('TEMPORAL CONTEXT');
+      });
+    });
+  });
+
+  // ── Web-search ledger wiring (ADR 0010) ──
+
+  describe('dispatchToolCall - web_search ledger (ADR 0010)', () => {
+    it('appends the per-turn search ledger to the web_search tool result', async () => {
+      mockWebSearch.searchByQuery = vi.fn(async () => 'RAW SEARCH RESULT');
+      mockWebSearch.renderSearchLedger = vi.fn(
+        () => '\n\nSEARCHES THIS TURN (do not repeat — reuse these results):\n  • "x" → 2 results\n'
+      );
+
+      const toolCall = {
+        id: 't1',
+        type: 'function',
+        function: { name: 'web_search', arguments: JSON.stringify({ query: 'x' }) }
+      };
+      const signal = new AbortController().signal;
+      const dispatch = await (orchestrator as any).dispatchToolCall(toolCall, signal);
+
+      expect(mockWebSearch.searchByQuery).toHaveBeenCalledWith('x');
+      // The model sees the raw result AND its running search history together.
+      expect(dispatch.result).toContain('RAW SEARCH RESULT');
+      expect(dispatch.result).toContain('SEARCHES THIS TURN');
+    });
   });
 
   // ── Message Building ──
@@ -670,6 +916,142 @@ describe('RequestOrchestrator', () => {
       const messagesArg = mockClient.buildContext.mock.calls[0][0];
       const lastUserMsg = messagesArg[messagesArg.length - 1];
       expect(lastUserMsg.content).toContain('src/app.ts');
+    });
+
+    // ── Active-plan recency pinning (ADR 0009) ──
+
+    const FULL_PLAN = '\n--- ACTIVE PLANS ---\nThe following plans...\n## deck.md\n## Steps\n- [x] Scaffold\n- [ ] Wire diagram\n--- END PLANS ---\n';
+    const TERSE_REMINDER = '\n--- ACTIVE PLAN (reminder) ---\ndeck.md — step 2 of 2\nRemaining:\n[ ] 2. Wire diagram\n(full plan and completed steps are in the system prompt)\n--- END ACTIVE PLAN ---\n';
+
+    function stubPlanManager(reminder: string, full = FULL_PLAN) {
+      (orchestrator as any).planManager = {
+        getActivePlansContext: vi.fn(async () => full),
+        getActivePlanReminder: vi.fn(async () => reminder),
+      };
+    }
+
+    it('pins the terse plan reminder into the last user message (recency)', async () => {
+      stubPlanManager(TERSE_REMINDER);
+
+      await orchestrator.handleMessage('Hello', null, async () => '', undefined);
+
+      const messagesArg = mockClient.buildContext.mock.calls[0][0];
+      const lastUserMsg = messagesArg[messagesArg.length - 1];
+      expect(lastUserMsg.content).toContain('ACTIVE PLAN (reminder)');
+      expect(lastUserMsg.content).toContain('step 2 of 2');
+    });
+
+    it('keeps the full plan in the system prompt (primacy), reminder out of it', async () => {
+      stubPlanManager(TERSE_REMINDER);
+
+      await orchestrator.handleMessage('Hello', null, async () => '', undefined);
+
+      const systemPrompt = mockClient.streamChat.mock.calls[0][2] as string;
+      expect(systemPrompt).toContain('--- ACTIVE PLANS ---');
+      // The terse steering copy must NOT be in the system prompt — it lives at recency.
+      expect(systemPrompt).not.toContain('ACTIVE PLAN (reminder)');
+    });
+
+    it('does not duplicate the full plan prose across the two positions', async () => {
+      stubPlanManager(TERSE_REMINDER);
+
+      await orchestrator.handleMessage('Hello', null, async () => '', undefined);
+
+      const systemPrompt = mockClient.streamChat.mock.calls[0][2] as string;
+      const messagesArg = mockClient.buildContext.mock.calls[0][0];
+      const lastUserMsg = messagesArg[messagesArg.length - 1].content as string;
+
+      const combined = systemPrompt + '\n' + lastUserMsg;
+      const fullPlanOccurrences = combined.split('--- ACTIVE PLANS ---').length - 1;
+      expect(fullPlanOccurrences).toBe(1); // prose appears exactly once (system prompt only)
+      // ...while the terse reminder is present at recency, not in the system prompt.
+      expect(lastUserMsg).toContain('ACTIVE PLAN (reminder)');
+    });
+
+    it('tracks PlanManager — a changed step shows up in the next turn', async () => {
+      const reminders = [
+        '\n--- ACTIVE PLAN (reminder) ---\ndeck.md — step 1 of 2\n--- END ACTIVE PLAN ---\n',
+        '\n--- ACTIVE PLAN (reminder) ---\ndeck.md — step 2 of 2\n--- END ACTIVE PLAN ---\n',
+      ];
+      let i = 0;
+      (orchestrator as any).planManager = {
+        getActivePlansContext: vi.fn(async () => FULL_PLAN),
+        getActivePlanReminder: vi.fn(async () => reminders[i]),
+      };
+
+      i = 0;
+      await orchestrator.handleMessage('first', 'session-1', async () => '', undefined);
+      const firstMsgs = mockClient.buildContext.mock.calls[0][0];
+      expect(firstMsgs[firstMsgs.length - 1].content).toContain('step 1 of 2');
+
+      i = 1;
+      await orchestrator.handleMessage('second', 'session-1', async () => '', undefined);
+      const secondCall = mockClient.buildContext.mock.calls.at(-1)!;
+      expect(secondCall[0][secondCall[0].length - 1].content).toContain('step 2 of 2');
+    });
+  });
+
+  // ── In-turn re-pin: change-gate + fade backstop (ADR 0009 item 3) ──
+
+  describe('maybeRepinPlanReminder', () => {
+    function stubReminder(fn: () => Promise<string>) {
+      (orchestrator as any).planManager = { getActivePlanReminder: vi.fn(fn) };
+    }
+
+    it('re-pins when the reminder text changes (step pointer moved)', async () => {
+      stubReminder(async () => 'step 2');
+      (orchestrator as any)._lastPlanReminder = 'step 1'; // seeded at request build
+      (orchestrator as any)._planReminderStaleIters = 0;
+
+      const pushed: string[] = [];
+      await (orchestrator as any).maybeRepinPlanReminder((m: string) => pushed.push(m));
+
+      expect(pushed).toEqual(['step 2']);
+      expect((orchestrator as any)._lastPlanReminder).toBe('step 2');
+      expect((orchestrator as any)._planReminderStaleIters).toBe(0);
+    });
+
+    it('does NOT re-pin an unchanged reminder inside the fade window', async () => {
+      stubReminder(async () => 'step 1');
+      (orchestrator as any)._lastPlanReminder = 'step 1';
+      (orchestrator as any)._planReminderStaleIters = 0;
+
+      const pushed: string[] = [];
+      await (orchestrator as any).maybeRepinPlanReminder((m: string) => pushed.push(m));
+
+      expect(pushed).toEqual([]);
+      expect((orchestrator as any)._planReminderStaleIters).toBe(1); // counter advanced
+    });
+
+    it('fade backstop re-pins after PLAN_REMINDER_FADE_ITERS unchanged iterations', async () => {
+      // The regression guard for "model loses the plan and stops ticking boxes":
+      // the pointer never moves, the change-gate never fires, yet salience is
+      // still re-anchored on the floor.
+      stubReminder(async () => 'step 1');
+      (orchestrator as any)._lastPlanReminder = 'step 1';
+      (orchestrator as any)._planReminderStaleIters = 0;
+
+      const pushed: string[] = [];
+      for (let n = 0; n < 6; n++) {
+        await (orchestrator as any).maybeRepinPlanReminder((m: string) => pushed.push(m));
+      }
+
+      expect(pushed).toEqual(['step 1']); // exactly one re-pin, on the 6th iteration
+      expect((orchestrator as any)._planReminderStaleIters).toBe(0); // reset after the backstop
+    });
+
+    it('is a no-op without a plan manager', async () => {
+      (orchestrator as any).planManager = undefined;
+      const pushed: string[] = [];
+      await (orchestrator as any).maybeRepinPlanReminder((m: string) => pushed.push(m));
+      expect(pushed).toEqual([]);
+    });
+
+    it('is a no-op when there is no active plan (empty reminder)', async () => {
+      stubReminder(async () => '');
+      const pushed: string[] = [];
+      await (orchestrator as any).maybeRepinPlanReminder((m: string) => pushed.push(m));
+      expect(pushed).toEqual([]);
     });
   });
 
@@ -893,22 +1275,48 @@ describe('RequestOrchestrator', () => {
   // ── stopGeneration ──
 
   describe('stopGeneration', () => {
-    it('should fire onGenerationStopped', () => {
+    // ADR 0008: stopGeneration is now async — it fires onGenerationStopped only
+    // after the in-flight loop's teardown resolves. With no active request the
+    // teardown is an already-resolved promise, so the fire is one microtask away.
+    it('should fire onGenerationStopped', async () => {
       const events: void[] = [];
       orchestrator.onGenerationStopped(() => events.push(undefined));
 
-      orchestrator.stopGeneration();
+      await orchestrator.stopGeneration();
 
       expect(events).toHaveLength(1);
     });
 
-    it('should fire onGenerationStopped even without active request', () => {
+    it('should fire onGenerationStopped even without active request', async () => {
       const events: void[] = [];
       orchestrator.onGenerationStopped(() => events.push(undefined));
 
-      orchestrator.stopGeneration();
+      await orchestrator.stopGeneration();
 
       expect(events).toHaveLength(1);
+    });
+
+    it('defers generationStopped until the in-flight turn has torn down (ADR 0008)', async () => {
+      const order: string[] = [];
+      orchestrator.onGenerationStopped(() => order.push('generationStopped'));
+
+      // Simulate an in-flight turn: a pending teardown deferred + an active
+      // controller, exactly as handleMessage sets up at turn start.
+      const deferred = (orchestrator as any).makeDeferred();
+      (orchestrator as any)._teardownDeferred = deferred;
+      (orchestrator as any).abortController = new AbortController();
+
+      const stop = orchestrator.stopGeneration(); // aborts, then awaits teardown
+      await Promise.resolve();
+      // Teardown is still pending → generationStopped must NOT have fired yet.
+      expect(order).not.toContain('generationStopped');
+
+      order.push('teardown');
+      deferred.resolve();                          // what handleMessage's finally does
+      await stop;
+
+      // generationStopped fires only AFTER teardown — the serialization guarantee.
+      expect(order).toEqual(['teardown', 'generationStopped']);
     });
   });
 
@@ -2262,6 +2670,51 @@ describe('RequestOrchestrator', () => {
       expect(mockClient.streamChat).toHaveBeenCalledTimes(2);
       // Tool batch lifecycle fired in order.
       expect(mockClient.chat).not.toHaveBeenCalled();
+    });
+
+    it('re-pins the active-plan reminder into the loop as the step advances (ADR 0009 wiring)', async () => {
+      // PlanManager returns a fresh reminder each consult, simulating the model
+      // checking off a box between iterations (the step pointer moves).
+      let n = 0;
+      (orchestrator as any).planManager = {
+        getActivePlansContext: vi.fn(async () => '\n--- ACTIVE PLANS ---\nfull plan body\n--- END PLANS ---\n'),
+        getActivePlanReminder: vi.fn(async () => `\n--- ACTIVE PLAN (reminder) ---\nstep ${++n}\n--- END ACTIVE PLAN ---\n`),
+      };
+
+      // Snapshot, AT CALL TIME, the reminder-bearing user messages each
+      // streamChat call receives (the messages array is mutated in place across
+      // iterations, so we must read it synchronously inside the mock).
+      const seen: string[][] = [];
+      let call = 0;
+      mockClient.streamChat.mockImplementation(async (messages: any[], onToken: (t: string) => void) => {
+        seen.push(
+          messages
+            .filter(m => m.role === 'user' && typeof m.content === 'string' && m.content.includes('ACTIVE PLAN (reminder)'))
+            .map(m => m.content as string)
+        );
+        call++;
+        if (call <= 2) {
+          onToken('working');
+          return {
+            content: 'working',
+            tool_calls: [{ id: `c${call}`, type: 'function' as const, function: { name: 'read_file', arguments: '{"path":"a.ts"}' } }],
+            finish_reason: 'tool_calls',
+          };
+        }
+        onToken('done');
+        return { content: 'done', finish_reason: 'stop' };
+      });
+
+      await orchestrator.handleMessage('go', 'session-1', async () => '', undefined);
+
+      // Iteration 1 saw only the seeded reminder (merged into the user message).
+      expect(seen[0]).toHaveLength(1);
+      expect(seen[0][0]).toContain('step 1');
+      // By the terminal iteration the loop has re-pinned the advancing step as
+      // separate user messages — more than just the seed, latest pointer present.
+      const last = seen[seen.length - 1];
+      expect(last.length).toBeGreaterThan(1);
+      expect(last.some(c => c.includes('step 3'))).toBe(true);
     });
 
     it('reasoning_content surfaces during the tool-decision phase (the whole point of 4.5)', async () => {

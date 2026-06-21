@@ -72,6 +72,16 @@ describe('webSearchDigestRole', () => {
       const prompt = webSearchDigestRole.buildSystemPrompt({ recentUserPrompt: '' });
       expect(prompt).toContain('unspecified');
     });
+
+    // Subagent prompts are built per-role and never pass through the main
+    // agent's buildSystemPrompt, so they must NOT inherit the temporal block
+    // (ADR 0007). A digester ranking already-fetched results has no use for a
+    // "search first" imperative and must not be told to spawn more searches.
+    it('does not inherit the main agent temporal block (ADR 0007)', () => {
+      const prompt = webSearchDigestRole.buildSystemPrompt({ recentUserPrompt: 'task' });
+      expect(prompt).not.toContain('TEMPORAL CONTEXT');
+      expect(prompt).not.toContain('Call web_search first');
+    });
   });
 
   describe('buildUserMessage', () => {

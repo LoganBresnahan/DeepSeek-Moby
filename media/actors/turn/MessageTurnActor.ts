@@ -182,6 +182,14 @@ export class MessageTurnActor extends InterleavedShadowActor {
   // ============================================
 
   private _shellSegments: Map<string, ShellSegment> = new Map();
+  // Coalescing: the section's single shell group. Consecutive shell executions
+  // between two assistant text outputs merge into this one container — mirrors
+  // _activeToolGroup. Only createTextSegment clears it.
+  private _activeShellGroup: ShellSegment | null = null;
+  // Index in _activeShellGroup.commands where the most-recent appended batch
+  // begins, so setShellResults/startShellSegment (batch-relative) map into the
+  // merged commands array.
+  private _activeShellOffset = 0;
 
   // ============================================
   // Command Approval State
@@ -337,6 +345,8 @@ export class MessageTurnActor extends InterleavedShadowActor {
 
     // Reset shell
     this._shellSegments.clear();
+    this._activeShellGroup = null;
+    this._activeShellOffset = 0;
 
     // Reset pending files
     this._pendingGroups = [];
@@ -702,6 +712,8 @@ export class MessageTurnActor extends InterleavedShadowActor {
     this._currentPendingGroup = null;
     this._activeToolGroup = null;
     this._activeToolBatchOffset = 0;
+    this._activeShellGroup = null;
+    this._activeShellOffset = 0;
     this._activeThinkingGroup = null;
     this._textSegmentCounter++;
     const segmentId = `${this._turnId}-text-${this._textSegmentCounter}`;
@@ -1154,18 +1166,31 @@ export class MessageTurnActor extends InterleavedShadowActor {
     this._currentPendingGroup = null;
     log.debug(`createShellSegment: creating with ${commands.length} commands`);
 
+    const shellCommands: ShellCommand[] = commands.map(cmd => ({
+      command: cmd.command,
+      cwd: cmd.cwd,
+      status: 'pending' as ShellCommandStatus
+    }));
+
+    // Coalesce: within a text-delimited section, consecutive shell executions
+    // merge into one container (parity with tool batches and thinking). The
+    // offset records where this batch begins so batch-relative setShellResults
+    // resolves in the merged array. createTextSegment clears _activeShellGroup.
+    if (this._activeShellGroup) {
+      this._activeShellOffset = this._activeShellGroup.commands.length;
+      this._activeShellGroup.commands.push(...shellCommands);
+      this._activeShellGroup.complete = false; // a new running command re-opens the group
+      this.renderShellSegment(this._activeShellGroup.id);
+      log.debug(`createShellSegment: coalesced into ${this._activeShellGroup.id} at offset ${this._activeShellOffset}`);
+      return this._activeShellGroup.id;
+    }
+
     const container = this.createContainer('message', {
       hostClasses: ['shell-container'],
       dataAttributes: { 'turn-id': this._turnId ?? '' }
     });
 
     log.debug(`createShellSegment: container created with id ${container.id}`);
-
-    const shellCommands: ShellCommand[] = commands.map(cmd => ({
-      command: cmd.command,
-      cwd: cmd.cwd,
-      status: 'pending' as ShellCommandStatus
-    }));
 
     const segment: ShellSegment = {
       id: container.id,
@@ -1176,6 +1201,8 @@ export class MessageTurnActor extends InterleavedShadowActor {
     };
 
     this._shellSegments.set(segment.id, segment);
+    this._activeShellGroup = segment;
+    this._activeShellOffset = 0;
 
     this.renderShellSegment(segment.id);
     this.setupShellHandlers(container.id);
@@ -1194,9 +1221,12 @@ export class MessageTurnActor extends InterleavedShadowActor {
     const segment = this._shellSegments.get(segmentId);
     if (!segment) return;
 
-    segment.commands.forEach(cmd => {
-      cmd.status = 'running';
-    });
+    // Only the most-recently-appended batch starts running; commands from
+    // earlier batches in a coalesced group keep their (done) status.
+    const offset = segment === this._activeShellGroup ? this._activeShellOffset : 0;
+    for (let i = offset; i < segment.commands.length; i++) {
+      segment.commands[i].status = 'running';
+    }
 
     this.renderShellSegment(segmentId);
   }
@@ -1208,8 +1238,11 @@ export class MessageTurnActor extends InterleavedShadowActor {
     const segment = this._shellSegments.get(segmentId);
     if (!segment) return;
 
+    // Results belong to the most-recently-appended batch within a coalesced
+    // group; shift past earlier commands via the offset (mirrors updateTool).
+    const offset = segment === this._activeShellGroup ? this._activeShellOffset : 0;
     results.forEach((result, i) => {
-      const cmd = segment.commands[i];
+      const cmd = segment.commands[offset + i];
       if (cmd) {
         cmd.output = result.output;
         // Detect timeout — command ran but was killed after timeout (not a real failure)

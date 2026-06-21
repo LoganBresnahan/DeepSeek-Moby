@@ -408,8 +408,8 @@ describe('DrawingServer', () => {
         expect(h).toContain('Moby ASCII Editor');
       });
 
-      it('should include a navigation link to the drawing page', () => {
-        expect(html).toContain('/draw');
+      it('should not link to the drawing page while image mode is hidden', () => {
+        expect(html).not.toContain('/draw');
       });
 
       // ── Tool buttons ──
@@ -519,111 +519,29 @@ describe('DrawingServer', () => {
       });
     });
 
-    describe('GET /draw (color drawing page)', () => {
-      let html: string;
-
-      beforeEach(() => {
-        const req = createMockRequest('GET', '/draw');
-        const res = createMockResponse();
-        capturedRequestHandler!(req, res);
-        html = res.end.mock.calls[0][0] as string;
-      });
-
-      it('should serve the color drawing HTML page', () => {
+    describe('GET /draw (hidden until image support)', () => {
+      // Image/drawing mode is hidden until multimodal image support exists — the
+      // drawing page is no longer served; the route redirects to the working
+      // ASCII editor. DRAWING_HTML is retained in code behind the
+      // IMAGE_MODE_ENABLED flag, and its content tests return with the feature.
+      it('redirects to the ASCII editor instead of serving the drawing page', () => {
         const req = createMockRequest('GET', '/draw');
         const res = createMockResponse();
 
         capturedRequestHandler!(req, res);
 
-        expect(res.writeHead).toHaveBeenCalledWith(200, {
-          'Content-Type': 'text/html; charset=utf-8',
-        });
+        expect(res.writeHead).toHaveBeenCalledWith(302, { Location: '/' });
         expect(res.end).toHaveBeenCalled();
-        const h = res.end.mock.calls[0][0] as string;
-        expect(h).toContain('Moby Drawing Pad');
-        expect(h).toContain('<canvas');
-        expect(h).toContain('touchstart');
       });
 
-      it('should include a navigation link back to ASCII editor', () => {
-        expect(html).toContain('ASCII');
-      });
+      it('does not serve any drawing-page HTML body', () => {
+        const req = createMockRequest('GET', '/draw');
+        const res = createMockResponse();
 
-      // ── Color picker ──
+        capturedRequestHandler!(req, res);
 
-      it('should include color swatches', () => {
-        expect(html).toContain('color-swatch');
-        expect(html).toContain('strokeColor');
-        expect(html).toContain('#000000');
-        expect(html).toContain('#ff0000');
-        expect(html).toContain('#0066ff');
-      });
-
-      // ── Stroke size ──
-
-      it('should include stroke size slider', () => {
-        expect(html).toContain('strokeSize');
-        expect(html).toContain('type="range"');
-        expect(html).toContain('min="1"');
-        expect(html).toContain('max="20"');
-      });
-
-      // ── Undo/Redo ──
-
-      it('should include undo and redo with ImageData snapshots', () => {
-        expect(html).toContain('undoStack');
-        expect(html).toContain('redoStack');
-        expect(html).toContain('function undo()');
-        expect(html).toContain('function redo()');
-        expect(html).toContain('getImageData');
-        expect(html).toContain('putImageData');
-        expect(html).toContain('MAX_UNDO');
-      });
-
-      // ── Clear ──
-
-      it('should include clear canvas function', () => {
-        expect(html).toContain('clearCanvas');
-        expect(html).toContain('clearRect');
-      });
-
-      // ── HiDPI ──
-
-      it('should handle HiDPI displays', () => {
-        expect(html).toContain('devicePixelRatio');
-      });
-
-      // ── Touch + mouse input ──
-
-      it('should support both touch and mouse input', () => {
-        expect(html).toContain('touchstart');
-        expect(html).toContain('touchmove');
-        expect(html).toContain('touchend');
-        expect(html).toContain('mousedown');
-        expect(html).toContain('mousemove');
-        expect(html).toContain('mouseup');
-      });
-
-      // ── Send ──
-
-      it('should send image via POST to /upload', () => {
-        expect(html).toContain('/upload');
-        expect(html).toContain('toDataURL');
-        expect(html).toContain('function send()');
-      });
-
-      // ── Single toolbar layout ──
-
-      it('should have a single top toolbar', () => {
-        expect(html).toContain('tool-bar');
-        expect(html).toContain('spacer');
-      });
-
-      // ── Mobile viewport fix ──
-
-      it('should fix mobile viewport height', () => {
-        expect(html).toContain('fixViewport');
-        expect(html).toContain('innerHeight');
+        // The redirect ends the response with no body.
+        expect(res.end.mock.calls[0]?.[0]).toBeUndefined();
       });
     });
 
@@ -637,11 +555,11 @@ describe('DrawingServer', () => {
         );
       });
 
-      it('should log serving the drawing page', () => {
+      it('does not log serving the drawing page (route is hidden)', () => {
         const req = createMockRequest('GET', '/draw');
         capturedRequestHandler!(req, createMockResponse());
 
-        expect(logger.debug).toHaveBeenCalledWith(
+        expect(logger.debug).not.toHaveBeenCalledWith(
           '[DrawingServer] Served drawing page'
         );
       });

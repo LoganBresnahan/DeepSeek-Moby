@@ -139,8 +139,11 @@ This makes the gate a **monotonic ratchet from any starting state**: a model fix
 | `validateTimeoutMs` | `60000` | Hard timeout for the check command. |
 | `maxRepairAttempts` | `3` | **Per-file** budget: consecutive **same-error** reverts for one file before the turn halts. Independent failures across files don't accumulate; a changing error resets the file's streak. |
 | `onInconclusive` | `"commit"` | No oracle / timeout / unapproved: `"commit"` apply + note (Auto's default); `"halt"` stop the turn. No "ask" — Auto never becomes Ask. |
+| `verifyOnStop` | `true` | **Verify on stop** (ADR 0011): at turn completion, don't accept "done" on a regression verdict or on a file the turn just wrote that reads back empty. One bounded repair pass, capped by `maxRepairAttempts`. |
 
 Contributed in `package.json` `contributes.configuration.properties`; read via `getConfiguration('moby')` (same pattern as `moby.subagents`).
+
+**Stop-boundary gate (ADR 0011).** Beyond the per-batch settle above, a verification gate runs at the agentic loop's *terminal stop*, extending 0006's invariant from the edit-batch boundary to the turn-completion boundary. It (a) re-consults the last batch verdict — a trailing no-edit "done" after a `regression` gets one bounded repair pass — and (b) adds a **language-agnostic artifact-presence check**: a file the turn just wrote that reads back empty/whitespace holds the turn open (build-pass ≠ artifact-produced — the empty-`Slide3Demo` clobber compiled clean and a build gate alone waved it through). It flags only *present-but-empty* files, never *missing* ones (a missing file is ambiguous — an intentional delete, or a path it couldn't resolve). Bounded by the same `maxRepairAttempts` per-file budget (no new loop counter); config `moby.editSafety.verifyOnStop`. The native-tool loops (streaming + legacy `runToolLoop`) are wired; the R1 reasoner-shell path is a documented follow-up.
 
 ## Rollout phases
 
@@ -171,7 +174,7 @@ Authoritative list of what must be covered, across `tests/unit/providers/{checkp
 - ask-mode early batch-close does not corrupt transaction state
 
 ### editValidation.test.ts (Phase 2 — engine, ✅ real)
-- `discoverCheckCommand`: `.csproj`/`.sln` → `dotnet build`; package.json scripts (build→typecheck→test) → `npm run …`; Makefile (check→build) → `make …`; `Cargo.toml` → `cargo check`; `go.mod` → `go build ./...`; `.NET` preferred over package.json; unrecognised / unreadable / malformed → `null`
+- `discoverCheckCommand`: `.csproj`/`.sln` → `dotnet build`; package.json scripts (build→typecheck→test) → `npm run …`; Makefile (check→build) → `make …`; `Cargo.toml` → `cargo check`; `go.mod` → `go build ./...`; `.NET` preferred over package.json; unrecognised / unreadable / malformed → `null`. **Project-root-aware (ADR 0012):** probes the workspace root first, then — if no marker is there — the nearest project root(s) below it (`findProjectRoots`), running the check with `cwd` set to the project directory. This is why the gate isn't dormant when the project lives in a subdirectory (e.g. `dotnet new` created it one level down); a nested project still resolves `dotnet build`.
 - `classifyCheckOutcome` (differential): passing after → clean (any start); clean baseline + failing → regression; broken baseline + a NEW error → regression; broken baseline + only pre-existing errors → held; failing with no comparable error-set (either side empty), no baseline, not-run, or timed-out → inconclusive
 - `normalizeErrors`: strips line/col so a shifted error compares equal; dedupes to a set; drops count/summary lines (`N Error(s)`, `Found N errors`, cargo `could not compile`); ignores non-error/warning lines; `[]` when no line says `error` (go-style) or output is empty; handles `:line:col:` (clang/javac)
 - `errorSetsEqual` / `recordRepairRegression` (per-file halt): order-independent set equality; three different files each failing once → no halt; one file failing the SAME error `limit`× in a row → stuck; a changing error set resets the streak; per-file keying survives an interleaved failure on another file
