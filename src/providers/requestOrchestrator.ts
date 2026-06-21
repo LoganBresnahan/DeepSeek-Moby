@@ -1574,6 +1574,15 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
     // than only when a manual-mode web search happened to pre-fetch results.
     // The "may be out of date" wording is deliberately model-agnostic (no
     // hard-coded cutoff) since Moby runs an open model registry.
+    //
+    // ADR 0013 (Lever B): the data-seeding clause reframes "populate this app
+    // with real-world facts" AS a time-sensitive lookup. The 4:26pm miss was a
+    // task-CLASSIFICATION failure at iteration 1 — the directive was already
+    // fresh at primacy and the model still seeded stale World-Cup data, because
+    // it filed "seed app data" as a coding task, not a lookup. An adversarial
+    // design pass rejected re-pinning the (static) date at recency as the fix
+    // (it re-states wording the model already ignored, and dilutes the dynamic
+    // plan reminder sharing that slot); the leverage is in the primacy wording.
     systemPrompt += `
 --- TEMPORAL CONTEXT ---
 Today's date is ${today}.
@@ -1583,6 +1592,11 @@ a library or tool, who currently holds an office or title — do NOT answer from
 memory. Call web_search first and prefer fresh results over your prior
 knowledge. If web_search is unavailable this turn, say what you'd verify rather
 than assert a possibly-stale fact as current.
+This rule covers DATA you write, not just answers you give the user: seeding,
+populating, or hard-coding real-world facts — team rosters, fixtures, standings
+or results, prices, release versions, officeholders — into a source or data
+file IS a time-sensitive lookup. Verify with web_search before writing such
+data; do not seed it from memory.
 --- END TEMPORAL CONTEXT ---
 `;
 

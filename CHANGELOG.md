@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Temporal grounding now covers data you *write*, not just answers you give (ADR 0013)
+
+A traced run built an app and populated it with **stale** real-world data (an old World Cup), calling `web_search` zero times — and the miss happened at the very first iteration, with the ADR 0007 temporal directive already fresh at the top of the prompt. So it wasn't salience decay; it was **task misclassification** — the model filed "seed this app with real-world facts" as a coding task, not as a time-sensitive lookup.
+
+- **The temporal directive now names written data explicitly.** A clause added to the always-present `TEMPORAL CONTEXT` block states that seeding/populating/hard-coding real-world facts (rosters, fixtures, standings, prices, versions, officeholders) into a source or data file *is* a time-sensitive lookup — verify with `web_search` before writing, don't seed from memory. The fix sits at **primacy** (the iteration-1 decision point where the miss occurs), not in a recency re-pin: an adversarial design pass rejected mirroring ADR 0009's plan-reminder re-pin here, because the date is *static* within a turn — re-pinning it just re-states wording the model already ignored while diluting the *dynamic* plan reminder sharing that slot. ([src/providers/requestOrchestrator.ts](src/providers/requestOrchestrator.ts)) Decision, the rejected re-pin designs, and the deferred behavioral backstop: [ADR 0013](docs/architecture/decisions/0013-temporal-grounding-data-seeding.md). New regression test in [tests/unit/providers/requestOrchestrator.test.ts](tests/unit/providers/requestOrchestrator.test.ts).
+
 ### Project-root awareness — works when the project lives in a subdirectory (ADR 0012)
 
 Fixes a cluster of bugs that all stem from one assumption — that the workspace root is the project root — broken when `dotnet new` (or any scaffolder) creates the project one level down. Surfaced together in a traced session whose `.csproj` sat in a subdirectory.

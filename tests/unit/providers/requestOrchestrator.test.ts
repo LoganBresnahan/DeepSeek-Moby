@@ -789,6 +789,20 @@ describe('RequestOrchestrator', () => {
         expect(sp).toContain('web_search');
       });
 
+      it('reframes data-seeding as a time-sensitive lookup (ADR 0013, Lever B)', async () => {
+        // The 4:26pm regression: the model seeded an app with stale real-world
+        // data because it filed "populate this app" as a coding task, not a
+        // lookup. The primacy clause must name DATA the model *writes*, not just
+        // answers it gives, so the directive is recognised as applicable.
+        await orchestrator.handleMessage('Hello', null, async () => '', undefined);
+
+        const sp = mockClient.streamChat.mock.calls[0][2];
+        expect(sp).toContain('seeding');
+        // The keyword that makes the rule bite on written data.
+        expect(sp).toMatch(/IS a time-sensitive lookup/i);
+        expect(sp).toMatch(/do not seed it from memory/i);
+      });
+
       it('renders today\'s date deterministically under a mocked clock', async () => {
         // Fake only Date so setTimeout/microtasks in handleMessage still run.
         // Noon-local avoids the UTC-midnight→previous-day TZ edge.

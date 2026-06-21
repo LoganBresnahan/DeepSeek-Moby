@@ -22,6 +22,7 @@ Short, dated records of significant architectural and behavioral decisions. Each
 | [0010](0010-web-search-query-ledger-and-cache.md) | Web-search query ledger and near-duplicate cache | Accepted | 2026-06-20 |
 | [0011](0011-verification-gated-turn-completion.md) | Verification-gated turn completion | Accepted | 2026-06-20 |
 | [0012](0012-project-root-awareness.md) | Project-root awareness (workspace root ≠ project root) | Accepted | 2026-06-21 |
+| [0013](0013-temporal-grounding-data-seeding.md) | Temporal grounding II: data-seeding classification clause | Accepted | 2026-06-21 |
 
 ## When to write an ADR
 
