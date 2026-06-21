@@ -83,6 +83,9 @@ export class EditValidator {
   private _baselineProbed = false;
   // undefined = not resolved yet this turn; null = resolved to "no command".
   private _command: CheckCommand | null | undefined = undefined;
+  /** ADR 0011: the most recent batch result, re-consulted by the turn-completion
+   *  gate at the loop's terminal stop boundary. null before any batch this turn. */
+  private _lastBatch: BatchValidation | null = null;
 
   constructor(private readonly deps: EditValidatorDeps) {}
 
@@ -91,6 +94,17 @@ export class EditValidator {
     this._baseline = null;
     this._baselineProbed = false;
     this._command = undefined;
+    this._lastBatch = null;
+  }
+
+  /** ADR 0011: the last batch's verdict (or null before any batch this turn). */
+  getLastVerdict(): BatchValidation['verdict'] | null {
+    return this._lastBatch?.verdict ?? null;
+  }
+
+  /** ADR 0011: the full last batch result — carries the captured build output + errors. */
+  getLastBatch(): BatchValidation | null {
+    return this._lastBatch;
   }
 
   /**
@@ -120,6 +134,13 @@ export class EditValidator {
    * may halt on inconclusive per `onInconclusive`).
    */
   async validateBatch(root: vscode.Uri, signal?: AbortSignal): Promise<BatchValidation> {
+    // ADR 0011: remember the verdict so the turn-completion gate can re-consult it.
+    const result = await this.runBatchValidation(root, signal);
+    this._lastBatch = result;
+    return result;
+  }
+
+  private async runBatchValidation(root: vscode.Uri, signal?: AbortSignal): Promise<BatchValidation> {
     const attempt = await this.runCheck(root, signal);
     switch (attempt.kind) {
       case 'skipped':

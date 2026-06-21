@@ -280,6 +280,10 @@ export class RequestOrchestrator {
   private _editRepairByFile = new Map<string, FileRepairState>();
   /** Whether the "validation is dormant (command not approved)" note fired this turn. */
   private _editSafetyDormantWarned = false;
+  /** ADR 0011: one-shot guard so the verify-on-stop gate re-injects a trailing
+   *  build-regression at most once per turn — bounded even when the iteration
+   *  cap is Infinity (the user's "unlimited" maxToolCalls config). */
+  private _verifyRegressionReinjected = false;
 
   /**
    * Establish the edit-safety baseline on the PRISTINE tree before the turn's
@@ -418,6 +422,89 @@ export class RequestOrchestrator {
       }
     }
     return false;
+  }
+
+  /**
+   * ADR 0011: verification gate at the terminal stop boundary of the agentic
+   * loops. Returns feedback to inject (the caller pushes it and `continue`s the
+   * loop) or `null` to accept the stop. Extends ADR 0006 — it re-consults the
+   * last build verdict and adds a language-agnostic artifact-presence check; it
+   * introduces no new validation oracle and yields to 0006's terminal halt.
+   *
+   * Bounded by the SAME budgets 0006 owns (the per-file `_editRepairByFile`
+   * tracker) plus a one-shot guard for the regression re-inject — so it can't
+   * loop even when the iteration cap is Infinity (the user's unlimited config).
+   * Only gates AUTO mode: manual/ask edits aren't auto-committed by the loop and
+   * 0006's verdict machinery only runs in auto.
+   */
+  private async verifyTurnCompletion(signal: AbortSignal): Promise<string | null> {
+    const cfg = vscode.workspace.getConfiguration('moby');
+    if (!(cfg.get<boolean>('editSafety.verifyOnStop') ?? true)) return null;
+    if (signal.aborted) return null;
+    if (this.diffManager.currentEditMode !== 'auto') return null;
+
+    const maxRepair = cfg.get<number>('editSafety.maxRepairAttempts') ?? 3;
+
+    // ── Half 1: re-consult the last build verdict (hole 1) ──
+    // A trailing no-edit "done" iteration after a final batch that regressed:
+    // 0006 already reverted + fed back once; had it halted (stuck) the loop
+    // would have broken and we'd never be here. Give one more bounded nudge,
+    // at most once per turn (the one-shot guard bounds it under Infinity).
+    if (this.editValidator.getLastVerdict() === 'regression' && !this._verifyRegressionReinjected) {
+      this._verifyRegressionReinjected = true;
+      const batch = this.editValidator.getLastBatch();
+      const output = (batch?.output ?? '').slice(-4000);
+      logger.info('[VerifyOnStop] Last build verdict was a regression at stop — re-injecting once.');
+      return `You ended the turn, but the project check \`${batch?.command ?? 'build'}\` was still failing after your last edit:\n\n${output}\n\nFix the cause and finish — do not end the turn on a broken build.`;
+    }
+
+    // ── Half 2: language-agnostic artifact-presence check (hole 2) ──
+    // Build-pass ≠ artifact-produced: the empty/clobbered-but-compiles case (the
+    // traced empty-Slide3Demo failure). We flag only PRESENT-but-empty files,
+    // not missing ones — a missing file is ambiguous (an intentional delete, or
+    // a path we couldn't resolve), and flagging it would spuriously hold turns
+    // open. An empty file the turn just wrote is a near-certain failure.
+    const targets = Array.from(new Set(
+      this.diffManager.getFileChanges().filter(c => c.status === 'applied').map(c => c.filePath)
+    ));
+    if (targets.length === 0) return null;
+
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+    const emptyFiles: string[] = [];
+    for (const p of targets) {
+      const text = await this.readArtifactText(root, p);
+      if (text !== null && text.trim().length === 0) emptyFiles.push(p);
+    }
+    if (emptyFiles.length === 0) return null;
+
+    // Bound by the per-file repair budget (no new counter): a file that reads
+    // empty `maxRepair` times in a row is "stuck" — stop re-injecting and warn.
+    const { stuck } = recordRepairRegression(
+      this._editRepairByFile, emptyFiles, ['__artifact_empty__'], maxRepair,
+    );
+    const actionable = emptyFiles.filter(p => !stuck.includes(p));
+    if (actionable.length === 0) {
+      this._onWarning.fire({ message: `Completed, but ${emptyFiles.join(', ')} ${emptyFiles.length === 1 ? 'is' : 'are'} empty — the deliverable may not have been produced.` });
+      logger.warn(`[VerifyOnStop] Accepting stop with empty deliverable(s) after ${maxRepair} attempts: ${emptyFiles.join(', ')}`);
+      return null;
+    }
+    logger.info(`[VerifyOnStop] Empty deliverable(s) at stop — re-injecting: ${actionable.join(', ')}`);
+    return `You reported completion, but ${actionable.join(', ')} ${actionable.length === 1 ? 'is' : 'are'} empty. ` +
+      `Re-read ${actionable.length === 1 ? 'it' : 'them'} and produce the intended content, then finish.`;
+  }
+
+  /** Read a turn-modified file as text for the artifact check. Returns null when
+   *  the file is missing/unreadable (treated as "not empty" — see the caller's
+   *  rationale). Paths from `getFileChanges` are workspace-relative. */
+  private async readArtifactText(root: vscode.Uri | undefined, filePath: string): Promise<string | null> {
+    try {
+      const isAbsolute = filePath.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(filePath);
+      const uri = isAbsolute || !root ? vscode.Uri.file(filePath) : vscode.Uri.joinPath(root, filePath);
+      const data = await vscode.workspace.fs.readFile(uri);
+      return Buffer.from(data).toString('utf8');
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -731,6 +818,7 @@ export class RequestOrchestrator {
     this.editValidator.resetTurn();
     this._editRepairByFile.clear();
     this._editSafetyDormantWarned = false;
+    this._verifyRegressionReinjected = false;
     // Clear read files tracking and extract user intent
     this.fileContextManager.clearTurnTracking();
     this.fileContextManager.extractFileIntent(message);
@@ -3359,9 +3447,18 @@ than assert a possibly-stale fact as current.
 
       const toolCalls = response.tool_calls ?? [];
 
-      // Terminal turn — model produced its final answer. Loop ends.
+      // Terminal turn — model produced its final answer. Loop ends, UNLESS the
+      // verification gate (ADR 0011) holds it open: a "done" that sits on a
+      // broken build or an empty deliverable gets one bounded repair pass. The
+      // `iterations < maxIterations` guard means a continue at the cap accepts
+      // the stop rather than pushing feedback the loop would never act on.
       if (response.finish_reason !== 'tool_calls' || toolCalls.length === 0) {
         logger.info(`[StreamingToolCalls] Iteration ${iterations} terminal (finish_reason=${response.finish_reason ?? 'unknown'}, tool_calls=${toolCalls.length})`);
+        const verifyFeedback = await this.verifyTurnCompletion(signal);
+        if (verifyFeedback && iterations < maxIterations) {
+          currentMessages.push({ role: 'user', content: verifyFeedback });
+          continue;
+        }
         break;
       }
 
@@ -3652,8 +3749,15 @@ than assert a possibly-stale fact as current.
         }
       }
 
-      // If no tool calls, we're done with the tool loop
+      // If no tool calls, we're done with the tool loop — UNLESS the verification
+      // gate (ADR 0011) holds it open for one bounded repair pass (broken build
+      // or empty deliverable). Mirrors runStreamingToolCallsLoop.
       if (!response.tool_calls || response.tool_calls.length === 0) {
+        const verifyFeedback = await this.verifyTurnCompletion(signal);
+        if (verifyFeedback && iterations < maxIterations) {
+          toolMessages.push({ role: 'user', content: verifyFeedback });
+          continue;
+        }
         break;
       }
 

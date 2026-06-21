@@ -294,3 +294,42 @@ describe('EditValidator.ensureBaseline (ADR 0006, Phase 2 — pre-edit probe)', 
     expect((await validator.validateBatch(ROOT)).verdict).toBe('inconclusive');
   });
 });
+
+describe('EditValidator — last-verdict accessors (ADR 0011)', () => {
+  const pass: RunOutcome = { exitCode: 0, timedOut: false, output: 'Build succeeded' };
+  const fail: RunOutcome = { exitCode: 1, timedOut: false, output: 'a.cs(10,5): error CS1002: ; expected' };
+
+  it('getLastVerdict is null before any batch, then the last verdict after validateBatch', async () => {
+    const { validator } = makeValidator({ runCommand: vi.fn(async () => pass) });
+    expect(validator.getLastVerdict()).toBeNull();
+    await validator.validateBatch(ROOT);
+    expect(validator.getLastVerdict()).toBe('clean');
+  });
+
+  it('tracks the verdict across batches (clean → regression)', async () => {
+    const runCommand = vi.fn().mockResolvedValueOnce(pass).mockResolvedValueOnce(fail);
+    const { validator } = makeValidator({ runCommand });
+    await validator.validateBatch(ROOT);                 // clean baseline
+    expect(validator.getLastVerdict()).toBe('clean');
+    await validator.validateBatch(ROOT);                 // regression
+    expect(validator.getLastVerdict()).toBe('regression');
+  });
+
+  it('getLastBatch carries the captured build output on a regression', async () => {
+    const runCommand = vi.fn().mockResolvedValueOnce(pass).mockResolvedValueOnce(fail);
+    const { validator } = makeValidator({ runCommand });
+    await validator.validateBatch(ROOT);
+    await validator.validateBatch(ROOT);
+    expect(validator.getLastBatch()?.verdict).toBe('regression');
+    expect(validator.getLastBatch()?.output).toMatch(/CS1002/);
+  });
+
+  it('resetTurn clears the last verdict and batch back to null', async () => {
+    const { validator } = makeValidator({ runCommand: vi.fn(async () => pass) });
+    await validator.validateBatch(ROOT);
+    expect(validator.getLastVerdict()).toBe('clean');
+    validator.resetTurn();
+    expect(validator.getLastVerdict()).toBeNull();
+    expect(validator.getLastBatch()).toBeNull();
+  });
+});

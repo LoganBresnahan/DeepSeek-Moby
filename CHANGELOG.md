@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Verification-gated turn completion (ADR 0011)
+
+A turn can no longer report **done** on a broken build or an empty/missing deliverable. This extends ADR 0006's invariant ("never report success on an edit that broke the build") from the edit-*batch* boundary to the *turn-completion* boundary, and closes the exact `914pm` failure: `Slide3Demo.razor` was clobbered down to an empty `<div>`, which **compiles fine**, so the build verdict was `clean` and the turn completed "successfully" — the user had to ask to restore it the next session. Build-pass ≠ artifact-produced.
+
+- **Re-consults the build verdict at stop.** `EditValidator` now remembers its last batch verdict (`getLastVerdict`/`getLastBatch`); at the loop's terminal break, a trailing no-edit "done" after a `regression` gets one bounded repair pass (the captured build errors fed back) instead of completing on a broken tree. ([src/providers/editValidator.ts](src/providers/editValidator.ts))
+- **Language-agnostic artifact-presence check.** A file the turn just wrote that reads back empty/whitespace holds the turn open with a "re-read and produce the content" nudge. Deliberately loose — it confirms only "present and non-empty," never "correct" — and ships **zero** language knowledge. It flags only *present-but-empty* files, never *missing* ones (a missing file is ambiguous — an intentional delete, or an unresolved path). ([src/providers/requestOrchestrator.ts](src/providers/requestOrchestrator.ts))
+- **No new loop primitive.** Bounded by the budgets ADR 0006 already owns — the per-file `maxRepairAttempts` repair tracker (an empty file `maxRepairAttempts`× in a row stops re-injecting and warns) plus the iteration cap — and a one-shot guard for the regression re-inject so it can't loop even under an unbounded (`maxToolCalls ≥ 100`) iteration cap. Yields to 0006's terminal halt; never fights it. Wired into the streaming and legacy `runToolLoop` paths; the R1 reasoner-shell path is a documented follow-up. Config: `moby.editSafety.verifyOnStop` (default `true`). Decision: [ADR 0011](docs/architecture/decisions/0011-verification-gated-turn-completion.md); reference: [edit-safety.md](docs/architecture/integration/edit-safety.md).
+- 13 new tests: `EditValidator` last-verdict accessors ([tests/unit/providers/editValidator.test.ts](tests/unit/providers/editValidator.test.ts)) and the stop-boundary gate — regression re-inject (one-shot), clean+non-empty accepts, clean-but-empty holds open, per-file budget bound + warning, inconclusive accepts, missing-not-flagged, `verifyOnStop:false`, non-auto no-op ([tests/unit/providers/requestOrchestrator.test.ts](tests/unit/providers/requestOrchestrator.test.ts)).
+
 ### Web search — query ledger + near-duplicate cache (ADR 0010)
 
 Stops the near-duplicate **search storm**: a traced auto-mode turn issued **71 `web_search` calls** (≈140 `deepseek-v4-flash` digest calls), the overwhelming majority trivial rephrasings of the same handful of targets. Pairs with ADR 0007, which deliberately makes the model search *more* for time-sensitive facts — this bounds that so it can't degenerate into a storm.

@@ -139,8 +139,11 @@ This makes the gate a **monotonic ratchet from any starting state**: a model fix
 | `validateTimeoutMs` | `60000` | Hard timeout for the check command. |
 | `maxRepairAttempts` | `3` | **Per-file** budget: consecutive **same-error** reverts for one file before the turn halts. Independent failures across files don't accumulate; a changing error resets the file's streak. |
 | `onInconclusive` | `"commit"` | No oracle / timeout / unapproved: `"commit"` apply + note (Auto's default); `"halt"` stop the turn. No "ask" — Auto never becomes Ask. |
+| `verifyOnStop` | `true` | **Verify on stop** (ADR 0011): at turn completion, don't accept "done" on a regression verdict or on a file the turn just wrote that reads back empty. One bounded repair pass, capped by `maxRepairAttempts`. |
 
 Contributed in `package.json` `contributes.configuration.properties`; read via `getConfiguration('moby')` (same pattern as `moby.subagents`).
+
+**Stop-boundary gate (ADR 0011).** Beyond the per-batch settle above, a verification gate runs at the agentic loop's *terminal stop*, extending 0006's invariant from the edit-batch boundary to the turn-completion boundary. It (a) re-consults the last batch verdict — a trailing no-edit "done" after a `regression` gets one bounded repair pass — and (b) adds a **language-agnostic artifact-presence check**: a file the turn just wrote that reads back empty/whitespace holds the turn open (build-pass ≠ artifact-produced — the empty-`Slide3Demo` clobber compiled clean and a build gate alone waved it through). It flags only *present-but-empty* files, never *missing* ones (a missing file is ambiguous — an intentional delete, or a path it couldn't resolve). Bounded by the same `maxRepairAttempts` per-file budget (no new loop counter); config `moby.editSafety.verifyOnStop`. The native-tool loops (streaming + legacy `runToolLoop`) are wired; the R1 reasoner-shell path is a documented follow-up.
 
 ## Rollout phases
 

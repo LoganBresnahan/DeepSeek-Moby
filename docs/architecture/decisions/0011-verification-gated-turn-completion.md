@@ -1,6 +1,6 @@
 # 0011. Verification-gated turn completion
 
-**Status:** Proposed
+**Status:** Accepted — implemented for the native-tool loops (streaming + legacy `runToolLoop`). Three implementation refinements vs. this text: (1) the artifact check flags only *present-but-empty* files, not *missing* ones (a missing file is ambiguous — an intentional delete, or an unresolved path — and flagging it risks false positives); (2) the regression re-inject is bounded by a one-shot per-turn guard (the iteration cap is `Infinity` under the user's `maxToolCalls ≥ 100` config, so it can't be the backstop there); (3) the R1 reasoner-shell break is **deferred** as a follow-up (it has its own auto-continuation state machine and isn't a native-tool path).
 **Date:** 2026-06-20
 
 ## Context

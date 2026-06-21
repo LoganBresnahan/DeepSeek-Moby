@@ -395,6 +395,100 @@ describe('RequestOrchestrator', () => {
     });
   });
 
+  // ── Verify-on-stop gate (ADR 0011) ──
+  // Drives verifyTurnCompletion directly with stubbed verdict + file state.
+  // readArtifactText is stubbed so no real fs is touched (the vscode mock here
+  // has no workspace.fs). recordRepairRegression runs for real over the real
+  // _editRepairByFile, so the per-file budget bound is exercised end to end.
+  describe('verifyTurnCompletion — verify-on-stop gate (ADR 0011)', () => {
+    const signal = new AbortController().signal;
+    function stubVerdict(verdict: any, batch: any = null) {
+      (orchestrator as any).editValidator.getLastVerdict = vi.fn(() => verdict);
+      (orchestrator as any).editValidator.getLastBatch = vi.fn(() => batch);
+    }
+    function stubFiles(paths: string[]) {
+      mockDiffManager.getFileChanges = vi.fn(() =>
+        paths.map(p => ({ filePath: p, status: 'applied' as const, iteration: 1 })));
+    }
+    function stubReads(map: Record<string, string | null>) {
+      (orchestrator as any).readArtifactText = vi.fn(async (_root: any, p: string) =>
+        (p in map ? map[p] : null));
+    }
+    beforeEach(() => { mockDiffManager.currentEditMode = 'auto'; });
+
+    it('regression verdict at stop → re-injects the build errors, once per turn', async () => {
+      stubVerdict('regression', { command: 'dotnet build', output: 'a.cs: error CS1002' });
+      stubFiles([]);
+      const first = await (orchestrator as any).verifyTurnCompletion(signal);
+      expect(first).toContain('still failing');
+      expect(first).toContain('CS1002');
+      // One-shot guard: a second consult this turn does not re-inject again.
+      expect(await (orchestrator as any).verifyTurnCompletion(signal)).toBeNull();
+    });
+
+    it('clean verdict + non-empty artifact → accepts the stop (null)', async () => {
+      stubVerdict('clean');
+      stubFiles(['Components/Slides/Slide3Demo.razor']);
+      stubReads({ 'Components/Slides/Slide3Demo.razor': '<div>content</div>' });
+      expect(await (orchestrator as any).verifyTurnCompletion(signal)).toBeNull();
+    });
+
+    it('clean build but EMPTY deliverable → holds the turn open (the Slide3Demo case)', async () => {
+      stubVerdict('clean');
+      stubFiles(['Components/Slides/Slide3Demo.razor']);
+      stubReads({ 'Components/Slides/Slide3Demo.razor': '   \n  ' }); // whitespace only
+      const fb = await (orchestrator as any).verifyTurnCompletion(signal);
+      expect(fb).toContain('Slide3Demo.razor');
+      expect(fb).toContain('empty');
+    });
+
+    it('an empty deliverable stops re-injecting after maxRepairAttempts (bounded + warns)', async () => {
+      configStore.set('editSafety.maxRepairAttempts', 2);
+      stubVerdict('clean');
+      stubFiles(['x.razor']);
+      stubReads({ 'x.razor': '' });
+      const warnings: string[] = [];
+      orchestrator.onWarning(w => warnings.push(w.message));
+      expect(await (orchestrator as any).verifyTurnCompletion(signal)).toContain('empty'); // 1 → re-inject
+      expect(await (orchestrator as any).verifyTurnCompletion(signal)).toBeNull();          // 2 → stuck → accept
+      expect(warnings.some(w => /empty/.test(w))).toBe(true);
+    });
+
+    it('inconclusive verdict + present artifact → accepts (no false continuation)', async () => {
+      stubVerdict('inconclusive');
+      stubFiles(['x.ts']);
+      stubReads({ 'x.ts': 'export const x = 1;' });
+      expect(await (orchestrator as any).verifyTurnCompletion(signal)).toBeNull();
+    });
+
+    it('a missing file is NOT flagged (ambiguous: could be an intentional delete)', async () => {
+      stubVerdict('clean');
+      stubFiles(['deleted.ts']);
+      stubReads({ 'deleted.ts': null }); // read returns null = missing/unreadable
+      expect(await (orchestrator as any).verifyTurnCompletion(signal)).toBeNull();
+    });
+
+    it('verifyOnStop=false disables the gate entirely', async () => {
+      configStore.set('editSafety.verifyOnStop', false);
+      stubVerdict('regression', { command: 'build', output: 'err' });
+      stubFiles(['x.ts']);
+      stubReads({ 'x.ts': '' });
+      expect(await (orchestrator as any).verifyTurnCompletion(signal)).toBeNull();
+    });
+
+    it('is a no-op outside auto mode', async () => {
+      mockDiffManager.currentEditMode = 'manual';
+      stubVerdict('regression', { command: 'build', output: 'err' });
+      expect(await (orchestrator as any).verifyTurnCompletion(signal)).toBeNull();
+    });
+
+    it('no edits this turn → nothing to verify (null)', async () => {
+      stubVerdict('clean');
+      stubFiles([]);
+      expect(await (orchestrator as any).verifyTurnCompletion(signal)).toBeNull();
+    });
+  });
+
   // ── Session Management ──
 
   describe('handleMessage - session management', () => {

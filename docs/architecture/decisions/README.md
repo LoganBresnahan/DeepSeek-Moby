@@ -20,7 +20,7 @@ Short, dated records of significant architectural and behavioral decisions. Each
 | [0008](0008-request-scoped-stream-lifecycle-and-interrupt-teardown.md) | Request-scoped stream lifecycle and interrupt teardown | Proposed | 2026-06-20 |
 | [0009](0009-active-plan-recency-pinning.md) | Active-plan recency pinning (context salience) | Proposed | 2026-06-20 |
 | [0010](0010-web-search-query-ledger-and-cache.md) | Web-search query ledger and near-duplicate cache | Accepted | 2026-06-20 |
-| [0011](0011-verification-gated-turn-completion.md) | Verification-gated turn completion | Proposed | 2026-06-20 |
+| [0011](0011-verification-gated-turn-completion.md) | Verification-gated turn completion | Accepted | 2026-06-20 |
 
 ## When to write an ADR
 

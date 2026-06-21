@@ -185,6 +185,7 @@ Rejected. It **mixes the edit modes**, and that breaks the mode contract. Choosi
 - Does **not** reduce the model's garble *rate* — only the surface that reaches disk. Root-cause attack (decoding knobs; content-embedded transport, Phase 4) is complementary and tracked separately.
 
 **Follow-ups:**
+- **The batch verdict is now also consumed at the turn-completion boundary** — [ADR 0011](0011-verification-gated-turn-completion.md) wires `EditValidator`'s last verdict into the loop's terminal stop (and adds a language-agnostic artifact-presence check), so a turn can't report "done" on a trailing broken build or an empty deliverable. This extends 0006's invariant from the edit-*batch* boundary to the *turn* boundary, reusing the same verdict + per-file repair budget.
 - Phase 4 ADR: content-embedded SEARCH/REPLACE transport (get bulky code out of JSON tool-call args).
 - Instrument the generation boundary (log raw REPLACE / `write_file` content as it exits `finalizeToolCalls`) to measure garble rate per model / `reasoning_effort` — quantifies whether decoding-knob changes help.
 - Consider surfacing the validation result (build pass/fail + reverted) in the turn UI so the user sees why an edit was held.
