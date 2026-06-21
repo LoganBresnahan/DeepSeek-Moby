@@ -2478,6 +2478,10 @@ than assert a possibly-stale fact as current.
             // Add full result to context
             resultsContext += `\n--- Web Search Results for: "${q.query}" ---\n${searchResult}\n--- End Web Search Results ---\n`;
           }
+          // ADR 0010 Layer 2: surface the per-turn search ledger once after the
+          // batch so the reasoner sees its own search history and stops
+          // re-issuing near-duplicates.
+          resultsContext += this.webSearchManager.renderSearchLedger();
 
           // Notify frontend of web search results
           this._onShellResults.fire({ results: webResults });
@@ -2773,6 +2777,12 @@ than assert a possibly-stale fact as current.
       } catch (e: any) {
         result = `Error: Failed to execute web search — ${e.message}`;
       }
+      // ADR 0010 Layer 2: append the per-turn search ledger so the model sees
+      // what it has already searched this turn and declines redundant calls.
+      // The system prompt is built once per turn and can't carry the running
+      // ledger, so it rides on the tool result instead — visible right at the
+      // point the model decides whether to search again.
+      result += this.webSearchManager.renderSearchLedger();
     } else {
       result = await executeToolCall(toolCall);
     }

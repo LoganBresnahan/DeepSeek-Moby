@@ -1,6 +1,6 @@
 # 0010. Web-search query ledger and near-duplicate cache
 
-**Status:** Proposed
+**Status:** Accepted — implemented. Layer 1a omits the ADR snippet's `.sort()` (token-sort would fail the order-distinct false-collision guard); Layer 2's ledger rides on the `web_search` tool result rather than the system prompt (built once per turn, so it can't carry a ledger that accumulates during the tool loop). The `read_file` generalization is deferred as a guarded fast-follow.
 **Date:** 2026-06-20
 
 ## Context

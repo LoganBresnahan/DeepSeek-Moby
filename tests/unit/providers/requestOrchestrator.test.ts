@@ -221,6 +221,7 @@ function createMockWebSearchManager() {
     updateSettings: vi.fn(),
     setRecentUserPrompt: vi.fn(),
     getDigestMaxResults: vi.fn(() => 5),
+    renderSearchLedger: vi.fn(() => ''), // ADR 0010: per-turn search ledger
   };
 }
 
@@ -721,6 +722,30 @@ describe('RequestOrchestrator', () => {
         const sp = mockClient.streamChat.mock.calls[0][2];
         expect(sp).toContain('TEMPORAL CONTEXT');
       });
+    });
+  });
+
+  // ── Web-search ledger wiring (ADR 0010) ──
+
+  describe('dispatchToolCall - web_search ledger (ADR 0010)', () => {
+    it('appends the per-turn search ledger to the web_search tool result', async () => {
+      mockWebSearch.searchByQuery = vi.fn(async () => 'RAW SEARCH RESULT');
+      mockWebSearch.renderSearchLedger = vi.fn(
+        () => '\n\nSEARCHES THIS TURN (do not repeat — reuse these results):\n  • "x" → 2 results\n'
+      );
+
+      const toolCall = {
+        id: 't1',
+        type: 'function',
+        function: { name: 'web_search', arguments: JSON.stringify({ query: 'x' }) }
+      };
+      const signal = new AbortController().signal;
+      const dispatch = await (orchestrator as any).dispatchToolCall(toolCall, signal);
+
+      expect(mockWebSearch.searchByQuery).toHaveBeenCalledWith('x');
+      // The model sees the raw result AND its running search history together.
+      expect(dispatch.result).toContain('RAW SEARCH RESULT');
+      expect(dispatch.result).toContain('SEARCHES THIS TURN');
     });
   });
 
