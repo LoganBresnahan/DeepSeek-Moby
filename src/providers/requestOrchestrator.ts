@@ -1422,13 +1422,36 @@ Rules: "# File:" header is required. SEARCH must match the file exactly. For new
     // prior assistant turns in history — they'll otherwise emit a
     // web_search tool call this turn despite the tool not being in the
     // schema. Telling them explicitly stops the loop.
+    // `today` is computed once per prompt build, regardless of whether web
+    // search ran, so the temporal block (below) and the web-search header
+    // (when present) share a single source of truth for the date. See ADR 0007.
+    const today = new Date().toLocaleDateString('en-US', {
+      weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
+    });
+
     const webSearchContext = await this.webSearchManager.searchForMessage(message);
     if (webSearchContext) {
-      const today = new Date().toLocaleDateString('en-US', {
-        weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
-      });
       systemPrompt += `\n\n--- WEB SEARCH RESULTS (${today}) ---\n${webSearchContext}\n--- END WEB SEARCH RESULTS ---\n\nThese results were retrieved for you. Use them to answer the user's question — do not call the web_search tool, it is unavailable this turn.\n`;
     }
+
+    // ── 4.5 Temporal context (always present) ──
+    // Standing date + staleness directive. See ADR 0007. Present on every turn
+    // — search or not — so the model has a clock and a "your knowledge may be
+    // stale" rule before it decides whether it even needs to search, rather
+    // than only when a manual-mode web search happened to pre-fetch results.
+    // The "may be out of date" wording is deliberately model-agnostic (no
+    // hard-coded cutoff) since Moby runs an open model registry.
+    systemPrompt += `
+--- TEMPORAL CONTEXT ---
+Today's date is ${today}.
+Your training data has a cutoff and may be out of date. For time-sensitive
+facts — current events, live scores/standings, prices, the latest version of
+a library or tool, who currently holds an office or title — do NOT answer from
+memory. Call web_search first and prefer fresh results over your prior
+knowledge. If web_search is unavailable this turn, say what you'd verify rather
+than assert a possibly-stale fact as current.
+--- END TEMPORAL CONTEXT ---
+`;
 
     // ── 5. Active plans ──
     if (this.planManager) {

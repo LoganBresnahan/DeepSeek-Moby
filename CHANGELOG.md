@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### System-prompt temporal grounding — always-present date + staleness directive (ADR 0007)
+
+Closes the *confidently-stale* failure mode: a model answering a time-sensitive question from training memory and never reaching for `web_search`, because nothing in the prompt told it its knowledge might predate the event (the traced 9:14pm session asserted "the 2026 World Cup hasn't happened yet" and never searched).
+
+- **Today's date and a staleness directive are now in the system prompt on _every_ turn**, not only when a manual-mode web search happened to pre-fetch results. Previously the date entered the prompt in exactly one place — the `--- WEB SEARCH RESULTS (<date>) ---` header — so a normal (non-search) turn carried no date and no "your knowledge may be stale" cue at all. A new always-present **`--- TEMPORAL CONTEXT ---`** block (section 4.5 of `buildSystemPrompt`, between the web-search section and active plans) supplies today's date plus an explicit instruction: for time-sensitive facts — current events, live scores/standings, prices, latest library versions, who currently holds a title — do **not** answer from memory; call `web_search` first and prefer fresh results over prior knowledge. The directive is model-agnostic ("may be out of date", no hard-coded cutoff) since Moby runs an open model registry, and degrades gracefully when search is unavailable that turn. Decision + alternatives: [ADR 0007](docs/architecture/decisions/0007-system-prompt-temporal-grounding.md); section-by-section reference: [docs/guides/system-prompt.md](docs/guides/system-prompt.md). ([src/providers/requestOrchestrator.ts](src/providers/requestOrchestrator.ts))
+- **One source of truth for the date.** `new Date().toLocaleDateString(...)` is hoisted out of the `if (webSearchContext)` branch so it is computed once per prompt build; the temporal block and the web-search header share that single value and can't drift.
+- **Subagent prompts stay clean.** Per-role subagent prompts (e.g. the web-search-digest role) are built separately and do **not** inherit the temporal block — a digester ranking already-fetched results must not be told to "search first". Locked in by test.
+- Pairs with [ADR 0010](docs/architecture/decisions/0010-web-search-query-ledger-and-cache.md) (per-turn search ledger + near-duplicate cache), which bounds the extra searches this directive encourages — 0007 raises search propensity, 0010 caps the cost.
+- 6 new tests: temporal block present on a no-search turn, a deterministic date under a mocked clock, ordering before active plans, a single shared date source on a web-search turn, presence on the reasoner path ([tests/unit/providers/requestOrchestrator.test.ts](tests/unit/providers/requestOrchestrator.test.ts)), and the subagent exemption ([tests/unit/subagents/roles/webSearchDigest.test.ts](tests/unit/subagents/roles/webSearchDigest.test.ts)).
+
 ## [0.5.0] - 2026-06-19
 
 ### Edit safety — checkpoint + differential validation gate (ADR 0006)

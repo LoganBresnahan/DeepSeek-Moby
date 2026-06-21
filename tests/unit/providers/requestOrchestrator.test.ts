@@ -643,6 +643,85 @@ describe('RequestOrchestrator', () => {
       // Reasoner prompt includes shell command instructions
       expect(systemPromptArg).toContain('shell');
     });
+
+    // ── Temporal grounding (ADR 0007) ──
+    // The standing date + staleness directive must be present on EVERY turn,
+    // not only when a manual-mode web search pre-fetched results. These pin the
+    // status-quo gap fix (date was trapped inside the `if (webSearchContext)`
+    // branch) and the insertion point (before active plans).
+    describe('temporal grounding (ADR 0007)', () => {
+      it('includes the temporal block on a normal turn with no web search', async () => {
+        // searchForMessage defaults to '' (falsy) → no web-search section.
+        await orchestrator.handleMessage('Hello', null, async () => '', undefined);
+
+        const sp = mockClient.streamChat.mock.calls[0][2];
+        expect(sp).toContain('TEMPORAL CONTEXT');
+        // Staleness-directive keywords — the load-bearing behavioral cue.
+        expect(sp).toContain('out of date');
+        expect(sp).toContain('time-sensitive');
+        expect(sp).toContain('web_search');
+      });
+
+      it('renders today\'s date deterministically under a mocked clock', async () => {
+        // Fake only Date so setTimeout/microtasks in handleMessage still run.
+        // Noon-local avoids the UTC-midnight→previous-day TZ edge.
+        const fixed = new Date(2026, 5, 20, 12, 0, 0);
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(fixed);
+        try {
+          await orchestrator.handleMessage('Hello', null, async () => '', undefined);
+
+          const sp = mockClient.streamChat.mock.calls[0][2];
+          // Compute the expected string the same way buildSystemPrompt does,
+          // from the same instant, so the assertion is TZ/locale-independent.
+          const expected = fixed.toLocaleDateString('en-US', {
+            weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
+          });
+          expect(sp).toContain(`Today's date is ${expected}`);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('places the temporal block before the active-plans section', async () => {
+        // planManager is not injected by the shared beforeEach; stub it so the
+        // active-plans section renders, then assert ordering.
+        (orchestrator as any).planManager = {
+          getActivePlansContext: vi.fn(async () => '\n--- ACTIVE PLANS ---\nStep 1 of 3\n')
+        };
+
+        await orchestrator.handleMessage('Hello', null, async () => '', undefined);
+
+        const sp = mockClient.streamChat.mock.calls[0][2];
+        const temporalIdx = sp.indexOf('TEMPORAL CONTEXT');
+        const plansIdx = sp.indexOf('ACTIVE PLANS');
+        expect(temporalIdx).toBeGreaterThan(-1);
+        expect(plansIdx).toBeGreaterThan(-1);
+        expect(temporalIdx).toBeLessThan(plansIdx);
+      });
+
+      it('uses a single date source shared with the web-search header', async () => {
+        mockWebSearch.searchForMessage.mockResolvedValue('Web result: live standings');
+
+        await orchestrator.handleMessage('Hello', null, async () => '', undefined);
+
+        const sp = mockClient.streamChat.mock.calls[0][2];
+        // The hoisted `today` feeds both the WEB SEARCH RESULTS header and the
+        // temporal block — guards against reintroducing a second `new Date()`.
+        const headerDate = sp.match(/WEB SEARCH RESULTS \(([^)]+)\)/)?.[1];
+        expect(headerDate).toBeTruthy();
+        expect(sp).toContain(`Today's date is ${headerDate}`);
+      });
+
+      it('includes the temporal block on the reasoner path', async () => {
+        mockClient.isReasonerModel.mockReturnValue(true);
+
+        await orchestrator.handleMessage('Hello', null, async () => '', undefined);
+
+        const sp = mockClient.streamChat.mock.calls[0][2];
+        expect(sp).toContain('TEMPORAL CONTEXT');
+      });
+    });
   });
 
   // ── Message Building ──
