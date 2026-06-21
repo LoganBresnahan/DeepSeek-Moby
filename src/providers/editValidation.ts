@@ -30,6 +30,7 @@
  */
 
 import * as vscode from 'vscode';
+import { findProjectRoots } from '../utils/workspacePaths';
 
 /** A discovered project check command and the directory to run it in. */
 export interface CheckCommand {
@@ -45,12 +46,34 @@ const NPM_SCRIPT_PRIORITY = ['build', 'typecheck', 'test'] as const;
 const MAKE_TARGET_PRIORITY = ['check', 'build'] as const;
 
 /**
- * Discover the project's check command from marker files at the workspace root.
- * Probes a single directory listing + at most one file read, in priority order.
- * Returns `null` when no recognised project type is found — the caller treats
- * that as "no oracle" (the gate is a no-op).
+ * Discover the project's check command, starting at `root` (the workspace root)
+ * and — when no marker is found there — at the nearest project root(s) below it
+ * (ADR 0012). This is why the gate isn't silently dormant when `dotnet new`
+ * created the project in a subdirectory: the marker (`.csproj`) is found one
+ * level down and the check runs with `cwd` set to that project directory.
+ *
+ * The conventional root-level case costs no extra I/O (the root probe hits
+ * first). Returns `null` only when no recognised project exists anywhere in the
+ * bounded search — the caller treats that as "no oracle" (the gate is a no-op).
  */
 export async function discoverCheckCommand(root: vscode.Uri): Promise<CheckCommand | null> {
+  const atRoot = await probeCheckCommand(root);
+  if (atRoot) return atRoot;
+
+  for (const projectRoot of await findProjectRoots(root)) {
+    if (projectRoot.fsPath === root.fsPath) continue; // already probed above
+    const nested = await probeCheckCommand(projectRoot);
+    if (nested) return nested;
+  }
+
+  return null;
+}
+
+/**
+ * Probe a SINGLE directory's marker files for a check command.
+ * One directory listing + at most one file read, in priority order.
+ */
+async function probeCheckCommand(root: vscode.Uri): Promise<CheckCommand | null> {
   let entries: [string, vscode.FileType][];
   try {
     entries = await vscode.workspace.fs.readDirectory(root);

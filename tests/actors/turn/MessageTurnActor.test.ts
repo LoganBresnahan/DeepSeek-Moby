@@ -1071,6 +1071,49 @@ describe('MessageTurnActor', () => {
       const output = queryInShadow(containers[0], '.shell-output');
       expect(output?.textContent).toContain('hello');
     });
+
+    // ── Coalescing per text return (#3) — mirrors tool-batch grouping ──
+
+    it('coalesces consecutive shell executions into ONE container', () => {
+      const id1 = actor.createShellSegment([{ command: 'dotnet build' }]);
+      actor.setShellResults(id1, [{ output: 'ok', success: true }]);
+      const id2 = actor.createShellSegment([{ command: 'dotnet test' }]);
+      actor.setShellResults(id2, [{ output: 'passed', success: true }]);
+
+      expect(id2).toBe(id1); // same group id — no new container
+      const containers = findContainers('shell');
+      expect(containers.length).toBe(1);
+      const items = containers[0].shadowRoot?.querySelectorAll('.shell-item');
+      expect(items?.length).toBe(2); // both commands live in the one dropdown
+      expect(containers[0].shadowRoot?.textContent).toContain('dotnet build');
+      expect(containers[0].shadowRoot?.textContent).toContain('dotnet test');
+    });
+
+    it('routes results to the correct command after coalescing (offset)', () => {
+      const id1 = actor.createShellSegment([{ command: 'first' }]);
+      actor.setShellResults(id1, [{ output: 'OUT-FIRST', success: true }]);
+      const id2 = actor.createShellSegment([{ command: 'second' }]);
+      actor.setShellResults(id2, [{ output: 'OUT-SECOND', success: false }]);
+
+      const outputs = Array.from(
+        findContainers('shell')[0].shadowRoot?.querySelectorAll('.shell-output') ?? []
+      ).map(el => el.textContent ?? '');
+      expect(outputs.join('\n')).toContain('OUT-FIRST');
+      expect(outputs.join('\n')).toContain('OUT-SECOND');
+      // The second command's result did not overwrite the first.
+      expect(outputs[0]).toContain('OUT-FIRST');
+    });
+
+    it('a text segment between shells splits them into separate containers', () => {
+      const id1 = actor.createShellSegment([{ command: 'before-text' }]);
+      actor.setShellResults(id1, [{ output: 'a', success: true }]);
+      actor.createTextSegment('some narration'); // section delimiter
+      const id2 = actor.createShellSegment([{ command: 'after-text' }]);
+      actor.setShellResults(id2, [{ output: 'b', success: true }]);
+
+      expect(id2).not.toBe(id1);
+      expect(findContainers('shell').length).toBe(2);
+    });
   });
 
   // ============================================

@@ -442,6 +442,38 @@ describe('RequestOrchestrator', () => {
       expect(fb).toContain('empty');
     });
 
+    it('build-output artifacts are not deliverables — empty obj/.cache never holds the turn (ADR 0012)', async () => {
+      // The 304pm-trace false positive: `dotnet build` wrote empty MSBuild cache
+      // files under a NESTED obj/, which the gate treated as empty deliverables
+      // and re-injected 3× before giving up. They must be filtered out entirely.
+      stubVerdict('clean');
+      stubFiles([
+        'worldCupWebApp/obj/Debug/net10.0/worldCupWebApp.MvcApplicationPartsAssemblyInfo.cache',
+        'worldCupWebApp/obj/Debug/net10.0/swae.build.ex.cache',
+      ]);
+      stubReads({
+        'worldCupWebApp/obj/Debug/net10.0/worldCupWebApp.MvcApplicationPartsAssemblyInfo.cache': '',
+        'worldCupWebApp/obj/Debug/net10.0/swae.build.ex.cache': '',
+      });
+      // Every "deliverable" is build output → filtered → nothing to verify → accept.
+      expect(await (orchestrator as any).verifyTurnCompletion(signal)).toBeNull();
+    });
+
+    it('still flags a real empty deliverable while ignoring build artifacts beside it', async () => {
+      stubVerdict('clean');
+      stubFiles([
+        'worldCupWebApp/bin/Debug/net10.0/app.dll',  // build artifact → ignored
+        'worldCupWebApp/Models/Team.cs',             // real source, empty → flagged
+      ]);
+      stubReads({
+        'worldCupWebApp/bin/Debug/net10.0/app.dll': '',
+        'worldCupWebApp/Models/Team.cs': '',
+      });
+      const fb = await (orchestrator as any).verifyTurnCompletion(signal);
+      expect(fb).toContain('Team.cs');
+      expect(fb).not.toContain('app.dll');
+    });
+
     it('an empty deliverable stops re-injecting after maxRepairAttempts (bounded + warns)', async () => {
       configStore.set('editSafety.maxRepairAttempts', 2);
       stubVerdict('clean');

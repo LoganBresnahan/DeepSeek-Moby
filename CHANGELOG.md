@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Project-root awareness — works when the project lives in a subdirectory (ADR 0012)
+
+Fixes a cluster of bugs that all stem from one assumption — that the workspace root is the project root — broken when `dotnet new` (or any scaffolder) creates the project one level down. Surfaced together in a traced session whose `.csproj` sat in a subdirectory.
+
+- **Build artifacts no longer pollute the file pipeline.** `shouldIgnoreWatcherPath` was build-dir-aware only at the path's first segment, so a *nested* project's `obj/`/`bin/Debug/` leaked into the Modified Files list, history, and the verification gate (≈40 webview `file not found` warnings, and the ADR 0011 gate holding turns open chasing empty MSBuild `.cache` files). `.NET` artifacts (`obj/` at any depth, `bin/<config>/`) are now caught structurally, and the broader build dirs (`dist`/`build`/`out`/`target`) are anchored at the resolved project root — preserving the "don't false-ignore a deep `src/build/`" safety. ([src/utils/workspacePaths.ts](src/utils/workspacePaths.ts), [src/providers/requestOrchestrator.ts](src/providers/requestOrchestrator.ts))
+- **The verification gate (ADR 0011) only verifies real deliverables.** Generated build output is filtered out of the present-but-empty check, so an empty `obj/…cache` can never hold a turn open. ([src/providers/requestOrchestrator.ts](src/providers/requestOrchestrator.ts))
+- **Edit safety (ADR 0006) is no longer silently dormant on a subdirectory project.** `discoverCheckCommand` now resolves the nearest project root and runs the check there, instead of probing only the workspace root and finding no `.csproj`. ([src/providers/editValidation.ts](src/providers/editValidation.ts))
+- **File-context attachment resolves against project roots.** Attaching a path relative to a nested project (e.g. `Program.cs` when the `.csproj` is in `app/`) now finds the file. ([src/providers/fileContextManager.ts](src/providers/fileContextManager.ts))
+- New `findProjectRoots` (bounded BFS, fast path for root-level repos) + `resolveWorkspacePath` underpin all of the above. Decision + alternatives: [ADR 0012](docs/architecture/decisions/0012-project-root-awareness.md). 21 new tests: the resolver/ignore/path-resolution unit suite ([tests/unit/utils/workspacePaths.test.ts](tests/unit/utils/workspacePaths.test.ts)), nested-project check discovery ([tests/unit/providers/editValidation.test.ts](tests/unit/providers/editValidation.test.ts)), and the verify-gate artifact filter ([tests/unit/providers/requestOrchestrator.test.ts](tests/unit/providers/requestOrchestrator.test.ts)).
+
+### Shell commands coalesce into one dropdown per text response
+
+Consecutive shell executions within a text-delimited section now merge into a single "Ran N commands" dropdown — the same coalescing tool calls and thinking iterations already use. Previously every shell execution opened its own dropdown, fragmenting a multi-command turn. Mirrors the existing tool-batch grouping (`_activeShellGroup`, reset on each text segment), with batch-relative result routing so each command's output lands on the right row. ([media/actors/turn/MessageTurnActor.ts](media/actors/turn/MessageTurnActor.ts)); 4 new tests in [tests/actors/turn/MessageTurnActor.test.ts](tests/actors/turn/MessageTurnActor.test.ts).
+
 ### ASCII diagrams land in the composer instead of auto-sending; drawing page hidden
 
 - **A diagram from the phone now stages in the input box for review.** Previously an ASCII diagram sent from the drawing-pad phone page was code-fenced and **auto-sent** as its own turn the instant it arrived. It now **appends into the composer** (below anything already typed, blank-line separated, focused) so you can wrap a prompt around it and send when ready. Adds `InputAreaShadowActor.appendText()`; the ASCII handler stages instead of posting `sendMessage`. ([media/actors/input-area/InputAreaShadowActor.ts](media/actors/input-area/InputAreaShadowActor.ts), [media/actors/message-gateway/VirtualMessageGatewayActor.ts](media/actors/message-gateway/VirtualMessageGatewayActor.ts))

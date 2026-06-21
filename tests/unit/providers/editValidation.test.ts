@@ -55,6 +55,29 @@ describe('editValidation — discoverCheckCommand (ADR 0006, Phase 2)', () => {
     expect((await discoverCheckCommand(ROOT))?.command).toBe('dotnet build');
   });
 
+  it('discovers a project in a subdirectory and runs the check there (ADR 0012)', async () => {
+    // The workspace root has no marker (just subdirs); `.csproj` is one level
+    // down — the `dotnet new` nested-project case that left the gate dormant.
+    const dirs: Record<string, Array<[string, number]>> = {
+      '/workspace': [['app', 2], ['.moby-plans', 2]],
+      '/workspace/app': [['app.csproj', 1], ['Program.cs', 1]],
+      '/workspace/.moby-plans': [['plan.md', 1]],
+    };
+    const readDir = vi.mocked(vscode.workspace.fs.readDirectory);
+    readDir.mockImplementation(async (uri: any) => {
+      const d = dirs[uri.fsPath];
+      if (!d) throw new Error('ENOENT');
+      return d;
+    });
+    try {
+      const cmd = await discoverCheckCommand(ROOT);
+      expect(cmd?.command).toBe('dotnet build');
+      expect(cmd?.cwd).toBe('/workspace/app'); // check runs in the project dir, not the workspace root
+    } finally {
+      readDir.mockImplementation(async () => fsState.dir); // restore the flat default
+    }
+  });
+
   it('maps package.json with a build script to `npm run build`', async () => {
     setProject({ 'package.json': JSON.stringify({ scripts: { build: 'tsc', test: 'vitest' } }) });
     expect((await discoverCheckCommand(ROOT))?.command).toBe('npm run build');

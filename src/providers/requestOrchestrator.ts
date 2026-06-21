@@ -50,76 +50,16 @@ import { EditValidator, ApprovalState } from './editValidator';
 import { recordRepairRegression, FileRepairState } from './editValidation';
 import type { SavedPromptManager } from './savedPromptManager';
 import type { PlanManager } from './planManager';
+import {
+  shouldIgnoreWatcherPath,
+  findProjectRoots,
+  toWorkspaceRelativeRoots,
+} from '../utils/workspacePaths';
 
-// ── File Watcher Ignore Patterns ──
-// Directories to always ignore at any depth in the file tree.
-// Covers dependency, cache, and tooling directories across all major languages.
-const WATCHER_IGNORE_SEGMENTS = new Set([
-  // VCS
-  '.git', '.svn', '.hg', 'CVS',
-  // JavaScript/TypeScript
-  'node_modules', '.next', '.nuxt', '.svelte-kit', '.turbo',
-  '.parcel-cache', '.cache', '.vite', '.npm', 'bower_components',
-  'jspm_packages', 'web_modules', '.yarn', '.pnpm-store',
-  'coverage', '.nyc_output', '.eslintcache', 'storybook-static',
-  // Python
-  '__pycache__', '.venv', 'venv', '.tox', '.nox',
-  '.mypy_cache', '.pytest_cache', '.ruff_cache', '.hypothesis',
-  '.pybuilder', '.eggs', 'htmlcov', '.ipynb_checkpoints',
-  // Java/Kotlin
-  '.gradle', '.idea', '.kotlin', '.konan',
-  // C/C++
-  'CMakeFiles', '.ccache', 'vcpkg_installed', '_deps',
-  // C#/.NET
-  '.vs', 'TestResults', 'packages',
-  // Go (module cache is global, not in-project)
-  // Rust
-  // (target/ is root-only below)
-  // PHP
-  '.phpunit.cache',
-  // Ruby
-  '.bundle', '.yardoc', '_yardoc',
-  // Swift/Objective-C
-  'Pods', 'Carthage', 'DerivedData', '.swiftpm', 'xcuserdata',
-  // Dart/Flutter
-  '.dart_tool',
-  // Elixir/Erlang
-  'deps', '_build', '.elixir_ls', '.fetch', 'ebin',
-  '_checkouts', '.rebar', '.rebar3', '.eunit',
-  // Haskell
-  '.stack-work', '.cabal-sandbox', '.hpc',
-  // Scala
-  '.bloop', '.metals', '.bsp',
-  // Perl
-  'blib', 'cover_db',
-  // Lua
-  'lua_modules', '.luarocks',
-  // R
-  'renv', 'packrat', '.Rproj.user', 'rsconnect',
-  // Lisp/Scheme
-  'compiled',
-  // OS
-  '.DS_Store',
-]);
-
-// Directories to ignore only at workspace root (could be legitimate subdirectories deeper)
-const WATCHER_IGNORE_ROOT_DIRS = new Set([
-  'dist', 'build', 'Build', 'out', 'output',
-  'target', 'vendor', 'bin', 'obj',
-  'Debug', 'Release', 'artifacts',
-  'tmp', 'pkg', 'doc', 'docs',
-  'local', 'inc',
-]);
-
-/** Check if a relative path should be ignored by the file watcher. */
-function shouldIgnoreWatcherPath(relativePath: string): boolean {
-  const segments = relativePath.split(/[\\/]/);
-  for (const seg of segments) {
-    if (WATCHER_IGNORE_SEGMENTS.has(seg)) return true;
-  }
-  if (segments.length > 0 && WATCHER_IGNORE_ROOT_DIRS.has(segments[0])) return true;
-  return false;
-}
+// File-watcher ignore patterns + project-root discovery live in
+// utils/workspacePaths (ADR 0012). `shouldIgnoreWatcherPath` is now
+// project-root-aware: pass `this._projectRoots` so build dirs under a *nested*
+// project root (e.g. `app/obj/`, `app/bin/Debug/`) are recognised too.
 
 /** ADR 0009: re-pin the active-plan reminder after this many iterations with an
  *  unchanged step pointer (the fade backstop). The change-gate handles the
@@ -310,6 +250,11 @@ export class RequestOrchestrator {
   /** ADR 0009: iterations since the plan reminder was last re-pinned. Drives the
    *  fade backstop (`PLAN_REMINDER_FADE_ITERS`); reset to 0 on every pin. */
   private _planReminderStaleIters = 0;
+  /** ADR 0012: workspace-relative project roots (dirs holding a build marker).
+   *  Refreshed at turn start; threaded into `shouldIgnoreWatcherPath` so build
+   *  output under a *nested* project root is filtered out of the file-change
+   *  pipeline and the verification gate. */
+  private _projectRoots: string[] = [];
 
   /**
    * Establish the edit-safety baseline on the PRISTINE tree before the turn's
@@ -491,7 +436,20 @@ export class RequestOrchestrator {
     // a path we couldn't resolve), and flagging it would spuriously hold turns
     // open. An empty file the turn just wrote is a near-certain failure.
     const targets = Array.from(new Set(
-      this.diffManager.getFileChanges().filter(c => c.status === 'applied').map(c => c.filePath)
+      this.diffManager.getFileChanges()
+        .filter(c => c.status === 'applied')
+        .map(c => c.filePath)
+        // ADR 0012: a deliverable is source, not generated build output. Drop
+        // `obj/`, `bin/Debug/`, … (incl. under a nested project root) so the gate
+        // never holds a turn open chasing an empty MSBuild cache file — the
+        // false-positive seen on a subdirectory `dotnet` project. Paths here are
+        // mixed absolute (model edits) / workspace-relative (shell-modified);
+        // normalise to relative before the ignore check.
+        .filter(p => {
+          const isAbsolute = p.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(p);
+          const rel = isAbsolute ? vscode.workspace.asRelativePath(p, false) : p;
+          return !shouldIgnoreWatcherPath(rel, this._projectRoots);
+        })
     ));
     if (targets.length === 0) return null;
 
@@ -848,6 +806,12 @@ export class RequestOrchestrator {
     // ADR 0009: reset the active-plan recency-reminder tracker for the new turn.
     this._lastPlanReminder = null;
     this._planReminderStaleIters = 0;
+    // ADR 0012: refresh project roots so build-output filtering + edit-safety
+    // discovery are scoped to where the project actually lives (handles a
+    // project created in a prior turn under a subdirectory). Fire-and-forget;
+    // the BFS is cheap and a stale-empty list only misses nested non-.NET build
+    // dirs for one turn (.NET obj/bin are caught structurally regardless).
+    void this.refreshProjectRoots();
     // Clear read files tracking and extract user intent
     this.fileContextManager.clearTurnTracking();
     this.fileContextManager.extractFileIntent(message);
@@ -1760,7 +1724,7 @@ than assert a possibly-stale fact as current.
         );
         const trackChange = (uri: vscode.Uri) => {
           const relativePath = vscode.workspace.asRelativePath(uri, false);
-          if (!shouldIgnoreWatcherPath(relativePath)) {
+          if (!shouldIgnoreWatcherPath(relativePath, this._projectRoots)) {
             modifiedFiles.add(relativePath);
           }
         };
@@ -1768,7 +1732,7 @@ than assert a possibly-stale fact as current.
         shellFileWatcher.onDidCreate(trackChange);
         shellFileWatcher.onDidDelete((uri: vscode.Uri) => {
           const relativePath = vscode.workspace.asRelativePath(uri, false);
-          if (!shouldIgnoreWatcherPath(relativePath)) {
+          if (!shouldIgnoreWatcherPath(relativePath, this._projectRoots)) {
             deletedFiles.add(relativePath);
             modifiedFiles.delete(relativePath);
           }
@@ -2064,7 +2028,7 @@ than assert a possibly-stale fact as current.
                 shellFileWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(workspacePath, '**/*'));
                 const trackChange = (uri: vscode.Uri) => {
                   const relativePath = vscode.workspace.asRelativePath(uri, false);
-                  if (!shouldIgnoreWatcherPath(relativePath)) { modifiedFiles.add(relativePath); }
+                  if (!shouldIgnoreWatcherPath(relativePath, this._projectRoots)) { modifiedFiles.add(relativePath); }
                 };
                 shellFileWatcher.onDidChange(trackChange);
                 shellFileWatcher.onDidCreate(trackChange);
@@ -2238,7 +2202,7 @@ than assert a possibly-stale fact as current.
                 );
                 const trackChange = (uri: vscode.Uri) => {
                   const relativePath = vscode.workspace.asRelativePath(uri, false);
-                  if (!shouldIgnoreWatcherPath(relativePath)) {
+                  if (!shouldIgnoreWatcherPath(relativePath, this._projectRoots)) {
                     modifiedFiles.add(relativePath);
                   }
                 };
@@ -3181,13 +3145,13 @@ than assert a possibly-stale fact as current.
               );
               const trackChange = (uri: vscode.Uri) => {
                 const rel = vscode.workspace.asRelativePath(uri, false);
-                if (!shouldIgnoreWatcherPath(rel)) modifiedFiles.add(rel);
+                if (!shouldIgnoreWatcherPath(rel, this._projectRoots)) modifiedFiles.add(rel);
               };
               shellFileWatcher.onDidChange(trackChange);
               shellFileWatcher.onDidCreate(trackChange);
               shellFileWatcher.onDidDelete((uri: vscode.Uri) => {
                 const rel = vscode.workspace.asRelativePath(uri, false);
-                if (!shouldIgnoreWatcherPath(rel)) {
+                if (!shouldIgnoreWatcherPath(rel, this._projectRoots)) {
                   deletedFiles.add(rel);
                   modifiedFiles.delete(rel);
                 }
@@ -3759,6 +3723,20 @@ than assert a possibly-stale fact as current.
       this._lastPlanReminder = reminder;
       this._planReminderStaleIters = 0;
       logger.info(`[RequestOrchestrator] Active-plan reminder re-pinned (${changed ? 'step changed' : 'fade backstop'})`);
+    }
+  }
+
+  /** ADR 0012: (re)discover the workspace's project root(s) — a cheap bounded
+   *  BFS that stops at the first marker on each branch. Refreshed at turn start.
+   *  The result scopes build-output filtering and edit-safety discovery so a
+   *  project living in a subdirectory is handled like a root-level one. */
+  private async refreshProjectRoots(): Promise<void> {
+    const ws = vscode.workspace.workspaceFolders?.[0];
+    if (!ws) { this._projectRoots = []; return; }
+    try {
+      this._projectRoots = toWorkspaceRelativeRoots(await findProjectRoots(ws.uri));
+    } catch {
+      this._projectRoots = [];
     }
   }
 
