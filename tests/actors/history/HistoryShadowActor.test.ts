@@ -484,6 +484,47 @@ describe('HistoryShadowActor', () => {
     });
   });
 
+  describe('Session delete', () => {
+    beforeEach(async () => {
+      actor = new HistoryShadowActor(manager, element, mockVSCode);
+      await waitForRegistration();
+      const sessions = [
+        createTestSession({ id: 'keep-me', title: 'Keep' }),
+        createTestSession({ id: 'delete-me', title: 'Delete' })
+      ];
+      actor.open();
+      manager.publishDirect('history.sessions', sessions);
+      await waitForRegistration();
+      mockVSCode.postMessage.mockClear();
+    });
+
+    const confirmDelete = (id: string) => {
+      (element.shadowRoot?.querySelector(`[data-entry-menu="${id}"]`) as HTMLElement)
+        ?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      (element.shadowRoot?.querySelector(`[data-entry-action="delete"][data-session-id="${id}"]`) as HTMLElement)
+        ?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      (element.shadowRoot?.querySelector(`[data-action="confirmDelete"][data-session-id="${id}"]`) as HTMLElement)
+        ?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    };
+
+    it('posts deleteSession when confirmed', () => {
+      confirmDelete('delete-me');
+      expect(mockVSCode.postMessage).toHaveBeenCalledWith({ type: 'deleteSession', sessionId: 'delete-me' });
+    });
+
+    it('optimistically removes the row immediately, without waiting for the historySessions echo', () => {
+      expect(element.shadowRoot?.querySelectorAll('.history-entry').length).toBe(2);
+
+      confirmDelete('delete-me');
+
+      // No echo was published — the row must be gone from the DOM already.
+      const remaining = Array.from(element.shadowRoot?.querySelectorAll('.history-entry') ?? [])
+        .map(e => e.getAttribute('data-session-id'));
+      expect(remaining).toEqual(['keep-me']);
+      expect(element.shadowRoot?.querySelector('[data-session-id="delete-me"]')).toBeNull();
+    });
+  });
+
   describe('Bulk actions', () => {
     beforeEach(() => {
       actor = new HistoryShadowActor(manager, element, mockVSCode);

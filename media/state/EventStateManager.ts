@@ -390,21 +390,28 @@ export class EventStateManager {
 
     if (pending.length === 0) return;
 
-    // Merge all changed keys, using the last source's chain for each key
-    const mergedKeys = new Set<string>();
-    let lastSource = pending[0].source;
-    let lastChain = pending[0].chain;
-
+    // Group pending changes by source (NOT merged under one "last source").
+    // broadcast() skips the source actor for every key it's given, so merging
+    // keys from multiple sources under a single source would (a) skip that actor
+    // for keys OTHER actors published — dropping updates it subscribes to — and
+    // (b) fail to skip the real sources — echoing an actor its own publish.
+    // Per-source grouping keeps each broadcast's skip correct.
+    const bySource = new Map<string, { keys: Set<string>; chain: string[] }>();
     for (const entry of pending) {
-      for (const key of entry.changedKeys) {
-        mergedKeys.add(key);
+      let group = bySource.get(entry.source);
+      if (!group) {
+        group = { keys: new Set(), chain: entry.chain };
+        bySource.set(entry.source, group);
       }
-      lastSource = entry.source;
-      lastChain = entry.chain;
+      for (const key of entry.changedKeys) {
+        group.keys.add(key);
+      }
+      group.chain = entry.chain; // last chain seen for this source
     }
 
-    // Single broadcast with all merged keys
-    this.broadcast(lastSource, Array.from(mergedKeys), lastChain);
+    for (const [source, group] of bySource) {
+      this.broadcast(source, Array.from(group.keys), group.chain);
+    }
   }
 
   /**

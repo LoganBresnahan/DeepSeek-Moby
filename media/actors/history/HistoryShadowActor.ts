@@ -694,7 +694,12 @@ export class HistoryShadowActor extends ShadowActor {
   private confirmDeleteSession(sessionId: string): void {
     this._confirmingDeleteId = null;
     this._vscode.postMessage({ type: 'deleteSession', sessionId });
+    // Optimistically drop the row so the list updates instantly instead of waiting
+    // on the extension's historySessions echo (which still arrives and reconciles).
+    this._sessions = this._sessions.filter(s => s.id !== sessionId);
+    this._filteredSessions = this._filteredSessions.filter(s => s.id !== sessionId);
     this.closeAllMenus();
+    this.updateHistoryList();
   }
 
   private cancelDeleteSession(_sessionId: string): void {
