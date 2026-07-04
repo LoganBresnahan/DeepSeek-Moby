@@ -554,6 +554,53 @@ Not a pass/fail scenario yet — investigation only.
 
 ---
 
+## M31. Active-plan injection carries the `.moby-plans/` path (P1)
+
+**Why this matters:** the plan feature stores files in `.moby-plans/` but the model was only ever told the plan's bare filename (`## cobweb_update.md`) via the injected active-plan context — never the directory. Asked to "save/update the plan file," the model resolved the bare name to the **workspace root** and silently created a stray copy there (`write_file`/`createFile` auto-creates the parent dir, so no error), leaving the real `.moby-plans/<name>.md` untouched. Fix: [planManager.ts](../../src/providers/planManager.ts) now surfaces the workspace-relative path (`.moby-plans/<name>`) in both the system-prompt orientation block (`getActivePlansContext`) and the recency reminder (`getActivePlanReminder`), plus an explicit "write to that exact path, not the repo root" instruction.
+
+**Setup:**
+- Open a workspace, create a plan via the plans UI (*New Plan*) — this writes an empty template to `.moby-plans/<name>.md` and auto-activates it.
+- Use a chat/V4 model (has `write_file`/`edit_file`).
+
+**Steps:**
+1. Ask the model to draft a plan for some task, then in a follow-up turn: *"save that plan into the plan file."*
+2. **Pass:** the model writes to `.moby-plans/<name>.md` (the active plan file updates in place). **Fail (old bug):** a same-named file appears at the repo root and the `.moby-plans/` file stays empty.
+3. Sanity-check the injected context via *Moby: Export Turn as JSON (Debug)* or logs: the `--- ACTIVE PLANS ---` block heading should read `## .moby-plans/<name>` and the `--- ACTIVE PLAN (reminder) ---` line should name `.moby-plans/<name>`.
+
+---
+
+## M32. History restore parity: modified files + no duplicate code dropdowns (P1)
+
+**Why this matters:** the live render path and the history-restore path diverged (ADR 0003 says they should be identical). Two root causes, both fixed:
+1. **Missing modified files.** `write_file`-created and shell-touched files only populated the live `autoAppliedFiles` side-channel (`onAutoAppliedFilesChanged` → `diffListChanged`); they never fired `onCodeApplied`, the sole producer of a *persisted* `file-modified` event. So they showed live but vanished on restore. Fixed by a new `diffManager.onFileRegistered` event fired from all four `register{Tool,Shell}{Created,Modified,Deleted}` methods, which [requestOrchestrator.ts](../../src/providers/requestOrchestrator.ts) persists as `file-modified` structural events. (`edit_file` already persisted via the diff engine.)
+2. **Duplicated code dropdowns.** `text-append` keeps the raw ``` fence *and* a separate `code-block` event is extracted from the same text. The live webview stream never emits `code-block` events, so live renders one dropdown (from the text via `formatContent`); restore replayed the persisted `code-block` segment too → a second dropdown. Fixed by making the `code-block` case in [VirtualMessageGatewayActor.ts](../../media/actors/message-gateway/VirtualMessageGatewayActor.ts) a no-op (the fence is already in the text segment).
+
+**Setup:** run a turn that (a) creates a file via `write_file`, (b) modifies a file via a shell command, (c) edits a file via `edit_file`, and (d) emits at least one fenced code block. Note the live "Modified Files" dropdown contents and the number of code-block dropdowns.
+
+**Steps:**
+1. During the live turn: confirm the Modified Files dropdown lists the write_file, shell, and edit_file targets, and each code block shows exactly one dropdown.
+2. Switch to another session, then reload this one from the history sidebar (restore path).
+3. **Pass:** the restored turn shows the **same** Modified Files (all three kinds, not just edit_file) and each code block still shows **exactly one** dropdown. **Fail (old bug):** write_file/shell files missing from the dropdown, and/or code blocks doubled.
+4. Also restore a turn that deleted a file (via tool or shell) — it should show with `deleted` status, not vanish.
+
+---
+
+## M33. History modal: delete removes the row instantly + batched-broadcast fix (P1)
+
+**Why this matters:** user report — deleting a session from the history modal didn't remove the row from the list until the modal was closed and reopened. Two fixes, one direct and one root-cause:
+
+1. **Optimistic removal (direct).** `confirmDeleteSession` in [HistoryShadowActor.ts](../../media/actors/history/HistoryShadowActor.ts) previously only posted `deleteSession` and relied entirely on the extension's `historySessions` echo to re-render — a single point of failure with no local fallback. It now drops the row from `_sessions`/`_filteredSessions` and calls `updateHistoryList()` immediately (mirroring `cancelDeleteSession`); the echo still arrives and reconciles.
+
+2. **Batched-broadcast correctness (root cause).** [EventStateManager.ts](../../media/state/EventStateManager.ts) `flushPendingBroadcasts` merged changed keys from *all* pending publishes under a single `lastSource`, then `broadcast()` skips the source actor for *every* key it's given. So an actor that co-published any key in the same rAF frame was wrongly skipped for keys **other** sources published — dropping updates it subscribes to (and, symmetrically, echoing an actor its own publish). The history modal's `open()` publishes `history.modal.visible` in the same frame as an incoming `history.sessions`, so the list could render stale until a reopen. Fixed by grouping pending broadcasts **by source** so each broadcast's skip is correct. Deterministic regression test: [EventStateManager.batching.test.ts](../../tests/unit/state/EventStateManager.batching.test.ts) (only reproduces with `batchBroadcasts: true`, the production default — the rest of the suite runs synchronous).
+
+**Steps:**
+1. Open the history modal with ≥2 sessions. Delete one via ⋮ → Delete → Yes.
+2. **Pass:** the row disappears immediately, no reopen needed; the footer count decrements. Delete down to zero → "No chat history found" shows without reopening.
+3. Delete the currently-active session and a non-active session — both remove instantly.
+4. Reload the window, open the history modal → the list populates on the first open (not blank-until-reopen).
+
+---
+
 ## Removing items from this backlog
 
 When a scenario has been verified in a dev host:
