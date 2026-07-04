@@ -682,6 +682,68 @@ describe('VirtualMessageGatewayActor', () => {
       expect(fileCall).toBeLessThan(textCall);
     });
 
+    it('does not double-render code-block segments on restore (dedup vs the fenced text)', () => {
+      // Regression: text-append carries the raw ``` fence AND a separate code-block
+      // event is extracted from the same text. On restore, formatContent turns the
+      // text's fence into one dropdown; re-rendering the code-block segment as a
+      // second fenced text segment produced a DUPLICATE dropdown. The live path
+      // never emits code-block events, so restore must ignore them.
+      const fencedText = 'Here you go:\n```js\nconst x = 1;\n```';
+      dispatchMessage({
+        type: 'loadHistory',
+        history: [
+          { role: 'user', content: 'write code', timestamp: 1000 },
+          {
+            role: 'assistant',
+            content: fencedText,
+            model: 'deepseek-chat',
+            timestamp: 2000,
+            turnEvents: [
+              { type: 'text-append', content: fencedText, iteration: 0, ts: 2001 },
+              { type: 'code-block', language: 'js', content: 'const x = 1;', iteration: 0, ts: 2002 },
+              { type: 'text-finalize', iteration: 0, ts: 2003 },
+            ],
+          },
+        ],
+      });
+
+      const addText = mockActors.virtualList.addTextSegment as ReturnType<typeof vi.fn>;
+      // The fenced text renders exactly once (formatContent extracts its dropdown).
+      expect(addText).toHaveBeenCalledWith('turn-2', fencedText);
+      // The code-block segment must NOT produce a second (re-wrapped) text segment.
+      expect(addText).not.toHaveBeenCalledWith('turn-2', '```js\nconst x = 1;\n```');
+      const turn2TextCalls = addText.mock.calls.filter(c => c[0] === 'turn-2');
+      expect(turn2TextCalls).toHaveLength(1);
+    });
+
+    it('restores the created/modified/deleted action on file-modified segments', () => {
+      // Regression: the created-vs-modified distinction lived only in the live
+      // side-channel; on restore every file collapsed to "edited". The action is
+      // now persisted on the file-modified event and passed through to addPendingFile.
+      dispatchMessage({
+        type: 'loadHistory',
+        history: [
+          { role: 'user', content: 'do stuff', timestamp: 1000 },
+          {
+            role: 'assistant', content: 'done', model: 'deepseek-chat', timestamp: 2000,
+            turnEvents: [
+              { type: 'file-modified', path: 'new.ts', status: 'applied', action: 'created', ts: 2001 },
+              { type: 'file-modified', path: 'edited.ts', status: 'applied', action: 'modified', ts: 2002 },
+              { type: 'file-modified', path: 'gone.ts', status: 'deleted', action: 'deleted', ts: 2003 },
+              { type: 'text-append', content: 'done', iteration: 0, ts: 2004 },
+              { type: 'text-finalize', iteration: 0, ts: 2005 },
+            ],
+          },
+        ],
+      });
+      const calls = (mockActors.virtualList.addPendingFile as ReturnType<typeof vi.fn>).mock.calls
+        .filter(c => c[0] === 'turn-2')
+        .map(c => c[1]);
+      expect(calls).toContainEqual(expect.objectContaining({ filePath: 'new.ts', action: 'created' }));
+      expect(calls).toContainEqual(expect.objectContaining({ filePath: 'edited.ts', action: 'modified' }));
+      expect(calls).toContainEqual(expect.objectContaining({ filePath: 'gone.ts', action: 'deleted' }));
+    });
+
     it('restores Reasoner with files after shells', () => {
       // Iteration 0: thinking → text → shell
       // Iteration 1: thinking → text → file-modified

@@ -636,6 +636,20 @@ export class RequestOrchestrator {
         ts: Date.now(),
       });
     }));
+    // write_file (native tool) and shell-touched files bypass the diff engine, so
+    // they never fire onCodeApplied. Persist their file-modified events here so
+    // history restore (projectFull) renders them too — the live "Modified Files"
+    // dropdown gets them via diffManager's separate onAutoAppliedFilesChanged.
+    track(this.diffManager.onFileRegistered(e => {
+      this._appendStructuralEvent({
+        type: 'file-modified',
+        path: e.filePath,
+        status: e.status,
+        action: e.action,
+        editMode: this.diffManager.currentEditMode,
+        ts: Date.now(),
+      });
+    }));
 
     // Phase 2.5 fix #5: mirror Chat-model tool call events into the recorder.
     // Without this, hydration of Chat turns loses all tool call rendering.

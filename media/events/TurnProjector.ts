@@ -76,6 +76,7 @@ export interface FileModifiedSegment {
   type: 'file-modified';
   path: string;
   status: string;
+  action?: string;
   editMode?: string;
 }
 
@@ -244,6 +245,7 @@ export class TurnProjector {
             type: 'file-modified',
             path: event.path,
             status: event.status,
+            action: event.action,
             editMode: event.editMode,
           });
           break;
@@ -491,6 +493,7 @@ export class TurnProjector {
           type: 'file-modified',
           path: event.path,
           status: event.status,
+          action: event.action,
           editMode: event.editMode,
         };
         segments.push(newSeg);

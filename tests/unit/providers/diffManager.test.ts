@@ -185,6 +185,44 @@ describe('DiffManager', () => {
     manager.dispose();
   });
 
+  // ── onFileRegistered (restore-parity: write_file / shell file mods persist) ──
+
+  describe('onFileRegistered', () => {
+    it('fires applied+created for registerToolCreatedFile (write_file)', () => {
+      const events: Array<{ filePath: string; status: string; action: string }> = [];
+      manager.onFileRegistered(e => events.push(e));
+      manager.registerToolCreatedFile('src/new.ts', 'Created by write_file');
+      expect(events).toEqual([{ filePath: 'src/new.ts', status: 'applied', action: 'created' }]);
+    });
+
+    it('fires applied+modified per file for registerShellModifiedFiles', () => {
+      const events: Array<{ filePath: string; status: string; action: string }> = [];
+      manager.onFileRegistered(e => events.push(e));
+      manager.registerShellModifiedFiles(['a.ts', 'b.ts']);
+      expect(events).toEqual([
+        { filePath: 'a.ts', status: 'applied', action: 'modified' },
+        { filePath: 'b.ts', status: 'applied', action: 'modified' },
+      ]);
+    });
+
+    it('fires deleted for registerToolDeletedFile', () => {
+      const events: Array<{ filePath: string; status: string; action: string }> = [];
+      manager.onFileRegistered(e => events.push(e));
+      manager.registerToolDeletedFile('gone.ts');
+      expect(events).toEqual([{ filePath: 'gone.ts', status: 'deleted', action: 'deleted' }]);
+    });
+
+    it('fires deleted per file for registerShellDeletedFiles', () => {
+      const events: Array<{ filePath: string; status: string; action: string }> = [];
+      manager.onFileRegistered(e => events.push(e));
+      manager.registerShellDeletedFiles(['x.ts', 'y.ts']);
+      expect(events).toEqual([
+        { filePath: 'x.ts', status: 'deleted', action: 'deleted' },
+        { filePath: 'y.ts', status: 'deleted', action: 'deleted' },
+      ]);
+    });
+  });
+
   // ── setEditMode ──
 
   describe('setEditMode', () => {

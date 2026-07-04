@@ -31,7 +31,7 @@ import type { InputAreaShadowActor } from '../input-area/InputAreaShadowActor';
 import type { ToolbarShadowActor } from '../toolbar/ToolbarShadowActor';
 import type { HistoryShadowActor } from '../history';
 import type { VirtualListActor } from '../virtual-list';
-import type { EditMode } from '../turn/types';
+import type { EditMode, PendingFileAction } from '../turn/types';
 
 const log = createLogger('VirtualGateway');
 
@@ -358,6 +358,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         virtualList.addPendingFile(turnId, {
           filePath: segment.path,
           status: fileStatus,
+          action: segment.action as PendingFileAction | undefined,
           editMode: segment.editMode as EditMode | undefined,
         });
         // On restore, if the file was applied, mark the matching code block
@@ -384,8 +385,11 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       }
 
       case 'code-block':
-        // Code blocks are rendered as text segments with fenced content
-        virtualList.addTextSegment(turnId, '```' + segment.language + '\n' + segment.content + '\n```');
+        // No-op: the fenced code is already present verbatim in the preceding text
+        // segment (text-append never strips fences), which formatContent renders as a
+        // code dropdown. The live path never emits code-block events, so it shows
+        // exactly one (text-derived) dropdown; rendering this segment too would DOUBLE
+        // the dropdown on history restore. Keep restore consistent with live.
         break;
 
       case 'drawing':
@@ -1286,7 +1290,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         // insertCausal would backdate the event to after its causing shell command,
         // splitting text that was streamed between the shell and the file notification.
         tl.append({
-          type: 'file-modified', path: diff.filePath, status, editMode: msg.editMode as string | undefined, ts: Date.now()
+          type: 'file-modified', path: diff.filePath, status, action, editMode: msg.editMode as string | undefined, ts: Date.now()
         });
       }
 

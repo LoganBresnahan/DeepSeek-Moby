@@ -201,6 +201,7 @@ function createMockDiffManager() {
     snapshotPathForCheckpoint: vi.fn(async () => {}),
     onCodeApplied: vi.fn(noopDisposable),
     onEditRejected: vi.fn(noopDisposable),
+    onFileRegistered: vi.fn(noopDisposable),
   };
 }
 
@@ -2503,6 +2504,29 @@ describe('RequestOrchestrator', () => {
         type: 'file-modified',
         path: 'src/game.ts',
         status: 'applied',
+      }));
+    });
+
+    it('emits file-modified on DiffManager.onFileRegistered (write_file/shell) so restore shows them', () => {
+      // Regression: write_file (registerToolCreatedFile) and shell-touched files
+      // bypass the diff engine and never fire onCodeApplied, so their file-modified
+      // events were never persisted and vanished on history restore. They now route
+      // through onFileRegistered, which wireStructuralRecorder persists.
+      const recorder = orchestrator.structuralEvents;
+      recorder.startTurn('turn-x', 'session-1');
+
+      const calls = (mockDiffManager as any).onFileRegistered.mock.calls;
+      const handler = calls[calls.length - 1][0];
+      handler({ filePath: 'notes.txt', status: 'applied', action: 'created' });
+      handler({ filePath: 'old.txt', status: 'deleted', action: 'deleted' });
+
+      const events = recorder.peekCurrent()!.events;
+      // action is carried through so restore can label "created" vs "edited" vs "deleted"
+      expect(events).toContainEqual(expect.objectContaining({
+        type: 'file-modified', path: 'notes.txt', status: 'applied', action: 'created',
+      }));
+      expect(events).toContainEqual(expect.objectContaining({
+        type: 'file-modified', path: 'old.txt', status: 'deleted', action: 'deleted',
       }));
     });
 

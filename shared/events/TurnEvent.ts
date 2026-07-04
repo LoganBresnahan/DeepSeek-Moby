@@ -51,7 +51,7 @@ export type TurnEvent =
   | { type: 'approval-resolved'; id: string; decision: 'allowed' | 'blocked'; persistent: boolean; ts: number }
 
   // File modifications (from shell or diff engine)
-  | { type: 'file-modified'; path: string; status: string; editMode?: string; causedBy?: string; ts: number }
+  | { type: 'file-modified'; path: string; status: string; action?: 'created' | 'modified' | 'deleted'; editMode?: string; causedBy?: string; ts: number }
 
   // Tool calls (Chat model)
   | { type: 'tool-batch-start'; tools: ToolCallData[]; ts: number }

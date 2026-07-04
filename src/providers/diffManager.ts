@@ -52,9 +52,16 @@ export class DiffManager {
   private readonly _onEditConfirm = new vscode.EventEmitter<{ filePath: string; code: string; language: string }>();
   private readonly _onEditRejected = new vscode.EventEmitter<{ filePath: string }>();
   private readonly _onWaitingForApproval = new vscode.EventEmitter<{ filePaths: string[] }>();
+  // Fired when a native tool (write_file) or a shell command creates/modifies/deletes
+  // a file directly, bypassing the diff engine (so it never fires onCodeApplied).
+  // RequestOrchestrator turns this into a persisted file-modified structural event so
+  // these files appear on history restore too — live shows them via the separate
+  // onAutoAppliedFilesChanged (diffListChanged) side-channel. [restore-parity]
+  private readonly _onFileRegistered = new vscode.EventEmitter<{ filePath: string; status: 'applied' | 'deleted'; action: 'created' | 'modified' | 'deleted' }>();
 
   readonly onDiffListChanged = this._onDiffListChanged.event;
   readonly onAutoAppliedFilesChanged = this._onAutoAppliedFilesChanged.event;
+  readonly onFileRegistered = this._onFileRegistered.event;
   readonly onCodeApplied = this._onCodeApplied.event;
   readonly onActiveDiffChanged = this._onActiveDiffChanged.event;
   readonly onDiffClosed = this._onDiffClosed.event;
@@ -1708,6 +1715,7 @@ which I already edited - would you like me to update it?"
     this.currentResponseFileChanges.push({ filePath, status: 'applied', iteration });
 
     this.notifyAutoAppliedFilesChanged();
+    this._onFileRegistered.fire({ filePath, status: 'applied', action: 'created' });
   }
 
   /**
@@ -1727,6 +1735,7 @@ which I already edited - would you like me to update it?"
 
     this._lastNotifiedDiffIndex = this.resolvedDiffs.length;
     this.notifyDeletedFilesChanged([filePath]);
+    this._onFileRegistered.fire({ filePath, status: 'deleted', action: 'deleted' });
   }
 
   /**
@@ -1747,6 +1756,7 @@ which I already edited - would you like me to update it?"
       this.autoAppliedFiles.push({ filePath, timestamp: Date.now(), description: 'Modified by shell command' });
       this.resolvedDiffs.push({ filePath, timestamp: Date.now(), status: 'applied', iteration, diffId, action: 'modified' });
       this.currentResponseFileChanges.push({ filePath, status: 'applied', iteration });
+      this._onFileRegistered.fire({ filePath, status: 'applied', action: 'modified' });
     }
 
     this.notifyAutoAppliedFilesChanged();
@@ -1769,6 +1779,7 @@ which I already edited - would you like me to update it?"
 
       this.resolvedDiffs.push({ filePath, timestamp: Date.now(), status: 'applied', iteration, diffId, action: 'deleted' });
       this.currentResponseFileChanges.push({ filePath, status: 'applied', iteration });
+      this._onFileRegistered.fire({ filePath, status: 'deleted', action: 'deleted' });
     }
 
     // Advance the notification index so these entries aren't re-sent
@@ -1891,6 +1902,7 @@ which I already edited - would you like me to update it?"
     this.clearPendingDiffs();
     this._onDiffListChanged.dispose();
     this._onAutoAppliedFilesChanged.dispose();
+    this._onFileRegistered.dispose();
     this._onCodeApplied.dispose();
     this._onActiveDiffChanged.dispose();
     this._onDiffClosed.dispose();
