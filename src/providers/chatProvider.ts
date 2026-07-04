@@ -986,6 +986,10 @@ export class ChatProvider implements vscode.WebviewViewProvider {
           // installs (or sessions opened before the user has sent anything) with
           // the webview's hardcoded V3+R1 fallback list, missing V4 entries.
           this.sendModelList();
+          // Warm the plan list on a fresh webview so the active-plan badge is
+          // correct without opening the Plans popup first. Injection correctness
+          // is handled separately by scanPlans() inside the PlanManager getters.
+          void this.planManager.refresh();
           break;
 
         // Drawing server control

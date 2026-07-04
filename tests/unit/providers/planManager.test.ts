@@ -49,7 +49,12 @@ vi.mock('vscode', async (importOriginal) => {
       fs: {
         readFile: vi.fn(async (uri: any) => {
           const key = uri.fsPath || uri.path;
-          if (fsStore.has(key)) return Buffer.from(fsStore.get(key)!, 'utf-8');
+          if (fsStore.has(key)) {
+            const val = fsStore.get(key)!;
+            // Sentinel: a file listed by readDirectory but unreadable (e.g. EACCES).
+            if (val === '__UNREADABLE__') throw new Error(`Cannot read: ${key}`);
+            return Buffer.from(val, 'utf-8');
+          }
           throw new Error(`File not found: ${key}`);
         }),
         writeFile: vi.fn(async (uri: any, content: any) => {
@@ -377,28 +382,27 @@ describe('PlanManager', () => {
       const context = await manager.getActivePlansContext();
 
       expect(context).toContain('ACTIVE PLANS');
-      expect(context).toContain('## plan-a.md');
+      expect(context).toContain('## .moby-plans/plan-a.md');
       expect(context).toContain('# Plan A content');
-      expect(context).toContain('## plan-b.md');
+      expect(context).toContain('## .moby-plans/plan-b.md');
       expect(context).toContain('# Plan B content');
       expect(context).toContain('END PLANS');
     });
 
     it('should skip plans whose file cannot be read', async () => {
       fsStore.set('/workspace/.moby-plans/ok.md', '# OK');
-      // readable.md exists in plan list but not in fsStore
+      // missing.md IS listed by readDirectory (so it survives the getter's re-scan)
+      // but readFile throws for it — exercises the read-error catch in the getter.
+      fsStore.set('/workspace/.moby-plans/missing.md', '__UNREADABLE__');
       fsStore.set('/workspace/.moby-plans/.plans.json', JSON.stringify({
         activePlans: ['ok.md', 'missing.md']
       }));
-      // Manually add 'missing.md' to plans via refresh (it won't be in readDirectory)
       await manager.refresh();
-      // Manually push the missing plan to test the read error path
-      (manager as any)._plans.push({ name: 'missing.md', active: true });
 
       const context = await manager.getActivePlansContext();
 
       expect(context).toContain('# OK');
-      expect(context).not.toContain('missing.md content');
+      expect(context).not.toContain('__UNREADABLE__');
     });
 
     it('should return empty string when no workspace', async () => {
@@ -535,7 +539,7 @@ describe('PlanManager', () => {
 
       const reminder = await manager.getActivePlanReminder();
 
-      expect(reminder).toContain('active plan: notes.md');
+      expect(reminder).toContain('active plan: .moby-plans/notes.md');
       expect(reminder).not.toContain('step ');
     });
 
@@ -545,7 +549,7 @@ describe('PlanManager', () => {
 
       const reminder = await manager.getActivePlanReminder();
 
-      expect(reminder).toContain('active plan: fresh.md');
+      expect(reminder).toContain('active plan: .moby-plans/fresh.md');
       expect(reminder).not.toContain('step ');
     });
 

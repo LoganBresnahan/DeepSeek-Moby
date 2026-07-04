@@ -24,6 +24,11 @@ const DEFAULT_PLAN_MAX_CHARS = 1500;
  *  collapse to a "… (+K more)" line so the steering copy stays small. */
 const MAX_REMAINING_SHOWN = 6;
 
+/** Workspace-relative directory where plan files live. Single source of truth:
+ *  the path the model is *told* (in the injected plan context) must match where
+ *  plans are actually read/written, or the model writes plans to the repo root. */
+const PLANS_DIRNAME = '.moby-plans';
+
 // ============================================
 // Types
 // ============================================
@@ -174,6 +179,12 @@ export class PlanManager {
     const dir = this.getPlansDir();
     if (!dir) return '';
 
+    // Re-scan on every read: the only other trigger is the Plans popup opening,
+    // so without this an active plan on disk (or one the model just wrote to
+    // .moby-plans/) isn't injected until the popup is opened once. scanPlans()
+    // reads disk (the source of truth) and does NOT emit — no UI churn.
+    await this.scanPlans();
+
     const activePlans = this._plans.filter(p => p.active);
     if (activePlans.length === 0) return '';
 
@@ -187,9 +198,9 @@ export class PlanManager {
         let text = Buffer.from(content).toString('utf-8').trim();
         if (text) {
           if (maxChars > 0 && text.length > maxChars) {
-            text = `${text.slice(0, maxChars).trimEnd()}\n… (truncated; full plan in .moby-plans/${plan.name})`;
+            text = `${text.slice(0, maxChars).trimEnd()}\n… (truncated; full plan in ${PLANS_DIRNAME}/${plan.name})`;
           }
-          sections.push(`## ${plan.name}\n${text}`);
+          sections.push(`## ${PLANS_DIRNAME}/${plan.name}\n${text}`);
         }
       } catch {
         logger.warn(`[PlanManager] Failed to read plan: ${plan.name}`);
@@ -198,7 +209,7 @@ export class PlanManager {
 
     if (sections.length === 0) return '';
 
-    return `\n--- ACTIVE PLANS ---\nThe following plans describe the user's goals and approach. Follow them when relevant:\n\n${sections.join('\n\n')}\n--- END PLANS ---\n`;
+    return `\n--- ACTIVE PLANS ---\nThe following plans describe the user's goals and approach. Follow them when relevant. Each plan's heading is its workspace-relative path; to create or update a plan, write_file (or edit_file) to that exact path — e.g. \`${PLANS_DIRNAME}/plan.md\` — not a bare filename at the repo root.\n\n${sections.join('\n\n')}\n--- END PLANS ---\n`;
   }
 
   /**
@@ -224,8 +235,14 @@ export class PlanManager {
     const dir = this.getPlansDir();
     if (!dir) return '';
 
+    await this.scanPlans(); // keep _plans fresh every turn — see getActivePlansContext
+
     const activePlan = this._plans.find(p => p.active);
     if (!activePlan) return '';
+
+    // Identify the plan by its workspace-relative path (not a bare name) so the
+    // model writes updates to the right place — see getActivePlansContext.
+    const planPath = `${PLANS_DIRNAME}/${activePlan.name}`;
 
     let text = '';
     try {
@@ -241,7 +258,7 @@ export class PlanManager {
 
     // No parseable checklist — name the plan, no pointer. Graceful, never an error.
     if (steps.length === 0) {
-      return open(`active plan: ${activePlan.name} (no checklist — see the full plan in the system prompt)`);
+      return open(`active plan: ${planPath} (no checklist — see the full plan in the system prompt)`);
     }
 
     const remaining = steps.filter(s => !s.done);
@@ -249,7 +266,7 @@ export class PlanManager {
 
     // All steps checked — the model thinks it's done; remind it to verify/finish.
     if (remaining.length === 0) {
-      return open(`${activePlan.name} — all ${total} steps checked\n(verify the work and finish, or see the full plan in the system prompt)`);
+      return open(`${planPath} — all ${total} steps checked\n(verify the work and finish, or see the full plan in the system prompt)`);
     }
 
     const current = steps.findIndex(s => !s.done) + 1; // 1-based position of first unchecked
@@ -260,7 +277,7 @@ export class PlanManager {
     }
 
     return open(
-      `${activePlan.name} — step ${current} of ${total}\n` +
+      `${planPath} — step ${current} of ${total}\n` +
       `Remaining:\n${lines.join('\n')}\n` +
       `(full plan and completed steps are in the system prompt)`
     );
@@ -322,7 +339,7 @@ export class PlanManager {
   private getPlansDir(): vscode.Uri | null {
     const workspace = vscode.workspace.workspaceFolders?.[0];
     if (!workspace) return null;
-    return vscode.Uri.joinPath(workspace.uri, '.moby-plans');
+    return vscode.Uri.joinPath(workspace.uri, PLANS_DIRNAME);
   }
 
   private async ensurePlansDir(): Promise<vscode.Uri | null> {
