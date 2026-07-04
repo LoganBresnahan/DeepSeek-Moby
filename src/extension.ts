@@ -182,7 +182,7 @@ export async function activate(context: vscode.ExtensionContext) {
   statusBar.start();
 
   // Check API key (fire-and-forget — don't block activation)
-  checkApiKey(context);
+  checkApiKey();
 }
 
 function registerCommands(context: vscode.ExtensionContext) {
@@ -363,18 +363,21 @@ async function storeEncryptionKey(context: vscode.ExtensionContext, key: string)
   }
 }
 
-async function checkApiKey(context: vscode.ExtensionContext) {
-  const apiKey = await context.secrets.get('moby.apiKey');
+async function checkApiKey() {
+  // Use the same model-aware effective-key check as the send button, so the toast
+  // stays silent when the ACTIVE model is already configured: a custom model with
+  // its own per-model key, a local model with a registry apiKey placeholder (e.g.
+  // Ollama), or DEEPSEEK_API_KEY. Previously this checked only the global
+  // moby.apiKey secret and nagged spuriously for those setups.
+  if (await deepSeekClient.isApiKeyConfigured()) return;
 
-  if (!apiKey) {
-    const result = await vscode.window.showInformationMessage(
-      'DeepSeek Moby: API key is not set. Would you like to configure it now?',
-      'Configure', 'Later'
-    );
+  const result = await vscode.window.showInformationMessage(
+    'DeepSeek Moby: API key is not set. Would you like to configure it now?',
+    'Configure', 'Later'
+  );
 
-    if (result === 'Configure') {
-      vscode.commands.executeCommand('moby.setApiKey');
-    }
+  if (result === 'Configure') {
+    vscode.commands.executeCommand('moby.setApiKey');
   }
 }
 
