@@ -2,6 +2,38 @@
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-07-04
+
+A bug-fix patch: plans now write to (and inject from) the right place, history restore matches the live render, the startup API-key prompt stops nagging keyed setups, and deleting a session updates the list instantly. No new features or config; no breaking changes.
+
+### Plans write to `.moby-plans/` and inject every turn — not only after the popup is opened (ADR 0009)
+
+Two failures in the active-plan path, both observed 2026-07-03. When asked to "save the plan into the plan file," a tool-calling model resolved the bare filename to the **workspace root** and `createFile` silently `mkdir -p`'d a stray copy there, leaving the real `.moby-plans/<name>.md` untouched. Separately, an active plan on disk wasn't injected into the prompt until the Plans popup had been opened once in the session (the only thing that scanned disk).
+
+- **The plan path is now explicit at every mention.** A `.moby-plans/` constant threads through `getActivePlansContext`/`getActivePlanReminder`, the truncation marker, and the injected block headers (`## .moby-plans/<name>`), and the intro instruction tells the model to `write_file`/`edit_file` to that exact path — not a bare filename at the repo root. ([src/providers/planManager.ts](src/providers/planManager.ts))
+- **Active plans inject without opening the popup.** Both context getters now `scanPlans()` (disk read, no UI emit) on every read, so a plan that's active on disk — or one the model just wrote to `.moby-plans/` mid-turn — is injected from the next turn on. A `webviewReady` `refresh()` warms the toolbar badge on a fresh webview. ([src/providers/planManager.ts](src/providers/planManager.ts), [src/providers/chatProvider.ts](src/providers/chatProvider.ts)) Design sketch for a future plan-specific tool: [docs/plans/plan-tools.md](docs/plans/plan-tools.md).
+
+### History restore now matches the live render — modified files present, one dropdown per code block, correct file status (ADR 0003)
+
+The restore path (persisted events → `projectFull`) diverged from the live stream (`projectIncremental`), which ADR 0003 says must be identical. Three root causes:
+
+- **`write_file`- and shell-touched files were missing on restore.** They only populated the live `autoAppliedFiles` side-channel and never fired `onCodeApplied`, the sole producer of a *persisted* `file-modified` event. A new `diffManager.onFileRegistered` event — fired from all four `register{Tool,Shell}{Created,Modified,Deleted}` methods — is persisted by the orchestrator as a `file-modified` structural event, so restore shows the same Modified Files as live. ([src/providers/diffManager.ts](src/providers/diffManager.ts), [src/providers/requestOrchestrator.ts](src/providers/requestOrchestrator.ts))
+- **The created/modified/deleted distinction was lost on restore** (everything read back as "edited"). The `action` that drives those labels lived only in the live side-channel; it's now carried through the whole persist→restore path — the shared `file-modified` event, both projector sites, and the gateway render. ([shared/events/TurnEvent.ts](shared/events/TurnEvent.ts), [media/events/TurnProjector.ts](media/events/TurnProjector.ts), [media/actors/message-gateway/VirtualMessageGatewayActor.ts](media/actors/message-gateway/VirtualMessageGatewayActor.ts))
+- **Code blocks doubled on restore.** `text-append` keeps the raw fence *and* a separate `code-block` event is extracted from it; the live stream never emits `code-block`, so restore rendered a second dropdown. The `code-block` case in the gateway is now a no-op — the fence is already in the text segment. ([media/actors/message-gateway/VirtualMessageGatewayActor.ts](media/actors/message-gateway/VirtualMessageGatewayActor.ts))
+- Tests: per-kind `onFileRegistered` payloads and orchestrator persistence ([tests/unit/providers/diffManager.test.ts](tests/unit/providers/diffManager.test.ts), [tests/unit/providers/requestOrchestrator.test.ts](tests/unit/providers/requestOrchestrator.test.ts)), restore action passthrough ([tests/actors/message-gateway/VirtualMessageGatewayActor.test.ts](tests/actors/message-gateway/VirtualMessageGatewayActor.test.ts)).
+
+### The startup API-key prompt respects the active model's effective key
+
+`checkApiKey` only checked the global `moby.apiKey` secret, so it nagged "API key is not set" even when the active model was already usable — a custom model with its own per-model key, a local model with a registry placeholder (e.g. Ollama), or `DEEPSEEK_API_KEY` in the environment. It now routes through the same model-aware `isApiKeyConfigured()` the send button uses, so the toast fires only when the active model genuinely has no key. ([src/extension.ts](src/extension.ts))
+
+### Deleting a history session updates the list instantly + a batched-broadcast correctness fix
+
+Deleting a session from the history modal didn't remove the row until the modal was closed and reopened. Two fixes:
+
+- **Optimistic removal (direct).** `confirmDeleteSession` relied entirely on the extension's `historySessions` echo to re-render — a single point of failure. It now drops the row locally and re-renders immediately (mirroring `cancelDeleteSession`); the echo still reconciles. ([media/actors/history/HistoryShadowActor.ts](media/actors/history/HistoryShadowActor.ts))
+- **Batched broadcasts no longer drop co-published updates (root cause).** `EventStateManager.flushPendingBroadcasts` merged changed keys from *all* pending publishes under a single `lastSource`, and `broadcast()` skips the source actor for every key it's handed — so an actor that co-published any key in the same rAF frame was wrongly skipped for keys **other** sources published (and, symmetrically, could be echoed its own publish). The modal's `open()` publishes `history.modal.visible` in the same frame as an incoming `history.sessions`, so the list could render stale until a reopen. Pending broadcasts are now grouped **by source**, keeping each broadcast's skip correct. This only manifests with `batchBroadcasts: true` (the production default), which is why the synchronous test suite never caught it. ([media/state/EventStateManager.ts](media/state/EventStateManager.ts))
+- Tests: optimistic delete without an echo ([tests/actors/history/HistoryShadowActor.test.ts](tests/actors/history/HistoryShadowActor.test.ts)) and a batching-mode regression proving co-published keys are delivered and self-publishes are not echoed ([tests/unit/state/EventStateManager.batching.test.ts](tests/unit/state/EventStateManager.batching.test.ts)).
+
 ## [0.6.0] - 2026-06-21
 
 ### Temporal grounding now covers data you *write*, not just answers you give (ADR 0013)

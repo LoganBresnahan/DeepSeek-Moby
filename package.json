@@ -2,7 +2,7 @@
   "name": "deepseek-moby",
   "displayName": "DeepSeek Moby",
   "description": "AI coding assistant for VS Code, powered by DeepSeek",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "publisher": "LoganBresnahan",
   "author": {
     "name": "Logan Bresnahan",
@@ -567,7 +567,10 @@
         },
         "moby.editSafety.onInconclusive": {
           "type": "string",
-          "enum": ["commit", "halt"],
+          "enum": [
+            "commit",
+            "halt"
+          ],
           "default": "commit",
           "markdownDescription": "**Edit safety — inconclusive outcome**: When validation can't run (no check command discovered, timed out, or not approved): `commit` applies the edit with a note (Auto's default expectation); `halt` stops the turn instead. There is deliberately no 'ask' — Auto never becomes Ask."
         },
