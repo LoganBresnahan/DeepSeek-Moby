@@ -133,6 +133,48 @@ Backend-agnostic ⇒ the custom-model path is first-class:
 - Unit: orchestrator image-branch — routed → digest appended as string; `routed:false` → placeholder appended (not dropped); text attachments unaffected.
 - Manual-test backlog (add entries): attach image with a vision model configured → digest reaches main model; no backend configured → clear placeholder; oversized image → reject message; multiple images in one turn; reload session → thumbnail + digest restore.
 
+## Build plan (design-plan workflow, 2026-07-31)
+
+13 slices, all assessed `todo` against source. Dominant model: opus (12 slices); one fable slice. Critical path: `router-build-user-content-hook` → `image-describe-role-module` → `orchestrator-image-injection` → `thumbnail-digest-persistence` → `transcript-thumbnail-render` → `manual-test-backlog-entries`.
+
+### Phases
+
+- [ ] **1. Foundations** *(opus)* — all zero-dependency; land as one batch so everything later compiles against a stable substrate. `/shipshape` at boundary; quick `/verify` eyeball of the thumbnail chip.
+  - [ ] `router-build-user-content-hook` (low/mechanical) — optional `buildUserContent?` on `SubagentRole`, nullish-coalescing dispatch in `route()`, string-vs-array guard at the four `inputBytes` trace sites. Transport already typed `MessageContent` — no widening needed.
+  - [ ] `attachment-type-threading` (low/mechanical) — optional `type`/`mimeType` on the attachment shape at [chatProvider.ts:44](../../src/providers/chatProvider.ts#L44), [requestOrchestrator.ts:809](../../src/providers/requestOrchestrator.ts#L809), [media/chat.ts:340](../../media/chat.ts#L340).
+  - [ ] `webview-image-capture` (medium/moderate) — accept-list + FileReader branch + img-chip in `InputAreaShadowActor`; async canvas downscale with hard byte cap (cap after re-encode, reject before attach).
+  - [ ] `custom-models-schema-fix` (low/mechanical) — `subagentRoles` + `acceptsImages` in the package.json customModels schema; mirror the existing one-line optional-axis checks in `validateCustomModelEntry`; explicit `moby.subagents.image-describe` property.
+- [ ] **2. Role module + settings filter** *(opus)* — `/shipshape` at boundary.
+  - [ ] `image-describe-role-module` (medium/moderate) — clone `webSearchDigest.ts` shape; VL prompt contract + lenient parse (fence-strip, first-`{…}`, garbage → null).
+  - [ ] `accepts-images-capability-filter` (low/mechanical) — filter the image-describe dropdown to `acceptsImages` models, extension-side from the registry.
+- [ ] **3. Orchestrator branch + guard rails + tests** *(opus)* — `/shipshape`, then dev-host `/verify`: attach → "Analyzing image…" → digest in chat; no backend → placeholder.
+  - [ ] `orchestrator-image-injection` (medium/moderate, risk: medium) — partition attachments by type at [requestOrchestrator.ts:1050](../../src/providers/requestOrchestrator.ts#L1050), `Promise.all` the `route()` calls, append digest or named placeholder; never let an image ride the text `--- Attached Files ---` path, never silently drop on `routed:false`.
+  - [ ] `no-array-content-assertion` (low/mechanical) — **same commit** as the injection slice; assert main-model message content is never an array at the finalization choke point(s) covering both loops.
+  - [ ] `analyzing-image-status-indicator` (low/mechanical) — mirror webSearching/webSearchComplete postMessages; emit complete in a `finally`.
+  - [ ] `unit-tests` (medium/moderate) — role tests, router-hook tests, orchestrator branch (digest-append / placeholder / trace-guard contracts).
+- [ ] **4. Thumbnail + digest persistence** *(opus)* — own phase because its failure mode (full-res base64 in the events table) is **silent**. Gate: persisted-attachment-size unit test + `Moby: Export Turn as JSON` during `/verify`.
+  - [ ] `thumbnail-digest-persistence` (medium/moderate, risk: medium) — thread the webview-made ~256px thumbnail + digest into `UserMessageEvent.attachments` (shape already exists in [EventTypes.ts:31](../../src/events/EventTypes.ts#L31)); full-res bytes never reach the table.
+- [ ] **5. Transcript thumbnail render on reload** *(fable + adversarial verify — the only slice that warrants it)* — ADR 0003 hydration-invariant work: restore-path render must not double what the live path drew; a plausible-but-wrong version passes live testing and breaks only on reload/fork. `/verify` must exercise reload, session switch, and fork explicitly, then `/shipshape`.
+  - [ ] `transcript-thumbnail-render` (high/hard-reasoning) — thumbnail segment type in the webview's local event model; project persisted attachment → renderable segment on hydration; live/restore consistency.
+- [ ] **6. Manual-test backlog + discharge** *(opus)* — also the trigger for the jsonMode-on-VL-backend empirical check. Final `/verify` session discharges the entries.
+  - [ ] `manual-test-backlog-entries` (low/mechanical) — the five scenarios from [Testing](#testing), per the backlog template.
+
+### Sequencing risks
+
+1. **Phase 1→3 window:** once the accept-list admits images, an image must never ride the text path — land phases 1–3 before any release/tag (or placeholder unknown-type attachments in the orchestrator from day one).
+2. **jsonMode on VL backends** is only testable empirically in phase 6; if it fails, the per-role jsonMode opt-out contingency touches the phase-2 role module — keep it in mind when writing `imageDescribe.ts`.
+3. **Phase 5 may slip** — phases 1–4 + 6 (minus the reload scenario) are a shippable increment without it.
+
+### Verification roster
+
+| Gate | When | What |
+| --- | --- | --- |
+| `/shipshape` | every phase boundary | compile + suites green twice + docs/conventions |
+| `/verify` | after 3 | attach → indicator → digest; no-backend placeholder |
+| `/verify` | after 4 | Export Turn as JSON — no full-res bytes persisted (the one silent risk outside phase 5) |
+| `/verify` + adversarial verify | after 5 | reload, session switch, fork render — no double-draw |
+| `/verify` | phase 6 | discharge the backlog entries (shipshape green does not) |
+
 ## Related
 
 - [subagents.md](subagents.md) — parent design; router/role/capability conventions this follows.
