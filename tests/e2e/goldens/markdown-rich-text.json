@@ -1,0 +1,9 @@
+{
+  "turn-2": [
+    {
+      "classes": "text-container assistant",
+      "hasShadow": true,
+      "shadowText": "MOBYHeading\nA paragraph with bold, inline code, and a link.\n\n\n\ncol A\ncol B\n\n\n\n\n1\n2\n\n\n\n\na blockquote\n\n\nitem one\nitem two"
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "turn-2": [
+    {
+      "classes": "header-container assistant",
+      "hasShadow": true,
+      "shadowText": "MOBY"
+    },
+    {
+      "classes": "thinking-container",
+      "hasShadow": true,
+      "shadowText": "+\n        💭\n        Thinking — 2 steps\n        Two entries. Summarizing.\n      \n      \n        \n          Step 1\n          I should list the directory first.\n        \n      \n        \n          Step 2\n          Two entries. Summarizing."
+    },
+    {
+      "classes": "shell-container complete",
+      "hasShadow": true,
+      "shadowText": "+\n        \n        Ran 1 command\n        ls src/\n      \n      \n        \n          \n            └─\n            ✓\n            ls src/\n          \n          extension.ts\nproviders/"
+    },
+    {
+      "classes": "text-container assistant",
+      "hasShadow": true,
+      "shadowText": "The src directory holds the entry point and providers."
+    }
+  ]
+}

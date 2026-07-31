@@ -1,0 +1,14 @@
+{
+  "turn-2": [
+    {
+      "classes": "text-container assistant",
+      "hasShadow": true,
+      "shadowText": "MOBYHere is the module:"
+    },
+    {
+      "classes": "text-container assistant",
+      "hasShadow": true,
+      "shadowText": "Done."
+    }
+  ]
+}
