@@ -48,8 +48,10 @@ playwright-report/
 vitest.config.js
 vitest.config.js.map
 
-# Anthropic
+# Anthropic — settings stay local; skills/workflows are part of the repo's dev system
 .claude/*
+!.claude/skills/
+!.claude/workflows/
 
 # WASM build artifacts (rebuild with: npm run build:wasm)
 packages/moby-wasm/target/
