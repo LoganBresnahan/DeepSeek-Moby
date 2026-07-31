@@ -140,9 +140,12 @@ See [docs/plans/beta.md](docs/plans/beta.md) for the priority table.
 ## Testing
 
 - `npm run compile` — webpack build
-- `npx vitest run` — unit tests (1900+ tests)
+- `npm run typecheck` — `tsc --noEmit` over the whole project
+- `npx vitest run` — full suite (3000+ tests, ~8s). The historical worker OOM was fixed (root cause: a global `vi.resetModules()` beforeEach — see the comment in [vitest.config.ts](vitest.config.ts)); single-process full runs are fine now.
+- `npm run test:all` — same suites split into unit/actors/events/integration (what CI runs)
 - Targeted: `npx vitest run tests/unit/providers tests/unit/tools`
-- Known infra issue: full-suite runs hit OOM in vitest worker (pre-existing, not from code changes)
+- `npm run test:e2e` — Playwright (webview harness headless; the VS Code integration spec needs a display — WSLg locally, xvfb in CI)
+- CI ([ci.yml](.github/workflows/ci.yml)) mirrors `/shipshape`: typecheck → build → four suites → e2e under xvfb
 
 ## Conventions
 

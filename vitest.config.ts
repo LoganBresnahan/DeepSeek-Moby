@@ -43,7 +43,6 @@ export default defineConfig({
 
     // Exclude visual/e2e from default run
     exclude: [
-      'tests/visual/**',
       'tests/e2e/**',
       'node_modules/**'
     ],
