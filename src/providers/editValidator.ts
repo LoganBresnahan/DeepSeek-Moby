@@ -22,7 +22,7 @@
  * See docs/architecture/integration/edit-safety.md.
  */
 
-import * as vscode from 'vscode';
+import type * as vscode from 'vscode';
 import {
   discoverCheckCommand,
   classifyCheckOutcome,

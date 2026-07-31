@@ -2,7 +2,7 @@ import * as http from 'http';
 import * as fs from 'fs';
 import * as os from 'os';
 import { execSync } from 'child_process';
-import * as vscode from 'vscode';
+import { TypedEmitter } from '../utils/emitter';
 import { logger } from '../utils/logger';
 import { tracer } from '../tracing';
 
@@ -828,10 +828,10 @@ export class DrawingServer {
   private _port: number;
 
   // ── Events ──
-  private readonly _onImageReceived = new vscode.EventEmitter<DrawingReceivedEvent>();
-  private readonly _onAsciiReceived = new vscode.EventEmitter<AsciiReceivedEvent>();
-  private readonly _onServerStarted = new vscode.EventEmitter<{ port: number; url: string }>();
-  private readonly _onServerStopped = new vscode.EventEmitter<void>();
+  private readonly _onImageReceived = new TypedEmitter<DrawingReceivedEvent>();
+  private readonly _onAsciiReceived = new TypedEmitter<AsciiReceivedEvent>();
+  private readonly _onServerStarted = new TypedEmitter<{ port: number; url: string }>();
+  private readonly _onServerStopped = new TypedEmitter<void>();
 
   readonly onImageReceived = this._onImageReceived.event;
   readonly onAsciiReceived = this._onAsciiReceived.event;

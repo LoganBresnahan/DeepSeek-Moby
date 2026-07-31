@@ -5,7 +5,7 @@
  * for communication between extracted classes (Phase 0 of ChatProvider refactor).
  */
 
-import * as vscode from 'vscode';
+import type * as vscode from 'vscode';
 
 // ── Diff Types ──
 

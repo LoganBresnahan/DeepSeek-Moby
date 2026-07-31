@@ -1,4 +1,4 @@
-import * as vscode from 'vscode';
+import type * as vscode from 'vscode';
 import { HttpClient, HttpError } from '../utils/httpClient';
 import { ConfigManager } from '../utils/config';
 import { WebSearchProvider, WebSearchResponse, WebSearchResult, WebSearchOptions } from './webSearchProvider';

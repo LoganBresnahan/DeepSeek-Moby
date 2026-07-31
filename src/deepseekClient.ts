@@ -1,4 +1,4 @@
-import * as vscode from 'vscode';
+import type * as vscode from 'vscode';
 import { HttpClient, HttpError, createStreamReader } from './utils/httpClient';
 import { ConfigManager } from './utils/config';
 import { logger } from './utils/logger';
