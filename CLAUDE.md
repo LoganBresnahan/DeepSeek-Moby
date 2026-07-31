@@ -43,7 +43,7 @@ The development loop: orient → (design doc/ADR → design-plan) → implement 
 - HTML escape in `formatContent` ([MessageTurnActor.ts](media/actors/turn/MessageTurnActor.ts)) — model-emitted raw `<a>`/`<u>`/`<script>` tags now render as escaped text; markdown + fenced code blocks unaffected. Two-pass placeholder substitution preserves code-block extraction.
 - SQLCipher `SQLITE_NOTADB` recovery: garbage <4KB partial-init files quarantined automatically; >4KB undecryptable files surface a descriptive error with hint to `Moby: Manage Database Encryption Key`. See [docs/guides/database-recovery.md](docs/guides/database-recovery.md).
 - R1 path-semantics guards: prompt rules + absolute-path ground truth in shell tool results — see [ADR 0004](docs/architecture/decisions/0004-r1-path-semantics-guards.md)
-- Events table is the sole source of truth for session history; blob persistence path retired — see [ADR 0003](docs/architecture/decisions/0003-events-table-sole-source-of-truth.md) and [plan](docs/plans/events-table-sole-source-of-truth.md)
+- Events table is the sole source of truth for session history; blob persistence path retired — see [ADR 0003](docs/architecture/decisions/0003-events-table-sole-source-of-truth.md) and [plan](docs/plans/completed/events-table-sole-source-of-truth.md)
 - Directory click in Modified Files dropdown now reveals in explorer instead of erroring
 - Stop button discards partial content (user-initiated only) — see [ADR 0001](docs/architecture/decisions/0001-stop-button-discards-partial.md)
 - `isLongRunningCommand` strips heredoc bodies before pattern matching — see [ADR 0002](docs/architecture/decisions/0002-strip-heredocs-before-long-running-check.md)
@@ -114,6 +114,7 @@ Items are labeled by area and rough leverage. See ADRs linked where relevant.
 - **Real-API agentic turns need >120s.** R1 applies an edit then runs its post-edit continuation loop; a single W1 turn takes ~2 min. Workflow tests budget 300s.
 - **Model expectations come from the registry.** Assert against `DEFAULT_MODEL_ID`, never a hardcoded name — two specs went stale when the default moved to V4 Pro. Where the label isn't id-derived (HeaderActor hardcodes "Chat (V3)" / "Reasoner (R1)"), assert the *property* the test is named for instead of any name at all.
 - **Don't put shared setup in a test.** Retries run in a fresh worker that re-runs `beforeAll` but not earlier tests, so state assigned by a "Setup" test is undefined for everything after the first retry. `webview`/`frame` are acquired in `beforeAll`.
+- **Never select a session by list position.** W5 clicked `entries[1]` ("the second entry — first is the new empty one"), which holds only when nothing else creates sessions. Under `mode: 'default'` other tests do, so the click restored an unrelated empty session and the test read as a *restore* bug — green alone, red in a full run. Capture the id from `.history-entry.active` before leaving the session and select `[data-session-id="…"]` (`getActiveSessionId` + `selectSessionById` in [workflow.ts](tests/e2e/helpers/workflow.ts)). Same identity-over-position rule as `getLastAssistantTurnId`.
 - **The file is `mode: 'default'`, deliberately.** Under `serial`, one slow model response skipped ~30 unrelated tests and hid every downstream failure — the reason this suite took ten full runs to repair. Blocks whose steps genuinely build on each other (W1/W2/W3/W9) declare `mode: 'serial', retries: 2` locally.
 - **Approval needs its own instance.** The shared instance sets `allowAllShellCommands: true`, which would make an approval test vacuous, so W14's approval case launches a second VS Code with the setting off and asserts the prompt really gates execution.
 - **Prefer waiting on the state you assert.** Fixed `waitForTimeout` sleeps before status assertions were a recurring flake source; wait for the class/attribute you are about to check, with a timeout.
@@ -131,7 +132,7 @@ Items are labeled by area and rough leverage. See ADRs linked where relevant.
 
 ### Events-table follow-ups (ADR 0003 parked items)
 
-Not formal phases — parked items from [docs/plans/events-table-sole-source-of-truth.md](docs/plans/events-table-sole-source-of-truth.md):
+Not formal phases — parked items from [docs/plans/completed/events-table-sole-source-of-truth.md](docs/plans/completed/events-table-sole-source-of-truth.md):
 
 - **Phase 3b — Per-turn lazy load (2–3 focused days).** Split `loadHistory` into headers + on-demand `requestTurnEvents(turnId)`. VirtualListActor visibility callback triggers requests; cache loaded turnIds. Deferred until real usage surfaces the need.
 - **Small cleanups:**
@@ -145,7 +146,7 @@ Not formal phases — parked items from [docs/plans/events-table-sole-source-of-
 
 ### Beta release blockers
 
-See [docs/plans/beta.md](docs/plans/beta.md) for the priority table.
+See [docs/plans/completed/beta.md](docs/plans/completed/beta.md) for the priority table.
 
 ## Key Files (frequently touched)
 
@@ -163,8 +164,21 @@ See [docs/plans/beta.md](docs/plans/beta.md) for the priority table.
 - `npx vitest run` — full suite (3000+ tests, ~8s). The historical worker OOM was fixed (root cause: a global `vi.resetModules()` beforeEach — see the comment in [vitest.config.ts](vitest.config.ts)); single-process full runs are fine now.
 - `npm run test:all` — same suites split into unit/actors/events/integration (what CI runs)
 - Targeted: `npx vitest run tests/unit/providers tests/unit/tools`
-- `npm run test:e2e` — Playwright (webview harness headless; the VS Code integration spec needs a display — WSLg locally, xvfb in CI)
-- CI ([ci.yml](.github/workflows/ci.yml)) mirrors `/shipshape`: typecheck → build → four suites → e2e under xvfb
+- CI ([ci.yml](.github/workflows/ci.yml)): typecheck → build → four suites → `test:e2e` under xvfb. It runs the *full* e2e command but has no `DEEPSEEK_API_KEY`, so the real-API specs self-skip — broader than `/shipshape`'s harness tier, narrower than a release run.
+
+### The three e2e tiers — pick by cost
+
+Playwright specs differ enormously in what they cost to run, and the config has no project filter, so `playwright test` means *all of them*. Use the tier that matches the moment:
+
+| Script | Specs | Cost | When |
+| --- | --- | --- | --- |
+| `test:e2e:harness` | webview-rendering, golden-rendering, smoke | ~45 tests, ~90s, no VS Code, **no model calls** | every `/shipshape` |
+| `test:e2e:vscode` | vscode-integration, chat-model-boot | launches real VS Code (needs a display: WSLg locally, xvfb in CI); its API-flow tests self-skip without a key | when the extension host or activation path changed |
+| `test:e2e` | everything, incl. the workflow suite | ~116 tests, ~7.5m, **real DeepSeek tokens** | **release gate** — before cutting a release, plus after changes to request/streaming/edit paths |
+
+The real-API specs self-skip when `DEEPSEEK_API_KEY` is unset ([workflows.spec.ts:73](tests/e2e/workflows.spec.ts#L73), [vscode-integration.spec.ts:242](tests/e2e/vscode-integration.spec.ts#L242), [chat-model-boot.spec.ts:21](tests/e2e/chat-model-boot.spec.ts#L21)), which is how CI runs the full command without a key and still gets a meaningful pass.
+
+Known blind spot: the harness tier replays hand-authored event streams and never launches the extension, so it cannot catch a missing event *producer* in `src/` or a broken harness assumption in the workflow suite. The W5 history-restore bug (2026-07-31) was invisible to every tier except the full one.
 
 ## Conventions
 

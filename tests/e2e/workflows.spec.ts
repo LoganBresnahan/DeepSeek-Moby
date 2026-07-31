@@ -26,6 +26,10 @@ import {
   waitForFileChange,
   waitForComposerReady,
   startNewChat,
+  openHistoryModal,
+  closeHistoryModal,
+  getActiveSessionId,
+  selectSessionById,
   type EditMechanism,
   hasThinkingInLastTurn,
 } from './helpers/workflow';
@@ -918,67 +922,33 @@ test.describe('W5: History Restore After Edits', () => {
       frame = await getWebviewFrame(page);
     }
 
-    // We should have assistant turns from earlier tests
-    const turnsBefore = await countAssistantTurns(frame);
+    // Seed our own turn rather than inheriting one from an earlier test: this
+    // block has no retries, and a retry runs in a fresh worker where those
+    // earlier turns never happened.
+    await startNewChat(page, frame);
+    await sendMessageAndWait(page, webview, frame,
+      'Reply with just "history-test" and nothing else.');
+    expect(await countAssistantTurns(frame)).toBeGreaterThan(0);
 
-    // If no turns exist (isolated run), send a quick message first
-    if (turnsBefore === 0) {
-      await sendMessageAndWait(page, webview, frame,
-        'Reply with just "history-test" and nothing else.');
-      await page.waitForTimeout(1000);
-    }
-
-    const turnsWithContent = await countAssistantTurns(frame);
-    expect(turnsWithContent).toBeGreaterThan(0);
-
-    // Get some text from the last assistant turn for verification
     const originalText = await getLastAssistantText(frame);
 
-    // Start a new chat — "New Chat" button is in VS Code's native view title bar
-    // Click it in the main page (not the webview iframe)
-    const newChatBtn = page.locator('a[title="New Chat"], .action-item a', { hasText: 'New Chat' });
-    try {
-      await newChatBtn.first().click({ timeout: 5000 });
-    } catch {
-      // Fallback: use the clearChat message via the webview
-      await frame.evaluate(() => {
-        window.dispatchEvent(new MessageEvent('message', {
-          data: { type: 'clearChat' }
-        }));
-      });
-    }
+    // Record which session this is before leaving it — the restore below
+    // selects by this id, not by position in the list.
+    await openHistoryModal(webview, frame);
+    const sessionId = await getActiveSessionId(frame);
+    expect(sessionId).toBeTruthy();
+    await closeHistoryModal(frame);
 
-    // Wait for the session to clear
-    await frame.waitForFunction(() => {
-      return document.querySelectorAll('[data-role="assistant"]').length === 0;
-    }, { timeout: 10_000 }).catch(() => {});
-    await page.waitForTimeout(1000);
+    await startNewChat(page, frame);
 
-    // Open history modal
-    const historyBtn = webview.locator('#historyBtn');
-    await historyBtn.click();
-    await page.waitForTimeout(2000);
+    await openHistoryModal(webview, frame);
+    await selectSessionById(frame, sessionId!);
 
-    // Click the previous session (second entry — first is the new empty one)
-    const switched = await frame.evaluate(() => {
-      const historyHost = document.getElementById('historyHost');
-      if (!historyHost?.shadowRoot) return false;
-      const entries = historyHost.shadowRoot.querySelectorAll('.history-entry');
-      if (entries.length < 2) return false;
-      (entries[1] as HTMLElement).click();
-      return true;
-    });
-    expect(switched).toBe(true);
-
-    await page.waitForTimeout(3000);
-
-    // Verify turns were restored
-    const turnsAfterRestore = await countAssistantTurns(frame);
-    expect(turnsAfterRestore).toBeGreaterThan(0);
-
-    // Verify content matches
+    // Restored turns are asserted by selectSessionById's wait; content is
+    // what this test is actually named for.
     const restoredText = await getLastAssistantText(frame);
     expect(restoredText.length).toBeGreaterThan(0);
+    expect(restoredText.trim()).toBe(originalText.trim());
   });
 });
 

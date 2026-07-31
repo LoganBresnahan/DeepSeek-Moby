@@ -40,12 +40,28 @@ npm run test:all
 separate vitest processes; the single-process full run hits the known
 vitest-worker OOM and reads like a broken suite rather than an infra limit.
 
-Also run `npm run test:e2e` (Playwright against the *built* webview bundle —
-depends on the `npm run compile` above). Full-extension verification in a real
-VS Code instance is `/verify`'s job (Handle 2), not this gate's; here the
-headless webview harness suffices. Manual dev-host checks stay on the
-manual-test backlog (Docs gate) — a green `/shipshape` does **not** discharge
-them.
+Then the e2e harness — the headless webview specs only:
+
+```bash
+npm run test:e2e:harness
+```
+
+**`test:e2e:harness`, not `test:e2e`.** The harness path is ~45 tests in ~90s
+against the *built* webview bundle (so it depends on the `npm run compile`
+above); it launches no VS Code and makes no model calls. Bare `test:e2e` also
+runs the real-API workflow suite — ~116 tests, ~7.5m, real DeepSeek tokens on
+every invocation. That's a **release gate, not a per-commit gate**: run
+`npm run test:e2e` (with `DEEPSEEK_API_KEY` set) before cutting a release, and
+whenever a change lands in the request/streaming/edit paths that only the real
+suite exercises. `/shipshape` does not run it.
+
+Say so in the report rather than implying full coverage: the tests line should
+read `e2e:harness <n>/<n>` — the real-API suite is out of scope for this gate,
+and its last known state belongs in the release checklist, not here.
+
+Full-extension verification in a real VS Code instance is `/verify`'s job
+(Handle 2). Manual dev-host checks stay on the manual-test backlog (Docs
+gate) — a green `/shipshape` does **not** discharge them.
 
 Coverage is judged by **behavior mapping**, not a percentage. For each changed
 public behavior in scope, name the test that pins it — the usual surfaces:
@@ -137,7 +153,7 @@ line max for non-obvious WHY.
 
 ```
 SHIPSHAPE REPORT
-  tests        ✓|✗   compile clean · test:all <n>/<n> twice · e2e green · gaps: <behavior lacking a test, or none>
+  tests        ✓|✗   compile clean · test:all <n>/<n> twice · e2e:harness <n>/<n> · gaps: <behavior lacking a test, or none>
   docs         ✓|✗   ADRs current · tracker true · backlog covers UI changes · drift: <doc: stale claim, or none>
   conventions  ✓|✗   violations: <file:line, or none>
 ```

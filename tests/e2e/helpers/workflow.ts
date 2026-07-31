@@ -353,3 +353,93 @@ export async function hasShellInLastTurn(frame: Frame): Promise<boolean> {
     return lastTurn.querySelectorAll('.shell-container').length > 0;
   });
 }
+
+/**
+ * Open the history modal and wait for its entries to render.
+ *
+ * Open/closed is `.history-backdrop.visible` — the class `HistoryShadowActor`
+ * toggles in open()/close(). While it is set, `#historyHost` covers the
+ * toolbar and swallows pointer events, so a helper that leaves the modal open
+ * makes the *next* webview click hang until the test times out.
+ */
+export async function openHistoryModal(
+  webview: FrameLocator,
+  frame: Frame,
+  timeoutMs = 15_000
+): Promise<void> {
+  await webview.locator('#historyBtn').click();
+  await frame.waitForFunction(
+    () => {
+      const sr = document.getElementById('historyHost')?.shadowRoot;
+      if (!sr?.querySelector('.history-backdrop.visible')) return false;
+      return sr.querySelectorAll('.history-entry').length > 0;
+    },
+    { timeout: timeoutMs }
+  );
+}
+
+/**
+ * Close the history modal and wait until it stops intercepting clicks.
+ *
+ * Clicks the modal's own ✕ rather than pressing Escape: the actor's Escape
+ * handler is on `document` inside the webview, and by this point focus is
+ * usually back on the VS Code page, so the key never reaches it.
+ */
+export async function closeHistoryModal(frame: Frame): Promise<void> {
+  await frame.evaluate(() => {
+    const sr = document.getElementById('historyHost')?.shadowRoot;
+    sr?.querySelector<HTMLElement>('[data-action="close"]')?.click();
+  });
+  await frame.waitForFunction(
+    () => !document
+      .getElementById('historyHost')
+      ?.shadowRoot?.querySelector('.history-backdrop.visible'),
+    { timeout: 5_000 }
+  );
+}
+
+/**
+ * Session id of the entry the history modal marks active. Requires the modal
+ * to be open.
+ */
+export async function getActiveSessionId(frame: Frame): Promise<string | null> {
+  return frame.evaluate(() => {
+    const sr = document.getElementById('historyHost')?.shadowRoot;
+    return sr?.querySelector('.history-entry.active')?.getAttribute('data-session-id') ?? null;
+  });
+}
+
+/**
+ * Switch to a session by id, then wait for its turns to render.
+ *
+ * Identity, not index: the suite runs `mode: 'default'` and other tests create
+ * sessions while this one runs, so "the second entry" is not reliably the
+ * session you left — picking by position can restore an unrelated (often
+ * empty) session and read as a restore bug. Requires the modal to be open.
+ */
+export async function selectSessionById(
+  frame: Frame,
+  sessionId: string,
+  timeoutMs = 30_000
+): Promise<void> {
+  const clicked = await frame.evaluate((id) => {
+    const sr = document.getElementById('historyHost')?.shadowRoot;
+    const entry = sr?.querySelector(`.history-entry[data-session-id="${id}"]`);
+    if (!entry) return false;
+    (entry as HTMLElement).click();
+    return true;
+  }, sessionId);
+  if (!clicked) throw new Error(`history entry for session ${sessionId} not found`);
+
+  // Selecting closes the modal; wait it out so the next click isn't swallowed.
+  await frame.waitForFunction(
+    () => !document
+      .getElementById('historyHost')
+      ?.shadowRoot?.querySelector('.history-backdrop.visible'),
+    { timeout: 10_000 }
+  );
+  await frame.waitForFunction(
+    () => document.querySelectorAll('[data-role="assistant"]').length > 0,
+    { timeout: timeoutMs }
+  );
+}
