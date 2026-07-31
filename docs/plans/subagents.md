@@ -355,6 +355,8 @@ The router is generic over roles — adding a new role is a new module + a regis
 
 ### Phase 2 — `image-describe` (capability bridge)
 
+> **Decision-locked implementation plan: [image-describe-subagent.md](image-describe-subagent.md)** (2026-07-04). It supersedes the stale bits below — `apiEndpoint` plumbing is already done (not a prerequisite), only the OpenAI `image_url` encoder is needed (custom models are openai-only), backend is agnostic with no default (not auto-suggest Haiku), and the one real router edit is an optional `buildUserContent` hook. Read that doc to build; this section is retained for design lineage.
+
 **Goal:** unblock vision use cases for non-vision main models (DeepSeek V3/R1/V4 today, future text-only models tomorrow). User can paste a screenshot or attach an image and get useful behavior even when their chosen main model is blind.
 
 **Why this comes after Phase 1:** routing scaffolding from Phase 1 must be stable. `image-describe` reuses `SubagentRouter` and the role-module shape, so it validates that the abstraction generalizes from a pure-digest role (Phase 1) to a capability-bridge role.
