@@ -1,10 +1,19 @@
 # Manual Test Backlog
 
-_Last reconciled with code 2026-06-16._
+_Last reconciled with code 2026-07-31._
 
 Scenarios that have been implemented but not yet exercised in a VS Code dev host. Once a scenario has been walked through and passes, remove it from here (or move evergreen regressions into [test-scenarios.md](./test-scenarios.md)).
 
 **Purpose:** caught-up list of "what needs eyeballing before shipping." Not a comprehensive regression suite — that's [test-scenarios.md](./test-scenarios.md).
+
+## What the test suite already covers (2026-07-31 reconciliation)
+
+Seven scenarios were removed this pass because tests now pin their pass criteria — M8, M9, M16, M17, M18, M20, M25. Four more were narrowed to the part tests can't reach (M6, M10, M11, M26).
+
+Two limits worth remembering when deciding whether a future item belongs here:
+
+- **The webview e2e specs replay hand-authored event streams.** [webview-rendering.spec.ts](../../tests/e2e/webview-rendering.spec.ts)'s `2G. History Restore Fidelity` group proves the *renderer* handles a `file-modified` event, not that the extension ever *emits* one. Any bug whose root cause is a missing producer on the `src/` side survives a green run — that's why M32 stays.
+- **Animation and feel are not assertable.** Golden screenshots ([golden-rendering.spec.ts](../../tests/e2e/golden-rendering.spec.ts)) pin an end state; they say nothing about whether a label crossfaded or snapped. M3, M4, M5, M12 are eyes-only by nature.
 
 ---
 
@@ -99,6 +108,8 @@ Scenarios that have been implemented but not yet exercised in a VS Code dev host
 
 ## M6. Send button primed (green) state (P1)
 
+_Covered by tests: the enabled-with-a-key gate (`TB1` in [workflows.spec.ts](../../tests/e2e/workflows.spec.ts)) and the stop/send swap during streaming (`IA7`, `IA9`). The primed-green state itself has no assertion anywhere — steps 2–4 and 7 are the live part._
+
 **Setup:** DeepSeek API key is set OR a local model is active.
 
 **Steps:**
@@ -128,40 +139,11 @@ Scenarios that have been implemented but not yet exercised in a VS Code dev host
 
 ---
 
-## M8. Custom model max-tokens slider (P2)
-
-**Why this matters:** previously the slider tried to write to `moby.maxTokensCustom<ModelName>` which isn't a registered config key; VS Code threw. Now writes patch the matching entry's `maxOutputTokens` inside `moby.customModels[]`.
-
-**Steps:**
-1. Switch to a custom model.
-2. Open settings and find the maxTokens slider (may be per-model in its popup).
-3. Drag the slider → no errors in Debug Console about "not a registered configuration".
-4. Open `settings.json` → the matching `moby.customModels[].maxOutputTokens` updated to the new value.
-5. Send a message → request uses the new value (check tokenCV log or response length).
-
-**Pass criteria:** slider works end-to-end for custom models, zero config-write errors.
-
----
-
-## M9. Command approval: absolute-path `rm` no longer double-blocked (P0)
-
-**Why this matters:** the executor's catastrophic blocklist used to reject any `rm` with a `/`-starting path (including `rm -f /home/user/foo.txt`), even after the approval UI said "allow." Now user-approved commands bypass the blocklist.
-
-**Steps:**
-1. Use R1 on a test workspace. Ask it to delete a specific file at an absolute path, e.g., "Delete /tmp/moby-test-file.txt" (create the file first).
-2. Approval UI appears → click **Allow once**.
-3. **Command executes** — file is deleted, no "Blocked: Potentially dangerous operation" error in logs.
-4. Try the catastrophic form: have R1 attempt `rm -rf /` (careful — this shouldn't happen in practice; you can also call `validateCommand('rm -rf /')` directly in tests). This **should still be blocked** without an approval prompt (regex-level catch).
-5. `rm -rf ~`, `rm -rf /*`, `rm -f /` should all be blocked at the regex level.
-6. `rm -rf /home/user/build`, `rm -rf ~/Documents/foo.zip`, `rm /tmp/workfile` should all flow through approval cleanly.
-
-**Pass criteria:** approval UI decisions are respected by the executor; only bare-root / bare-home patterns are hard-blocked.
-
----
-
 ## M10. Input area: expand stays expanded while typing (P2)
 
 **Why this matters:** clicking the expand toggle bumps the textarea to 300px. Previously typing would strip `force-expanded` and auto-resize back to content-height. Now only the collapse state exits on typing.
+
+_Covered by tests: plain auto-resize from the default state (`D3` in [webview-rendering.spec.ts](../../tests/e2e/webview-rendering.spec.ts)), i.e. step 4. Nothing touches `force-expanded` — steps 1–3 and 5 are the live part._
 
 **Steps:**
 1. Click the textarea expand toggle (▴) → textarea grows to 300px.
@@ -177,6 +159,8 @@ Scenarios that have been implemented but not yet exercised in a VS Code dev host
 ## M11. Idempotent-edit skip + dropdown dedupe (P2)
 
 **Why this matters:** repeated applies of the same SEARCH/REPLACE to the same file (common when R1 retries after an unrelated error) used to add duplicate rows to the Modified Files dropdown and write the same content multiple times.
+
+_Covered by tests: the idempotent-skip path itself — no disk write when content is unchanged ([diffManager.test.ts:451](../../tests/unit/providers/diffManager.test.ts#L451), [:499](../../tests/unit/providers/diffManager.test.ts#L499)). The dropdown side is untested: nothing asserts one row per file, so step 2's "no extra dropdown row" and step 3's update-in-place are the live part._
 
 **Steps:**
 1. On R1, trigger a scenario where the model emits the same fix for the same file twice in the same turn. (Or force it: ask for a fix, let it apply, then ask "apply that same fix again.")
@@ -257,9 +241,11 @@ Scenarios that have been implemented but not yet exercised in a VS Code dev host
 
 ---
 
-## M15–M20. V4 `run_shell` native-tool path (Phase 3.75)
+## M15, M19. V4 `run_shell` native-tool path (Phase 3.75)
 
 These exercise the `run_shell` tool for native-tool-calling models (V4, V3 Chat, custom). All tests use a V4 model (flash or flash-thinking) with `shellProtocol: 'native-tool'`.
+
+M16, M17, M18 and M20 were removed on 2026-07-31: `run_shell` routes through the *same* pipeline as R1's `<shell>` ([workspaceTools.ts:252](../../src/tools/workspaceTools.ts#L252)), so long-running detection, the `allowAllShellCommands` bypass, the ADR-0004 absolute-path block and the shellProtocol-gated tools array are all pinned by [reasonerShellExecutor.test.ts](../../tests/unit/tools/reasonerShellExecutor.test.ts) and [fidelity.test.ts](../../tests/unit/providers/fidelity.test.ts). What's left here is model behaviour, which no test can assert.
 
 ### M15. V4 model runs tests via `run_shell`
 
@@ -274,37 +260,6 @@ These exercise the `run_shell` tool for native-tool-calling models (V4, V3 Chat,
 
 **Pass criteria:** `run_shell` dispatches through the existing approval + execution pipeline; test output is visible in the shell-results dropdown.
 
-### M16. Long-running command detection
-
-**Steps:**
-1. Send: "Start the dev server with `npm run dev`."
-2. Model calls `run_shell` with the dev-server command.
-3. Extension rejects it via `LONG_RUNNING_PATTERNS`.
-4. Model receives the rejection as a tool result and tells the user to run it manually.
-
-**Pass criteria:** `npm run dev`, `flask run`, `python -m http.server`, etc. are all caught. Short commands (tests, builds) still execute.
-
-### M17. `allowAllShellCommands` bypass
-
-**Setup:** Set `moby.allowAllShellCommands: true`.
-
-**Steps:**
-1. Send a prompt requiring shell execution on a V4 model.
-2. Model calls `run_shell`.
-3. No approval prompt — command executes immediately.
-4. Set `moby.allowAllShellCommands: false` → next `run_shell` triggers approval again.
-
-**Pass criteria:** Bypass works identically for native-tool path and R1's `<shell>` path.
-
-### M18. File-watcher diff with absolute paths (ADR 0004)
-
-**Steps:**
-1. Ask V4 to `mkdir tmp && echo "hello" > tmp/test.txt` via `run_shell`.
-2. Check the tool result returned to the model — it must include `--- Files touched by this command (absolute paths) ---`.
-3. Paths are absolute (e.g. `/home/user/project/tmp/test.txt`), not relative.
-
-**Pass criteria:** ADR 0004 B-pattern preserved for native-tool shell path.
-
 ### M19. Interrupt during shell execution
 
 **Steps:**
@@ -315,20 +270,11 @@ These exercise the `run_shell` tool for native-tool-calling models (V4, V3 Chat,
 
 **Pass criteria:** Abort during `run_shell` cancels cleanly — same path R1 uses.
 
-### M20. Custom model gets `run_shell` automatically
-
-**Setup:** Add a custom model with `toolCalling: 'native'` and `shellProtocol: 'native-tool'` (e.g., the Ollama Qwen template with `shellProtocol` changed from `"none"` to `"native-tool"`).
-
-**Steps:**
-1. Select the custom model.
-2. Send a prompt that requires a shell command.
-3. Verify the model's tools array includes `run_shell`.
-
-**Pass criteria:** `run_shell` appears automatically for any model with `shellProtocol: 'native-tool'`.
-
 ---
 
-## M21–M27. V4 streaming tool calls (Phase 4.5)
+## M21–M24, M26–M27. V4 streaming tool calls (Phase 4.5)
+
+M25 (V3 legacy `runToolLoop` path with `streamingToolCalls: false`) was removed on 2026-07-31 — it's a pure code-path switch, covered by [requestOrchestrator.test.ts](../../tests/unit/providers/requestOrchestrator.test.ts) and [fidelity.test.ts](../../tests/unit/providers/fidelity.test.ts).
 
 ### M21. Visible reasoning during tool decisions
 
@@ -368,25 +314,16 @@ These exercise the `run_shell` tool for native-tool-calling models (V4, V3 Chat,
 
 **Pass criteria:** Partial tool calls are discarded on abort; no half-baked file writes.
 
-### M25. V3 regression (legacy path still works)
+### M26. `reasoningEcho` round-trip — no live 400s (narrowed)
 
-**Steps:**
-1. Temporarily set `streamingToolCalls: false` on `deepseek-chat` in the registry.
-2. Send a prompt that requires tool calls.
-3. Verify the legacy `runToolLoop` + `streamAndIterate` path still works.
-4. Restore `streamingToolCalls: true`.
-
-**Pass criteria:** Legacy path still functional for models that don't opt into streaming.
-
-### M26. `reasoningEcho` round-trip (no 400s)
+_Covered by tests: that the request body carries `reasoning_content` on prior assistant-with-tool-calls messages ([deepseekClient.streamChat.test.ts](../../tests/unit/deepseekClient.streamChat.test.ts), [requestOrchestrator.test.ts](../../tests/unit/providers/requestOrchestrator.test.ts)). Only the wire outcome needs eyes — whether the real API accepts what we send._
 
 **Steps:**
 1. Start a multi-turn conversation on V4-flash-thinking with tool calls.
 2. Send a second message that triggers more tools.
 3. Check logs — no `400` errors mentioning `reasoning_content must be passed back`.
-4. Verify the request body includes `reasoning_content` on prior assistant-with-tool-calls messages.
 
-**Pass criteria:** `reasoningEcho: 'required'` constraint satisfied across multi-turn tool loops.
+**Pass criteria:** `reasoningEcho: 'required'` constraint satisfied against the live API across multi-turn tool loops.
 
 ### M27. Wall-clock reduction on no-tool turns
 
