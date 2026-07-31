@@ -22,7 +22,7 @@ The development loop: orient → (design doc/ADR → design-plan) → implement 
 
 ## Active Bugs
 
-_None tracked at the moment._ Add new ones here as they're discovered.
+- **3 failing e2e specs on main (pre-existing, exposed 2026-07-31 when e2e joined CI).** (1) `webview-rendering G10`: standalone `code-block` turn events render no code block on history restore — suspected casualty of the 0.6.1 "drop duplicate code dropdowns" change (`557ffa3`); if R1 SEARCH/REPLACE turns persist code only as events, restore loses them (silent-failure class, relates to backlog M32). The golden spec pins this known-bad state with a comment. (2)(3) two `workflows.spec.ts` failures (W18 send-message, W2 reject-edit) — untriaged. CI's e2e step is red until these are resolved.
 
 ## Recently Fixed
 
@@ -104,6 +104,12 @@ Items are labeled by area and rough leverage. See ADRs linked where relevant.
 - **Giant-command approval UX.** 24KB heredoc previews are unreviewable (observed in tictactoe trace, 2026-04-20). Smallest useful fix: when command > ~2KB, collapse the heredoc body behind a "Show full content (N chars)" expander; show command shape (`cat > file << 'EOF' ... EOF`) + body size as summary.
 - **Observe.** Run more complex R1 tasks post-ADR-0004, capture traces. If path-confusion thrash is closed and *new* thrash shapes emerge, revisit the detector question with data (see ADR 0004, Alternative B).
 - **Parked:** thrash detection. Data-gated per ADR 0004.
+
+### Testing infrastructure (added 2026-07-31)
+
+- **Protocol orphan cleanup (Small).** The drift detector ([tests/integration/protocol-drift.test.ts](tests/integration/protocol-drift.test.ts)) found 12 dead postMessage types: 7 webview→extension sends with no handler (SessionActor: `clearSession`/`createSession`/`loadSession`/`getHistoryList`/`setModel`; SettingsShadowActor: `getDefaultSystemPrompt`/`setLogColors`) and 5 extension→webview (chatProvider: `activeDiffChanged`/`autoContinuation`/`editRejected`/`showEditConfirm`/`waitingForApproval`). Each is either a vestigial sender to delete or a missing handler to restore — triage individually, then shrink `knownOrphans`.
+- **vscode-at-the-edges, remaining slices.** Slice 1 landed (`f0e3a00`). Ranked remainder from the 2026-07-31 import-topology survey: (a) commandApprovalManager → TypedEmitter + local `KeyValueStore` for `Memento`; (b) webSearchManager → TypedEmitter + inject `digestMaxResults` (~400 lines of cache/ledger logic freed); (c) UnifiedLogExporter → split pure `format*` into `logFormatters.ts`; (d) vertical splits of serviceLocation / editValidation / workspacePaths (each has a pure top half); (e) requestOrchestrator: extract the 5× duplicated `ShellFileWatcher` block + collapse 10 scattered `getConfiguration` reads into one injected config — do NOT touch its EventEmitters/abort paths in the same pass; (f) searxngClient/webSearchProviderRegistry/subagents-router keep runtime `getConfiguration` — narrow later, not type-only candidates.
+- **Real-trace goldens (upgraded from "parked").** `Moby: Export Turn as JSON` is the capture tool: run real R1 tasks, save raw event streams under `tests/fixtures/traces/`, replay through ContentTransformBuffer / turn rendering, pin outputs. Kills the synthetic-stream tautology.
 
 ### Cross-model infrastructure
 
