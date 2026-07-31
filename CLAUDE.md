@@ -22,7 +22,10 @@ The development loop: orient → (design doc/ADR → design-plan) → implement 
 
 ## Active Bugs
 
-- **3 failing e2e specs on main (pre-existing, exposed 2026-07-31 when e2e joined CI).** (1) `webview-rendering G10`: standalone `code-block` turn events render no code block on history restore — suspected casualty of the 0.6.1 "drop duplicate code dropdowns" change (`557ffa3`); if R1 SEARCH/REPLACE turns persist code only as events, restore loses them (silent-failure class, relates to backlog M32). The golden spec pins this known-bad state with a comment. (2)(3) two `workflows.spec.ts` failures (W18 send-message, W2 reject-edit) — untriaged. CI's e2e step is red until these are resolved.
+- **3 failing e2e specs on main — triaged 2026-07-31: all test-infra staleness, no product bugs.** CI's e2e step is red until fixed. Opus-suitable spec/helper maintenance, medium effort:
+  - `webview-rendering G10`: **stale fixture.** Its event stream (a `code-block` event whose content appears in no text event) cannot occur in real data — the only producer ([requestOrchestrator.ts:758](src/providers/requestOrchestrator.ts#L758) `_flushCodeBlocksForIteration`) extracts blocks *from* accumulated text, so every persisted code-block event duplicates a fence already in a text event. `557ffa3`'s gateway no-op is correct. Re-author G10 with the fence in `text-append` + `file-modified` events, keeping its real purpose: applied-badge isolation across same-filename turns. Same fix for the known-bad golden in `golden-rendering.spec.ts`.
+  - `workflows W18`: **helper selector drift.** `sendMessageAndWait` ([tests/e2e/helpers/workflow.ts](tests/e2e/helpers/workflow.ts)) detects end-of-streaming via a `.stop-btn` in the *toolbar* shadow root; the stop button now lives in the input area, so the wait passes instantly and the assert races the response (failure screenshot confirms: stop button visible, turn still streaming). Also: harness model default is now "v4 pro thinking" (slower generation, tighter races). Fix the selector; consider pinning the model for e2e.
+  - `workflows W2` (reject-edit timeout): same wait-helper drift is the prime suspect; re-run after the W18 fix before deeper investigation. Env note: `DEEPSEEK_API_KEY` in env is valid and reaches the API from this machine — real-API e2e works here.
 
 ## Recently Fixed
 

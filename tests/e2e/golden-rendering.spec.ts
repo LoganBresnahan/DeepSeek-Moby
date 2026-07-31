@@ -75,12 +75,11 @@ const SCENARIOS: Scenario[] = [
     ],
   },
   {
-    // KNOWN-BAD PIN (2026-07-31): standalone code-block turn events render
-    // no code block on history restore (see failing G10 in
-    // webview-rendering.spec.ts — regression suspected from the 0.6.1
-    // "drop duplicate code dropdowns" change). This golden pins the current
-    // broken structure so the eventual fix shows up as a reviewed golden
-    // diff. Do not treat the pinned state as correct.
+    // STALE FIXTURE (triaged 2026-07-31): standalone code-block events are
+    // deliberately a no-op on restore (557ffa3) because real persisted data
+    // always carries the fence inside a text event — this synthetic stream
+    // cannot occur in reality. Re-author this scenario with the fence in
+    // text-append content (see tracker Active Bugs / G10).
     name: 'code-block-with-file-header',
     pinTurns: ['turn-2'],
     turns: [
