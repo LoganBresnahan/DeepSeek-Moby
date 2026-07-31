@@ -3,12 +3,7 @@
     {
       "classes": "text-container assistant",
       "hasShadow": true,
-      "shadowText": "MOBYHere is the module:"
-    },
-    {
-      "classes": "text-container assistant",
-      "hasShadow": true,
-      "shadowText": "Done."
+      "shadowText": "MOBYHere is the module:\n▶typescript# File: src/hello.tsDiffApplyCopy# File: src/hello.ts\nexport function hello(name: string): string {\n  return `Hello ${name}`;\n}Done."
     }
   ]
 }

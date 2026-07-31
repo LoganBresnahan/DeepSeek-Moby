@@ -15,6 +15,9 @@
 
 import { test, expect, Page, FrameLocator, Frame } from '@playwright/test';
 import { launchVSCode, closeVSCode, VSCodeResult } from './helpers/launch';
+// Node-side test importing the vscode-free registry so model expectations
+// track the source of truth.
+import { DEFAULT_MODEL_ID } from '../../src/models/registry';
 
 const API_KEY = process.env.DEEPSEEK_API_KEY;
 
@@ -178,9 +181,12 @@ test.describe('3B. Webview in VS Code', () => {
     const modelName = webview.locator('#currentModelName');
     await expect(modelName).toBeAttached({ timeout: 10_000 });
 
+    // Derived from the registry default rather than a hardcoded pattern,
+    // which went stale when the default moved to V4 Pro.
+    const expected = DEFAULT_MODEL_ID.replace('deepseek-', '').replace(/-/g, ' ');
     const text = await modelName.textContent();
     expect(text).toBeTruthy();
-    expect(text!.toLowerCase()).toMatch(/deepseek|chat|reasoner/);
+    expect(text!.toLowerCase()).toBe(expected);
   });
 });
 

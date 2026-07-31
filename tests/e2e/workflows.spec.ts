@@ -21,13 +21,25 @@ import {
   getTurnPendingFiles,
   getTurnCodeBlockStatus,
   countAssistantTurns,
+  getLastAssistantTurnId,
   hasThinkingInLastTurn,
 } from './helpers/workflow';
+// Node-side test importing the extension's registry directly (it is
+// vscode-free) so model expectations track the source of truth.
+import { DEFAULT_MODEL_ID } from '../../src/models/registry';
 
 const API_KEY = process.env.DEEPSEEK_API_KEY;
 
 // Each workflow gets its own VS Code instance for isolation
 test.describe.configure({ mode: 'serial' });
+
+// Real-API agentic turns routinely exceed the 120s default: R1 applies an
+// edit, then runs its post-edit continuation loop (another reasoning pass
+// plus shell round-trips) before the turn ends. The waits below refuse to
+// return mid-stream, so the budget has to cover the whole chain.
+test.beforeEach(() => {
+  test.setTimeout(300_000);
+});
 
 let result: VSCodeResult;
 let page: Page;
@@ -108,6 +120,7 @@ test.describe('W18: Input Area Interactions', () => {
 test.describe('W7: Stop Generation', () => {
   test('stop streaming mid-response', async () => {
     const turnsBefore = await countAssistantTurns(frame);
+    const prevTurnId = await getLastAssistantTurnId(frame);
 
     // Send a message that generates a long response
     const textarea = webview.locator('#inputAreaContainer textarea');
@@ -118,11 +131,12 @@ test.describe('W7: Stop Generation', () => {
     await sendBtn.click({ timeout: 10_000 });
 
     // Wait for assistant turn to appear with content
-    await frame.waitForFunction((before) => {
+    await frame.waitForFunction((prevId) => {
       const turns = document.querySelectorAll('[data-role="assistant"]');
-      if (turns.length <= before) return false;
-      return turns[before].querySelectorAll('[data-container-id]').length > 0;
-    }, turnsBefore, { timeout: 30_000 });
+      const newTurn = turns[turns.length - 1];
+      if (!newTurn || newTurn.getAttribute('data-turn-id') === prevId) return false;
+      return newTurn.querySelectorAll('[data-container-id]').length > 0;
+    }, prevTurnId, { timeout: 30_000 });
 
     // Click stop
     const stopBtn = webview.locator('.stop-btn');
@@ -153,13 +167,17 @@ test.describe('W7: Stop Generation', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 test.describe('W6: Model Switch Between Sessions', () => {
-  test('default model is Reasoner', async () => {
+  test('boots on the registry default model', async () => {
+    // Assert against DEFAULT_MODEL_ID rather than a hardcoded name — this
+    // test previously pinned "Reasoner" and went stale when the default
+    // moved to V4 Pro. HeaderActor derives the label from the model id.
+    const expected = DEFAULT_MODEL_ID.replace('deepseek-', '').replace(/-/g, ' ');
     const modelName = webview.locator('#currentModelName');
     const modelText = await modelName.textContent();
-    expect(modelText?.toLowerCase()).toMatch(/reasoner/);
+    expect(modelText?.toLowerCase()).toBe(expected);
   });
 
-  test('send message with default Reasoner model', async () => {
+  test('send message with the default model', async () => {
     await sendMessageAndWait(page, webview, frame,
       'Reply with just "reasoner-ok" and nothing else.');
 
@@ -377,6 +395,7 @@ test.describe('W2: Ask Mode Accept/Reject Cycle', () => {
 
   test('send edit request and accept', async () => {
     const turnsBefore = await countAssistantTurns(frame);
+    const prevTurnId = await getLastAssistantTurnId(frame);
 
     // Send message — don't use sendMessageAndWait because Ask mode
     // blocks streaming until the user accepts/rejects
@@ -388,22 +407,22 @@ test.describe('W2: Ask Mode Accept/Reject Cycle', () => {
     await sendBtn.click({ timeout: 10_000 });
 
     // Wait for the pending container to appear (Ask mode shows it during streaming)
-    await frame.waitForFunction((before) => {
+    await frame.waitForFunction((prevId) => {
       const turns = document.querySelectorAll('[data-role="assistant"]');
-      if (turns.length <= before) return false;
-      const newTurn = turns[before];
+      const newTurn = turns[turns.length - 1];
+      if (!newTurn || newTurn.getAttribute('data-turn-id') === prevId) return false;
       const pendingContainers = newTurn.querySelectorAll('.pending-container');
       for (const pc of pendingContainers) {
         const sr = (pc as HTMLElement).shadowRoot;
         if (sr?.querySelector('.accept-btn')) return true;
       }
       return false;
-    }, turnsBefore, { timeout: 120_000 });
+    }, prevTurnId, { timeout: 120_000 });
 
     // Click Accept
     const accepted = await frame.evaluate((before) => {
       const turns = document.querySelectorAll('[data-role="assistant"]');
-      const newTurn = turns[before];
+      const newTurn = turns[turns.length - 1];
       if (!newTurn) return false;
       const pendingContainers = newTurn.querySelectorAll('.pending-container');
       for (const pc of pendingContainers) {
@@ -424,7 +443,7 @@ test.describe('W2: Ask Mode Accept/Reject Cycle', () => {
     // Verify the pending container shows applied status
     const pendingInfo = await frame.evaluate((before) => {
       const turns = document.querySelectorAll('[data-role="assistant"]');
-      const turn = turns[before];
+      const turn = turns[turns.length - 1];
       if (!turn) return { classes: '', text: '' };
       const pc = turn.querySelector('.pending-container');
       return {
@@ -445,6 +464,7 @@ test.describe('W2: Ask Mode Accept/Reject Cycle', () => {
 
   test('send another edit and reject it', async () => {
     const turnsBefore = await countAssistantTurns(frame);
+    const prevTurnId = await getLastAssistantTurnId(frame);
 
     // Send message — Ask mode blocks until approval
     const textarea = webview.locator('#inputAreaContainer textarea');
@@ -455,22 +475,22 @@ test.describe('W2: Ask Mode Accept/Reject Cycle', () => {
     await sendBtn.click({ timeout: 10_000 });
 
     // Wait for the pending container with reject button to appear
-    await frame.waitForFunction((before) => {
+    await frame.waitForFunction((prevId) => {
       const turns = document.querySelectorAll('[data-role="assistant"]');
-      if (turns.length <= before) return false;
-      const newTurn = turns[before];
+      const newTurn = turns[turns.length - 1];
+      if (!newTurn || newTurn.getAttribute('data-turn-id') === prevId) return false;
       const pendingContainers = newTurn.querySelectorAll('.pending-container');
       for (const pc of pendingContainers) {
         const sr = (pc as HTMLElement).shadowRoot;
         if (sr?.querySelector('.reject-btn')) return true;
       }
       return false;
-    }, turnsBefore, { timeout: 120_000 });
+    }, prevTurnId, { timeout: 120_000 });
 
     // Click Reject
     const rejected = await frame.evaluate((before) => {
       const turns = document.querySelectorAll('[data-role="assistant"]');
-      const newTurn = turns[before];
+      const newTurn = turns[turns.length - 1];
       if (!newTurn) return false;
       const pendingContainers = newTurn.querySelectorAll('.pending-container');
       for (const pc of pendingContainers) {
@@ -491,7 +511,7 @@ test.describe('W2: Ask Mode Accept/Reject Cycle', () => {
     // Verify the pending container shows rejected status
     const pendingInfo = await frame.evaluate((before) => {
       const turns = document.querySelectorAll('[data-role="assistant"]');
-      const turn = turns[before];
+      const turn = turns[turns.length - 1];
       if (!turn) return { classes: '' };
       const pc = turn.querySelector('.pending-container');
       return { classes: pc?.className || '' };
@@ -542,6 +562,7 @@ test.describe('W9: History Restore After Accept', () => {
     }
 
     const turnsBefore = await countAssistantTurns(frame);
+    const prevTurnId = await getLastAssistantTurnId(frame);
 
     // Send edit request — Ask mode blocks until approval
     const textarea = webview.locator('#inputAreaContainer textarea');
@@ -551,21 +572,21 @@ test.describe('W9: History Restore After Accept', () => {
     await webview.locator('.send-btn').click({ timeout: 10_000 });
 
     // Wait for pending container with accept button
-    await frame.waitForFunction((before) => {
+    await frame.waitForFunction((prevId) => {
       const turns = document.querySelectorAll('[data-role="assistant"]');
-      if (turns.length <= before) return false;
-      const newTurn = turns[before];
+      const newTurn = turns[turns.length - 1];
+      if (!newTurn || newTurn.getAttribute('data-turn-id') === prevId) return false;
       for (const pc of newTurn.querySelectorAll('.pending-container')) {
         const sr = (pc as HTMLElement).shadowRoot;
         if (sr?.querySelector('.accept-btn')) return true;
       }
       return false;
-    }, turnsBefore, { timeout: 120_000 });
+    }, prevTurnId, { timeout: 120_000 });
 
     // Click Accept
     await frame.evaluate((before) => {
       const turns = document.querySelectorAll('[data-role="assistant"]');
-      const newTurn = turns[before];
+      const newTurn = turns[turns.length - 1];
       if (!newTurn) return;
       for (const pc of newTurn.querySelectorAll('.pending-container')) {
         const sr = (pc as HTMLElement).shadowRoot;
@@ -580,7 +601,7 @@ test.describe('W9: History Restore After Accept', () => {
     // Verify pending shows applied
     const statusAfterAccept = await frame.evaluate((before) => {
       const turns = document.querySelectorAll('[data-role="assistant"]');
-      const turn = turns[before];
+      const turn = turns[turns.length - 1];
       if (!turn) return '';
       const pc = turn.querySelector('.pending-container');
       return pc?.className || '';
@@ -1064,6 +1085,7 @@ test.describe('W14: Command Approval Flow', () => {
     // Send a message that will trigger a shell command needing approval
     // Use a command prefix that isn't in the default allowed list
     const turnsBefore = await countAssistantTurns(frame);
+    const prevTurnId = await getLastAssistantTurnId(frame);
 
     const textarea = webview.locator('#inputAreaContainer textarea');
     await textarea.click();
@@ -1072,21 +1094,21 @@ test.describe('W14: Command Approval Flow', () => {
     await webview.locator('.send-btn').click({ timeout: 10_000 });
 
     // Wait for either an approval widget or a shell result
-    await frame.waitForFunction((before) => {
+    await frame.waitForFunction((prevId) => {
       const turns = document.querySelectorAll('[data-role="assistant"]');
-      if (turns.length <= before) return false;
-      const newTurn = turns[before];
+      const newTurn = turns[turns.length - 1];
+      if (!newTurn || newTurn.getAttribute('data-turn-id') === prevId) return false;
       // Check for approval widget OR shell container (command might be auto-allowed)
       const hasApproval = newTurn.querySelectorAll('.approval-container').length > 0;
       const hasShell = newTurn.querySelectorAll('.shell-container').length > 0;
       const hasContent = newTurn.querySelectorAll('[data-container-id]').length > 0;
       return hasApproval || hasShell || hasContent;
-    }, turnsBefore, { timeout: 60_000 });
+    }, prevTurnId, { timeout: 60_000 });
 
     // If approval widget appeared, click "Allow Once"
     const hasApproval = await frame.evaluate((before) => {
       const turns = document.querySelectorAll('[data-role="assistant"]');
-      const newTurn = turns[before];
+      const newTurn = turns[turns.length - 1];
       if (!newTurn) return false;
       for (const c of newTurn.querySelectorAll('.approval-container, [data-container-id]')) {
         const sr = (c as HTMLElement).shadowRoot;

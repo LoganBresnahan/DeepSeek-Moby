@@ -22,10 +22,8 @@ The development loop: orient → (design doc/ADR → design-plan) → implement 
 
 ## Active Bugs
 
-- **3 failing e2e specs on main — triaged 2026-07-31: all test-infra staleness, no product bugs.** CI's e2e step is red until fixed. Opus-suitable spec/helper maintenance, medium effort:
-  - `webview-rendering G10`: **stale fixture.** Its event stream (a `code-block` event whose content appears in no text event) cannot occur in real data — the only producer ([requestOrchestrator.ts:758](src/providers/requestOrchestrator.ts#L758) `_flushCodeBlocksForIteration`) extracts blocks *from* accumulated text, so every persisted code-block event duplicates a fence already in a text event. `557ffa3`'s gateway no-op is correct. Re-author G10 with the fence in `text-append` + `file-modified` events, keeping its real purpose: applied-badge isolation across same-filename turns. Same fix for the known-bad golden in `golden-rendering.spec.ts`.
-  - `workflows W18`: **helper selector drift.** `sendMessageAndWait` ([tests/e2e/helpers/workflow.ts](tests/e2e/helpers/workflow.ts)) detects end-of-streaming via a `.stop-btn` in the *toolbar* shadow root; the stop button now lives in the input area, so the wait passes instantly and the assert races the response (failure screenshot confirms: stop button visible, turn still streaming). Also: harness model default is now "v4 pro thinking" (slower generation, tighter races). Fix the selector; consider pinning the model for e2e.
-  - `workflows W2` (reject-edit timeout): same wait-helper drift is the prime suspect; re-run after the W18 fix before deeper investigation. Env note: `DEEPSEEK_API_KEY` in env is valid and reaches the API from this machine — real-API e2e works here.
+- **Unidentified intermittent unit-test failure (~1 in 14 runs, 2026-07-31).** One `test:all` run reported `1 failed | 2059 passed` in the unit suite; 14 subsequent full runs were clean and never reproduced it, so the test was never named. Most likely shape is a wall-clock assertion — the only obvious candidate is [hydration-perf.test.ts:75](tests/unit/events/hydration-perf.test.ts#L75) (`elapsedMs < 2000`, typically 370–560ms, ~4× headroom). Next time a run goes red, capture the failing test name before re-running — that is the missing datum.
+- **Real-API workflow specs are model-nondeterministic (accepted limitation, not a defect).** `workflows.spec.ts` ask-mode tests (W2-reject, W9) assume R1 answers an edit request with a SEARCH/REPLACE block, but R1 sometimes edits via a shell `sed` instead — no pending container appears and the wait times out. Both were observed flaky across back-to-back local runs. **CI is unaffected**: these specs `test.skip` without `DEEPSEEK_API_KEY`, so CI's e2e step runs the 56 deterministic tests and is green. Options if the flakiness starts costing local runs: make the waits accept either mechanism and assert the outcome (file changed vs. UI shown), or move the assertions to the deterministic Layer 2 replay suite (as W8 already does by deferring to G10).
 
 ## Recently Fixed
 
@@ -107,6 +105,14 @@ Items are labeled by area and rough leverage. See ADRs linked where relevant.
 - **Giant-command approval UX.** 24KB heredoc previews are unreviewable (observed in tictactoe trace, 2026-04-20). Smallest useful fix: when command > ~2KB, collapse the heredoc body behind a "Show full content (N chars)" expander; show command shape (`cat > file << 'EOF' ... EOF`) + body size as summary.
 - **Observe.** Run more complex R1 tasks post-ADR-0004, capture traces. If path-confusion thrash is closed and *new* thrash shapes emerge, revisit the detector question with data (see ADR 0004, Alternative B).
 - **Parked:** thrash detection. Data-gated per ADR 0004.
+
+### E2E harness invariants (learned 2026-07-31 — don't regress these)
+
+- **Never count rendered turns.** `VirtualListActor` recycles off-screen turns ([VirtualListActor.ts:257](media/actors/virtual-list/VirtualListActor.ts#L257)), so in a long conversation the rendered count stops growing and any "wait until count increases" check hangs forever. Wait on turn *identity* via `getLastAssistantTurnId` instead.
+- **Never wait only for streaming to end.** The stop button is `display:none` until the first token, so a naive check passes before generation starts and the assertion reads an empty turn. `sendMessageAndWait` settles on rendered-content stability instead.
+- **The e2e VS Code instance must pre-authorise shell.** `launchVSCode` seeds `moby.allowAllShellCommands`; without it the first shell-using response blocks on a "Command approval required" prompt no test answers, hanging the run until timeout.
+- **Real-API agentic turns need >120s.** R1 applies an edit then runs its post-edit continuation loop; a single W1 turn takes ~2 min. Workflow tests budget 300s.
+- **Model expectations come from the registry.** Assert against `DEFAULT_MODEL_ID`, never a hardcoded name — two specs went stale when the default moved to V4 Pro.
 
 ### Testing infrastructure (added 2026-07-31)
 

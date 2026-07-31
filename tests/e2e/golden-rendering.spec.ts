@@ -75,25 +75,28 @@ const SCENARIOS: Scenario[] = [
     ],
   },
   {
-    // STALE FIXTURE (triaged 2026-07-31): standalone code-block events are
-    // deliberately a no-op on restore (557ffa3) because real persisted data
-    // always carries the fence inside a text event — this synthetic stream
-    // cannot occur in reality. Re-author this scenario with the fence in
-    // text-append content (see tracker Active Bugs / G10).
+    // The fence rides inside the text event — that is how real turns
+    // persist (the extension extracts code-block events *from* accumulated
+    // text), which is why the gateway's code-block case is a no-op.
     name: 'code-block-with-file-header',
     pinTurns: ['turn-2'],
     turns: [
       { role: 'user', content: 'Write a hello module' },
       {
         role: 'assistant', content: '', model: 'deepseek-chat', turnEvents: [
-          { type: 'text-append', iteration: 0, ts: 1, content: 'Here is the module:\n' },
           {
-            type: 'code-block', iteration: 0, ts: 2,
-            language: 'typescript', file: 'src/hello.ts',
-            content: '# File: src/hello.ts\nexport function hello(name: string): string {\n  return `Hello ${name}`;\n}\n',
+            type: 'text-append', iteration: 0, ts: 1, content: [
+              'Here is the module:',
+              '```typescript',
+              '# File: src/hello.ts',
+              'export function hello(name: string): string {',
+              '  return `Hello ${name}`;',
+              '}',
+              '```',
+              'Done.',
+            ].join('\n'),
           },
-          { type: 'text-append', iteration: 0, ts: 3, content: 'Done.' },
-          { type: 'text-finalize', iteration: 0, ts: 4 },
+          { type: 'text-finalize', iteration: 0, ts: 2 },
         ],
       },
     ],

@@ -71,7 +71,10 @@ export interface VSCodeResult {
  * Requires a display server (WSLg, X11, or xvfb).
  * Downloads a cached VS Code binary on first run.
  */
-export async function launchVSCode(workspacePath?: string, options?: { userDataDir?: string }): Promise<VSCodeResult> {
+export async function launchVSCode(
+  workspacePath?: string,
+  options?: { userDataDir?: string; settings?: Record<string, unknown> }
+): Promise<VSCodeResult> {
   const extensionPath = resolve(__dirname, '..', '..', '..');
   const vscodePath = process.env.VSCODE_PATH ?? await downloadAndUnzipVSCode('1.92.2');
   const debugPort = 9222 + Math.floor(Math.random() * 1000);
@@ -88,6 +91,22 @@ export async function launchVSCode(workspacePath?: string, options?: { userDataD
     `--remote-debugging-port=${debugPort}`,
     `--user-data-dir=${userDataDir}`,
   ];
+
+  // Seed user settings before launch. Without this the suite hangs on the
+  // first response that uses a shell command: the turn blocks on a
+  // "Command approval required" prompt no test answers, so it never
+  // settles. An unattended run must pre-authorise shell execution.
+  const userSettings = {
+    'moby.allowAllShellCommands': true,
+    'security.workspace.trust.enabled': false,
+    ...(options?.settings ?? {}),
+  };
+  const settingsDir = `${userDataDir}/User`;
+  require('fs').mkdirSync(settingsDir, { recursive: true });
+  require('fs').writeFileSync(
+    `${settingsDir}/settings.json`,
+    JSON.stringify(userSettings, null, 2)
+  );
 
   // Open a workspace folder — extension activation may block without one
   let actualWorkspace: string;

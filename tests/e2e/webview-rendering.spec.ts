@@ -476,20 +476,27 @@ test.describe('2G. History Restore Fidelity', () => {
     // Regression test: two turns both edit animals.txt in manual mode.
     // Only the second turn's file-modified is "applied". The first turn's
     // code block should NOT be marked as applied.
+    // The fence lives in the text event, matching how real turns persist:
+    // the extension extracts code-block events *from* accumulated text
+    // (requestOrchestrator._flushCodeBlocksForIteration), so a code-block
+    // event never carries content that isn't already fenced in the text —
+    // which is why the gateway's code-block case is a no-op (557ffa3).
+    const fence = (search: string, replace: string) =>
+      '```plaintext\n# File: animals.txt\n<<<<<<< SEARCH\n' +
+      search + '\n=======\n' + replace + '\n>>>>>>> REPLACE\n```';
+
     const page = await freshPage();
     await replayHistory(page, [
       { role: 'user', content: 'Add turtle' },
       { role: 'assistant', content: '', model: 'deepseek-reasoner', turnEvents: [
-        { type: 'text-append', content: 'Adding turtle.', iteration: 0, ts: 1 },
+        { type: 'text-append', content: 'Adding turtle.\n' + fence('hippo', 'hippo\nturtle'), iteration: 0, ts: 1 },
         { type: 'text-finalize', iteration: 0, ts: 2 },
-        { type: 'code-block', language: 'plaintext', content: '# File: animals.txt\n<<<<<<< SEARCH\nhippo\n=======\nhippo\nturtle\n>>>>>>> REPLACE', file: 'animals.txt', iteration: 0, ts: 3 },
         // NOT applied — no file-modified event
       ]},
       { role: 'user', content: 'Add alligator' },
       { role: 'assistant', content: '', model: 'deepseek-reasoner', turnEvents: [
-        { type: 'text-append', content: 'Adding alligator.', iteration: 0, ts: 1 },
+        { type: 'text-append', content: 'Adding alligator.\n' + fence('turtle', 'turtle\nalligator'), iteration: 0, ts: 1 },
         { type: 'text-finalize', iteration: 0, ts: 2 },
-        { type: 'code-block', language: 'plaintext', content: '# File: animals.txt\n<<<<<<< SEARCH\nturtle\n=======\nturtle\nalligator\n>>>>>>> REPLACE', file: 'animals.txt', iteration: 0, ts: 3 },
         // This one WAS applied
         { type: 'file-modified', path: 'animals.txt', status: 'applied', editMode: 'manual', ts: 4 },
       ]},
