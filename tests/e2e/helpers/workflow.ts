@@ -70,6 +70,132 @@ export async function getLastAssistantTurnId(frame: Frame): Promise<string | nul
   });
 }
 
+/**
+ * Wait until the composer can accept a new message.
+ *
+ * The toolbar hides the send button while a turn streams, so clicking it
+ * mid-stream fails with "element is not visible". Tests that send without
+ * waiting inherit whatever the previous test left running.
+ */
+export async function waitForComposerReady(
+  webview: FrameLocator,
+  timeoutMs = 240_000
+): Promise<void> {
+  await webview.locator('.send-btn').waitFor({ state: 'visible', timeout: timeoutMs });
+}
+
+/**
+ * Start a fresh chat.
+ *
+ * The workflow suite shares one VS Code instance across every test, so the
+ * conversation grows all run. Blocks that don't depend on earlier turns
+ * should reset first: a long transcript makes each request slower and gives
+ * the model more room to answer in an unexpected shape.
+ */
+export async function startNewChat(page: Page, frame: Frame): Promise<void> {
+  const newChatBtn = page.locator('a[title="New Chat"], .action-item a', { hasText: 'New Chat' });
+  try {
+    await newChatBtn.first().click({ timeout: 5000 });
+  } catch {
+    await frame.evaluate(() => {
+      window.dispatchEvent(new MessageEvent('message', { data: { type: 'clearChat' } }));
+    });
+  }
+  await frame
+    .waitForFunction(() => document.querySelectorAll('[data-role="assistant"]').length === 0, {
+      timeout: 10_000,
+    })
+    .catch(() => { /* best effort — some views keep a placeholder turn */ });
+}
+
+/**
+ * Wait for a file's contents to differ from `baseline`. Returns false if it
+ * never changed — i.e. the model declined to edit, which is a model choice,
+ * not a product failure. Callers decide whether that is skip-worthy.
+ */
+export async function waitForFileChange(
+  filePath: string,
+  baseline: string,
+  timeoutMs = 60_000,
+  pollMs = 500
+): Promise<boolean> {
+  const fs = require('fs');
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      if (fs.readFileSync(filePath, 'utf-8') !== baseline) return true;
+    } catch { /* file may be mid-write */ }
+    await new Promise(r => setTimeout(r, pollMs));
+  }
+  return false;
+}
+
+/**
+ * Which route a model took to perform an edit.
+ *
+ * `approval-ui`  — it emitted a SEARCH/REPLACE block, so Ask mode rendered a
+ *                  pending container with accept/reject buttons.
+ * `direct-write` — it ran a shell command instead, so the file changed on
+ *                  disk and no approval UI ever appeared.
+ */
+export type EditMechanism = 'approval-ui' | 'direct-write';
+
+/**
+ * Wait for an edit request to surface either way, and report which happened.
+ *
+ * Models without native tool calling (R1, including users running R1 locally
+ * via Ollama, and any future text-only model) answer an edit request with a
+ * SEARCH/REPLACE block — but the same model may decide to shell out to `sed`
+ * instead, even when told not to. Both are legitimate product behaviour, so a
+ * test that waits only for the approval UI hangs whenever the model picks the
+ * other route. Callers branch on the result rather than failing.
+ */
+export async function waitForEditMechanism(
+  frame: Frame,
+  opts: {
+    prevTurnId: string | null;
+    button: '.accept-btn' | '.reject-btn';
+    filePath: string;
+    /** File contents before the request was sent. */
+    baseline: string;
+    timeoutMs?: number;
+    pollMs?: number;
+  }
+): Promise<EditMechanism> {
+  const fs = require('fs');
+  const timeoutMs = opts.timeoutMs ?? 180_000;
+  const pollMs = opts.pollMs ?? 500;
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const uiReady = await frame.evaluate(({ prevId, button }) => {
+      const turns = document.querySelectorAll('[data-role="assistant"]');
+      const newTurn = turns[turns.length - 1];
+      if (!newTurn || newTurn.getAttribute('data-turn-id') === prevId) return false;
+      for (const pc of newTurn.querySelectorAll('.pending-container')) {
+        const sr = (pc as HTMLElement).shadowRoot;
+        if (sr?.querySelector(button)) return true;
+      }
+      return false;
+    }, { prevId: opts.prevTurnId, button: opts.button });
+
+    if (uiReady) return 'approval-ui';
+
+    let current = opts.baseline;
+    try {
+      current = fs.readFileSync(opts.filePath, 'utf-8');
+    } catch { /* file may not exist yet */ }
+    if (current !== opts.baseline) return 'direct-write';
+
+    await new Promise(r => setTimeout(r, pollMs));
+  }
+
+  throw new Error(
+    `waitForEditMechanism: neither ${opts.button} nor a change to ` +
+    `${opts.filePath} appeared within ${timeoutMs}ms`
+  );
+}
+
 /** Send a message in the chat and wait for the response to complete */
 export async function sendMessageAndWait(
   page: Page,

@@ -23,7 +23,6 @@ The development loop: orient → (design doc/ADR → design-plan) → implement 
 ## Active Bugs
 
 - **Unidentified intermittent unit-test failure (~1 in 14 runs, 2026-07-31).** One `test:all` run reported `1 failed | 2059 passed` in the unit suite; 14 subsequent full runs were clean and never reproduced it, so the test was never named. Most likely shape is a wall-clock assertion — the only obvious candidate is [hydration-perf.test.ts:75](tests/unit/events/hydration-perf.test.ts#L75) (`elapsedMs < 2000`, typically 370–560ms, ~4× headroom). Next time a run goes red, capture the failing test name before re-running — that is the missing datum.
-- **Real-API workflow specs are model-nondeterministic (accepted limitation, not a defect).** `workflows.spec.ts` ask-mode tests (W2-reject, W9) assume R1 answers an edit request with a SEARCH/REPLACE block, but R1 sometimes edits via a shell `sed` instead — no pending container appears and the wait times out. Both were observed flaky across back-to-back local runs. **CI is unaffected**: these specs `test.skip` without `DEEPSEEK_API_KEY`, so CI's e2e step runs the 56 deterministic tests and is green. Options if the flakiness starts costing local runs: make the waits accept either mechanism and assert the outcome (file changed vs. UI shown), or move the assertions to the deterministic Layer 2 replay suite (as W8 already does by deferring to G10).
 
 ## Recently Fixed
 
@@ -108,11 +107,16 @@ Items are labeled by area and rough leverage. See ADRs linked where relevant.
 
 ### E2E harness invariants (learned 2026-07-31 — don't regress these)
 
+- **Edit-mechanism tolerance is a permanent requirement, not an R1 workaround.** Models without native tool calling answer an edit request with a SEARCH/REPLACE block (Ask mode renders accept/reject), but the same model may shell out to `sed` instead — the file just changes and no approval UI appears. Both are correct product behaviour. `waitForEditMechanism` ([tests/e2e/helpers/workflow.ts](tests/e2e/helpers/workflow.ts)) waits for whichever happens and reports it; tests branch instead of hanging. This outlives R1's retirement: it covers users running R1 locally via Ollama and any future text-only model. Ditto `waitForFileChange` for auto mode, where a model that declines to edit is a model choice, not a failure.
 - **Never count rendered turns.** `VirtualListActor` recycles off-screen turns ([VirtualListActor.ts:257](media/actors/virtual-list/VirtualListActor.ts#L257)), so in a long conversation the rendered count stops growing and any "wait until count increases" check hangs forever. Wait on turn *identity* via `getLastAssistantTurnId` instead.
 - **Never wait only for streaming to end.** The stop button is `display:none` until the first token, so a naive check passes before generation starts and the assertion reads an empty turn. `sendMessageAndWait` settles on rendered-content stability instead.
 - **The e2e VS Code instance must pre-authorise shell.** `launchVSCode` seeds `moby.allowAllShellCommands`; without it the first shell-using response blocks on a "Command approval required" prompt no test answers, hanging the run until timeout.
 - **Real-API agentic turns need >120s.** R1 applies an edit then runs its post-edit continuation loop; a single W1 turn takes ~2 min. Workflow tests budget 300s.
-- **Model expectations come from the registry.** Assert against `DEFAULT_MODEL_ID`, never a hardcoded name — two specs went stale when the default moved to V4 Pro.
+- **Model expectations come from the registry.** Assert against `DEFAULT_MODEL_ID`, never a hardcoded name — two specs went stale when the default moved to V4 Pro. Where the label isn't id-derived (HeaderActor hardcodes "Chat (V3)" / "Reasoner (R1)"), assert the *property* the test is named for instead of any name at all.
+- **Don't put shared setup in a test.** Retries run in a fresh worker that re-runs `beforeAll` but not earlier tests, so state assigned by a "Setup" test is undefined for everything after the first retry. `webview`/`frame` are acquired in `beforeAll`.
+- **The file is `mode: 'default'`, deliberately.** Under `serial`, one slow model response skipped ~30 unrelated tests and hid every downstream failure — the reason this suite took ten full runs to repair. Blocks whose steps genuinely build on each other (W1/W2/W3/W9) declare `mode: 'serial', retries: 2` locally.
+- **Approval needs its own instance.** The shared instance sets `allowAllShellCommands: true`, which would make an approval test vacuous, so W14's approval case launches a second VS Code with the setting off and asserts the prompt really gates execution.
+- **Prefer waiting on the state you assert.** Fixed `waitForTimeout` sleeps before status assertions were a recurring flake source; wait for the class/attribute you are about to check, with a timeout.
 
 ### Testing infrastructure (added 2026-07-31)
 
