@@ -735,6 +735,14 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         this._manager.publishDirect('files.content', { path: msg.filePath, content: msg.content, _ts: Date.now() });
         break;
 
+      case 'droppedFileContents':
+        // Reply to requestDroppedFiles — a drop the webview couldn't read
+        // itself (dragged from the Explorer, so it carried only a uri-list).
+        this._actors.inputArea.handleDroppedFileContents(
+          (msg.files || []) as Array<{ name: string; content: string; isImage?: boolean; mimeType?: string }>
+        );
+        break;
+
       // ---- Status Messages ----
       case 'error':
         this._manager.publishDirect('status.message', { type: 'error', message: (msg.error || msg.message || 'An error occurred') as string });

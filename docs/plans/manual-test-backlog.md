@@ -579,6 +579,30 @@ Not a pass/fail scenario yet — investigation only.
 
 ---
 
+## M36. Drag-and-drop attach (Phase 1b) (P1)
+
+**Why this matters:** the automated tests synthesize a `DataTransfer` and dispatch `drop`, which exercises our handler, the image-vs-text branch, the highlight counter and the navigation guard. **Nothing automated can cross the real OS → webview boundary**, and nothing can reproduce what the VS Code Explorer actually puts on a drag payload — the `text/uri-list` round-trip is built against a documented assumption that has never been observed running.
+
+**The dangerous failure mode is step 4.** An unhandled drop makes the webview frame navigate to the dropped file, blanking the chat and losing the in-flight turn. The document-level guard exists solely to prevent that.
+
+**Steps:**
+1. Drag an image from the OS file manager onto the **input box**. Chip appears with a thumbnail; size is tens-to-low-hundreds of KB (the downscale ran).
+2. Drag a source file from the OS file manager onto the input box → 📄 chip with its name. Send a message → the model can quote the file's contents.
+3. Drag a file **from the VS Code Explorer** onto the input box → same result. This is the `text/uri-list` path: the webview can't read it, so the extension does. Try both a text file and an image (e.g. `media/icon.png`).
+4. **Drag a file over the transcript / header / anywhere that is not the input box, and drop it.** Nothing should attach — and critically **the chat must not disappear or navigate away**. If the panel goes blank, the guard isn't engaging.
+5. While dragging over the input box, move the pointer across the textarea and over existing chips. The dashed highlight must stay **steady**, not flicker — that's the depth counter.
+6. Drag over the input box then drag back out without dropping → highlight clears.
+7. Drop a **folder** from the Explorer → warning notification, nothing attached.
+8. Drop a very large file (>10MB) → warning naming the 10MB limit, nothing attached.
+9. Drop several files at once (mixed image + text) → all attach, correct chip types.
+10. Regression: the paperclip picker still works, and dropping still works after switching sessions (listeners survive re-render).
+
+**Pass criteria:** both drop sources attach, off-target drops are inert and never navigate, the highlight is steady, and folder/oversize cases warn instead of failing silently.
+
+**Not implemented, deliberately:** modifier keys. Shift+drop does nothing special — plain drop attaches, that's the whole interaction.
+
+---
+
 ## Removing items from this backlog
 
 When a scenario has been verified in a dev host:

@@ -1,6 +1,6 @@
 # `image-describe` subagent — vision via digest routing
 
-**Status:** Phases 0–1 shipped 2026-08-02 (ADR 0014 + foundations). Phase 1b (drag-and-drop) and phases 2–6 not started.
+**Status:** Phases 0, 1, 1b shipped 2026-08-02 (ADR 0014 + foundations + drag-drop). Phases 2–6 not started.
 **Date:** 2026-07-04 · **Revised:** 2026-08-02 (decisions 4–6: thumbnail sizing, blob storage, attachment replay — adds Phase 0; then §8 drag-and-drop — adds Phase 1b)
 **Parent:** [subagents.md § Phase 2](subagents.md) — this doc is the concrete, decision-locked implementation plan for that phase. Where the two disagree, this doc wins (it reflects verified code state + explicit product decisions made 2026-07-04).
 
@@ -204,14 +204,7 @@ The second case needs an extension round-trip: webview posts the URI, the extens
 
 **The input box is the drop target** (decided 2026-08-02) — not the transcript, not the whole panel. It is where attachments already live, it puts the drop next to the chips that result from it, and it keeps the transcript inert so a mis-aimed drop cannot land content mid-conversation. The rest of the panel still needs the navigation guard above; it just swallows the drop rather than acting on it. Highlight the input box on drag-enter (border + subtle background shift, mirroring how `.dropzone.dragging` reads in Carton-Fit) so the target is discoverable without a permanent "drag files here" affordance eating vertical space.
 
-**On modifier keys — check the convention in the dev host before choosing.** Two VS Code behaviors are adjacent and easy to conflate:
-
-- Dragging a file onto an **editor** opens it; holding **Shift** drops the *path as text* instead.
-- Dragging a file onto a **chat input** (Copilot Chat) attaches it as context, unmodified.
-
-Moby's input box is the second kind of surface, so the default should be **plain drop = attach** — requiring a modifier for the primary action would make the feature undiscoverable. The interesting use for Shift is the *editor* meaning: **Shift+drop inserts the file path as text** into the textarea, which is genuinely useful for "look at `src/foo.ts`" prompts and costs almost nothing once the drop handler exists.
-
-Treat both mappings as **provisional until verified in a dev host** — VS Code owns some drag behavior above the webview, and what a modifier actually delivers in `dataTransfer` is worth observing rather than assuming. The verification step below calls this out explicitly.
+**No modifier keys (scoped out 2026-08-02).** Plain drop attaches; that is the whole interaction. A Shift+drop variant that inserts the file path as text was considered and dropped — it depends on whether VS Code passes the modifier through to the webview at all, which we would have to observe in a dev host before we could even commit to building it, and it buys a convenience nobody asked for. Revisit only if the path-insert case comes up in real use.
 
 ### Decided: every drop becomes an attachment
 
@@ -272,7 +265,7 @@ Carton-Fit's [ADR 0005](/home/oof/Carton-Fit/doc/adr/0005-testing-and-deploy.md)
 
 13 slices in the original decomposition, all assessed `todo` against source. Dominant model: opus (12 slices); one fable slice. Critical path: `router-build-user-content-hook` → `image-describe-role-module` → `orchestrator-image-injection` → `thumbnail-digest-persistence` → `transcript-thumbnail-render` → `manual-test-backlog-entries`.
 
-**Revised 2026-08-02:** +1 phase, +5 slices (18 total), then **+1 phase, +5 slices for drag-and-drop (23 total)** — see [§8](#8-drag-and-drop-attach). Phase 0 is new and now heads the critical path — `attachment-blob-store` → `attachment-replay` → (existing chain) → `thumbnail-digest-persistence`. Phase 0 ships standalone value (text attachments become replayable) and can land before any image work starts.
+**Revised 2026-08-02:** +1 phase, +5 slices (18 total), then **+1 phase, +4 slices for drag-and-drop (22 total)** — see [§8](#8-drag-and-drop-attach). Phase 0 is new and now heads the critical path — `attachment-blob-store` → `attachment-replay` → (existing chain) → `thumbnail-digest-persistence`. Phase 0 ships standalone value (text attachments become replayable) and can land before any image work starts.
 
 ### Phases
 
@@ -287,12 +280,11 @@ Carton-Fit's [ADR 0005](/home/oof/Carton-Fit/doc/adr/0005-testing-and-deploy.md)
   - [x] `attachment-type-threading` (low/mechanical) — optional `type`/`mimeType` on the attachment shape at [chatProvider.ts:44](../../src/providers/chatProvider.ts#L44), [requestOrchestrator.ts:809](../../src/providers/requestOrchestrator.ts#L809), [media/chat.ts:340](../../media/chat.ts#L340).
   - [x] `webview-image-capture` (medium/moderate) — accept-list + FileReader branch + img-chip in `InputAreaShadowActor`; async canvas downscale with hard byte cap (cap after re-encode, reject before attach).
   - [x] `custom-models-schema-fix` (low/mechanical) — `subagentRoles` + `acceptsImages` in the package.json customModels schema; mirror the existing one-line optional-axis checks in `validateCustomModelEntry`; explicit `moby.subagents.image-describe` property.
-- [ ] **1b. Drag-and-drop attach** *(opus)* — **added 2026-08-02 at user request** ([§8](#8-drag-and-drop-attach)). Independent of the vision pipeline: it serves text attachments too, so it can land before or after phases 2–5, and slips without blocking them. Drop semantics are settled ([§8](#decided-every-drop-becomes-an-attachment)): every drop attaches. `/shipshape` at boundary, then `/verify` — this phase is unusually dev-host-dependent (see below).
-  - [ ] `ingest-files-extraction` (low/mechanical) — pull the image-vs-text branch out of `handleFileSelect` into `ingestFiles(files: File[])`; picker calls it. **Must land first** — a drop handler written against the old shape would re-implement the text path and store images as mojibake.
-  - [ ] `drag-drop-os-files` (medium/moderate) — shadow-root `dragenter`/`dragover`/`dragleave`/`drop` on the input box with a **depth counter** for the highlight; document-level `preventDefault` guard so a drop anywhere else in the panel cannot navigate the frame away; drop → `ingestFiles`. Keep the picker (automation seam + keyboard access).
-  - [ ] `drag-drop-editor-uris` (medium/moderate, risk: **medium** — behavior we cannot fully observe from a test) — `text/uri-list` branch for VS Code-internal drags. Per the §8 decision every drop attaches, so this reads the file extension-side and returns content for text and images alike — no origin branching. Any new postMessage type gets registered with the protocol drift detector in the same commit.
-  - [ ] `shift-drop-path-insert` (low/mechanical, **provisional**) — Shift+drop inserts the file path as text instead of attaching. Build only after the dev-host observation confirms the modifier arrives as assumed; drop the slice if it doesn't.
-  - [ ] `drag-drop-tests` (medium/moderate) — synthesized `DataTransfer` drop tests over the handler: image file → downscale branch, text file → text branch, mixed batch, highlight counter survives child crossings, guard swallows an off-target drop. Pins everything except the OS boundary.
+- [x] **1b. Drag-and-drop attach** *(opus)* — **SHIPPED 2026-08-02** (shift-drop variant scoped out); dev-host `/verify` still owed. Added at user request ([§8](#8-drag-and-drop-attach)). Independent of the vision pipeline: it serves text attachments too, so it can land before or after phases 2–5, and slips without blocking them. Drop semantics are settled ([§8](#decided-every-drop-becomes-an-attachment)): every drop attaches. `/shipshape` at boundary, then `/verify` — this phase is unusually dev-host-dependent (see below).
+  - [x] `ingest-files-extraction` (low/mechanical) — pull the image-vs-text branch out of `handleFileSelect` into `ingestFiles(files: File[])`; picker calls it. **Must land first** — a drop handler written against the old shape would re-implement the text path and store images as mojibake.
+  - [x] `drag-drop-os-files` (medium/moderate) — shadow-root `dragenter`/`dragover`/`dragleave`/`drop` on the input box with a **depth counter** for the highlight; document-level `preventDefault` guard so a drop anywhere else in the panel cannot navigate the frame away; drop → `ingestFiles`. Keep the picker (automation seam + keyboard access).
+  - [x] `drag-drop-editor-uris` (medium/moderate, risk: **medium** — behavior we cannot fully observe from a test) — `text/uri-list` branch for VS Code-internal drags. Per the §8 decision every drop attaches, so this reads the file extension-side and returns content for text and images alike — no origin branching. Any new postMessage type gets registered with the protocol drift detector in the same commit.
+  - [x] `drag-drop-tests` (medium/moderate) — synthesized `DataTransfer` drop tests over the handler: image file → downscale branch, text file → text branch, mixed batch, highlight counter survives child crossings, guard swallows an off-target drop. Pins everything except the OS boundary.
 - [ ] **2. Role module + settings filter** *(opus)* — `/shipshape` at boundary.
   - [ ] `image-describe-role-module` (medium/moderate) — clone `webSearchDigest.ts` shape; VL prompt contract + lenient parse (fence-strip, first-`{…}`, garbage → null).
   - [ ] `accepts-images-capability-filter` (low/mechanical) — filter the image-describe dropdown to `acceptsImages` models, extension-side from the registry.
@@ -325,8 +317,7 @@ Carton-Fit's [ADR 0005](/home/oof/Carton-Fit/doc/adr/0005-testing-and-deploy.md)
 | --- | --- | --- |
 | `/shipshape` | every phase boundary | compile + suites green twice + docs/conventions |
 | `/verify` | after 0 | attach a text file → reload the session → the `--- Attached Files ---` block is still in rebuilt context, timestamp-stamped; fork carries it too |
-| `/verify` | **during 1b, before finishing it** | drag from the OS file manager, from the Explorer, and from an editor tab — observe what `dataTransfer` actually carries in each case, and what Shift changes. The §8 mappings are provisional until this runs; `shift-drop-path-insert` is gated on it |
-| `/verify` | after 1b | plain drop on the input box attaches (image → thumbnail chip, text → 📄 chip); drop outside the input box does nothing and **never navigates the frame away**; picker still works |
+| `/verify` | after 1b | drop on the input box from the OS file manager AND from the VS Code Explorer — both attach (image → thumbnail chip, text → 📄 chip); drop outside the input box does nothing and **never navigates the frame away**; picker still works |
 | `/verify` | after 3 | attach → indicator → digest; no-backend placeholder |
 | `/verify` | after 4 | Export Turn as JSON — blob *references* only, no full-res bytes, no inline base64 (the one silent risk outside phase 5) |
 | `/verify` + adversarial verify | after 5 | reload, session switch, fork render — no double-draw; blobs fetched lazily, no reflow on late arrival |

@@ -105,6 +105,13 @@ textarea::placeholder {
   flex-shrink: 0;
 }
 
+/* Drop-to-attach target highlight */
+.input-area.dragging textarea {
+  border-color: var(--vscode-focusBorder);
+  border-style: dashed;
+  background: var(--vscode-list-dropBackground, var(--vscode-input-background));
+}
+
 .attachment .thumb {
   width: 20px;
   height: 20px;

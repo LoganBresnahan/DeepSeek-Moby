@@ -67,6 +67,11 @@ export class InputAreaShadowActor extends ShadowActor {
   // Mid-stream interrupt state
   private _pendingInterrupt: { content: string; attachments?: Attachment[] } | null = null;
 
+  // Drag-drop: depth counter (dragenter/leave fire per child crossing) and
+  // the teardown for the document-level navigation guard.
+  private _dragDepth = 0;
+  private _dragGuards: (() => void) | null = null;
+
   // Handlers
   private _onSend: SendHandler | null = null;
   private _onStop: StopHandler | null = null;
@@ -128,6 +133,8 @@ export class InputAreaShadowActor extends ShadowActor {
     // File input
     this.delegate('change', '.hidden-input', (e) => this.handleFileSelect(e));
 
+    this.setupDragAndDrop();
+
     // Attachment remove
     this.delegate('click', '.attachment .remove', (_, el) => {
       const index = parseInt(el.closest('.attachment')?.getAttribute('data-index') || '0', 10);
@@ -174,8 +181,16 @@ export class InputAreaShadowActor extends ShadowActor {
 
   private handleFileSelect(e: Event): void {
     const input = e.target as HTMLInputElement;
-    const files = Array.from(input.files || []);
+    this.ingestFiles(Array.from(input.files || []));
+    input.value = ''; // Reset for next selection
+  }
 
+  /**
+   * The one place a File becomes an attachment. Both entry points — the
+   * picker and drag-drop — funnel through here so an image can never take the
+   * text branch (which would store it as mojibake in a code fence).
+   */
+  private ingestFiles(files: File[]): void {
     files.forEach(file => {
       if (this.isImage(file)) {
         void this.attachImage(file);
@@ -184,13 +199,113 @@ export class InputAreaShadowActor extends ShadowActor {
       const reader = new FileReader();
       reader.onload = (event) => {
         const content = event.target?.result as string;
-        const attachment: Attachment = { content, name: file.name, size: file.size, type: 'file' };
-        this.addAttachment(attachment);
+        this.addAttachment({ content, name: file.name, size: file.size, type: 'file' });
       };
       reader.readAsText(file);
     });
+  }
 
-    input.value = ''; // Reset for next selection
+  // ============================================
+  // Drag and drop
+  // ============================================
+
+  /**
+   * Drop-to-attach on the input box.
+   *
+   * Two listener sets with different jobs:
+   * - The **panel guard** on `document` exists because an unhandled drop makes
+   *   the webview frame navigate to the dropped file, blanking the chat and
+   *   losing the in-flight turn. It swallows drops everywhere outside the
+   *   input box; it never attaches anything.
+   * - The **input-box listeners** do the attaching. `dragenter`/`dragleave`
+   *   fire on every child crossing (chips, textarea), so the highlight tracks
+   *   a depth counter rather than a boolean or it flickers as the pointer
+   *   moves within the box.
+   */
+  private setupDragAndDrop(): void {
+    const swallow = (e: DragEvent) => {
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'none';
+    };
+    document.addEventListener('dragover', swallow);
+    document.addEventListener('drop', swallow);
+    this._dragGuards = () => {
+      document.removeEventListener('dragover', swallow);
+      document.removeEventListener('drop', swallow);
+    };
+
+    const zone = this.query<HTMLElement>('.input-area');
+    if (!zone) return;
+
+    zone.addEventListener('dragenter', (e: DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this._dragDepth++;
+      zone.classList.add('dragging');
+    });
+
+    zone.addEventListener('dragover', (e: DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+    });
+
+    zone.addEventListener('dragleave', (e: DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this._dragDepth = Math.max(0, this._dragDepth - 1);
+      if (this._dragDepth === 0) zone.classList.remove('dragging');
+    });
+
+    zone.addEventListener('drop', (e: DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this._dragDepth = 0;
+      zone.classList.remove('dragging');
+      this.handleDrop(e.dataTransfer);
+    });
+  }
+
+  /**
+   * A drop carries either real Files (OS file manager) or only a uri-list
+   * (dragged from the VS Code Explorer or an editor tab — the webview has no
+   * filesystem access, so the extension has to read those for us).
+   */
+  private handleDrop(dataTransfer: DataTransfer | null): void {
+    if (!dataTransfer) return;
+
+    const files = Array.from(dataTransfer.files || []);
+    if (files.length > 0) {
+      this.ingestFiles(files);
+      return;
+    }
+
+    const uris = this.parseUriList(dataTransfer.getData('text/uri-list'));
+    if (uris.length > 0) {
+      this._vscode?.postMessage({ type: 'requestDroppedFiles', uris });
+    }
+  }
+
+  private parseUriList(raw: string): string[] {
+    if (!raw) return [];
+    return raw
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(line => line.length > 0 && !line.startsWith('#'));
+  }
+
+  /**
+   * Extension's reply to `requestDroppedFiles`. Images come back as data URIs
+   * (they still need the canvas downscale); text comes back as text.
+   */
+  handleDroppedFileContents(files: Array<{ name: string; content: string; isImage?: boolean; mimeType?: string }>): void {
+    for (const file of files) {
+      if (file.isImage) {
+        void this.attachImageFromDataUrl(file.content, file.name);
+      } else {
+        this.addAttachment({ content: file.content, name: file.name, size: file.content.length, type: 'file' });
+      }
+    }
   }
 
   private isImage(file: File): boolean {
@@ -227,12 +342,40 @@ export class InputAreaShadowActor extends ShadowActor {
     }
   }
 
+  /** Same guards as {@link attachImage}, for bytes the extension read for us. */
+  private async attachImageFromDataUrl(dataUrl: string, name: string): Promise<void> {
+    try {
+      const scaled = await this.downscaleFromUrl(dataUrl);
+      if (scaled.bytes > IMAGE_MAX_BYTES) {
+        this.reportAttachmentError(
+          `"${name}" is too large to attach (${(scaled.bytes / 1024 / 1024).toFixed(1)}MB after downscaling).`
+        );
+        return;
+      }
+      this.addAttachment({
+        content: scaled.dataUrl,
+        name,
+        size: scaled.bytes,
+        type: 'image',
+        mimeType: 'image/webp'
+      });
+    } catch (err) {
+      this.reportAttachmentError(
+        `Could not read "${name}" as an image: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
+
   private downscaleImage(file: File): Promise<{ dataUrl: string; bytes: number }> {
+    const url = URL.createObjectURL(file);
+    return this.downscaleFromUrl(url).finally(() => URL.revokeObjectURL(url));
+  }
+
+  /** Downscale from any loadable source — an object URL or a data URI. */
+  private downscaleFromUrl(url: string): Promise<{ dataUrl: string; bytes: number }> {
     return new Promise((resolve, reject) => {
-      const url = URL.createObjectURL(file);
       const img = new Image();
       img.onload = () => {
-        URL.revokeObjectURL(url);
         try {
           const scale = Math.min(1, IMAGE_MAX_EDGE / Math.max(img.width, img.height));
           const canvas = document.createElement('canvas');
@@ -252,10 +395,7 @@ export class InputAreaShadowActor extends ShadowActor {
           reject(err instanceof Error ? err : new Error(String(err)));
         }
       };
-      img.onerror = () => {
-        URL.revokeObjectURL(url);
-        reject(new Error('not a decodable image'));
-      };
+      img.onerror = () => reject(new Error('not a decodable image'));
       img.src = url;
     });
   }
@@ -589,6 +729,9 @@ export class InputAreaShadowActor extends ShadowActor {
     this._onSend = null;
     this._onStop = null;
     this._vscode = null;
+    // Document-level listeners outlive the shadow root — remove them explicitly.
+    this._dragGuards?.();
+    this._dragGuards = null;
     super.destroy();
   }
 }

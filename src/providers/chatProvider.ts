@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { DeepSeekClient } from '../deepseekClient';
 import { StatusBar } from '../views/statusBar';
@@ -834,6 +835,9 @@ export class ChatProvider implements vscode.WebviewViewProvider {
           break;
         case 'getFileContent':
           await this.fileContextManager.sendFileContent(data.filePath);
+          break;
+        case 'requestDroppedFiles':
+          await this.handleDroppedUris((data.uris as string[]) ?? []);
           break;
         case 'setSelectedFiles':
           this.fileContextManager.setSelectedFiles(data.files);
@@ -1882,5 +1886,65 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       </body>
       </html>
     `;
+  }
+
+  /**
+   * Read files for a drop the webview couldn't read itself — a drag from the
+   * VS Code Explorer or an editor tab carries a uri-list, not File objects,
+   * and the webview has no filesystem access.
+   *
+   * Images come back as data URIs because the downscale needs a canvas, which
+   * only exists on the webview side.
+   */
+  private async handleDroppedUris(uris: string[]): Promise<void> {
+    const MAX_DROPPED_BYTES = 10 * 1024 * 1024;
+    const IMAGE_EXT = /\.(png|jpe?g|webp|gif|bmp)$/i;
+    const files: Array<{ name: string; content: string; isImage?: boolean; mimeType?: string }> = [];
+
+    for (const raw of uris.slice(0, 20)) {
+      let uri: vscode.Uri;
+      try {
+        uri = vscode.Uri.parse(raw, true);
+      } catch {
+        continue;
+      }
+      if (uri.scheme !== 'file' && uri.scheme !== 'vscode-file') continue;
+
+      const name = path.basename(uri.fsPath);
+      try {
+        const stat = await vscode.workspace.fs.stat(uri);
+        if (stat.type === vscode.FileType.Directory) {
+          vscode.window.showWarningMessage(`Cannot attach "${name}" — dropping a folder is not supported.`);
+          continue;
+        }
+        if (stat.size > MAX_DROPPED_BYTES) {
+          vscode.window.showWarningMessage(
+            `Cannot attach "${name}" — ${(stat.size / 1024 / 1024).toFixed(1)}MB exceeds the 10MB drop limit.`
+          );
+          continue;
+        }
+
+        const bytes = await vscode.workspace.fs.readFile(uri);
+        if (IMAGE_EXT.test(name)) {
+          const ext = name.split('.').pop()!.toLowerCase();
+          const mime = `image/${ext === 'jpg' ? 'jpeg' : ext}`;
+          files.push({
+            name,
+            content: `data:${mime};base64,${Buffer.from(bytes).toString('base64')}`,
+            isImage: true,
+            mimeType: mime
+          });
+        } else {
+          files.push({ name, content: Buffer.from(bytes).toString('utf8') });
+        }
+      } catch (err) {
+        logger.warn(`[ChatProvider] Could not read dropped file "${name}": ${err}`);
+        vscode.window.showErrorMessage(`Could not read "${name}".`);
+      }
+    }
+
+    if (files.length > 0) {
+      this._view?.webview.postMessage({ type: 'droppedFileContents', files });
+    }
   }
 }
