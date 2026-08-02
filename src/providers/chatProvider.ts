@@ -93,7 +93,8 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     this.requestOrchestrator = new RequestOrchestrator(
       this.deepSeekClient, this.conversationManager, this.statusBar,
       this.diffManager, this.webSearchManager, this.fileContextManager,
-      this.commandApprovalManager, this.savedPromptManager, this.planManager
+      this.commandApprovalManager, this.savedPromptManager, this.planManager,
+      this.subagentRouter
     );
 
     // Wire manager events → webview
@@ -138,6 +139,12 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     });
     this.webSearchManager.onSearchComplete(() => {
       this._view?.webview.postMessage({ type: 'webSearchComplete' });
+    });
+    // RequestOrchestrator → webview: image digest routing. count 0 = done.
+    this.requestOrchestrator.onAnalyzingImages(({ count }) => {
+      this._view?.webview.postMessage(
+        count > 0 ? { type: 'analyzingImages', count } : { type: 'analyzingImagesComplete' }
+      );
     });
     this.webSearchManager.onSearchCached(() => {
       this._view?.webview.postMessage({ type: 'webSearchCached' });

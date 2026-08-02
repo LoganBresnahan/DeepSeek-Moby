@@ -176,6 +176,8 @@
   ],
   "webviewHandles": [
     "addMessage",
+    "analyzingImages",
+    "analyzingImagesComplete",
     "asciiDrawingReceived",
     "clearChat",
     "codeApplied",

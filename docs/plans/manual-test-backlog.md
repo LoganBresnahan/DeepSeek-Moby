@@ -603,6 +603,45 @@ Not a pass/fail scenario yet — investigation only.
 
 ---
 
+## M37. Image describe — vision digest end to end (Phases 2–3) (P0)
+
+**Why this matters:** the whole point of the feature. Everything up to now stored and displayed images; this is where an attached image finally reaches the model — as a *text digest* produced by a separate vision model, since DeepSeek's API is text-only. Two things no test can check: whether a real VL backend honours `jsonMode` (the plan's open empirical question), and whether the digests are actually *good enough* to answer questions from.
+
+**Setup:** add a vision-capable custom model in `moby.customModels` — must declare `"acceptsImages": true` and `"subagentRoles": ["image-describe"]`. Worked example is SiliconFlow `deepseek-ai/deepseek-vl2`. Then set `"moby.subagents": { "image-describe": "<that model id>" }`.
+
+**S1. No backend configured → explicit placeholder.**
+1. Leave `moby.subagents.image-describe` unset. Attach a screenshot, ask *"what does this show?"*
+2. **Pass:** the model says it cannot see the image and names the setting. **Fail:** it hallucinates a description, or ignores the image entirely.
+
+**S2. Backend configured → real digest.**
+1. Attach a screenshot of a UI with visible text. Ask *"what does the error message say?"*
+2. Status shows **"Analyzing image..."** while routing, then clears.
+3. **Pass:** the model quotes the error text accurately. That text came through the digest's `text` field.
+4. *Moby: Show Logs* → a `subagent.route` span with `role: image-describe`, `validationResult: 'ok'`.
+
+**S3. jsonMode on the VL backend (the open empirical question).**
+1. Check the logs for `parse-fail` or `schema-fail` on the route span.
+2. Occasional fenced-JSON responses should now be *recovered* by `tolerantJsonParse` — a fence is not a failure.
+3. **If failures are persistent**, the contingency is a per-role `jsonMode` opt-out plus a plain-text `formatForMain` — see the plan's risk list. Record what the backend actually did.
+
+**S4. Ineligible model → refuses rather than 400s.**
+1. Point `moby.subagents.image-describe` at a text-only model that declares the role but not `acceptsImages`.
+2. **Pass:** placeholder mentioning `acceptsImages`, log line naming it, and **no 400 in the logs** — we must never send an `image_url` block to a text-only backend.
+
+**S5. Replay (the reload-drift guard).**
+1. With a backend configured, attach an image and get an answer.
+2. Switch sessions, restore this one, ask a follow-up about the image (*"what colour was the button?"*).
+3. **Pass:** the model still knows — it's reading the persisted digest. **Fail:** it has no idea, meaning the digest didn't persist.
+4. Fork at that turn → same follow-up → still answered.
+
+**S6. Multiple images + failure isolation.**
+1. Attach three images in one turn → all three digests appear; they resolve concurrently, so this should not take 3× one image.
+2. Attach one valid image and one that will fail (e.g. point at an unreachable endpoint mid-turn) → the good one still describes, the bad one becomes a placeholder, **the turn still completes**.
+
+**Pass criteria:** an attached image reliably reaches the model as usable text, failures are always named rather than silent, no `image_url` ever reaches the main model, and digests survive reload and fork.
+
+---
+
 ## Removing items from this backlog
 
 When a scenario has been verified in a dev host:

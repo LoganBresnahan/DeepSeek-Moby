@@ -30,6 +30,39 @@ function measureContentBytes(content: SubagentMessageContent): number {
   );
 }
 
+/**
+ * Parse a sub's response, tolerating the two ways models wrap JSON even when
+ * told not to: a ```json fence, or prose around the object.
+ *
+ * This lives in the router, not in a role's `parse`, because the router does
+ * the `JSON.parse` — a fenced response would fail here and never reach the
+ * role. Vision backends are the worst offenders (many ignore `response_format`
+ * entirely), but every role benefits.
+ *
+ * Throws like `JSON.parse` when nothing parses, so the caller's `parse-fail`
+ * path is unchanged.
+ */
+export function tolerantJsonParse(raw: string): unknown {
+  const trimmed = raw.trim();
+  try {
+    return JSON.parse(trimmed);
+  } catch (firstError) {
+    const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(trimmed);
+    if (fenced) {
+      try {
+        return JSON.parse(fenced[1].trim());
+      } catch { /* fall through to brace scan */ }
+    }
+
+    const start = trimmed.indexOf('{');
+    const end = trimmed.lastIndexOf('}');
+    if (start !== -1 && end > start) {
+      return JSON.parse(trimmed.slice(start, end + 1));
+    }
+    throw firstError;
+  }
+}
+
 export class SubagentRouter {
   private readonly clients = new Map<string, DeepSeekClient>();
 
@@ -56,6 +89,15 @@ export class SubagentRouter {
     if (!caps.subagentRoles?.includes(role.name)) {
       logger.warn(
         `[Subagent] Model "${modelId}" is not declared for role "${role.name}". Falling back to raw input.`
+      );
+      return { routed: false, reason: 'no-model' };
+    }
+
+    // Declaring the role is not enough for an image role — a text-only backend
+    // would 400 on the image_url block rather than degrade.
+    if (role.requiresImageSupport && !caps.acceptsImages) {
+      logger.warn(
+        `[Subagent] Model "${modelId}" does not declare acceptsImages, which role "${role.name}" requires. Falling back to raw input.`
       );
       return { routed: false, reason: 'no-model' };
     }
@@ -104,7 +146,7 @@ export class SubagentRouter {
 
     let parsedJson: unknown;
     try {
-      parsedJson = JSON.parse(rawContent);
+      parsedJson = tolerantJsonParse(rawContent);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       tracer.endSpan(span, {

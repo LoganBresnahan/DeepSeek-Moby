@@ -43,6 +43,7 @@ function imageRole(
     shouldRoute: () => true,
     buildSystemPrompt: () => 'describe the image',
     buildUserMessage: () => 'FALLBACK-STRING',
+    requiresImageSupport: true,
     buildUserContent: (input): SubagentMessageContent => [
       { type: 'text', text: 'Describe this.' },
       { type: 'image_url', image_url: { url: input.dataUri } }
@@ -119,6 +120,39 @@ describe('SubagentRouter — buildUserContent hook', () => {
     expect(result).toEqual({ routed: false, reason: 'sub-error' });
     const [, payload] = mockTracer.endSpan.mock.calls[0];
     expect(payload.data.inputBytes).toBe(14 + DATA_URI.length);
+  });
+
+  it('refuses a model that declares the role but not acceptsImages', async () => {
+    mockGetCapabilities.mockReturnValue({ subagentRoles: ['image-describe'], acceptsImages: false });
+
+    const router = new SubagentRouter(createContext());
+    const result = await router.route(imageRole(), { dataUri: DATA_URI }, { recentUserPrompt: '' });
+
+    // Would 400 on the image_url block rather than degrade — never send it.
+    expect(result).toEqual({ routed: false, reason: 'no-model' });
+    expect(mockChat).not.toHaveBeenCalled();
+    expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining('acceptsImages'));
+  });
+
+  it('does not require acceptsImages for text roles', async () => {
+    mockGetCapabilities.mockReturnValue({ subagentRoles: ['image-describe'] });
+    const role = imageRole();
+    delete (role as any).buildUserContent;
+    delete (role as any).requiresImageSupport;
+
+    const router = new SubagentRouter(createContext());
+    const result = await router.route(role, { dataUri: DATA_URI }, { recentUserPrompt: '' });
+
+    expect(result).toEqual({ routed: true, digest: 'digest: a whale' });
+  });
+
+  it('accepts a fenced JSON response from a VL backend', async () => {
+    mockChat.mockResolvedValue({ content: '```json\n{"description":"a whale"}\n```' });
+
+    const router = new SubagentRouter(createContext());
+    const result = await router.route(imageRole(), { dataUri: DATA_URI }, { recentUserPrompt: '' });
+
+    expect(result).toEqual({ routed: true, digest: 'digest: a whale' });
   });
 
   it('still measures a plain string body as its length', async () => {

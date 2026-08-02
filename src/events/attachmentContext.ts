@@ -32,6 +32,8 @@ export interface IncomingAttachment {
   mimeType?: string;
   language?: string;
   filePath?: string;
+  /** Images only — the digest resolved before the turn was recorded. */
+  digest?: string;
 }
 
 /** Split a `data:<mime>;base64,<payload>` URI into its mime and raw bytes. */
@@ -75,7 +77,13 @@ export function prepareAttachmentsForPersistence(
       const decoded = decodeDataUri(incoming.content ?? '');
       if (decoded) {
         const ref = blobStore.put(decoded.bytes, incoming.mimeType ?? decoded.mime);
-        return { ...base, mimeType: incoming.mimeType ?? decoded.mime, blobId: ref.blobId, bytes: ref.bytes };
+        return {
+          ...base,
+          mimeType: incoming.mimeType ?? decoded.mime,
+          blobId: ref.blobId,
+          bytes: ref.bytes,
+          ...(incoming.digest ? { digest: incoming.digest } : {})
+        };
       }
       logger.warn(`[Attachments] Image "${incoming.name}" is not a decodable data URI; storing verbatim`);
     }
@@ -111,11 +119,12 @@ export function prepareAttachmentsForPersistence(
 }
 
 /**
- * Rebuild the `--- Attached Files ---` context block from persisted
- * attachments. Byte-identical to the block the live path used to append.
+ * Rebuild the attachment context blocks from persisted attachments. The
+ * `--- Attached Files ---` block is byte-identical to what the live path used
+ * to append, so text-only turns are unchanged.
  *
- * Images are skipped: they reach the model as a subagent digest, never as text
- * in this block.
+ * Images get their own block carrying the vision subagent's *digest* — their
+ * bytes never appear here, and never reach the main model.
  *
  * @param readBlobText resolves a blobId to its stored text (null if missing)
  */
@@ -126,14 +135,34 @@ export function formatAttachmentsForContext(
   if (!attachments || attachments.length === 0) return '';
 
   const textual = attachments.filter(a => a.type !== 'image');
-  if (textual.length === 0) return '';
+  const images = attachments.filter(a => a.type === 'image');
 
-  let fileContext = '\n\n--- Attached Files ---\n';
-  for (const attachment of textual) {
-    fileContext += `\n### File: ${attachment.name}\n\`\`\`\n${resolveBody(attachment, readBlobText)}\n\`\`\`\n`;
+  let context = '';
+
+  if (textual.length > 0) {
+    context += '\n\n--- Attached Files ---\n';
+    for (const attachment of textual) {
+      context += `\n### File: ${attachment.name}\n\`\`\`\n${resolveBody(attachment, readBlobText)}\n\`\`\`\n`;
+    }
+    context += '--- End Attached Files ---\n';
   }
-  fileContext += '--- End Attached Files ---\n';
-  return fileContext;
+
+  // Images contribute their DIGEST — the description a vision subagent
+  // produced at attach time — and never their bytes. The digest is persisted
+  // on the attachment, so this rebuilds identically after a reload.
+  if (images.length > 0) {
+    context += '\n\n--- Attached Images ---\n';
+    for (const image of images) {
+      context += `\n${image.digest ?? missingDigestPlaceholder(image.name)}\n`;
+    }
+    context += '--- End Attached Images ---\n';
+  }
+
+  return context;
+}
+
+function missingDigestPlaceholder(name: string): string {
+  return `[Image "${name}" was attached but no description was recorded. You cannot see this image; say so rather than guessing at its contents.]`;
 }
 
 function resolveBody(

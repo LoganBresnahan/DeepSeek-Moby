@@ -716,6 +716,22 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         }
         break;
 
+      case 'analyzingImages': {
+        const count = (msg.count as number) ?? 1;
+        const label = count > 1 ? `Analyzing ${count} images...` : 'Analyzing image...';
+        this._manager.publishDirect('status.message', { type: 'info', message: label });
+        if (this._currentTurnId) {
+          this._actors.virtualList.pushTurnActivity(this._currentTurnId, 'image-describe', label);
+        }
+        break;
+      }
+
+      case 'analyzingImagesComplete':
+        if (this._currentTurnId) {
+          this._actors.virtualList.popTurnActivity(this._currentTurnId, 'image-describe');
+        }
+        break;
+
       case 'webSearchCached':
         this._manager.publishDirect('status.message', { type: 'info', message: 'Using cached search results' });
         break;

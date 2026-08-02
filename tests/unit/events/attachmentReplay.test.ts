@@ -228,16 +228,23 @@ describe('ADR 0014 — attachment replay', () => {
 
   // ── Images never ride the text path ──
 
-  it('skips image attachments — they reach the model as a digest, not as text', () => {
+  it('keeps images out of the text block — they carry a digest, never bytes', () => {
     const attachments = [
-      { type: 'image' as const, name: 'shot.png', blobId: 'deadbeef', bytes: 10 },
+      { type: 'image' as const, name: 'shot.png', blobId: 'deadbeef', bytes: 10, digest: 'a screenshot of a form' },
       { type: 'file' as const, name: 'code.ts', content: 'const a = 1;' }
     ];
 
     const block = formatAttachmentsForContext(attachments, () => 'RAW-IMAGE-BYTES');
-    expect(block).toContain('### File: code.ts');
-    expect(block).not.toContain('shot.png');
+
+    const filesBlock = block.slice(
+      block.indexOf('--- Attached Files ---'),
+      block.indexOf('--- End Attached Files ---')
+    );
+    expect(filesBlock).toContain('### File: code.ts');
+    expect(filesBlock).not.toContain('shot.png');
+    // The blob reader is never consulted for an image, in either block.
     expect(block).not.toContain('RAW-IMAGE-BYTES');
+    expect(block).toContain('a screenshot of a form');
   });
 
   it('stores an image as decoded binary, exempt from the text cap', () => {
@@ -269,11 +276,80 @@ describe('ADR 0014 — attachment replay', () => {
     expect(blobStore.get(persisted.blobId!)!.data).toEqual(raw);
   });
 
-  it('emits nothing when every attachment is an image', () => {
+  // ── Digest replay (plan Phase 3): the whole reason digests are resolved
+  // before the record rather than injected live. ──
+
+  it('rebuilds an image digest identically after a reload', () => {
+    const raw = Buffer.from([1, 2, 3]);
+    const persisted = prepareAttachmentsForPersistence(
+      [{
+        type: 'image',
+        name: 'mock.png',
+        content: `data:image/webp;base64,${raw.toString('base64')}`,
+        mimeType: 'image/webp',
+        digest: 'A signup form with email and password fields.'
+      }],
+      blobStore
+    );
+    const event = eventStore.append({
+      sessionId: 'session-1', timestamp: Date.now(), type: 'user_message',
+      content: 'what is wrong with this?', attachments: persisted
+    } as any);
+    blobStore.link(event.id, persisted[0].blobId!);
+
+    const live = rebuildContext('session-1');
+
+    const reloadedEvents = new EventStore(db);
+    const reloadedBlobs = new AttachmentBlobStore(db);
+    const afterReload = reloadedEvents.getEvents('session-1')
+      .filter(e => e.type === 'user_message')
+      .map(e => (e as any).content + formatAttachmentsForContext(
+        (e as UserMessageEvent).attachments,
+        id => reloadedBlobs.getText(id)
+      ));
+
+    expect(afterReload).toEqual(live);
+    expect(afterReload[0]).toContain('A signup form with email and password fields.');
+  });
+
+  it('replays a routing-failure placeholder as the placeholder, not silence', () => {
+    const raw = Buffer.from([9]);
+    const placeholder = '[Image "x.png" was attached but could not be described — no vision backend is configured.]';
+    const persisted = prepareAttachmentsForPersistence(
+      [{ type: 'image', name: 'x.png', content: `data:image/webp;base64,${raw.toString('base64')}`, digest: placeholder }],
+      blobStore
+    );
+    const event = eventStore.append({
+      sessionId: 'session-1', timestamp: Date.now(), type: 'user_message', content: 'see this', attachments: persisted
+    } as any);
+    blobStore.link(event.id, persisted[0].blobId!);
+
+    expect(rebuildContext('session-1')[0]).toContain(placeholder);
+  });
+
+  it('carries an image digest across a fork', () => {
+    const persisted = prepareAttachmentsForPersistence(
+      [{ type: 'image', name: 'shared.png', content: 'data:image/webp;base64,AQID', digest: 'a shared diagram' }],
+      blobStore
+    );
+    const event = eventStore.append({
+      sessionId: 'session-1', timestamp: Date.now(), type: 'user_message', content: 'fork me', attachments: persisted
+    } as any);
+    blobStore.link(event.id, persisted[0].blobId!);
+    db.prepare('INSERT INTO event_sessions (event_id, session_id, sequence) VALUES (?, ?, ?)')
+      .run(event.id, 'fork-1', 1);
+
+    expect(rebuildContext('fork-1')).toEqual(rebuildContext('session-1'));
+    expect(rebuildContext('fork-1')[0]).toContain('a shared diagram');
+  });
+
+  it('emits only the images block when every attachment is an image', () => {
     const block = formatAttachmentsForContext(
-      [{ type: 'image' as const, name: 'a.png', blobId: 'x', bytes: 1 }],
+      [{ type: 'image' as const, name: 'a.png', blobId: 'x', bytes: 1, digest: 'a whale' }],
       () => null
     );
-    expect(block).toBe('');
+    expect(block).toContain('--- Attached Images ---');
+    expect(block).toContain('a whale');
+    expect(block).not.toContain('--- Attached Files ---');
   });
 });

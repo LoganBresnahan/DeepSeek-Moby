@@ -74,6 +74,11 @@ export interface SubagentRole<TInput, TOutput> {
    *  roles omit it. */
   buildUserContent?(input: TInput): SubagentMessageContent;
 
+  /** Role sends image content, so the configured model must declare
+   *  `acceptsImages`. Declaring the role is not enough — a text-only backend
+   *  would 400 on the `image_url` block. */
+  readonly requiresImageSupport?: boolean;
+
   /** Parse + validate the sub's JSON response. Returns `null` on schema
    *  failure; router falls back to raw input. */
   parse(rawJson: unknown): TOutput | null;
