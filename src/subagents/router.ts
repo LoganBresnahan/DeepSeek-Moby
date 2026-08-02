@@ -65,6 +65,7 @@ export function tolerantJsonParse(raw: string): unknown {
 
 export class SubagentRouter {
   private readonly clients = new Map<string, DeepSeekClient>();
+  private readonly warnedMessages = new Set<string>();
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -203,10 +204,31 @@ export class SubagentRouter {
    *  when the setting is missing or set to "off". */
   private resolveModelId(roleName: string): string | null {
     const config = vscode.workspace.getConfiguration('moby');
-    const subs = config.get<Record<string, string>>('subagents');
+    const subs = config.get<Record<string, unknown>>('subagents');
     const raw = subs?.[roleName];
-    if (!raw || raw === 'off') return null;
+    if (raw === undefined || raw === null || raw === 'off') return null;
+
+    // Every value here must be a model id string. A non-string is a
+    // misconfiguration that would otherwise be silently inert — the schema
+    // warns in the editor, but nothing tells you at runtime that the setting
+    // isn't doing what it looks like it's doing.
+    if (typeof raw !== 'string') {
+      this.warnOnce(
+        `[Subagent] moby.subagents.${roleName} must be a model id string or "off", but is ${Array.isArray(raw) ? 'an array' : typeof raw}. ` +
+        'Ignoring it (role stays off). Note `moby.subagents.webSearchDigest.maxResults` is a separate top-level setting, not a key inside this object.'
+      );
+      return null;
+    }
+    if (raw.trim() === '') return null;
     return raw;
+  }
+
+  /** Misconfiguration warnings repeat on every route call otherwise — the
+   *  router runs once per search. One line per distinct message is enough. */
+  private warnOnce(message: string): void {
+    if (this.warnedMessages.has(message)) return;
+    this.warnedMessages.add(message);
+    logger.warn(message);
   }
 
   /** Lazy per-modelId client cache. Each subagent backend gets its own

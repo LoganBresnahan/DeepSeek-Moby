@@ -155,6 +155,74 @@ describe('SubagentRouter — buildUserContent hook', () => {
     expect(result).toEqual({ routed: true, digest: 'digest: a whale' });
   });
 
+  // A nested object under moby.subagents (e.g. the flat
+  // `subagents.webSearchDigest.maxResults` setting written in the wrong place)
+  // used to be silently inert — the JSON schema warns in the editor, but
+  // nothing said so at runtime.
+  describe('malformed setting values', () => {
+    function setSubagents(value: unknown) {
+      mockGetConfiguration.mockReturnValue({
+        get: (key: string) => (key === 'subagents' ? value : undefined)
+      });
+    }
+
+    it('ignores a non-string value and says so', async () => {
+      setSubagents({ 'image-describe': { maxResults: 2 } });
+
+      const router = new SubagentRouter(createContext());
+      const result = await router.route(imageRole(), { dataUri: DATA_URI }, { recentUserPrompt: '' });
+
+      expect(result).toEqual({ routed: false, reason: 'off' });
+      expect(mockChat).not.toHaveBeenCalled();
+      expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining('must be a model id string'));
+    });
+
+    it('names the top-level maxResults setting, the likeliest cause', async () => {
+      setSubagents({ 'image-describe': { maxResults: 2 } });
+
+      const router = new SubagentRouter(createContext());
+      await router.route(imageRole(), { dataUri: DATA_URI }, { recentUserPrompt: '' });
+
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('moby.subagents.webSearchDigest.maxResults')
+      );
+    });
+
+    it('warns once, not on every route call', async () => {
+      setSubagents({ 'image-describe': 42 });
+
+      const router = new SubagentRouter(createContext());
+      await router.route(imageRole(), { dataUri: DATA_URI }, { recentUserPrompt: '' });
+      await router.route(imageRole(), { dataUri: DATA_URI }, { recentUserPrompt: '' });
+      await router.route(imageRole(), { dataUri: DATA_URI }, { recentUserPrompt: '' });
+
+      const warnings = mockLogger.warn.mock.calls.filter(c => String(c[0]).includes('must be a model id string'));
+      expect(warnings).toHaveLength(1);
+    });
+
+    it('treats an empty string as off without warning', async () => {
+      setSubagents({ 'image-describe': '   ' });
+
+      const router = new SubagentRouter(createContext());
+      const result = await router.route(imageRole(), { dataUri: DATA_URI }, { recentUserPrompt: '' });
+
+      expect(result).toEqual({ routed: false, reason: 'off' });
+      expect(mockLogger.warn).not.toHaveBeenCalled();
+    });
+
+    it('still resolves a valid sibling role when another key is malformed', async () => {
+      setSubagents({
+        webSearchDigest: { maxResults: 2 },        // the invalid one
+        'image-describe': 'vision-model'           // valid, must still work
+      });
+
+      const router = new SubagentRouter(createContext());
+      const result = await router.route(imageRole(), { dataUri: DATA_URI }, { recentUserPrompt: '' });
+
+      expect(result).toEqual({ routed: true, digest: 'digest: a whale' });
+    });
+  });
+
   it('still measures a plain string body as its length', async () => {
     const role = imageRole();
     delete (role as any).buildUserContent;
