@@ -155,6 +155,28 @@
             ],
             [
               {
+                "id": "moonshot-v1-128k-vision-preview",
+                "name": "Kimi Vision (Moonshot)",
+                "toolCalling": "native",
+                "reasoningTokens": "none",
+                "editProtocol": [
+                  "native-tool"
+                ],
+                "shellProtocol": "none",
+                "supportsTemperature": true,
+                "maxOutputTokens": 32768,
+                "maxTokensConfigKey": "maxTokensCustomKimiVision",
+                "streaming": true,
+                "apiEndpoint": "https://api.moonshot.ai/v1",
+                "requestFormat": "openai",
+                "acceptsImages": true,
+                "subagentRoles": [
+                  "image-describe"
+                ]
+              }
+            ],
+            [
+              {
                 "id": "llama-3.3-70b-versatile",
                 "name": "Llama 3.3 70B (Groq)",
                 "toolCalling": "native",
