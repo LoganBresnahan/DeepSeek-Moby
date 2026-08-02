@@ -1,7 +1,7 @@
 # `image-describe` subagent — vision via digest routing
 
-**Status:** Phases 0–1 shipped 2026-08-02 (ADR 0014 + foundations). Phases 2–6 not started.
-**Date:** 2026-07-04 · **Revised:** 2026-08-02 (decisions 4–6: thumbnail sizing, blob storage, attachment replay — adds Phase 0)
+**Status:** Phases 0–1 shipped 2026-08-02 (ADR 0014 + foundations). Phase 1b (drag-and-drop) and phases 2–6 not started.
+**Date:** 2026-07-04 · **Revised:** 2026-08-02 (decisions 4–6: thumbnail sizing, blob storage, attachment replay — adds Phase 0; then §8 drag-and-drop — adds Phase 1b)
 **Parent:** [subagents.md § Phase 2](subagents.md) — this doc is the concrete, decision-locked implementation plan for that phase. Where the two disagree, this doc wins (it reflects verified code state + explicit product decisions made 2026-07-04).
 
 ## TL;DR
@@ -179,9 +179,59 @@ For text attachments this is survivable-but-wrong: the file is still on disk, so
 - **Text attachments need a persisted-size cap too.** A 200KB source file attached is 200KB in the blob table. Cap it, truncate with an explicit marker, and route text bodies through the same `attachment_blobs` path as images — uniform storage, uniform GC, and `events.data` stays small for both.
 - **Fork inherits this for free.** `skipRecord` on the fork path means the user message row is already in the store, so its attachments come along via `event_sessions` with no extra work.
 
+## 8. Drag-and-drop attach
+
+**Added 2026-08-02 at user request.** Phase 1 shipped file-dialog capture only. Drag-and-drop is the input surface people actually reach for with a screenshot, and it serves **text attachments equally** — so like Phase 0, it is independent of the vision pipeline and can land before, after, or without it.
+
+Reference implementation: `DropZone.tsx` in the Carton-Fit codebase (`/home/oof/Carton-Fit/src/renderer/src/components/DropZone.tsx`) — a React dropzone with `onDragOver`/`onDragLeave`/`onDrop`, an extension allow-list, a `dragging` class for the affordance, and a hidden file input behind a click. The shape is right; three things differ for Moby and are where the actual work is.
+
+### The three deltas from the Carton-Fit pattern
+
+**a. Two drop sources, not one.** Carton-Fit is an Electron app where every drop is an OS file drop. A VS Code webview receives two distinct kinds:
+
+| Source | What `dataTransfer` carries | Can the webview read the bytes? |
+|---|---|---|
+| OS file manager / desktop | `dataTransfer.files` — real `File` objects | **Yes** — same path `handleFileSelect` already uses |
+| VS Code Explorer, editor tab | `text/uri-list` (no `File` objects) | **No** — the webview has no filesystem access |
+
+The second case needs an extension round-trip: webview posts the URI, the extension reads the file, hands content back. A partial seam exists — `getFileContent` → `fileContent` ([chatProvider.ts:835](../../src/providers/chatProvider.ts#L835), [:162](../../src/providers/chatProvider.ts#L162)) — but it returns **text**, so an image dropped from the Explorer needs either a bytes/base64 variant or extension-side encoding. Any new message type must be registered with the [protocol drift detector](../../tests/integration/protocol-drift.test.ts) rather than landing as an orphan.
+
+**b. Shadow DOM + webview default behavior.** The input area is a `ShadowActor`, so listeners bind inside the shadow root, not on `document` — and `dragenter`/`dragleave` fire on every child crossing, so the highlight needs a depth counter rather than a boolean, or it flickers as the pointer moves between chips and the textarea. Separately, an **unhandled** drop anywhere in the webview makes the frame navigate to the dropped file, blanking the chat. So the guard and the target are two different things: a document-level `dragover`/`drop` `preventDefault` guard covers the whole panel and *swallows* drops outside the target, while the input box is the only place a drop actually attaches.
+
+**c. Reuse or the image path silently regresses.** `handleFileSelect` now branches: images go through `isImage` → downscale → WebP, text through `FileReader.readAsText`. A drop handler that calls `readAsText` itself would store a PNG as mojibake in a code fence — exactly the failure the accept-list is designed to prevent. Extract the shared ingest (`ingestFiles(files: File[])`) **first**, and have both entry points call it.
+
+### Drop target and modifier keys
+
+**The input box is the drop target** (decided 2026-08-02) — not the transcript, not the whole panel. It is where attachments already live, it puts the drop next to the chips that result from it, and it keeps the transcript inert so a mis-aimed drop cannot land content mid-conversation. The rest of the panel still needs the navigation guard above; it just swallows the drop rather than acting on it. Highlight the input box on drag-enter (border + subtle background shift, mirroring how `.dropzone.dragging` reads in Carton-Fit) so the target is discoverable without a permanent "drag files here" affordance eating vertical space.
+
+**On modifier keys — check the convention in the dev host before choosing.** Two VS Code behaviors are adjacent and easy to conflate:
+
+- Dragging a file onto an **editor** opens it; holding **Shift** drops the *path as text* instead.
+- Dragging a file onto a **chat input** (Copilot Chat) attaches it as context, unmodified.
+
+Moby's input box is the second kind of surface, so the default should be **plain drop = attach** — requiring a modifier for the primary action would make the feature undiscoverable. The interesting use for Shift is the *editor* meaning: **Shift+drop inserts the file path as text** into the textarea, which is genuinely useful for "look at `src/foo.ts`" prompts and costs almost nothing once the drop handler exists.
+
+Treat both mappings as **provisional until verified in a dev host** — VS Code owns some drag behavior above the webview, and what a modifier actually delivers in `dataTransfer` is worth observing rather than assuming. The verification step below calls this out explicitly.
+
+### Decision to make before building: what does a *workspace* file drop mean?
+
+Moby has two adjacent surfaces — **attachments** (a content snapshot persisted as a blob, replayed as-of-attach-time per [§7](#7-attachment-replay-the-correctness-prerequisite)) and **selected files for context** (path-based, re-read fresh each turn, managed by `FilesShadowActor` / `fileContextManager`). A file dragged in from the VS Code Explorer is a *repo file*, and snapshotting it is arguably wrong: it goes stale, it duplicates bytes already on disk, and the user's mental model is "look at this file", not "here is a frozen copy".
+
+**Recommendation: route by origin.** An OS drop from outside the workspace becomes an **attachment** (there is no path the extension could re-read, so a snapshot is the only option). A VS Code-internal drop of a workspace file becomes a **selected context file** (no blob, no staleness, and it reuses machinery that already exists). Images are the exception in both directions — they always become attachments, because the context-file path is text-only.
+
+This is worth deciding explicitly because it determines whether slice `drag-drop-editor-uris` needs a bytes round-trip at all: under the recommendation it mostly does not, and shrinks to path-forwarding plus an image special-case.
+
+### What is and is not testable
+
+Carton-Fit's [ADR 0005](/home/oof/Carton-Fit/doc/adr/0005-testing-and-deploy.md) records the constraint plainly: *"OS-level drag-drop cannot be simulated, so the DropZone must always keep a file-picker fallback (also an accessibility win)."* The same holds here, with one refinement — Playwright **can** synthesize an HTML5 `DataTransfer` and dispatch `drop` in-page, which exercises our handler, the ingest branch, and the overlay. What it cannot cross is the **OS → webview** boundary, and for the VS Code-internal case it cannot reproduce what the Explorer actually puts on the drag payload. So:
+
+- Unit / harness e2e: the handler, the branch, the overlay counter, and the guard.
+- Dev-host only: that a real OS drag and a real Explorer drag deliver what we assume.
+- **The file picker never goes away.** It is the automation seam and the keyboard-accessible path.
+
 ## Deferred / follow-ups
 
-- **Paste / drag-drop** image capture (Phase 1 is file-dialog only).
+- **Paste** image capture (`paste` event → clipboard `File`) — a natural sibling of drag-drop that reuses the same `ingestFiles` seam once it exists.
 - **Model-initiated hybrid (parent plan path 2):** `read_file` on an image-extension path ([workspaceTools.ts:407](../../src/tools/workspaceTools.ts#L407)) routes through the same role and returns the digest as the tool-role result — mirror the `web_search` branch in `dispatchToolCall` ([requestOrchestrator.ts:2934-2946](../../src/providers/requestOrchestrator.ts#L2934)), gated by a `isImageDescribeConfigured()` conditional spread like `includeWebSearch` ([:3845](../../src/providers/requestOrchestrator.ts#L3845)). Genuinely different surface (model wants to look at a mockup PNG it found).
 - **Result caching** keyed on `hash(dataUrl)+focus` with a TTL — mirror the web-search cache ([webSearchManager.ts:93](../../src/providers/webSearchManager.ts#L93)) — skip re-describing a re-attached image.
 - **`ImageDescribeManager` extraction** — keep injection inline (like today's attachment handling); refactor only if a second image surface lands.
@@ -195,6 +245,8 @@ For text attachments this is survivable-but-wrong: the file is still on disk, so
 - **Replay drift (the silent one).** Live-built and reload-built context diverging is invisible in a dev-host session and corrupts every subsequent turn. Mitigated by construction — one shared `formatAttachmentsForContext` — and pinned by `replay-equivalence-tests`. Treat any future attachment surface that formats its own block as a regression.
 - **Stale replayed file content.** A replayed text attachment is as-of-attach-time, so a model may act on content that has since changed. Deliberate (conversation fidelity) but signposted with the attach timestamp — see [§7](#7-attachment-replay-the-correctness-prerequisite).
 - **Blob GC correctness.** Zero-copy fork means a blob can be reachable from several sessions. GC must run off `event_blobs` after orphan-event cleanup, never off "was this session deleted" — the wrong order silently blanks thumbnails in a *surviving* forked session.
+- **Unhandled drop navigates the webview away (drag-drop).** The default action for a file dropped on a frame is to open it, which blanks the chat and loses the in-progress turn. The document-level guard is not optional polish — it is the thing standing between a mis-aimed drop and a destroyed session. Pin it with a test that drops outside the input box.
+- **Drag-drop assumptions we cannot test (drag-drop).** Playwright can synthesize a `DataTransfer`, so our handler is testable; what the OS and the VS Code Explorer actually put on a real drag is not. Anything asserted about `text/uri-list` contents or modifier keys is provisional until observed in a dev host — see [§8](#what-is-and-is-not-testable).
 - **No vision backend configured.** `moby.subagents.image-describe` unset → `{routed:false,'off'}` → explicit placeholder naming the setting; attach still allowed, nothing crashes.
 - **jsonMode on the VL backend.** Router forces `jsonMode:true` ([router.ts:67](../../src/subagents/router.ts#L67)); a VL model may ignore `response_format` → `parse` fails → placeholder. Mitigate with the lenient parse (§b) + a strict JSON instruction in the system prompt. **Verify empirically at build time** against the chosen VL backend; if unreliable, add a per-role `readonly jsonMode?: boolean` opt-out the router honors + a plain-text `formatForMain` fallback.
 - **Token accounting for the sub call.** `contextBuilder.extractText` counts an image part as literal `'[image]'` (~1 token, [contextBuilder.ts:43](../../src/context/contextBuilder.ts#L43)); confirm the sub client's budget guard isn't tripped by underestimating. Low risk — only the sub call carries the image.
@@ -206,13 +258,14 @@ For text attachments this is survivable-but-wrong: the file is still on disk, so
 - Unit: orchestrator image-branch — routed → digest appended as string; `routed:false` → placeholder appended (not dropped); text attachments unaffected.
 - Unit: **replay equivalence** (`replay-equivalence-tests`, Phase 0) — for a turn with text attachments, context built live and context built after a reload are byte-identical; the block survives a fork; `UserMessageEvent.content` holds raw user text only (no attachment bodies leaking to the transcript). Extended to digests + `routed:false` placeholders in Phase 4.
 - Unit: **blob store** — content-addressing dedupes identical bytes; GC reclaims only blobs unreferenced by any surviving event; a blob shared by a forked session survives deletion of its origin session.
+- Unit (`tests/actors/input-area/`): drag-drop over the input box — synthesized `DataTransfer` with an image file takes the downscale branch, with a text file takes the text branch, a mixed batch splits correctly; the highlight counter survives `dragleave` from child elements; an off-target drop is swallowed by the guard and attaches nothing.
 - Manual-test backlog (add entries): attach image with a vision model configured → digest reaches main model; no backend configured → clear placeholder; oversized image → reject message; multiple images in one turn; reload session → thumbnail + digest restore; **attach a text file → reload → the file's content is still in the model's context**.
 
 ## Build plan (design-plan workflow, 2026-07-31)
 
-13 slices, all assessed `todo` against source. Dominant model: opus (12 slices); one fable slice. Critical path: `router-build-user-content-hook` → `image-describe-role-module` → `orchestrator-image-injection` → `thumbnail-digest-persistence` → `transcript-thumbnail-render` → `manual-test-backlog-entries`.
+13 slices in the original decomposition, all assessed `todo` against source. Dominant model: opus (12 slices); one fable slice. Critical path: `router-build-user-content-hook` → `image-describe-role-module` → `orchestrator-image-injection` → `thumbnail-digest-persistence` → `transcript-thumbnail-render` → `manual-test-backlog-entries`.
 
-**Revised 2026-08-02:** +1 phase, +5 slices (18 total). Phase 0 is new and now heads the critical path — `attachment-blob-store` → `attachment-replay` → (existing chain) → `thumbnail-digest-persistence`. Phase 0 ships standalone value (text attachments become replayable) and can land before any image work starts.
+**Revised 2026-08-02:** +1 phase, +5 slices (18 total), then **+1 phase, +5 slices for drag-and-drop (23 total)** — see [§8](#8-drag-and-drop-attach). Phase 0 is new and now heads the critical path — `attachment-blob-store` → `attachment-replay` → (existing chain) → `thumbnail-digest-persistence`. Phase 0 ships standalone value (text attachments become replayable) and can land before any image work starts.
 
 ### Phases
 
@@ -227,6 +280,12 @@ For text attachments this is survivable-but-wrong: the file is still on disk, so
   - [x] `attachment-type-threading` (low/mechanical) — optional `type`/`mimeType` on the attachment shape at [chatProvider.ts:44](../../src/providers/chatProvider.ts#L44), [requestOrchestrator.ts:809](../../src/providers/requestOrchestrator.ts#L809), [media/chat.ts:340](../../media/chat.ts#L340).
   - [x] `webview-image-capture` (medium/moderate) — accept-list + FileReader branch + img-chip in `InputAreaShadowActor`; async canvas downscale with hard byte cap (cap after re-encode, reject before attach).
   - [x] `custom-models-schema-fix` (low/mechanical) — `subagentRoles` + `acceptsImages` in the package.json customModels schema; mirror the existing one-line optional-axis checks in `validateCustomModelEntry`; explicit `moby.subagents.image-describe` property.
+- [ ] **1b. Drag-and-drop attach** *(opus)* — **added 2026-08-02 at user request** ([§8](#8-drag-and-drop-attach)). Independent of the vision pipeline: it serves text attachments too, so it can land before or after phases 2–5, and slips without blocking them. Entry gate: settle the workspace-file-drop decision in [§8](#decision-to-make-before-building-what-does-a-workspace-file-drop-mean). `/shipshape` at boundary, then `/verify` — this phase is unusually dev-host-dependent (see below).
+  - [ ] `ingest-files-extraction` (low/mechanical) — pull the image-vs-text branch out of `handleFileSelect` into `ingestFiles(files: File[])`; picker calls it. **Must land first** — a drop handler written against the old shape would re-implement the text path and store images as mojibake.
+  - [ ] `drag-drop-os-files` (medium/moderate) — shadow-root `dragenter`/`dragover`/`dragleave`/`drop` on the input box with a **depth counter** for the highlight; document-level `preventDefault` guard so a drop anywhere else in the panel cannot navigate the frame away; drop → `ingestFiles`. Keep the picker (automation seam + keyboard access).
+  - [ ] `drag-drop-editor-uris` (medium/moderate, risk: **medium** — behavior we cannot fully observe from a test) — `text/uri-list` branch for VS Code-internal drags. Scope depends on the §8 decision: under the recommendation this forwards a path to the existing selected-files machinery and only images need a bytes round-trip. Any new postMessage type gets registered with the protocol drift detector in the same commit.
+  - [ ] `shift-drop-path-insert` (low/mechanical, **provisional**) — Shift+drop inserts the file path as text instead of attaching. Build only after the dev-host observation confirms the modifier arrives as assumed; drop the slice if it doesn't.
+  - [ ] `drag-drop-tests` (medium/moderate) — synthesized `DataTransfer` drop tests over the handler: image file → downscale branch, text file → text branch, mixed batch, highlight counter survives child crossings, guard swallows an off-target drop. Pins everything except the OS boundary.
 - [ ] **2. Role module + settings filter** *(opus)* — `/shipshape` at boundary.
   - [ ] `image-describe-role-module` (medium/moderate) — clone `webSearchDigest.ts` shape; VL prompt contract + lenient parse (fence-strip, first-`{…}`, garbage → null).
   - [ ] `accepts-images-capability-filter` (low/mechanical) — filter the image-describe dropdown to `acceptsImages` models, extension-side from the registry.
@@ -250,7 +309,8 @@ For text attachments this is survivable-but-wrong: the file is still on disk, so
 2. **Phase 1→3 window:** once the accept-list admits images, an image must never ride the text path — land phases 1–3 before any release/tag (or placeholder unknown-type attachments in the orchestrator from day one).
 3. **Migration is one-way.** `LATEST_VERSION` 1 → 2 lands in Phase 0. Additive-only, but a DB touched by the new build then opened by an older one loses blob rows. Fine for a pre-release extension; worth a line in the release notes.
 4. **jsonMode on VL backends** is only testable empirically in phase 6; if it fails, the per-role jsonMode opt-out contingency touches the phase-2 role module — keep it in mind when writing `imageDescribe.ts`.
-5. **Phase 5 may slip** — phases 0–4 + 6 (minus the reload-render scenario) are a shippable increment without it. Note this is now a *weaker* statement than before: Phase 0's replay guarantee ships regardless, so a slipped Phase 5 costs the thumbnail picture, not context fidelity.
+5. **Phase 1b is orthogonal.** Drag-and-drop touches only the webview input surface and the ingest seam; it neither blocks nor is blocked by phases 2–5. Sequence it by appetite. The one ordering constraint is internal: `ingest-files-extraction` before any drop handler.
+6. **Phase 5 may slip** — phases 0–4 + 6 (minus the reload-render scenario) are a shippable increment without it. Note this is now a *weaker* statement than before: Phase 0's replay guarantee ships regardless, so a slipped Phase 5 costs the thumbnail picture, not context fidelity.
 
 ### Verification roster
 
@@ -258,6 +318,8 @@ For text attachments this is survivable-but-wrong: the file is still on disk, so
 | --- | --- | --- |
 | `/shipshape` | every phase boundary | compile + suites green twice + docs/conventions |
 | `/verify` | after 0 | attach a text file → reload the session → the `--- Attached Files ---` block is still in rebuilt context, timestamp-stamped; fork carries it too |
+| `/verify` | **during 1b, before finishing it** | drag from the OS file manager, from the Explorer, and from an editor tab — observe what `dataTransfer` actually carries in each case, and what Shift changes. The §8 mappings are provisional until this runs; `shift-drop-path-insert` is gated on it |
+| `/verify` | after 1b | plain drop on the input box attaches (image → thumbnail chip, text → 📄 chip); drop outside the input box does nothing and **never navigates the frame away**; picker still works |
 | `/verify` | after 3 | attach → indicator → digest; no-backend placeholder |
 | `/verify` | after 4 | Export Turn as JSON — blob *references* only, no full-res bytes, no inline base64 (the one silent risk outside phase 5) |
 | `/verify` + adversarial verify | after 5 | reload, session switch, fork render — no double-draw; blobs fetched lazily, no reflow on late arrival |
