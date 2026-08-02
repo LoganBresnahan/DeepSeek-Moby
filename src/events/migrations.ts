@@ -14,7 +14,7 @@
 import { Database } from './SqlJsWrapper';
 import { logger } from '../utils/logger';
 
-const LATEST_VERSION = 1;
+const LATEST_VERSION = 2;
 
 export function runMigrations(db: Database): void {
   const version = db.pragmaGet('user_version');
@@ -102,6 +102,36 @@ export function runMigrations(db: Database): void {
       CREATE INDEX IF NOT EXISTS idx_events_turn_id
         ON events (json_extract(data, '$.turnId'))
         WHERE type IN ('assistant_message', 'structural_turn_event');
+    `);
+  }
+
+  if (version < 2) {
+    logger.info('[Migrations] Applying version 2: content-addressed attachment blobs');
+    db.exec(`
+      -- ADR 0014: attachment payloads live beside the events table, keyed by
+      -- sha256 of their bytes. events.data carries only a reference, so
+      -- hydration stays cheap (see ADR 0003) while the bytes remain inside
+      -- SQLCipher's encryption envelope.
+      CREATE TABLE IF NOT EXISTS attachment_blobs (
+        blob_id TEXT PRIMARY KEY,
+        mime TEXT NOT NULL,
+        byte_size INTEGER NOT NULL,
+        width INTEGER,
+        height INTEGER,
+        created_at INTEGER NOT NULL,
+        data BLOB NOT NULL
+      );
+
+      -- Which events reference which blobs. Mirrors event_sessions: an event
+      -- deleted by CASCADE drops its links, and unreferenced blobs are then
+      -- collectable. Blobs are shared by hash, so forking stays zero-copy.
+      CREATE TABLE IF NOT EXISTS event_blobs (
+        event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+        blob_id TEXT NOT NULL REFERENCES attachment_blobs(blob_id) ON DELETE CASCADE,
+        UNIQUE(event_id, blob_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_event_blobs_blob
+        ON event_blobs(blob_id);
     `);
   }
 

@@ -554,7 +554,7 @@ describe('RequestOrchestrator', () => {
     it('should save user message to history', async () => {
       await orchestrator.handleMessage('Hello world', null, async () => '', undefined);
 
-      expect(mockConversation.recordUserMessage).toHaveBeenCalledWith('test-session-123', 'Hello world');
+      expect(mockConversation.recordUserMessage).toHaveBeenCalledWith('test-session-123', 'Hello world', undefined);
     });
   });
 
@@ -895,18 +895,25 @@ describe('RequestOrchestrator', () => {
   // ── Message Building ──
 
   describe('handleMessage - message building', () => {
-    it('should inject attachments into last user message', async () => {
+    // ADR 0014: attachments are persisted at record time and materialized into
+    // context by getSessionMessagesCompat. The orchestrator must NOT inject
+    // them live — the user message is recorded before context is built, so a
+    // live injection would double the block on the current turn.
+    it('persists attachments instead of injecting them live', async () => {
       const attachments = [
         { content: 'file content here', name: 'test.ts', size: 100 }
       ];
 
       await orchestrator.handleMessage('Hello', null, async () => '', attachments);
 
-      // Check that buildContext received messages with attachment context
+      expect(mockConversation.recordUserMessage).toHaveBeenCalledWith(
+        'test-session-123', 'Hello', attachments
+      );
+
       const messagesArg = mockClient.buildContext.mock.calls[0][0];
-      const lastUserMsg = messagesArg[messagesArg.length - 1];
-      expect(lastUserMsg.content).toContain('test.ts');
-      expect(lastUserMsg.content).toContain('file content here');
+      const joined = messagesArg.map((m: any) => m.content).join('\n');
+      expect(joined).not.toContain('--- Attached Files ---');
+      expect(joined).not.toContain('file content here');
     });
 
     it('should inject selected files context', async () => {

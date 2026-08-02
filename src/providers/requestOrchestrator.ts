@@ -852,7 +852,9 @@ export class RequestOrchestrator {
     // Save user message to history (UI already shows it from frontend)
     // Skip when re-sending after fork (message already in event store)
     if (sessionId && !options?.skipRecord) {
-      await this.conversationManager.recordUserMessage(sessionId, message);
+      // ADR 0014: attachments are persisted here and materialized into context
+      // on read (getSessionMessagesCompat) — there is no live injection.
+      await this.conversationManager.recordUserMessage(sessionId, message, attachments);
     }
 
     // ADR 0003: begin structural event recording for this turn. turnId is
@@ -1047,22 +1049,9 @@ export class RequestOrchestrator {
         });
       }
 
-      // If this message has file attachments, include their contents in the context
-      if (attachments && attachments.length > 0) {
-        let fileContext = '\n\n--- Attached Files ---\n';
-        for (const attachment of attachments) {
-          const content = attachment.content || '';
-          fileContext += `\n### File: ${attachment.name}\n\`\`\`\n${content}\n\`\`\`\n`;
-        }
-        fileContext += '--- End Attached Files ---\n';
-
-        if (historyMessages.length > 0) {
-          const lastMsg = historyMessages[historyMessages.length - 1];
-          if (lastMsg.role === 'user') {
-            lastMsg.content = lastMsg.content + fileContext;
-          }
-        }
-      }
+      // Attachment context is NOT injected here — ADR 0014 makes
+      // getSessionMessagesCompat the single call site, so what the model sees
+      // live and what it sees after a reload are the same bytes.
 
       // If user has selected files for context, include them
       const selectedFilesContext = this.fileContextManager.getSelectedFilesContext();

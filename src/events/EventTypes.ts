@@ -31,9 +31,18 @@ export interface BaseEvent {
 export interface Attachment {
   type: 'file' | 'image' | 'selection';
   name: string;
-  content: string;
+  /** Inline body. Persisted attachments reference a blob instead (ADR 0014). */
+  content?: string;
   language?: string;
   filePath?: string;
+  mimeType?: string;
+  /** ADR 0014: content-addressed blob holding this attachment's payload. */
+  blobId?: string;
+  /** Stored byte size — post-truncation, post-encode. */
+  bytes?: number;
+  /** Set when the body was capped before persisting; `originalBytes` is pre-cap. */
+  truncated?: boolean;
+  originalBytes?: number;
 }
 
 // ============================================================================

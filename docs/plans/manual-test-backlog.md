@@ -538,6 +538,27 @@ Not a pass/fail scenario yet — investigation only.
 
 ---
 
+## M34. Attachment persistence + replay (ADR 0014) (P0)
+
+**Why this matters:** attachments were never persisted — `recordUserMessage` dropped them and the `--- Attached Files ---` block was appended to the ephemeral per-request array. A reloaded session rebuilt model context *without* the attachment, silently differing from the conversation that actually happened. ADR 0014 persists bodies as content-addressed blobs and makes `getSessionMessagesCompat` the single place the context block is materialized. Unit tests pin byte-identical replay, exactly-once emission, fork carry-over, and GC — but nothing exercises the real DB file, a real reload, or the webview's restored view, which is precisely the path that used to break silently.
+
+**Setup:** a workspace with a text file of a few KB. Tail the *DeepSeek Moby* output channel.
+
+**Steps:**
+1. New chat. Attach the text file, send a message that requires reading it (e.g. *"summarize the attached file"*). Model answers using the content — confirms the block still reaches the model now that the live injection is gone.
+2. *Moby: Export Turn as JSON (Debug)* → the user message's context contains **exactly one** `--- Attached Files ---` block. **Fail (the double-inject regression):** two blocks.
+3. Switch to another session, then restore this one from the history sidebar. Ask a follow-up that depends on the attachment (*"what was the third bullet in that file?"*). **Pass:** the model still knows. **Fail (old bug):** it has no idea what file you mean.
+4. Fork the session at that turn → same follow-up → still answered.
+5. Attach a file larger than 256KB. **Pass:** the model sees the head of the file plus a `[... truncated: N of M bytes omitted ...]` marker, and says so if asked. Logs show `[Attachments] Truncated "<name>" for persistence`.
+6. Attach the *same* file twice in one session → only one row lands in `attachment_blobs` (content-addressed dedupe). Check via the DB or by confirming no size jump.
+7. Delete the session from the history modal → its blobs are collected (`[AttachmentBlobStore] Collected N orphaned blob(s)` in the log). Delete a *forked* session while the parent survives → blobs are **kept**, and the parent's attachment still replays.
+
+**Pass criteria:** the model's view of an attachment is identical live, after reload, and after fork; the block appears exactly once; oversized bodies truncate visibly; blob lifetime follows event lifetime in both directions.
+
+**Note on the migration:** this run upgrades the database v1 → v2. Additive-only, but one-way — a DB touched by this build then opened by an older build loses blob rows.
+
+---
+
 ## Removing items from this backlog
 
 When a scenario has been verified in a dev host:

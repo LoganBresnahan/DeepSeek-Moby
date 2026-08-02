@@ -28,7 +28,7 @@ describe('runMigrations', () => {
   // Table creation
   // ==========================================================================
 
-  it('creates all five tables on fresh database', () => {
+  it('creates all tables on fresh database', () => {
     runMigrations(db);
 
     const tables = db.prepare(
@@ -41,6 +41,26 @@ describe('runMigrations', () => {
     expect(tableNames).toContain('event_sessions');
     expect(tableNames).toContain('snapshots');
     expect(tableNames).toContain('command_rules');
+    // ADR 0014 (version 2)
+    expect(tableNames).toContain('attachment_blobs');
+    expect(tableNames).toContain('event_blobs');
+  });
+
+  // ADR 0014: the schema's first versioned upgrade. A v1 database must gain
+  // the blob tables without losing its existing rows.
+  it('upgrades a version-1 database in place, preserving data', () => {
+    runMigrations(db);
+    db.pragma('user_version = 1');
+    db.exec('DROP TABLE event_blobs');
+    db.exec('DROP TABLE attachment_blobs');
+    db.prepare('INSERT INTO sessions (id, title, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
+      .run('pre-existing', 'Old', 'test', 1000, 1000);
+
+    runMigrations(db);
+
+    expect(db.pragmaGet('user_version')).toBe(2);
+    expect(db.prepare('SELECT id FROM sessions WHERE id = ?').get('pre-existing')).toBeDefined();
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE name = 'attachment_blobs'").get()).toBeDefined();
   });
 
   it('creates indexes for all tables', () => {
@@ -57,11 +77,11 @@ describe('runMigrations', () => {
     expect(indexNames).toContain('idx_command_rules_prefix_type');
   });
 
-  it('stamps user_version to latest (1)', () => {
+  it('stamps user_version to latest (2)', () => {
     runMigrations(db);
 
     const version = db.pragmaGet('user_version');
-    expect(version).toBe(1);
+    expect(version).toBe(2);
   });
 
   it('starts from version 0 on fresh database', () => {
@@ -74,7 +94,7 @@ describe('runMigrations', () => {
     runMigrations(db);
 
     const version = db.pragmaGet('user_version');
-    expect(version).toBe(1);
+    expect(version).toBe(2);
 
     const tables = db.prepare(
       "SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'"
