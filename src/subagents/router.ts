@@ -15,7 +15,20 @@ import type { Message } from '../deepseekClient';
 import { tracer } from '../tracing';
 import { logger } from '../utils/logger';
 import { getCapabilities } from '../models/registry';
-import type { RouteResult, SubagentRole, SubagentTaskContext } from './types';
+import type { RouteResult, SubagentMessageContent, SubagentRole, SubagentTaskContext } from './types';
+
+/**
+ * Size of a sub call's input for tracing. A content array has no `.length`
+ * that means anything, so measure the parts: text by its own length, an image
+ * by its encoded URL (a data URI's length is a fair proxy for payload size).
+ */
+function measureContentBytes(content: SubagentMessageContent): number {
+  if (typeof content === 'string') return content.length;
+  return content.reduce(
+    (sum, part) => sum + (part.type === 'text' ? part.text.length : part.image_url.url.length),
+    0
+  );
+}
 
 export class SubagentRouter {
   private readonly clients = new Map<string, DeepSeekClient>();
@@ -52,13 +65,17 @@ export class SubagentRouter {
       data: { role: role.name, modelId }
     });
     const startedAt = performance.now();
-    const userMessage = role.buildUserMessage(input);
+    // Multimodal roles (image-describe) supply a content array; text roles
+    // keep returning a plain string.
+    const userContent: SubagentMessageContent =
+      role.buildUserContent?.(input) ?? role.buildUserMessage(input);
+    const inputBytes = measureContentBytes(userContent);
     const systemPrompt = role.buildSystemPrompt(taskContext);
 
     let rawContent = '';
     try {
       const client = this.getClient(modelId);
-      const messages: Message[] = [{ role: 'user', content: userMessage }];
+      const messages: Message[] = [{ role: 'user', content: userContent }];
       // Force non-thinking on every sub call — digest roles never need
       // reasoning, and thinking-mode reasoning was the dominant latency
       // cost in Phase 1+polish observations (4-7s per call). For models
@@ -76,7 +93,7 @@ export class SubagentRouter {
         data: {
           role: role.name,
           modelId,
-          inputBytes: userMessage.length,
+          inputBytes,
           validationResult: 'sub-error',
           durationMs: Math.round(performance.now() - startedAt)
         }
@@ -96,7 +113,7 @@ export class SubagentRouter {
         data: {
           role: role.name,
           modelId,
-          inputBytes: userMessage.length,
+          inputBytes,
           outputBytes: rawContent.length,
           validationResult: 'parse-fail',
           preview: rawContent.slice(0, 200),
@@ -114,7 +131,7 @@ export class SubagentRouter {
         data: {
           role: role.name,
           modelId,
-          inputBytes: userMessage.length,
+          inputBytes,
           outputBytes: rawContent.length,
           validationResult: 'schema-fail',
           preview: rawContent.slice(0, 200),
@@ -130,7 +147,7 @@ export class SubagentRouter {
       data: {
         role: role.name,
         modelId,
-        inputBytes: userMessage.length,
+        inputBytes,
         outputBytes: rawContent.length,
         digestBytes: digest.length,
         validationResult: 'ok',

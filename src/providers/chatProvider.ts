@@ -41,7 +41,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
 
   // Message queuing during post-response summarization
   private _summarizing = false;
-  private _pendingMessages: Array<{ message: string; attachments?: Array<{ content: string; name: string; size: number }> }> = [];
+  private _pendingMessages: Array<{ message: string; attachments?: Array<{ content: string; name: string; size: number; type?: 'file' | 'image'; mimeType?: string }> }> = [];
   private _lastPendingDiffCount = 0;
   private webSearchManager: WebSearchManager;
   private fileContextManager: FileContextManager;
@@ -563,6 +563,11 @@ export class ChatProvider implements vscode.WebviewViewProvider {
           break;
         case 'loadHistory':
           await this.loadCurrentSessionHistory();
+          break;
+        case 'showError':
+          // Webview-side failures the user must see (e.g. an image too large
+          // to attach after downscaling) — the webview has no notification UI.
+          vscode.window.showErrorMessage(String(data.message ?? 'Unknown error'));
           break;
         case 'stopGeneration':
           // ADR 0008: await teardown so generationStopped fires only after the

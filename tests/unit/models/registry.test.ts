@@ -292,6 +292,25 @@ describe('model registry', () => {
         expect(result.ok).toBe(false);
         if (!result.ok) expect(result.error).toMatch(/tokenizer/);
       });
+
+      // image-describe Phase 1: the two axes a vision backend needs to declare.
+      it('accepts acceptsImages + subagentRoles for a vision backend', () => {
+        expect(validateCustomModelEntry({
+          ...validEntry,
+          acceptsImages: true,
+          subagentRoles: ['image-describe']
+        })).toEqual({ ok: true });
+      });
+
+      it('rejects non-boolean acceptsImages', () => {
+        const result = validateCustomModelEntry({ ...validEntry, acceptsImages: 'yes' });
+        expect(result.ok).toBe(false);
+        if (!result.ok) expect(result.error).toMatch(/acceptsImages/);
+      });
+
+      it('treats acceptsImages as optional', () => {
+        expect(validateCustomModelEntry(validEntry)).toEqual({ ok: true });
+      });
     });
 
     describe('registerCustomModels', () => {

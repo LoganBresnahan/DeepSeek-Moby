@@ -240,6 +240,35 @@ describe('ADR 0014 — attachment replay', () => {
     expect(block).not.toContain('RAW-IMAGE-BYTES');
   });
 
+  it('stores an image as decoded binary, exempt from the text cap', () => {
+    // 3 raw bytes, base64-encoded into a data URI.
+    const raw = Buffer.from([0x89, 0x50, 0x4e]);
+    const dataUri = `data:image/webp;base64,${raw.toString('base64')}`;
+    const [persisted] = prepareAttachmentsForPersistence(
+      [{ type: 'image', name: 'shot.webp', content: dataUri, mimeType: 'image/webp' }],
+      blobStore
+    );
+
+    expect(persisted.type).toBe('image');
+    expect(persisted.truncated).toBeUndefined();
+    // Decoded bytes, not the ~4/3-inflated data URI text.
+    expect(persisted.bytes).toBe(3);
+    expect(blobStore.get(persisted.blobId!)!.data).toEqual(raw);
+    expect(blobStore.get(persisted.blobId!)!.mime).toBe('image/webp');
+  });
+
+  it('does not truncate a large image the way it truncates large text', () => {
+    const raw = Buffer.alloc(MAX_PERSISTED_ATTACHMENT_BYTES + 10_000, 7);
+    const dataUri = `data:image/webp;base64,${raw.toString('base64')}`;
+    const [persisted] = prepareAttachmentsForPersistence(
+      [{ type: 'image', name: 'big.webp', content: dataUri, mimeType: 'image/webp' }],
+      blobStore
+    );
+
+    expect(persisted.truncated).toBeUndefined();
+    expect(blobStore.get(persisted.blobId!)!.data).toEqual(raw);
+  });
+
   it('emits nothing when every attachment is an image', () => {
     const block = formatAttachmentsForContext(
       [{ type: 'image' as const, name: 'a.png', blobId: 'x', bytes: 1 }],

@@ -806,7 +806,7 @@ export class RequestOrchestrator {
     message: string,
     currentSessionId: string | null,
     editorContextProvider: () => Promise<string>,
-    attachments?: Array<{ content: string; name: string; size: number }>,
+    attachments?: Array<{ content: string; name: string; size: number; type?: 'file' | 'image'; mimeType?: string }>,
     options?: { skipRecord?: boolean }
   ): Promise<{ sessionId: string | null }> {
     // Clear processed code blocks and pending diffs for new conversation turn

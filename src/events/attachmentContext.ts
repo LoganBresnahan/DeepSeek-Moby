@@ -34,6 +34,17 @@ export interface IncomingAttachment {
   filePath?: string;
 }
 
+/** Split a `data:<mime>;base64,<payload>` URI into its mime and raw bytes. */
+function decodeDataUri(uri: string): { mime: string; bytes: Buffer } | null {
+  const match = /^data:([^;,]+);base64,(.*)$/s.exec(uri);
+  if (!match) return null;
+  try {
+    return { mime: match[1], bytes: Buffer.from(match[2], 'base64') };
+  } catch {
+    return null;
+  }
+}
+
 function truncationMarker(originalBytes: number, keptBytes: number): string {
   return `\n\n[... truncated: ${originalBytes - keptBytes} of ${originalBytes} bytes omitted — attachment exceeded the ${MAX_PERSISTED_ATTACHMENT_BYTES} byte limit ...]`;
 }
@@ -56,6 +67,18 @@ export function prepareAttachmentsForPersistence(
       ...(incoming.filePath ? { filePath: incoming.filePath } : {}),
       ...(incoming.mimeType ? { mimeType: incoming.mimeType } : {})
     };
+
+    // Images arrive as data URIs. They store as decoded binary and are exempt
+    // from the text cap — truncating an image yields bytes that don't decode,
+    // where truncating text still reads.
+    if (type === 'image') {
+      const decoded = decodeDataUri(incoming.content ?? '');
+      if (decoded) {
+        const ref = blobStore.put(decoded.bytes, incoming.mimeType ?? decoded.mime);
+        return { ...base, mimeType: incoming.mimeType ?? decoded.mime, blobId: ref.blobId, bytes: ref.bytes };
+      }
+      logger.warn(`[Attachments] Image "${incoming.name}" is not a decodable data URI; storing verbatim`);
+    }
 
     const body = incoming.content ?? '';
     const originalBytes = Buffer.byteLength(body, 'utf8');

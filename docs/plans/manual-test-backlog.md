@@ -559,6 +559,26 @@ Not a pass/fail scenario yet — investigation only.
 
 ---
 
+## M35. Image attach — capture, downscale, chip (image-describe Phase 1) (P1)
+
+**Why this matters:** the file picker now accepts `.png/.jpg/.jpeg/.webp/.gif/.bmp`. The webview downscales to a 1024px longest edge, re-encodes to WebP q0.8, and enforces a 1.5MB cap *after* re-encoding (a clipped image decodes to garbage, so oversize is rejected rather than truncated). Unit tests mock the canvas — happy-dom has no real encoder — so the actual downscale, the WebP encode, and the thumbnail rendering have never run.
+
+**Interim behaviour, expected:** nothing routes the image to a model yet (that's phase 3). The image is stored and shown as a chip; the model is told nothing about it. Don't file that as a bug.
+
+**Steps:**
+1. Click attach → the picker offers image files alongside source files.
+2. Attach a large screenshot (>2MB, e.g. a full 4K capture). **Pass:** a chip appears within a beat showing a **thumbnail of the image**, its name, and a size in the tens-to-low-hundreds of KB — i.e. the downscale ran. **Fail:** multi-MB size, or a 📄 icon instead of a thumbnail.
+3. Attach a text file in the same batch → it still shows the 📄 icon and its own size. Both chips coexist.
+4. Remove the image chip via × → it disappears; the text chip is unaffected.
+5. Attach a `.gif` and a `.bmp` → both attach (canvas decodes them; they re-encode to WebP).
+6. Rename a non-image file to `.png` and attach it → a VS Code error notification reads *"Could not read … as an image"*, and **no chip is added**.
+7. Attach an enormous image (e.g. a 20000×20000 PNG, if you can produce one) → either it attaches downscaled, or a *"too large to attach"* notification appears. Never a silent no-op.
+8. Send a message with an image attached → the turn sends normally and the model responds to the text. Reload the session → the turn restores. Check *Moby: Export Turn as JSON*: the persisted attachment carries a `blobId` and a small `bytes` value, **not** a base64 data URI.
+
+**Pass criteria:** images downscale visibly, chips render thumbnails, non-images are rejected loudly, and no data URI ever lands in the event JSON.
+
+---
+
 ## Removing items from this backlog
 
 When a scenario has been verified in a dev host:

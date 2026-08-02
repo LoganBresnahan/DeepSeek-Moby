@@ -1,6 +1,6 @@
 # `image-describe` subagent — vision via digest routing
 
-**Status:** Phase 0 shipped 2026-08-02 (ADR 0014). Phases 1–6 not started.
+**Status:** Phases 0–1 shipped 2026-08-02 (ADR 0014 + foundations). Phases 2–6 not started.
 **Date:** 2026-07-04 · **Revised:** 2026-08-02 (decisions 4–6: thumbnail sizing, blob storage, attachment replay — adds Phase 0)
 **Parent:** [subagents.md § Phase 2](subagents.md) — this doc is the concrete, decision-locked implementation plan for that phase. Where the two disagree, this doc wins (it reflects verified code state + explicit product decisions made 2026-07-04).
 
@@ -222,11 +222,11 @@ For text attachments this is survivable-but-wrong: the file is still on disk, so
   - [x] `text-attachment-size-cap` (low/mechanical) — cap persisted text bodies, truncate with an explicit marker, route through the blob store.
   - [x] `adr-attachment-persistence` (low/mechanical) — ADR 0014: blobs-beside-events amends ADR 0003's sole-source-of-truth contract; records the sidecar-files and inline-base64 alternatives and why both lose.
   - [x] `replay-equivalence-tests` (medium/moderate) — the gate for this phase: assert live-built context and reload-built context are **byte-identical** for a turn with text attachments, that the block appears **exactly once** (pins the deleted live injection — the double-injection regression is the likeliest future re-break), and that the block survives a fork. Deliberately written before images exist so it keeps holding once they do.
-- [ ] **1. Foundations** *(opus)* — all zero-dependency; land as one batch so everything later compiles against a stable substrate. `/shipshape` at boundary; quick `/verify` eyeball of the thumbnail chip.
-  - [ ] `router-build-user-content-hook` (low/mechanical) — optional `buildUserContent?` on `SubagentRole`, nullish-coalescing dispatch in `route()`, string-vs-array guard at the four `inputBytes` trace sites. Transport already typed `MessageContent` — no widening needed.
-  - [ ] `attachment-type-threading` (low/mechanical) — optional `type`/`mimeType` on the attachment shape at [chatProvider.ts:44](../../src/providers/chatProvider.ts#L44), [requestOrchestrator.ts:809](../../src/providers/requestOrchestrator.ts#L809), [media/chat.ts:340](../../media/chat.ts#L340).
-  - [ ] `webview-image-capture` (medium/moderate) — accept-list + FileReader branch + img-chip in `InputAreaShadowActor`; async canvas downscale with hard byte cap (cap after re-encode, reject before attach).
-  - [ ] `custom-models-schema-fix` (low/mechanical) — `subagentRoles` + `acceptsImages` in the package.json customModels schema; mirror the existing one-line optional-axis checks in `validateCustomModelEntry`; explicit `moby.subagents.image-describe` property.
+- [x] **1. Foundations** *(opus)* — **SHIPPED 2026-08-02.** All zero-dependency; landed as one batch. `/verify` eyeball of the image chip still owed.
+  - [x] `router-build-user-content-hook` (low/mechanical) — optional `buildUserContent?` on `SubagentRole`, nullish-coalescing dispatch in `route()`, string-vs-array guard at the four `inputBytes` trace sites. Transport already typed `MessageContent` — no widening needed.
+  - [x] `attachment-type-threading` (low/mechanical) — optional `type`/`mimeType` on the attachment shape at [chatProvider.ts:44](../../src/providers/chatProvider.ts#L44), [requestOrchestrator.ts:809](../../src/providers/requestOrchestrator.ts#L809), [media/chat.ts:340](../../media/chat.ts#L340).
+  - [x] `webview-image-capture` (medium/moderate) — accept-list + FileReader branch + img-chip in `InputAreaShadowActor`; async canvas downscale with hard byte cap (cap after re-encode, reject before attach).
+  - [x] `custom-models-schema-fix` (low/mechanical) — `subagentRoles` + `acceptsImages` in the package.json customModels schema; mirror the existing one-line optional-axis checks in `validateCustomModelEntry`; explicit `moby.subagents.image-describe` property.
 - [ ] **2. Role module + settings filter** *(opus)* — `/shipshape` at boundary.
   - [ ] `image-describe-role-module` (medium/moderate) — clone `webSearchDigest.ts` shape; VL prompt contract + lenient parse (fence-strip, first-`{…}`, garbage → null).
   - [ ] `accepts-images-capability-filter` (low/mechanical) — filter the image-describe dropdown to `acceptsImages` models, extension-side from the registry.

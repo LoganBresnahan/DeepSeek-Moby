@@ -20,10 +20,26 @@ import { EventStateManager } from '../../state/EventStateManager';
 import { inputAreaShadowStyles } from './shadowStyles';
 
 export interface Attachment {
+  /** Text body, or a data URI for images. */
   content: string;
   name: string;
   size: number;
+  /** Absent means 'file' — the extension side defaults it. */
+  type?: 'file' | 'image';
+  mimeType?: string;
 }
+
+/**
+ * Longest edge of the copy sent to the vision subagent. Most VLM encoders
+ * downsample to 336–448px tiles, so this is near-lossless from a model's
+ * point of view while keeping the data URI small enough to post.
+ */
+const IMAGE_MAX_EDGE = 1024;
+
+/** Hard ceiling on an encoded image, enforced AFTER re-encode. */
+const IMAGE_MAX_BYTES = 1.5 * 1024 * 1024;
+
+const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'];
 
 export interface InputAreaState {
   value: string;
@@ -96,7 +112,7 @@ export class InputAreaShadowActor extends ShadowActor {
           <span class="file-chips-label">Context:</span>
           <div class="file-chips"></div>
         </div>
-        <input type="file" class="hidden-input" accept=".js,.ts,.jsx,.tsx,.py,.java,.go,.rs,.cpp,.c,.h,.cs,.rb,.php,.swift,.kt,.scala,.vue,.svelte,.json,.yaml,.yml,.toml,.xml,.env,.ini,.conf,.md,.txt,.rst,.log,.html,.css,.scss,.less,.sh,.bash,.zsh,.sql,.graphql,.proto" multiple>
+        <input type="file" class="hidden-input" accept=".js,.ts,.jsx,.tsx,.py,.java,.go,.rs,.cpp,.c,.h,.cs,.rb,.php,.swift,.kt,.scala,.vue,.svelte,.json,.yaml,.yml,.toml,.xml,.env,.ini,.conf,.md,.txt,.rst,.log,.html,.css,.scss,.less,.sh,.bash,.zsh,.sql,.graphql,.proto,.png,.jpg,.jpeg,.webp,.gif,.bmp" multiple>
       </div>
     `);
   }
@@ -161,18 +177,97 @@ export class InputAreaShadowActor extends ShadowActor {
     const files = Array.from(input.files || []);
 
     files.forEach(file => {
+      if (this.isImage(file)) {
+        void this.attachImage(file);
+        return;
+      }
       const reader = new FileReader();
       reader.onload = (event) => {
         const content = event.target?.result as string;
-        const attachment: Attachment = { content, name: file.name, size: file.size };
-        this._attachments.push(attachment);
-        this.renderAttachments();
-        this.publish({ 'input.attachments': [...this._attachments] });
+        const attachment: Attachment = { content, name: file.name, size: file.size, type: 'file' };
+        this.addAttachment(attachment);
       };
       reader.readAsText(file);
     });
 
     input.value = ''; // Reset for next selection
+  }
+
+  private isImage(file: File): boolean {
+    if (file.type.startsWith('image/')) return true;
+    const lower = file.name.toLowerCase();
+    return IMAGE_EXTENSIONS.some(ext => lower.endsWith(ext));
+  }
+
+  /**
+   * Downscale an image to {@link IMAGE_MAX_EDGE} and attach it as a data URI.
+   * The cap is checked after re-encoding and the attachment is rejected rather
+   * than truncated — a clipped image decodes to garbage, unlike clipped text.
+   */
+  private async attachImage(file: File): Promise<void> {
+    try {
+      const { dataUrl, bytes } = await this.downscaleImage(file);
+      if (bytes > IMAGE_MAX_BYTES) {
+        this.reportAttachmentError(
+          `"${file.name}" is too large to attach (${(bytes / 1024 / 1024).toFixed(1)}MB after downscaling).`
+        );
+        return;
+      }
+      this.addAttachment({
+        content: dataUrl,
+        name: file.name,
+        size: bytes,
+        type: 'image',
+        mimeType: 'image/webp'
+      });
+    } catch (err) {
+      this.reportAttachmentError(
+        `Could not read "${file.name}" as an image: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
+
+  private downscaleImage(file: File): Promise<{ dataUrl: string; bytes: number }> {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        try {
+          const scale = Math.min(1, IMAGE_MAX_EDGE / Math.max(img.width, img.height));
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.max(1, Math.round(img.width * scale));
+          canvas.height = Math.max(1, Math.round(img.height * scale));
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            reject(new Error('canvas 2d context unavailable'));
+            return;
+          }
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          const dataUrl = canvas.toDataURL('image/webp', 0.8);
+          // Data URI length overstates payload by ~4/3; report decoded bytes.
+          const bytes = Math.round((dataUrl.length - dataUrl.indexOf(',') - 1) * 0.75);
+          resolve({ dataUrl, bytes });
+        } catch (err) {
+          reject(err instanceof Error ? err : new Error(String(err)));
+        }
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        reject(new Error('not a decodable image'));
+      };
+      img.src = url;
+    });
+  }
+
+  private addAttachment(attachment: Attachment): void {
+    this._attachments.push(attachment);
+    this.renderAttachments();
+    this.publish({ 'input.attachments': [...this._attachments] });
+  }
+
+  private reportAttachmentError(message: string): void {
+    this._vscode?.postMessage({ type: 'showError', message });
   }
 
   // ============================================
@@ -355,9 +450,13 @@ export class InputAreaShadowActor extends ShadowActor {
 
     container.innerHTML = this._attachments.map((att, idx) => {
       const sizeKB = (att.size / 1024).toFixed(1);
+      // Images show a thumbnail of themselves; the data URI is already in hand.
+      const icon = att.type === 'image'
+        ? `<img class="thumb" src="${this.escapeHtml(att.content)}" alt="">`
+        : '<span class="icon">📄</span>';
       return `
         <div class="attachment" data-index="${idx}">
-          <span class="icon">📄</span>
+          ${icon}
           <span class="name" title="${this.escapeHtml(att.name)}">${this.escapeHtml(att.name)}</span>
           <span class="size">${sizeKB}KB</span>
           <button class="remove" title="Remove">×</button>

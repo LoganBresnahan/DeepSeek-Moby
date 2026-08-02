@@ -105,6 +105,14 @@ textarea::placeholder {
   flex-shrink: 0;
 }
 
+.attachment .thumb {
+  width: 20px;
+  height: 20px;
+  object-fit: cover;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
 .attachment .name {
   font-size: 11px;
   overflow: hidden;
