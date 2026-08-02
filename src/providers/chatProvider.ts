@@ -843,6 +843,16 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         case 'getFileContent':
           await this.fileContextManager.sendFileContent(data.filePath);
           break;
+        case 'setSubagentModel': {
+          // `moby.subagents` is a nested object, so this rewrites one key
+          // rather than going through the flat-setting path.
+          const config = vscode.workspace.getConfiguration('moby');
+          const subs = { ...(config.get<Record<string, string>>('subagents') ?? {}) };
+          subs[data.role as string] = data.modelId as string;
+          await config.update('subagents', subs, vscode.ConfigurationTarget.Global);
+          logger.settingsChanged(`subagents.${data.role}`, data.modelId);
+          break;
+        }
         case 'requestDroppedFiles':
           await this.handleDroppedUris((data.uris as string[]) ?? []);
           break;
@@ -1257,6 +1267,13 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  /** Current `moby.subagents.<role>` selection; '' when off or unset. */
+  private getSubagentModelId(role: string): string {
+    const subs = vscode.workspace.getConfiguration('moby').get<Record<string, string>>('subagents') ?? {};
+    const raw = subs[role];
+    return !raw || raw === 'off' ? '' : raw;
+  }
+
   private async sendCurrentSettings() {
     const snapshot = this.settingsManager.getCurrentSettings();
     const wsState = await this.webSearchManager.getSettings();
@@ -1271,6 +1288,9 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         ...snapshot,
         apiKeyConfigured,
         systemPrompt: this.savedPromptManager.getActiveContent(),
+        // Current image-describe subagent selection ('' = off) for the
+        // settings-popup picker.
+        imageDescribeModelId: this.getSubagentModelId('image-describe'),
         webSearch: {
           searchDepth: wsState.settings.searchDepth,
           creditsPerPrompt: wsState.settings.creditsPerPrompt,

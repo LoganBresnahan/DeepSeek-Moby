@@ -607,7 +607,13 @@ Not a pass/fail scenario yet — investigation only.
 
 **Why this matters:** the whole point of the feature. Everything up to now stored and displayed images; this is where an attached image finally reaches the model — as a *text digest* produced by a separate vision model, since DeepSeek's API is text-only. Two things no test can check: whether a real VL backend honours `jsonMode` (the plan's open empirical question), and whether the digests are actually *good enough* to answer questions from.
 
-**Setup:** add a vision-capable custom model in `moby.customModels` — must declare `"acceptsImages": true` and `"subagentRoles": ["image-describe"]`. Worked example is SiliconFlow `deepseek-ai/deepseek-vl2`. Then set `"moby.subagents": { "image-describe": "<that model id>" }`.
+**Setup:** add a vision-capable custom model in `moby.customModels` — must declare `"acceptsImages": true` and `"subagentRoles": ["image-describe"]`. Worked example is SiliconFlow `deepseek-ai/deepseek-vl2`. Then pick it in **Settings → Image Description (Vision)** (or set `"moby.subagents": { "image-describe": "<id>" }` by hand).
+
+**S0. The picker.**
+1. Before adding any vision model, open the settings popup → the Image Description section reads *"No vision-capable models registered"* with the required JSON keys. No empty dropdown.
+2. Add the vision model to `moby.customModels`, reopen → it appears in the dropdown. Text-only models (Chat, Reasoner, a custom text model) must **not** appear.
+3. Select it → `moby.subagents.image-describe` updates in settings.json. Reopen the popup → the selection persisted.
+4. Select **Off** → the setting becomes `"off"` (not empty), and attaching an image falls back to the S1 placeholder.
 
 **S1. No backend configured → explicit placeholder.**
 1. Leave `moby.subagents.image-describe` unset. Attach a screenshot, ask *"what does this show?"*

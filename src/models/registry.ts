@@ -293,6 +293,9 @@ export interface RegisteredModelInfo {
    *  the model never emits. The toolbar uses this to hide Manual from the
    *  edit-mode cycle. Mirrors `supportsManualMode(id)`. */
   supportsManualMode: boolean;
+  /** Model accepts image content. Drives the image-describe subagent picker,
+   *  which lists only vision-capable models. */
+  acceptsImages?: boolean;
 }
 
 /**
@@ -311,6 +314,7 @@ export function getAllRegisteredModels(): RegisteredModelInfo[] {
       maxTokens: caps.maxOutputTokensCap ?? caps.maxOutputTokens,
       isCustom: false,
       supportsManualMode: caps.toolCalling !== 'native',
+      ...(caps.acceptsImages !== undefined && { acceptsImages: caps.acceptsImages }),
       ...(caps.reasoningEffort !== undefined && { reasoningEffortDefault: caps.reasoningEffort }),
     });
   }
@@ -322,6 +326,7 @@ export function getAllRegisteredModels(): RegisteredModelInfo[] {
       maxTokens: caps.maxOutputTokensCap ?? caps.maxOutputTokens,
       isCustom: true,
       supportsManualMode: caps.toolCalling !== 'native',
+      ...(caps.acceptsImages !== undefined && { acceptsImages: caps.acceptsImages }),
       ...(caps.reasoningEffort !== undefined && { reasoningEffortDefault: caps.reasoningEffort }),
     });
   }
