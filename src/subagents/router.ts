@@ -89,7 +89,8 @@ export class SubagentRouter {
     const caps = getCapabilities(modelId);
     if (!caps.subagentRoles?.includes(role.name)) {
       logger.warn(
-        `[Subagent] Model "${modelId}" is not declared for role "${role.name}". Falling back to raw input.`
+        `[Subagent] Model "${modelId}" is not declared for role "${role.name}". ` +
+        `Add "subagentRoles": ["${role.name}"] to its moby.customModels entry. Falling back to raw input.`
       );
       return { routed: false, reason: 'no-model' };
     }

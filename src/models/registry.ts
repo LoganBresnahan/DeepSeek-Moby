@@ -296,6 +296,11 @@ export interface RegisteredModelInfo {
   /** Model accepts image content. Drives the image-describe subagent picker,
    *  which lists only vision-capable models. */
   acceptsImages?: boolean;
+  /** Roles this model is declared willing to serve. The picker filters on this
+   *  as well as `acceptsImages`, because the router requires both — offering a
+   *  model that fails one gate surfaces as a placeholder in chat, far from the
+   *  setting that caused it. */
+  subagentRoles?: string[];
 }
 
 /**
@@ -315,6 +320,7 @@ export function getAllRegisteredModels(): RegisteredModelInfo[] {
       isCustom: false,
       supportsManualMode: caps.toolCalling !== 'native',
       ...(caps.acceptsImages !== undefined && { acceptsImages: caps.acceptsImages }),
+      ...(caps.subagentRoles !== undefined && { subagentRoles: caps.subagentRoles }),
       ...(caps.reasoningEffort !== undefined && { reasoningEffortDefault: caps.reasoningEffort }),
     });
   }
@@ -327,6 +333,7 @@ export function getAllRegisteredModels(): RegisteredModelInfo[] {
       isCustom: true,
       supportsManualMode: caps.toolCalling !== 'native',
       ...(caps.acceptsImages !== undefined && { acceptsImages: caps.acceptsImages }),
+      ...(caps.subagentRoles !== undefined && { subagentRoles: caps.subagentRoles }),
       ...(caps.reasoningEffort !== undefined && { reasoningEffortDefault: caps.reasoningEffort }),
     });
   }

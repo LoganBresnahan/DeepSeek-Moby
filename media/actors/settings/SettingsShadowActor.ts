@@ -91,6 +91,10 @@ export class SettingsShadowActor extends PopupShadowActor {
   // from the same `model.list` channel, filtered on the `acceptsImages`
   // capability the registry reports.
   private _visionModels: Array<{ id: string; name: string }> = [];
+  /** Vision-capable but NOT declared for the image-describe role. The router
+   *  would refuse these, so they are listed as a fixable diagnosis rather than
+   *  offered as choices. */
+  private _visionModelsMissingRole: Array<{ id: string; name: string }> = [];
   /** Current `moby.subagents.image-describe` value; '' means off. */
   private _imageDescribeModelId = '';
 
@@ -115,8 +119,16 @@ export class SettingsShadowActor extends PopupShadowActor {
           this._customModels = all
             .filter(m => m.isCustom)
             .map(m => ({ id: m.id, name: m.name, hasApiKey: m.hasApiKey }));
-          this._visionModels = (value as Array<{ id: string; name: string; acceptsImages?: boolean }>)
-            .filter(m => m.acceptsImages)
+          // The router requires BOTH gates, so the picker must too — offering a
+          // model that fails one shows up as a placeholder mid-conversation,
+          // far from the setting that caused it.
+          const vision = (value as Array<{ id: string; name: string; acceptsImages?: boolean; subagentRoles?: string[] }>)
+            .filter(m => m.acceptsImages);
+          this._visionModels = vision
+            .filter(m => m.subagentRoles?.includes('image-describe'))
+            .map(m => ({ id: m.id, name: m.name }));
+          this._visionModelsMissingRole = vision
+            .filter(m => !m.subagentRoles?.includes('image-describe'))
             .map(m => ({ id: m.id, name: m.name }));
           this.updateBodyContent(this.renderPopupContent());
         }
@@ -237,8 +249,14 @@ export class SettingsShadowActor extends PopupShadowActor {
       .map(m => `<option value="${this.escapeHtml(m.id)}"${m.id === selectedId ? ' selected' : ''}>${this.escapeHtml(m.name)}</option>`)
       .join('');
 
+    const missingRole = this._visionModelsMissingRole ?? [];
     const body = visionModels.length === 0
-      ? `<div class="settings-hint">No vision-capable models registered. Add one to <code>moby.customModels</code> with <code>"acceptsImages": true</code> and <code>"subagentRoles": ["image-describe"]</code>.</div>`
+      ? (missingRole.length > 0
+          // Distinguish "you have no vision model" from "you have one but it
+          // is missing one line" — the second is a fixable diagnosis, and
+          // saying "none registered" when one is right there reads as a bug.
+          ? `<div class="settings-hint">${missingRole.map(m => this.escapeHtml(m.name)).join(', ')} accept${missingRole.length === 1 ? 's' : ''} images but ${missingRole.length === 1 ? 'does' : 'do'} not declare the role. Add <code>"subagentRoles": ["image-describe"]</code> to ${missingRole.length === 1 ? 'its' : 'their'} <code>moby.customModels</code> entry.</div>`
+          : `<div class="settings-hint">No vision-capable models registered. Add one to <code>moby.customModels</code> with <code>"acceptsImages": true</code> and <code>"subagentRoles": ["image-describe"]</code>.</div>`)
       : `<select class="settings-select" data-id="imageDescribeModel">
            <option value=""${selectedId ? '' : ' selected'}>Off — images are not described</option>
            ${options}

@@ -1,10 +1,12 @@
 /**
  * Settings popup — image-describe subagent picker.
  *
- * The list must contain ONLY models declaring `acceptsImages`. Offering a
- * text-only model here would let a user configure a combination the router
- * then refuses at route time — the failure would surface as a placeholder in
- * chat, far from the setting that caused it.
+ * The list must contain only models that pass BOTH router gates —
+ * `acceptsImages` AND `subagentRoles: ["image-describe"]`. Offering a model
+ * that fails either one lets a user configure a combination the router then
+ * refuses at route time, and the failure surfaces as a placeholder in chat,
+ * far from the setting that caused it. That happened for real in dev-host
+ * testing on 2026-08-02 with a model that had the capability but not the role.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -15,8 +17,8 @@ import { ShadowActor } from '../../../media/state/ShadowActor';
 const MODELS = [
   { id: 'deepseek-chat', name: 'Chat (V3)', isCustom: false },
   { id: 'deepseek-reasoner', name: 'Reasoner (R1)', isCustom: false },
-  { id: 'vl2', name: 'DeepSeek VL2', isCustom: true, acceptsImages: true },
-  { id: 'gpt-vision', name: 'GPT Vision', isCustom: true, acceptsImages: true },
+  { id: 'vl2', name: 'DeepSeek VL2', isCustom: true, acceptsImages: true, subagentRoles: ['image-describe'] },
+  { id: 'gpt-vision', name: 'GPT Vision', isCustom: true, acceptsImages: true, subagentRoles: ['image-describe'] },
   { id: 'qwen-text', name: 'Qwen (text only)', isCustom: true, acceptsImages: false }
 ];
 
@@ -78,6 +80,46 @@ describe('SettingsShadowActor — image-describe picker', () => {
     expect(select()).toBeNull();
     expect(html()).toContain('No vision-capable models registered');
     expect(html()).toContain('acceptsImages');
+  });
+
+  // Found in dev-host testing 2026-08-02: a model with acceptsImages but no
+  // role declaration was offered by the picker and then refused by the router,
+  // surfacing as a placeholder mid-conversation instead of at the setting.
+  it('does not offer a vision model that lacks the image-describe role', () => {
+    publishModels([
+      { id: 'kimi-k3', name: 'Kimi (Moonshot)', isCustom: true, acceptsImages: true }
+    ]);
+
+    expect(select()).toBeNull();
+  });
+
+  it('names the model and the missing line rather than claiming none exist', () => {
+    publishModels([
+      { id: 'kimi-k3', name: 'Kimi (Moonshot)', isCustom: true, acceptsImages: true }
+    ]);
+
+    expect(html()).toContain('Kimi (Moonshot)');
+    expect(html()).toContain('subagentRoles');
+    expect(html()).not.toContain('No vision-capable models registered');
+  });
+
+  it('offers the eligible ones and diagnoses the rest', () => {
+    publishModels([
+      { id: 'vl2', name: 'DeepSeek VL2', isCustom: true, acceptsImages: true, subagentRoles: ['image-describe'] },
+      { id: 'kimi-k3', name: 'Kimi (Moonshot)', isCustom: true, acceptsImages: true }
+    ]);
+
+    const options = Array.from(select()!.querySelectorAll('option')).map(o => o.getAttribute('value'));
+    expect(options).toContain('vl2');
+    expect(options).not.toContain('kimi-k3');
+  });
+
+  it('ignores a model declaring an unrelated subagent role', () => {
+    publishModels([
+      { id: 'x', name: 'X', isCustom: true, acceptsImages: true, subagentRoles: ['web-search-digest'] }
+    ]);
+
+    expect(select()).toBeNull();
   });
 
   it('preselects the configured model', () => {
