@@ -5,9 +5,15 @@
 
 export interface HttpClientConfig {
   baseURL: string;
-  timeout?: number;
+  /** Milliseconds before a request aborts. Pass a function to resolve it per
+   *  request — clients are cached per endpoint, so a fixed number would pin
+   *  whatever the setting was when the client was first built. */
+  timeout?: number | (() => number);
   headers?: Record<string, string>;
 }
+
+/** Fallback when no timeout is configured. */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 60000;
 
 export interface RequestConfig {
   headers?: Record<string, string>;
@@ -33,12 +39,16 @@ export interface HttpError extends Error {
 
 export class HttpClient {
   private baseURL: string;
-  private timeout: number;
+  private resolveTimeout: () => number;
   private defaultHeaders: Record<string, string>;
 
   constructor(config: HttpClientConfig) {
     this.baseURL = config.baseURL.replace(/\/$/, ''); // Remove trailing slash
-    this.timeout = config.timeout ?? 60000;
+    const t = config.timeout;
+    this.resolveTimeout =
+      typeof t === 'function' ? t :
+      typeof t === 'number' ? () => t :
+      () => DEFAULT_REQUEST_TIMEOUT_MS;
     this.defaultHeaders = config.headers ?? {};
   }
 
@@ -64,7 +74,7 @@ export class HttpClient {
 
     // Set up timeout via AbortController
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+    const timeoutId = setTimeout(() => controller.abort(), this.resolveTimeout());
 
     // Use provided signal or our timeout signal
     const signal = config?.signal ?? controller.signal;

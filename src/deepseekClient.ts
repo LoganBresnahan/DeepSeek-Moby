@@ -1,11 +1,22 @@
 import type * as vscode from 'vscode';
-import { HttpClient, HttpError, createStreamReader } from './utils/httpClient';
+import { HttpClient, HttpError, createStreamReader, DEFAULT_REQUEST_TIMEOUT_MS } from './utils/httpClient';
 import { ConfigManager } from './utils/config';
 import { logger } from './utils/logger';
 import { tracer } from './tracing';
 import { TokenCounter, EstimationTokenCounter, DynamicTokenCounter, countRequestTokens } from './services/tokenCounter';
 import { ContextBuilder, ContextResult, SnapshotSummary } from './context/contextBuilder';
 import { getCapabilities, DEFAULT_MODEL_ID, isReasonerModel as isReasonerModelFromRegistry } from './models/registry';
+
+/**
+ * Does any message carry an `image_url` content part? Used to exclude
+ * image-bearing requests from token calibration — see `crossValidateTokens`.
+ */
+export function hasImageContent(messages: Array<Record<string, unknown>>): boolean {
+  return messages.some(msg =>
+    Array.isArray(msg.content) &&
+    (msg.content as Array<{ type?: unknown }>).some(part => part?.type === 'image_url')
+  );
+}
 
 export type MessageContent = string | Array<{
   type: 'text';
@@ -149,13 +160,27 @@ export class DeepSeekClient {
     this.contextBuilder = new ContextBuilder(this.tokenCounter);
   }
 
+  /**
+   * Request timeout in ms. Clamped to a sane floor because a too-small value
+   * makes every request fail in a way that looks like a network problem —
+   * reasoning models routinely need tens of seconds before the first byte.
+   */
+  private readRequestTimeoutMs(): number {
+    const raw = this.config.get<number>('requestTimeoutMs');
+    if (typeof raw !== 'number' || !Number.isFinite(raw)) return DEFAULT_REQUEST_TIMEOUT_MS;
+    return Math.max(5000, Math.floor(raw));
+  }
+
   /** Get (or lazily create) the HttpClient for a given base URL. */
   private getHttpClientFor(baseURL: string): HttpClient {
     let client = this.httpClients.get(baseURL);
     if (!client) {
       client = new HttpClient({
         baseURL,
-        timeout: 60000,
+        // Resolved per request, not pinned here — clients are cached per
+        // endpoint, so a fixed value would freeze whatever the setting was
+        // when this endpoint was first used.
+        timeout: () => this.readRequestTimeoutMs(),
         headers: { 'Content-Type': 'application/json' }
       });
       this.httpClients.set(baseURL, client);
@@ -913,6 +938,20 @@ export class DeepSeekClient {
       `delta=${delta > 0 ? '+' : ''}${delta} (${deltaPercent}%) ` +
       `[${this.tokenCounter.isExact ? 'WASM' : 'estimation'}]`
     );
+
+    // An image-bearing request is not a usable calibration sample. The two
+    // halves of this function disagree about images by three orders of
+    // magnitude: `countRequestTokens` scores an image as the literal
+    // '[image]' (~2 tokens) while the char count below would stringify the
+    // whole base64 data URI (~21,600 chars). Neither models what the API
+    // actually bills, so feeding either to the calibrator wrecks a counter
+    // that was otherwise tracking within a few percent — observed 2026-08-03,
+    // one image route drove ratio to 0.0499 (~10x off) and every later
+    // estimate from that client with it.
+    if (hasImageContent(requestMessages)) {
+      logger.debug('[TokenCounter] Skipped calibration — image content is not modellable by a text tokenizer');
+      return;
+    }
 
     // Calibrate the shared estimation counter with actual data. Do this for
     // every response — even when the active model uses WASM — so that any

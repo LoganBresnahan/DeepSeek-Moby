@@ -624,6 +624,12 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "**Edit safety — verify on stop**: At turn completion (Auto mode), don't accept a model-declared \"done\" when the last build verdict was a regression or when a file the turn just wrote reads back empty. Re-consults the ADR 0006 build verdict and adds a language-agnostic artifact-presence check, giving the model one bounded repair pass. Bounded by the per-file repair budget — no new loop. (ADR 0011)"
+        },
+        "moby.requestTimeoutMs": {
+          "type": "number",
+          "default": 60000,
+          "minimum": 5000,
+          "markdownDescription": "Milliseconds before an API request is aborted. Raise this for slow providers — reasoning models and vision backends routinely take 30s or more, and a timeout mid-turn loses the whole turn. Applies to every endpoint, including custom models."
         }
       }
     },
