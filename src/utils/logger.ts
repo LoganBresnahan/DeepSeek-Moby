@@ -240,9 +240,13 @@ class Logger {
   private iterationChunkCount: number = 0;
   private iterationTokenCount: number = 0;
 
-  public apiRequest(model: string, messageCount: number, hasImages: boolean = false): string {
-    const imageInfo = hasImages ? ' (with images)' : '';
-    this.log('INFO', `→ Request: ${messageCount} messages${imageInfo}`, `Model: ${model}`, 'api');
+  // `hasAttachments` is attachment METADATA on the turn, not wire content —
+  // the main model receives digests, never image bytes. The old label
+  // "(with images)" read as image_url blocks reaching a text-only model and
+  // sent a dev-host investigation chasing a wire leak that wasn't there.
+  public apiRequest(model: string, messageCount: number, hasAttachments: boolean = false): string {
+    const attachmentInfo = hasAttachments ? ' (attachments on this turn)' : '';
+    this.log('INFO', `→ Request: ${messageCount} messages${attachmentInfo}`, `Model: ${model}`, 'api');
 
     // Generate correlation ID for this request flow
     this.currentApiCorrelationId = tracer.startFlow();
@@ -256,7 +260,7 @@ class Logger {
     this.currentApiSpan = tracer.startSpan('api.request', 'chat', {
       correlationId: this.currentApiCorrelationId,
       executionMode: 'async',
-      data: { model, messageCount, hasImages }
+      data: { model, messageCount, hasAttachments }
     });
     return this.currentApiSpan;
   }

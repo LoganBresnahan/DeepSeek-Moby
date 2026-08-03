@@ -3,7 +3,7 @@ import { HttpClient, HttpError, createStreamReader, DEFAULT_REQUEST_TIMEOUT_MS }
 import { ConfigManager } from './utils/config';
 import { logger } from './utils/logger';
 import { tracer } from './tracing';
-import { TokenCounter, EstimationTokenCounter, DynamicTokenCounter, countRequestTokens } from './services/tokenCounter';
+import { TokenCounter, EstimationTokenCounter, DynamicTokenCounter, countRequestTokens, countRequestChars } from './services/tokenCounter';
 import { ContextBuilder, ContextResult, SnapshotSummary } from './context/contextBuilder';
 import { getCapabilities, DEFAULT_MODEL_ID, isReasonerModel as isReasonerModelFromRegistry } from './models/registry';
 
@@ -833,8 +833,12 @@ export class DeepSeekClient {
       });
 
       // Cross-validate our token count against the API's
-      // Note: systemPrompt is already unshifted into requestMessages above
-      this.crossValidateTokens(requestMessages, result.usage);
+      // Note: systemPrompt is already unshifted into requestMessages above.
+      // Pass the tools too — the probe path always did, and validating one
+      // side with tools and the other without made the same turn's two calls
+      // disagree by the entire tools-JSON share (the "probe over-counts"
+      // half of the token-over-count bug).
+      this.crossValidateTokens(requestMessages, result.usage, requestBody.tools);
 
       const iterDuration = Math.round(performance.now() - iterStartTime);
       // Single per-iteration summary line. Lets us answer "why did the loop end?"
@@ -975,10 +979,11 @@ export class DeepSeekClient {
     // every response — even when the active model uses WASM — so that any
     // future model switch to an estimation-only model starts with real
     // samples instead of the default ratio.
-    const charCount = requestMessages.reduce((sum, msg) => {
-      const text = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content);
-      return sum + text.length;
-    }, 0);
+    //
+    // The numerator must cover what `prompt_tokens` bills — messages AND
+    // tool-call metadata AND the tools JSON — or every tool-bearing sample
+    // inflates the ratio by the uncounted share. See countRequestChars.
+    const charCount = countRequestChars(requestMessages, tools);
     this.calibrateTokenEstimation(charCount, apiCount);
   }
 
