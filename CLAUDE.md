@@ -20,6 +20,18 @@ The development loop: orient → (design doc/ADR → design-plan) → implement 
 - `/verify` — runtime verification recipe: headless webview harness (~5s) or full extension in real VS Code via WSLg (~60s), no real API key needed. This is Moby's deploy-gate analog — `/shipshape` green does not discharge manual-test-backlog items; `/verify` (or hand-testing in the dev host) does.
 - `design-plan` workflow ([.claude/workflows/design-plan.js](.claude/workflows/design-plan.js)) — decompose an accepted design doc or ADR into an effort-ranked, dependency-ordered, model-batched build checklist before implementing. Skip it for small changes where the decomposition would just restate the doc. Write the output into the plan doc (phases + verification roster).
 
+## Release gate — must fix before the next release
+
+The next release ships the image-describe work, and these were all found while exercising it. **Do not cut a release with any of them open** (2026-08-03):
+
+1. **401 names DeepSeek on any provider** — a custom-model user is told to check the wrong key. Trivial fix, user-visible on the first failure.
+2. **Timeout inert on streams; `chat()` drops its abort signal** — a hung stream never self-terminates, and Stop can't cancel a non-streaming probe. Falsifies a stated consequence of [ADR 0008](docs/architecture/decisions/0008-request-scoped-stream-lifecycle-and-interrupt-teardown.md).
+3. **`thinkingMode: 'disabled'` no-op on custom models** — makes every subagent role on a custom backend pay a reasoning tax; a 30s blocking digest is the observed cost. At minimum document the "pick a fast non-reasoning model" guidance in the release notes if the capability work slips.
+4. **Registry booleans that need values** — `supportsTemperature`, `sendThinkingParam`, `reasoningTokens` are all too coarse for real custom models (Kimi trips all three). Ship-blocking only insofar as (3) is; otherwise a fast-follow.
+5. **Token over-count on image turns (~2.4×)** — metrics-only, but it feeds the context-budget guard, so an image-heavy session could drop history early. Verify before shipping image support.
+
+Detail for each is in the Active Bugs list below.
+
 ## Active Bugs
 
 - **401 error names DeepSeek regardless of the active provider (found 2026-08-02, dev-host).** [deepseekClient.ts:932](src/deepseekClient.ts#L932) returns a hardcoded *"Invalid API key. Please check your DeepSeek API key in settings."* on any 401. A user on a custom model — Kimi hitting `api.moonshot.ai`, Ollama, Groq — is told to check a key that has nothing to do with the failure. `handleError` has no model context; the fix is to pass the active model id (or its `apiEndpoint`) in and name the right provider, plus point at *Set Custom Model API Key* rather than the global key command.
