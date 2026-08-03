@@ -334,6 +334,10 @@
                 "type": "boolean",
                 "default": false,
                 "markdownDescription": "Model accepts image content (OpenAI `image_url` blocks). Required for the `image-describe` role — DeepSeek's first-party API is text-only, so point this at a vision-capable endpoint (e.g. SiliconFlow `deepseek-ai/deepseek-vl2`)."
+              },
+              "disableThinkingParam": {
+                "type": "object",
+                "markdownDescription": "The provider's own request params for turning reasoning OFF, merged into the request body when Moby needs a non-thinking call (all subagent roles — web-search digests, image descriptions). There is no portable OpenAI-compatible knob, so declare your provider's: e.g. `{\"enable_thinking\": false}` (Qwen-style) or `{\"reasoning_effort\": \"none\"}`. Omit if the provider has none — and prefer a fast non-reasoning model for subagent roles, since these calls block the turn."
               }
             },
             "additionalProperties": false

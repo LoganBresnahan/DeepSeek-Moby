@@ -560,6 +560,66 @@ describe('DeepSeekClient — non-streaming', () => {
     });
   });
 
+  describe('disableThinkingParam on custom models (release-gate bug #3)', () => {
+    // The router forces thinkingMode:'disabled' on every sub-call, but
+    // applyThinkingMode returned early on !sendThinkingParam — so the force
+    // never reached a custom backend and a Kimi image digest burned 30s of
+    // reasoning. A custom entry can now DECLARE its provider's off-knob.
+    async function registerCustomAndSelect(extra: Record<string, unknown> = {}) {
+      const { registerCustomModels } = await import('../../src/models/registry');
+      registerCustomModels([{
+        id: 'qwen-test', name: 'Qwen Test',
+        toolCalling: 'native', reasoningTokens: 'inline',
+        editProtocol: ['native-tool'], shellProtocol: 'native-tool',
+        supportsTemperature: true, maxOutputTokens: 8192,
+        maxTokensConfigKey: 'customModels.qwen-test.maxOutputTokens',
+        streaming: true, apiEndpoint: 'https://example.test/v1',
+        requestFormat: 'openai',
+        ...extra
+      }]);
+      mockConfigValues.set('model', 'qwen-test');
+      mockSecrets.get.mockResolvedValue('test-key');
+      stubChatResponse();
+      return new DeepSeekClient(createContext());
+    }
+
+    afterEach(async () => {
+      const { __resetCustomModelsForTests } = await import('../../src/models/registry');
+      __resetCustomModelsForTests();
+    });
+
+    it('merges the declared params when a caller asks for thinkingMode disabled', async () => {
+      const client = await registerCustomAndSelect({
+        disableThinkingParam: { enable_thinking: false }
+      });
+
+      await client.chat([{ role: 'user', content: 'hi' }], undefined, { thinkingMode: 'disabled' });
+
+      expect(lastRequestBody().enable_thinking).toBe(false);
+    });
+
+    it('sends nothing extra when the caller did not ask to disable', async () => {
+      const client = await registerCustomAndSelect({
+        disableThinkingParam: { enable_thinking: false }
+      });
+
+      await client.chat([{ role: 'user', content: 'hi' }]);
+
+      expect(lastRequestBody().enable_thinking).toBeUndefined();
+    });
+
+    it('never invents a param when the entry declares none', async () => {
+      const client = await registerCustomAndSelect();
+
+      await client.chat([{ role: 'user', content: 'hi' }], undefined, { thinkingMode: 'disabled' });
+
+      const body = lastRequestBody();
+      expect(body.enable_thinking).toBeUndefined();
+      expect(body.thinking).toBeUndefined();
+      expect(body.reasoning_effort).toBeUndefined();
+    });
+  });
+
   describe('chat() abort signal (release-gate bug #2, half two)', () => {
     // chat() accepted options.signal but never passed it to the HTTP layer,
     // so Stop could not cancel a non-streaming runToolLoop probe — it stayed

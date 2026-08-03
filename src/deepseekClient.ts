@@ -348,7 +348,22 @@ export class DeepSeekClient {
     thinkingModeOverride?: 'enabled' | 'disabled'
   ): void {
     const caps = getCapabilities(modelId);
-    if (!caps.sendThinkingParam) return;
+    if (!caps.sendThinkingParam) {
+      // Custom-model path. There is no portable OpenAI-compatible "disable
+      // thinking" param, so we never invent one (a wrong guess is a 400) —
+      // but a model entry may DECLARE its provider's knob via
+      // `disableThinkingParam`, and a caller asking for 'disabled' (every
+      // subagent role does) gets it merged in. Without this, the router's
+      // forced non-thinking never reached custom backends and every sub-call
+      // paid the full reasoning tax (30s image digests on Kimi).
+      if (thinkingModeOverride === 'disabled' && caps.disableThinkingParam) {
+        Object.assign(requestBody, caps.disableThinkingParam);
+        logger.info(
+          `[ThinkingMode] ${modelId} → thinking disabled via declared param: ${JSON.stringify(caps.disableThinkingParam)}`
+        );
+      }
+      return;
+    }
 
     // Strip the `-thinking` suffix for the wire model id.
     requestBody.model = modelId.replace(/-thinking$/, '');

@@ -311,6 +311,21 @@ describe('model registry', () => {
       it('treats acceptsImages as optional', () => {
         expect(validateCustomModelEntry(validEntry)).toEqual({ ok: true });
       });
+
+      it('accepts disableThinkingParam as an object of request params', () => {
+        expect(validateCustomModelEntry({
+          ...validEntry,
+          disableThinkingParam: { enable_thinking: false }
+        })).toEqual({ ok: true });
+      });
+
+      it('rejects a non-object disableThinkingParam (string, array, null)', () => {
+        for (const bad of ['enable_thinking=false', ['enable_thinking'], null]) {
+          const result = validateCustomModelEntry({ ...validEntry, disableThinkingParam: bad });
+          expect(result.ok).toBe(false);
+          if (!result.ok) expect(result.error).toMatch(/disableThinkingParam/);
+        }
+      });
     });
 
     describe('registerCustomModels', () => {
