@@ -76,8 +76,16 @@ export class HttpClient {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), this.resolveTimeout());
 
-    // Use provided signal or our timeout signal
-    const signal = config?.signal ?? controller.signal;
+    // Honor BOTH the caller's signal and the timeout. The old selection
+    // (`config?.signal ?? controller.signal`) orphaned whichever lost: a
+    // caller signal silenced the timeout entirely (streaming requests ran
+    // unbounded), while its absence left the request unreachable by Stop.
+    // The timeout is cleared once headers arrive, so it bounds
+    // time-to-headers only — a long-running stream body is never killed by
+    // it, and mid-stream cancellation stays the caller signal's job.
+    const signal = config?.signal
+      ? AbortSignal.any([config.signal, controller.signal])
+      : controller.signal;
 
     try {
       const response = await fetch(url, {
@@ -122,8 +130,14 @@ export class HttpClient {
     } catch (error: unknown) {
       clearTimeout(timeoutId);
 
-      // Handle abort/timeout
+      // Handle abort/timeout. With both signals combined, "which one fired?"
+      // matters: a caller abort (Stop) must keep its AbortError identity so
+      // abort branches recognize it — only the timeout controller's fire is
+      // a timeout.
       if (error instanceof Error && error.name === 'AbortError') {
+        if (config?.signal?.aborted) {
+          throw error;
+        }
         const httpError = new Error('Request timeout') as HttpError;
         httpError.code = 'ECONNABORTED';
         throw httpError;

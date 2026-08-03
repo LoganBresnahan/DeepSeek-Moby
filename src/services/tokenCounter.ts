@@ -92,6 +92,45 @@ export function countRequestTokens(
 }
 
 /**
+ * Character-side mirror of {@link countRequestTokens} — same traversal, in
+ * chars. This is the calibration sample's numerator, and it must cover the
+ * same surface the API's `prompt_tokens` bills: message content, tool-call
+ * metadata, AND the tools-definition JSON. When it counted message content
+ * only, every tool-bearing request inflated the ratio (apiTokens ÷ chars)
+ * by the uncounted tools overhead — a short turn with 11 tool schemas
+ * produced ratio=0.7642 tokens/char (~3× the English norm) and every
+ * subsequent estimate from that counter with it (observed 2026-08-03; this
+ * was the actual mechanism behind the "token over-count on image turns"
+ * bug — image turns are short, so the tools share dominates).
+ * Server-side chat-template wrappers remain uncounted on both sides — the
+ * known ~10% residual, stable rather than compounding.
+ */
+export function countRequestChars(
+  requestMessages: Array<Record<string, unknown>>,
+  tools?: Array<{ type: string; function: { name: string; description: string; parameters: unknown } }>
+): number {
+  let total = 0;
+  for (const msg of requestMessages) {
+    const content = msg.content;
+    total += typeof content === 'string' ? content.length : content ? JSON.stringify(content).length : 0;
+
+    const toolCalls = msg.tool_calls as Array<{ function: { name: string; arguments: string } }> | undefined;
+    if (Array.isArray(toolCalls)) {
+      for (const tc of toolCalls) {
+        total += tc.function.name.length + tc.function.arguments.length;
+      }
+    }
+    if (typeof msg.tool_call_id === 'string') {
+      total += msg.tool_call_id.length;
+    }
+  }
+  if (tools && tools.length > 0) {
+    total += JSON.stringify(tools).length;
+  }
+  return total;
+}
+
+/**
  * Dispatches token counting to either an exact WASM counter or estimation,
  * based on the currently active model's declared tokenizer. Custom models
  * that don't declare a tokenizer (Qwen, Llama, LM Studio endpoints, etc.)

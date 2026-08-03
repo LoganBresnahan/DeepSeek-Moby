@@ -137,10 +137,12 @@ describe('Logger', () => {
       expect(logLine).toContain('deepseek-chat');
     });
 
-    it('apiRequest indicates images when present', () => {
+    it('apiRequest indicates attachments when present (metadata, not wire content)', () => {
       logger.apiRequest('deepseek-chat', 3, true);
       const logLine = (mockOutputChannel.info as Mock).mock.calls[0][0];
-      expect(logLine).toContain('with images');
+      expect(logLine).toContain('attachments on this turn');
+      // The old label — it implied image_url blocks reaching a text-only model.
+      expect(logLine).not.toContain('with images');
     });
 
     it('apiRequest does not mention images when absent', () => {

@@ -329,16 +329,55 @@ describe('HttpClient', () => {
   });
 
   describe('abort signal', () => {
-    it('passes provided signal to fetch', async () => {
+    /** A fetch that only ever settles by aborting — models a hung request. */
+    function mockHungFetch(): void {
+      mockFetch.mockImplementation((_url: string, init: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          init.signal!.addEventListener('abort', () => {
+            const e = new Error('aborted');
+            e.name = 'AbortError';
+            reject(e);
+          });
+        })
+      );
+    }
+
+    it('combines the caller signal with the timeout signal — caller abort propagates', async () => {
       const controller = new AbortController();
       mockFetch.mockResolvedValue(createMockResponse({ json: {} }));
 
       await client.get('/test', { signal: controller.signal });
 
-      expect(mockFetch).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.objectContaining({ signal: controller.signal })
-      );
+      const passed = (mockFetch.mock.calls[0][1] as RequestInit).signal as AbortSignal;
+      expect(passed.aborted).toBe(false);
+      controller.abort();
+      expect(passed.aborted).toBe(true);
+    });
+
+    // Release-gate bug #2, half one: the old `config?.signal ?? controller.signal`
+    // orphaned the timeout controller whenever a caller signal was supplied,
+    // so streaming requests had no timeout at all.
+    it('timeout still fires when a caller signal is supplied', async () => {
+      mockHungFetch();
+      const controller = new AbortController();
+
+      const pending = client.get('/hung', { signal: controller.signal });
+      const assertion = expect(pending).rejects.toMatchObject({
+        message: 'Request timeout',
+        code: 'ECONNABORTED'
+      });
+      await vi.advanceTimersByTimeAsync(5000);
+      await assertion;
+    });
+
+    it('a caller abort keeps its AbortError identity — Stop is not a timeout', async () => {
+      mockHungFetch();
+      const controller = new AbortController();
+
+      const pending = client.get('/inflight', { signal: controller.signal });
+      const assertion = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+      controller.abort();
+      await assertion;
     });
   });
 });

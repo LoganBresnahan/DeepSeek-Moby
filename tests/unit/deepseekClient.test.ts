@@ -471,9 +471,10 @@ describe('DeepSeekClient — non-streaming', () => {
       }
     }
 
-    it('maps 401 → "Invalid API key" message', async () => {
+    it('maps 401 → "Invalid API key" message naming DeepSeek on a DeepSeek model', async () => {
       const err = await chatWithHttpError(401);
-      expect(err.message).toMatch(/Invalid API key/i);
+      expect(err.message).toMatch(/Invalid API key for DeepSeek/i);
+      expect(err.message).toMatch(/DeepSeek API key/i);
     });
 
     it('maps 429 → rate-limit message', async () => {
@@ -501,7 +502,188 @@ describe('DeepSeekClient — non-streaming', () => {
       const client = new DeepSeekClient(createContext());
 
       await expect(client.chat([{ role: 'user', content: 'hi' }]))
-        .rejects.toThrow(/Cannot connect to DeepSeek API/i);
+        .rejects.toThrow(/Cannot connect to DeepSeek/i);
+    });
+
+    // Release-gate bug #1: a custom-model user must be pointed at THEIR
+    // provider and THEIR key command — not told to check a DeepSeek key
+    // that has nothing to do with the failure.
+    describe('custom-model provider naming', () => {
+      async function registerKimiAndSelect() {
+        const { registerCustomModels } = await import('../../src/models/registry');
+        registerCustomModels([{
+          id: 'kimi-test', name: 'Kimi Test',
+          toolCalling: 'native', reasoningTokens: 'inline',
+          editProtocol: ['native-tool'], shellProtocol: 'native-tool',
+          supportsTemperature: false, maxOutputTokens: 32768,
+          maxTokensConfigKey: 'customModels.kimi-test.maxOutputTokens',
+          streaming: true, apiEndpoint: 'https://api.moonshot.ai/v1',
+          requestFormat: 'openai'
+        }]);
+        mockConfigValues.set('model', 'kimi-test');
+      }
+
+      afterEach(async () => {
+        const { __resetCustomModelsForTests } = await import('../../src/models/registry');
+        __resetCustomModelsForTests();
+      });
+
+      it('401 names the custom provider host and the per-model key command', async () => {
+        await registerKimiAndSelect();
+        mockSecrets.get.mockResolvedValue('test-key');
+        const { HttpError } = await import('../../src/utils/httpClient');
+        const httpErr: any = new HttpError('unauthorized');
+        httpErr.response = { status: 401, statusText: 'X' };
+        mockHttpClient.post.mockRejectedValue(httpErr);
+        const client = new DeepSeekClient(createContext());
+
+        const err = await client.chat([{ role: 'user', content: 'hi' }]).catch((e: Error) => e) as Error;
+        expect(err.message).toContain('api.moonshot.ai');
+        expect(err.message).toContain('kimi-test');
+        expect(err.message).toContain('Set Custom Model API Key');
+        expect(err.message).not.toMatch(/DeepSeek API key/);
+      });
+
+      it('ENOTFOUND names the custom provider host, not DeepSeek', async () => {
+        await registerKimiAndSelect();
+        mockSecrets.get.mockResolvedValue('test-key');
+        const { HttpError } = await import('../../src/utils/httpClient');
+        const httpErr: any = new HttpError('getaddrinfo ENOTFOUND');
+        httpErr.code = 'ENOTFOUND';
+        mockHttpClient.post.mockRejectedValue(httpErr);
+        const client = new DeepSeekClient(createContext());
+
+        const err = await client.chat([{ role: 'user', content: 'hi' }]).catch((e: Error) => e) as Error;
+        expect(err.message).toContain('api.moonshot.ai');
+        expect(err.message).not.toMatch(/DeepSeek/);
+      });
+    });
+  });
+
+  describe('temperatureFixedValue (release-gate bug #4)', () => {
+    // Kimi rejects any temperature but 1 ("invalid temperature: only 1 is
+    // allowed"); the boolean supportsTemperature could only express all-or-
+    // nothing, so the only workaround was setting the GLOBAL temperature to
+    // 1 for every model. A per-model pin beats both.
+    afterEach(async () => {
+      const { __resetCustomModelsForTests } = await import('../../src/models/registry');
+      __resetCustomModelsForTests();
+    });
+
+    it('pins the request temperature regardless of the global setting', async () => {
+      const { registerCustomModels } = await import('../../src/models/registry');
+      registerCustomModels([{
+        id: 'kimi-pin', name: 'Kimi Pin',
+        toolCalling: 'native', reasoningTokens: 'none',
+        editProtocol: ['native-tool'], shellProtocol: 'none',
+        supportsTemperature: true, temperatureFixedValue: 1,
+        maxOutputTokens: 8192,
+        maxTokensConfigKey: 'customModels.kimi-pin.maxOutputTokens',
+        streaming: true, apiEndpoint: 'https://api.moonshot.ai/v1',
+        requestFormat: 'openai'
+      }]);
+      mockConfigValues.set('model', 'kimi-pin');
+      mockConfigValues.set('temperature', 0.3);
+      mockSecrets.get.mockResolvedValue('test-key');
+      stubChatResponse();
+      const client = new DeepSeekClient(createContext());
+
+      await client.chat([{ role: 'user', content: 'hi' }]);
+
+      expect(lastRequestBody().temperature).toBe(1);
+    });
+
+    it('without a pin, the global temperature still applies', async () => {
+      mockConfigValues.set('model', 'deepseek-chat');
+      mockConfigValues.set('temperature', 0.3);
+      mockSecrets.get.mockResolvedValue('test-key');
+      stubChatResponse();
+      const client = new DeepSeekClient(createContext());
+
+      await client.chat([{ role: 'user', content: 'hi' }]);
+
+      expect(lastRequestBody().temperature).toBe(0.3);
+    });
+  });
+
+  describe('disableThinkingParam on custom models (release-gate bug #3)', () => {
+    // The router forces thinkingMode:'disabled' on every sub-call, but
+    // applyThinkingMode returned early on !sendThinkingParam — so the force
+    // never reached a custom backend and a Kimi image digest burned 30s of
+    // reasoning. A custom entry can now DECLARE its provider's off-knob.
+    async function registerCustomAndSelect(extra: Record<string, unknown> = {}) {
+      const { registerCustomModels } = await import('../../src/models/registry');
+      registerCustomModels([{
+        id: 'qwen-test', name: 'Qwen Test',
+        toolCalling: 'native', reasoningTokens: 'inline',
+        editProtocol: ['native-tool'], shellProtocol: 'native-tool',
+        supportsTemperature: true, maxOutputTokens: 8192,
+        maxTokensConfigKey: 'customModels.qwen-test.maxOutputTokens',
+        streaming: true, apiEndpoint: 'https://example.test/v1',
+        requestFormat: 'openai',
+        ...extra
+      }]);
+      mockConfigValues.set('model', 'qwen-test');
+      mockSecrets.get.mockResolvedValue('test-key');
+      stubChatResponse();
+      return new DeepSeekClient(createContext());
+    }
+
+    afterEach(async () => {
+      const { __resetCustomModelsForTests } = await import('../../src/models/registry');
+      __resetCustomModelsForTests();
+    });
+
+    it('merges the declared params when a caller asks for thinkingMode disabled', async () => {
+      const client = await registerCustomAndSelect({
+        disableThinkingParam: { enable_thinking: false }
+      });
+
+      await client.chat([{ role: 'user', content: 'hi' }], undefined, { thinkingMode: 'disabled' });
+
+      expect(lastRequestBody().enable_thinking).toBe(false);
+    });
+
+    it('sends nothing extra when the caller did not ask to disable', async () => {
+      const client = await registerCustomAndSelect({
+        disableThinkingParam: { enable_thinking: false }
+      });
+
+      await client.chat([{ role: 'user', content: 'hi' }]);
+
+      expect(lastRequestBody().enable_thinking).toBeUndefined();
+    });
+
+    it('never invents a param when the entry declares none', async () => {
+      const client = await registerCustomAndSelect();
+
+      await client.chat([{ role: 'user', content: 'hi' }], undefined, { thinkingMode: 'disabled' });
+
+      const body = lastRequestBody();
+      expect(body.enable_thinking).toBeUndefined();
+      expect(body.thinking).toBeUndefined();
+      expect(body.reasoning_effort).toBeUndefined();
+    });
+  });
+
+  describe('chat() abort signal (release-gate bug #2, half two)', () => {
+    // chat() accepted options.signal but never passed it to the HTTP layer,
+    // so Stop could not cancel a non-streaming runToolLoop probe — it stayed
+    // parked until the request timeout. ADR 0008's teardown relies on the
+    // abort actually reaching the request.
+    it('forwards options.signal to the HTTP layer', async () => {
+      mockConfigValues.set('model', 'deepseek-chat');
+      mockSecrets.get.mockResolvedValue('test-key');
+      mockHttpClient.post.mockResolvedValue({
+        data: { choices: [{ message: { content: 'hi' }, finish_reason: 'stop' }] }
+      });
+      const client = new DeepSeekClient(createContext());
+      const controller = new AbortController();
+
+      await client.chat([{ role: 'user', content: 'hi' }], undefined, { signal: controller.signal });
+
+      const requestConfig = mockHttpClient.post.mock.calls[0][2];
+      expect(requestConfig.signal).toBe(controller.signal);
     });
   });
 

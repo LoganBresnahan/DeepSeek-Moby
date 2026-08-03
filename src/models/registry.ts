@@ -91,6 +91,22 @@ export interface ModelCapabilities {
    *  upstream DeepSeek API sees the bare `deepseek-v4-flash` / `-pro`. */
   sendThinkingParam?: boolean;
 
+  /** Pin the request temperature to exactly this value, overriding both the
+   *  global `moby.temperature` and `supportsTemperature`. For providers that
+   *  accept only one temperature (Kimi rejects anything but 1) — a boolean
+   *  can't express "must be exactly N". */
+  temperatureFixedValue?: number;
+
+  /** Custom models only: the provider's own request params for turning
+   *  reasoning OFF, merged into the body when a caller asks for
+   *  `thinkingMode: 'disabled'` (every subagent role does). There is no
+   *  portable OpenAI-compatible knob — e.g. Qwen-style backends take
+   *  `{"enable_thinking": false}`, others `{"reasoning_effort": "none"}` —
+   *  so the entry declares it and we never guess (a wrong guess is a 400).
+   *  Absent = reasoning runs regardless; pick a fast non-reasoning model
+   *  for subagent roles instead. */
+  disableThinkingParam?: Record<string, unknown>;
+
   /** Default reasoning effort for thinking-capable models. User override
    *  lives in `moby.modelOptions.<id>.reasoningEffort`. */
   reasoningEffort?: ReasoningEffort;
@@ -406,6 +422,14 @@ export function validateCustomModelEntry(entry: unknown): { ok: true } | { ok: f
   }
   if (e.sendThinkingParam !== undefined && typeof e.sendThinkingParam !== 'boolean') {
     return { ok: false, error: 'sendThinkingParam must be boolean if provided' };
+  }
+  if (e.temperatureFixedValue !== undefined &&
+      (typeof e.temperatureFixedValue !== 'number' || !Number.isFinite(e.temperatureFixedValue))) {
+    return { ok: false, error: 'temperatureFixedValue must be a finite number if provided' };
+  }
+  if (e.disableThinkingParam !== undefined &&
+      (typeof e.disableThinkingParam !== 'object' || e.disableThinkingParam === null || Array.isArray(e.disableThinkingParam))) {
+    return { ok: false, error: 'disableThinkingParam must be an object of request params if provided' };
   }
   if (e.reasoningEffort !== undefined && e.reasoningEffort !== 'high' && e.reasoningEffort !== 'max') {
     return { ok: false, error: 'reasoningEffort must be "high" or "max" if provided' };

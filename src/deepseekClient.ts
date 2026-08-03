@@ -3,7 +3,7 @@ import { HttpClient, HttpError, createStreamReader, DEFAULT_REQUEST_TIMEOUT_MS }
 import { ConfigManager } from './utils/config';
 import { logger } from './utils/logger';
 import { tracer } from './tracing';
-import { TokenCounter, EstimationTokenCounter, DynamicTokenCounter, countRequestTokens } from './services/tokenCounter';
+import { TokenCounter, EstimationTokenCounter, DynamicTokenCounter, countRequestTokens, countRequestChars } from './services/tokenCounter';
 import { ContextBuilder, ContextResult, SnapshotSummary } from './context/contextBuilder';
 import { getCapabilities, DEFAULT_MODEL_ID, isReasonerModel as isReasonerModelFromRegistry } from './models/registry';
 
@@ -348,7 +348,22 @@ export class DeepSeekClient {
     thinkingModeOverride?: 'enabled' | 'disabled'
   ): void {
     const caps = getCapabilities(modelId);
-    if (!caps.sendThinkingParam) return;
+    if (!caps.sendThinkingParam) {
+      // Custom-model path. There is no portable OpenAI-compatible "disable
+      // thinking" param, so we never invent one (a wrong guess is a 400) —
+      // but a model entry may DECLARE its provider's knob via
+      // `disableThinkingParam`, and a caller asking for 'disabled' (every
+      // subagent role does) gets it merged in. Without this, the router's
+      // forced non-thinking never reached custom backends and every sub-call
+      // paid the full reasoning tax (30s image digests on Kimi).
+      if (thinkingModeOverride === 'disabled' && caps.disableThinkingParam) {
+        Object.assign(requestBody, caps.disableThinkingParam);
+        logger.info(
+          `[ThinkingMode] ${modelId} → thinking disabled via declared param: ${JSON.stringify(caps.disableThinkingParam)}`
+        );
+      }
+      return;
+    }
 
     // Strip the `-thinking` suffix for the wire model id.
     requestBody.model = modelId.replace(/-thinking$/, '');
@@ -401,7 +416,12 @@ export class DeepSeekClient {
       };
 
       const caps = getCapabilities(model);
-      if (caps.supportsTemperature) {
+      // A fixed value beats the boolean: some providers accept exactly one
+      // temperature (Kimi: "only 1 is allowed") — a per-model pin keeps the
+      // global moby.temperature usable for every other model.
+      if (caps.temperatureFixedValue !== undefined) {
+        requestBody.temperature = caps.temperatureFixedValue;
+      } else if (caps.supportsTemperature) {
         requestBody.temperature = temperature;
       }
 
@@ -444,7 +464,11 @@ export class DeepSeekClient {
       }>('/chat/completions', requestBody, {
         headers: {
           'Authorization': `Bearer ${apiKey}`
-        }
+        },
+        // ADR 0008 follow-up: without this, Stop could not cancel a
+        // non-streaming probe — the abort only reached streamChat, and an
+        // aborted runToolLoop probe stayed parked until the timeout.
+        signal: options?.signal
       });
 
       const choice = response.data.choices[0];
@@ -526,7 +550,12 @@ export class DeepSeekClient {
       };
 
       const caps = getCapabilities(model);
-      if (caps.supportsTemperature) {
+      // A fixed value beats the boolean: some providers accept exactly one
+      // temperature (Kimi: "only 1 is allowed") — a per-model pin keeps the
+      // global moby.temperature usable for every other model.
+      if (caps.temperatureFixedValue !== undefined) {
+        requestBody.temperature = caps.temperatureFixedValue;
+      } else if (caps.supportsTemperature) {
         requestBody.temperature = temperature;
       }
 
@@ -622,8 +651,10 @@ export class DeepSeekClient {
         const resetInactivityTimer = () => {
           clearInactivityTimer();
           inactivityTimer = setTimeout(() => {
-            if (!resolved && (fullResponse || fullReasoning || toolCallAcc.size > 0)) {
-              resolved = true;
+            if (resolved) return;
+            resolved = true;
+            if (fullResponse || fullReasoning || toolCallAcc.size > 0) {
+              // Mid-stream stall with partial data: return what we have.
               resolve({
                 content: fullResponse,
                 reasoning_content: fullReasoning || undefined,
@@ -635,6 +666,18 @@ export class DeepSeekClient {
                   total_tokens: 0
                 }
               });
+            } else {
+              // Zero bytes ever. This branch used to do NOTHING — and since
+              // the timer only re-arms on data, the promise then hung until
+              // the user hit Stop ("a hung stream never self-terminates",
+              // release-gate bug #2). Headers arriving means the HTTP-layer
+              // timeout is already cleared, so this is the only watchdog
+              // left on the connection.
+              const err = new Error(
+                `Stream produced no data for ${INACTIVITY_TIMEOUT_MS / 1000}s — giving up`
+              ) as HttpError;
+              err.code = 'ECONNABORTED';
+              reject(err);
             }
           }, INACTIVITY_TIMEOUT_MS);
         };
@@ -815,8 +858,12 @@ export class DeepSeekClient {
       });
 
       // Cross-validate our token count against the API's
-      // Note: systemPrompt is already unshifted into requestMessages above
-      this.crossValidateTokens(requestMessages, result.usage);
+      // Note: systemPrompt is already unshifted into requestMessages above.
+      // Pass the tools too — the probe path always did, and validating one
+      // side with tools and the other without made the same turn's two calls
+      // disagree by the entire tools-JSON share (the "probe over-counts"
+      // half of the token-over-count bug).
+      this.crossValidateTokens(requestMessages, result.usage, requestBody.tools);
 
       const iterDuration = Math.round(performance.now() - iterStartTime);
       // Single per-iteration summary line. Lets us answer "why did the loop end?"
@@ -957,22 +1004,51 @@ export class DeepSeekClient {
     // every response — even when the active model uses WASM — so that any
     // future model switch to an estimation-only model starts with real
     // samples instead of the default ratio.
-    const charCount = requestMessages.reduce((sum, msg) => {
-      const text = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content);
-      return sum + text.length;
-    }, 0);
+    //
+    // The numerator must cover what `prompt_tokens` bills — messages AND
+    // tool-call metadata AND the tools JSON — or every tool-bearing sample
+    // inflates the ratio by the uncounted share. See countRequestChars.
+    const charCount = countRequestChars(requestMessages, tools);
     this.calibrateTokenEstimation(charCount, apiCount);
   }
 
+  /**
+   * Name the provider the ACTIVE model actually talks to. A user on Kimi,
+   * Ollama or Groq who gets "check your DeepSeek API key" is being pointed
+   * at a key that has nothing to do with the failure. Sub-clients are
+   * isolated per modelId, so `this.getModel()` is the right context here.
+   */
+  private describeActiveProvider(): { isDeepSeek: boolean; label: string; keyHint: string } {
+    const modelId = this.getModel();
+    const endpoint = getCapabilities(modelId).apiEndpoint;
+    if (endpoint === this.deepseekProviderBase) {
+      return {
+        isDeepSeek: true,
+        label: 'DeepSeek',
+        keyHint: 'Please check your DeepSeek API key in settings.'
+      };
+    }
+    let host = endpoint;
+    try {
+      host = new URL(endpoint).host;
+    } catch { /* keep the raw endpoint string */ }
+    return {
+      isDeepSeek: false,
+      label: `${host} (model "${modelId}")`,
+      keyHint: `Set the key for "${modelId}" via "Moby: Set Custom Model API Key".`
+    };
+  }
+
   private handleError(error: HttpError): Error {
+    const provider = this.describeActiveProvider();
     if (error.response) {
       switch (error.response.status) {
         case 401:
-          return new Error('Invalid API key. Please check your DeepSeek API key in settings.');
+          return new Error(`Invalid API key for ${provider.label}. ${provider.keyHint}`);
         case 429:
           return new Error('Rate limit exceeded. Please wait before making more requests.');
         case 500:
-          return new Error('DeepSeek API server error. Please try again later.');
+          return new Error(`${provider.label} API server error. Please try again later.`);
         default: {
           const errorData = error.response.data as { error?: { message?: string } } | undefined;
           return new Error(`API error: ${errorData?.error?.message || error.message}`);
@@ -980,7 +1056,7 @@ export class DeepSeekClient {
       }
     }
     if (error.code === 'ENOTFOUND') {
-      return new Error('Cannot connect to DeepSeek API. Check your internet connection.');
+      return new Error(`Cannot connect to ${provider.label}. Check your internet connection.`);
     }
     return new Error(error.message || 'Unknown error occurred');
   }
