@@ -72,6 +72,7 @@ markdown.renderer.rules.code_inline = (tokens, idx) => {
 import type {
   TurnRole,
   TurnData,
+  TurnAttachment,
   EditMode,
   TextSegment,
   ThinkingIteration,
@@ -129,6 +130,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
   private _timestamp: number = 0;
   private _model: string | null = null;
   private _files: string[] = [];
+  private _attachments: TurnAttachment[] = [];
 
   // ============================================
   // Text Segment State
@@ -317,6 +319,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
     this._timestamp = 0;
     this._model = null;
     this._files = [];
+    this._attachments = [];
 
     // Reset text segments
     this._textSegments.clear();
@@ -388,6 +391,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
     this._timestamp = data.timestamp;
     this._model = data.model ?? null;
     this._files = data.files ?? [];
+    this._attachments = data.attachments ?? [];
     this._sequence = data.sequence ?? null;
 
     this.element.setAttribute('data-turn-id', data.turnId);
@@ -747,8 +751,10 @@ export class MessageTurnActor extends InterleavedShadowActor {
     this.renderTextSegment(segment, container);
     this.setupTextSegmentHandlers(container.id);
 
-    // Hide container if created with empty content (will show when content arrives)
-    if (!content.trim()) {
+    // Hide container if created with empty content (will show when content
+    // arrives) — unless the row carries attachment chips: an image sent
+    // without a caption must not hide its own thumbnail.
+    if (!content.trim() && !this.hasAttachmentChrome()) {
       container.host.setAttribute('hidden', '');
     }
 
@@ -788,7 +794,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
     // visible response feels consistent with how dropdowns slide in —
     // the initial animation at createContainer() played while the host
     // was `display: none`, so it was invisible to the user.
-    const isEmpty = !content.trim();
+    const isEmpty = !content.trim() && !this.hasAttachmentChrome();
     if (isEmpty) {
       container.host.setAttribute('hidden', '');
     } else if (container.host.hasAttribute('hidden')) {
@@ -1399,11 +1405,24 @@ export class MessageTurnActor extends InterleavedShadowActor {
       this._headerRendered = true;
     }
 
-    // Files (user messages only)
-    if (isUser && this._files.length > 0) {
+    // Attachments (user messages only). Rich attachment data renders images
+    // as thumbnails; the name-only `files` shape is the fallback for turns
+    // that never carried attachment metadata (e.g. plain addMessage).
+    if (isUser && (this._attachments.length > 0 || this._files.length > 0)) {
       html += `<div class="files">`;
-      for (const file of this._files) {
-        html += `<span class="file-tag">${this.escapeHtml(file)}</span>`;
+      if (this._attachments.length > 0) {
+        for (const att of this._attachments) {
+          // An image with neither bytes nor a blob to fetch (e.g. its data
+          // URI never decoded at persist time) degrades to a name tag —
+          // never an empty placeholder that can't fill.
+          html += att.type === 'image' && (att.dataUrl || att.blobId)
+            ? this.renderAttachmentThumb(att)
+            : `<span class="file-tag">${this.escapeHtml(att.name)}</span>`;
+        }
+      } else {
+        for (const file of this._files) {
+          html += `<span class="file-tag">${this.escapeHtml(file)}</span>`;
+        }
       }
       html += `</div>`;
     }
@@ -1413,6 +1432,68 @@ export class MessageTurnActor extends InterleavedShadowActor {
     html += `</div>`;
 
     container.content.innerHTML = html;
+  }
+
+  /** A user turn with attachment chips has visible content even with no text. */
+  private hasAttachmentChrome(): boolean {
+    return this._role === 'user' && (this._attachments.length > 0 || this._files.length > 0);
+  }
+
+  /**
+   * Image attachment chip. The box size comes from persisted metadata, so a
+   * lazily-fetched blob (restore path) fills in without reflowing the list;
+   * the live path has the data URL in hand and produces identical DOM.
+   */
+  private renderAttachmentThumb(att: TurnAttachment): string {
+    const { width, height } = this.thumbDisplaySize(att);
+    const src = att.dataUrl ? ` src="${this.escapeAttr(att.dataUrl)}"` : '';
+    const blobId = att.blobId ? ` data-blob-id="${this.escapeAttr(att.blobId)}"` : '';
+    const name = this.escapeAttr(att.name);
+    // Rows without persisted dimensions (pre-phase-4 images) get the 64×64
+    // fallback box CSS-locked: with `height: auto` in the stylesheet, the
+    // attribute-derived 1:1 ratio would otherwise be replaced by the image's
+    // real ratio when bytes arrive — a reflow. Locking the box crops via
+    // object-fit instead. Rows with real dimensions match by construction.
+    const hasDims = (att.width ?? 0) > 0 && (att.height ?? 0) > 0;
+    const lock = hasDims ? '' : ` style="width:${width}px;height:${height}px"`;
+    return `<img class="attachment-thumb"${src}${blobId}${lock} width="${width}" height="${height}" alt="${name}" title="${name}">`;
+  }
+
+  /**
+   * escapeHtml is a textContent round-trip, which never escapes quotes —
+   * fine between tags, an injection vector inside an attribute (a filename
+   * may legally contain `"`). This adds the quote escaping.
+   */
+  private escapeAttr(value: string): string {
+    return this.escapeHtml(value).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  /** Scale stored dimensions down to chip size, never up. */
+  private thumbDisplaySize(att: TurnAttachment): { width: number; height: number } {
+    const THUMB_MAX_EDGE = 128;
+    const w = att.width ?? 0;
+    const h = att.height ?? 0;
+    if (w <= 0 || h <= 0) return { width: 64, height: 64 };
+    const scale = Math.min(1, THUMB_MAX_EDGE / Math.max(w, h));
+    return { width: Math.max(1, Math.round(w * scale)), height: Math.max(1, Math.round(h * scale)) };
+  }
+
+  /**
+   * Fill a lazily-fetched blob into its placeholder(s). Reserved width/height
+   * attributes keep the box unchanged — no reflow on arrival.
+   */
+  updateAttachmentBlob(blobId: string, dataUrl: string): void {
+    for (const att of this._attachments) {
+      if (att.blobId === blobId) att.dataUrl = dataUrl;
+    }
+    for (const container of this.containers.values()) {
+      const imgs = container.content.querySelectorAll<HTMLImageElement>(
+        `img.attachment-thumb[data-blob-id="${blobId}"]`
+      );
+      imgs.forEach(img => {
+        if (!img.getAttribute('src')) img.src = dataUrl;
+      });
+    }
   }
 
   /**
@@ -1721,8 +1802,8 @@ export class MessageTurnActor extends InterleavedShadowActor {
         actionsHtml = `
           <span class="pending-label action-${file.action ?? 'modified'}">${actionWord}</span>
           <div class="pending-actions">
-            <button class="pending-btn accept-btn" data-file-id="${file.id}" data-diff-id="${file.diffId ?? ''}">Accept</button>
-            <button class="pending-btn reject-btn" data-file-id="${file.id}" data-diff-id="${file.diffId ?? ''}">Reject</button>
+            <button class="pending-btn accept-btn" data-file-id="${file.id}" data-diff-id="${this.escapeAttr(file.diffId ?? '')}">Accept</button>
+            <button class="pending-btn reject-btn" data-file-id="${file.id}" data-diff-id="${this.escapeAttr(file.diffId ?? '')}">Reject</button>
           </div>
         `;
       } else if (file.status === 'expired') {
@@ -1745,7 +1826,7 @@ export class MessageTurnActor extends InterleavedShadowActor {
         <div class="pending-item" data-status="${effectiveStatus}" data-action="${file.action ?? ''}" data-superseded="${file.status === 'superseded'}">
           <span class="pending-tree">${tree}</span>
           <span class="pending-status ${statusClass}">${statusIcon}</span>
-          <span class="pending-file" data-file-id="${file.id}" data-diff-id="${file.diffId ?? ''}" data-file-path="${file.filePath}">${this.escapeHtml(file.fileName)}</span>
+          <span class="pending-file" data-file-id="${file.id}" data-diff-id="${this.escapeAttr(file.diffId ?? '')}" data-file-path="${this.escapeAttr(file.filePath)}">${this.escapeHtml(file.fileName)}</span>
           ${actionsHtml}
         </div>
       `;

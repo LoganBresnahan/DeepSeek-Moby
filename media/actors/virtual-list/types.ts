@@ -5,7 +5,7 @@
  * rendering only visible turns and recycling actors as the user scrolls.
  */
 
-import type { TurnRole, EditMode } from '../turn/types';
+import type { TurnRole, EditMode, TurnAttachment } from '../turn/types';
 
 // ============================================
 // Turn Data (source of truth for all turns)
@@ -21,6 +21,8 @@ export interface TurnData {
   timestamp: number;
   model?: string;
   files?: string[];
+  /** User-turn attachments; images render as thumbnails (plan phase 5). */
+  attachments?: TurnAttachment[];
   /** Event sequence number from backend (for fork API) */
   sequence?: number;
 

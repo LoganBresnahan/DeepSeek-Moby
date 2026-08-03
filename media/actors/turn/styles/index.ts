@@ -171,6 +171,22 @@ const textStyles = `
   font-size: 11px;
 }
 
+/* Image attachment thumbnail. width/height attributes reserve the box from
+   persisted metadata, so the background reads as a placeholder until the
+   lazily-fetched bytes arrive (and nothing reflows when they do). */
+.attachment-thumb {
+  display: block;
+  /* max-width + height:auto keep a narrow panel from overflowing; the
+     width/height attributes still reserve the box via the browser's
+     intrinsic aspect-ratio mapping, so late-arriving bytes never reflow. */
+  max-width: 100%;
+  height: auto;
+  border-radius: 4px;
+  border: 1px solid var(--vscode-panel-border, #454545);
+  background: var(--vscode-input-background, #2d2d2d);
+  object-fit: cover;
+}
+
 /* Code blocks */
 .code-block {
   margin: 6px 0 12px 0;

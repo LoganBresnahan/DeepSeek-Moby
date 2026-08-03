@@ -335,6 +335,26 @@ describe('ADR 0014 — attachment replay', () => {
     expect(persisted.width).toBeUndefined();
   });
 
+  it('persists metadata only for an image whose data URI does not decode (phase-5 review fix)', () => {
+    const before = blobStore.count();
+    const [persisted] = prepareAttachmentsForPersistence(
+      [{
+        type: 'image', name: 'corrupt.png', mimeType: 'image/png',
+        content: 'not-a-data-uri-at-all',
+        digest: 'a digest resolved before the bytes went bad'
+      }],
+      blobStore
+    );
+
+    // The old fallthrough stored the literal string under an image mime — the
+    // transcript then fetched a permanently-broken thumbnail. Now: no blob,
+    // no blobId, digest kept (it is the model-facing record).
+    expect(persisted.blobId).toBeUndefined();
+    expect(persisted.type).toBe('image');
+    expect(persisted.digest).toBe('a digest resolved before the bytes went bad');
+    expect(blobStore.count()).toBe(before);
+  });
+
   it('keeps the digest alongside the archive', () => {
     const archive = Buffer.alloc(50, 5);
     const [persisted] = prepareAttachmentsForPersistence(

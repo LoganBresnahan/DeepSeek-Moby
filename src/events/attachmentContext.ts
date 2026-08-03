@@ -101,7 +101,16 @@ export function prepareAttachmentsForPersistence(
           ...(incoming.digest ? { digest: incoming.digest } : {})
         };
       }
-      logger.warn(`[Attachments] Image "${incoming.name}" is not a decodable data URI; storing verbatim`);
+      // Do NOT fall through to the text branch: that would store the literal
+      // data-URI string under an image mime, and the transcript would fetch
+      // it forever as a permanently-broken thumbnail. Persist metadata only —
+      // nothing reads an image's body from the blob store for model context
+      // (images contribute their digest), so the blob would be dead weight.
+      logger.warn(`[Attachments] Image "${incoming.name}" is not a decodable data URI; persisting metadata only`);
+      return {
+        ...base,
+        ...(incoming.digest ? { digest: incoming.digest } : {})
+      };
     }
 
     const body = incoming.content ?? '';

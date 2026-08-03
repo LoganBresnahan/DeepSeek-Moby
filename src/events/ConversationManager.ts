@@ -54,9 +54,40 @@ export interface RichHistoryTurn {
   turnEvents?: Array<Record<string, unknown>>;
   // User-only fields:
   files?: string[];
+  /** Attachment metadata for transcript rendering. Image bytes are NOT here —
+   *  the webview lazy-fetches them by blobId when the turn becomes visible. */
+  attachments?: RichHistoryAttachment[];
   timestamp: number;
   /** Event sequence number for this turn boundary (used by fork API) */
   sequence?: number;
+}
+
+/** What the transcript needs to draw an attachment chip — never the body. */
+export interface RichHistoryAttachment {
+  name: string;
+  type: 'file' | 'image';
+  /** Images only — key for requestAttachmentBlob. */
+  blobId?: string;
+  width?: number;
+  height?: number;
+  mimeType?: string;
+}
+
+/**
+ * Project a persisted attachment down to render metadata. Only images carry a
+ * blobId out — the webview has no reason to fetch text bodies, and shipping
+ * text blobIds would invite exactly that.
+ */
+function toRichHistoryAttachment(a: Attachment): RichHistoryAttachment {
+  const isImage = a.type === 'image';
+  return {
+    name: a.name,
+    type: isImage ? 'image' : 'file',
+    ...(isImage && a.blobId ? { blobId: a.blobId } : {}),
+    ...(isImage && a.width !== undefined ? { width: a.width } : {}),
+    ...(isImage && a.height !== undefined ? { height: a.height } : {}),
+    ...(a.mimeType ? { mimeType: a.mimeType } : {})
+  };
 }
 
 // Statement interface for our wrapper
@@ -850,6 +881,7 @@ export class ConversationManager {
           role: 'user',
           content: userEvent.content,
           files: userEvent.attachments?.map(a => a.name),
+          attachments: userEvent.attachments?.map(a => toRichHistoryAttachment(a)),
           timestamp: userEvent.timestamp,
           sequence: event.sequence
         });

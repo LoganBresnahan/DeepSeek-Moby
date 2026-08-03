@@ -44,7 +44,7 @@ import type {
   ContentOrderEntry
 } from './types';
 import { DEFAULT_CONFIG } from './types';
-import type { TurnRole, EditMode } from '../turn/types';
+import type { TurnRole, EditMode, TurnAttachment } from '../turn/types';
 
 const log = createLogger('VirtualList');
 
@@ -110,6 +110,17 @@ export class VirtualListActor extends EventStateActor {
 
   /** Total content height (sum of all turn heights) */
   private _totalHeight = 0;
+
+  // ============================================
+  // Attachment Blob Fetch (lazy — plan phase 5)
+  // ============================================
+
+  /** blobId → data URL, or null when the extension reported the blob missing
+   *  (cached so a rebind doesn't re-request a blob that will never arrive). */
+  private _blobCache: Map<string, string | null> = new Map();
+
+  /** blobIds requested but not yet answered — dedupes across turns/rebinds. */
+  private _pendingBlobRequests: Set<string> = new Set();
 
   // ============================================
   // Scroll Handling
@@ -275,6 +286,7 @@ export class VirtualListActor extends EventStateActor {
   addTurn(turnId: string, role: TurnRole, options?: {
     model?: string;
     files?: string[];
+    attachments?: TurnAttachment[];
     timestamp?: number;
     sequence?: number;
   }): TurnData {
@@ -284,6 +296,7 @@ export class VirtualListActor extends EventStateActor {
       timestamp: options?.timestamp ?? Date.now(),
       model: options?.model,
       files: options?.files,
+      attachments: options?.attachments,
       sequence: options?.sequence,
       height: this.config.defaultTurnHeight,
       heightMeasured: false,
@@ -1068,6 +1081,49 @@ export class VirtualListActor extends EventStateActor {
     }
   }
 
+  /**
+   * Lazy blob fetch (plan phase 5): restored image attachments arrive as
+   * {blobId, width, height} only. When a turn holding an unfetched blob
+   * becomes visible, request the bytes — once per blobId, however many turns
+   * share it (content-addressing means a re-attached image is the same blob).
+   */
+  private hydrateAttachments(turn: TurnData): void {
+    if (!turn.attachments) return;
+    for (const att of turn.attachments) {
+      if (att.type !== 'image' || att.dataUrl || !att.blobId) continue;
+      const cached = this._blobCache.get(att.blobId);
+      if (typeof cached === 'string') {
+        att.dataUrl = cached;
+      } else if (cached === undefined && !this._pendingBlobRequests.has(att.blobId)) {
+        this._pendingBlobRequests.add(att.blobId);
+        this._postMessage?.({ type: 'requestAttachmentBlob', blobId: att.blobId });
+      }
+    }
+  }
+
+  /**
+   * Reply to requestAttachmentBlob. Fills the bytes into every turn that
+   * references the blob and patches bound actors in place (reserved
+   * dimensions mean no reflow). `dataUrl === null` marks the blob missing;
+   * cached so it is never re-requested this session.
+   */
+  handleAttachmentBlob(blobId: string, dataUrl: string | null): void {
+    if (!blobId) return;
+    this._pendingBlobRequests.delete(blobId);
+    this._blobCache.set(blobId, dataUrl);
+    if (dataUrl === null) {
+      log.warn('attachmentBlob: blob missing', blobId.substring(0, 8));
+      return;
+    }
+    for (const turn of this._turns) {
+      if (!turn.attachments?.some(a => a.blobId === blobId)) continue;
+      for (const att of turn.attachments) {
+        if (att.blobId === blobId) att.dataUrl = dataUrl;
+      }
+      this._boundActors.get(turn.turnId)?.actor.updateAttachmentBlob(blobId, dataUrl);
+    }
+  }
+
   private reconcileActors(): void {
     const { startIndex, endIndex } = this._visibleRange;
 
@@ -1118,6 +1174,9 @@ export class VirtualListActor extends EventStateActor {
       this._contentContainer.appendChild(actor.element);
     }
 
+    // Becoming visible is the lazy-fetch trigger for persisted image bytes.
+    this.hydrateAttachments(turn);
+
     // Bind to turn data
     actor.bind({
       turnId: turn.turnId,
@@ -1125,6 +1184,7 @@ export class VirtualListActor extends EventStateActor {
       timestamp: turn.timestamp,
       model: turn.model,
       files: turn.files,
+      attachments: turn.attachments,
       sequence: turn.sequence
     });
 
@@ -1416,6 +1476,10 @@ export class VirtualListActor extends EventStateActor {
     this._turnMap.clear();
     this._streamingTurnId = null;
     this._totalHeight = 0;
+    // Blob ids are content-addressed (session-agnostic), but a session switch
+    // is the natural bound on how much base64 we keep around.
+    this._blobCache.clear();
+    this._pendingBlobRequests.clear();
     this._visibleRange = {
       startIndex: 0,
       endIndex: -1,

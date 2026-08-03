@@ -843,6 +843,14 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         case 'getFileContent':
           await this.fileContextManager.sendFileContent(data.filePath);
           break;
+        case 'requestAttachmentBlob':
+          this.sendAttachmentBlob(String(data.blobId ?? ''));
+          break;
+        case 'poolWarning':
+          // VirtualListActor's actor-pool exhaustion warning, surfaced here so
+          // it lands in the persistent extension log, not just the console.
+          logger.warn(`[Webview] ${data.message}: ${JSON.stringify(data.stats)}`);
+          break;
         case 'setSubagentModel': {
           // `moby.subagents` is a nested object, so this rewrites one key
           // rather than going through the flat-setting path.
@@ -1638,6 +1646,34 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         history
       });
     }
+  }
+
+  /**
+   * Lazy blob fetch: hydration ships image attachments as {blobId, w, h} only;
+   * the webview asks for bytes when a turn actually becomes visible. A null
+   * dataUrl reply means the blob is unavailable (GC'd, foreign DB, non-image,
+   * or a read error) — the webview caches that and leaves the placeholder
+   * rather than re-requesting. Every request gets a reply: a silent drop
+   * would wedge the blobId in the webview's pending set for the session.
+   */
+  private sendAttachmentBlob(blobId: string): void {
+    if (!this._view) return;
+    let dataUrl: string | null = null;
+    try {
+      const blob = blobId ? this.conversationManager.getBlobStore().get(blobId) : null;
+      if (!blob) {
+        logger.warn(`[ChatProvider] requestAttachmentBlob: blob ${blobId.substring(0, 8)} not found`);
+      } else if (!blob.mime.startsWith('image/')) {
+        // The projection only hands the webview image blobIds; refuse anything
+        // else so that invariant holds on both sides (text bodies stay put).
+        logger.warn(`[ChatProvider] requestAttachmentBlob: refusing non-image blob ${blobId.substring(0, 8)} (${blob.mime})`);
+      } else {
+        dataUrl = `data:${blob.mime};base64,${blob.data.toString('base64')}`;
+      }
+    } catch (error) {
+      logger.error(`[ChatProvider] requestAttachmentBlob failed for ${blobId.substring(0, 8)}: ${error}`);
+    }
+    this._view.webview.postMessage({ type: 'attachmentBlob', blobId, dataUrl });
   }
 
   public async loadSession(sessionId: string) {
