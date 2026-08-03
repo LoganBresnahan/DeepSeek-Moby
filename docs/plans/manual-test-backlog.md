@@ -665,6 +665,27 @@ Not a pass/fail scenario yet — investigation only.
 
 ---
 
+## M39. Transcript thumbnails — live/restore parity + lazy blob fetch (Phase 5) (P0)
+
+**Why this matters:** a restored user turn now renders image attachments as thumbnails. Live and restore share one render path by design, but the phase's whole risk is that live testing can't catch a restore-only divergence — and no automated test crosses a real reload with a real DB. The lazy fetch (`requestAttachmentBlob` → `attachmentBlob`) has also never run against real SQLCipher blobs, only mocks.
+
+**Setup:** vision backend optional (thumbnails render regardless of digest routing). Attach any image.
+
+**Steps:**
+1. Attach an image and send. **The user turn in the transcript shows a thumbnail chip** (not just a name tag) — this is the live path, drawn from the composer's 512px archive copy. A text file attached in the same turn shows a name tag beside it.
+2. Note the thumbnail's rendered size. Switch to another session, restore this one. **Pass:** the same turn shows the same thumbnail at the same size. **Fail:** name tag only, doubled chips, or a blank box that never fills.
+3. Watch for reflow: on restore of a long session, scroll so the image turn enters the viewport. The thumbnail box must be reserved at its final size *before* the image paints — no visible layout jump when bytes arrive.
+4. Scroll the image turn far off-screen and back (virtual list recycles at ~20 turns). The thumbnail must re-render — and the log must show **no second** `requestAttachmentBlob` for the same blob (cache hit).
+5. Fork the session at or after the image turn → the forked transcript shows the thumbnail too (blob shared by hash).
+6. Attach the same image twice in two turns → both render; only one fetch on restore.
+7. Delete the session that owns the blob while a fork survives → the fork still renders the thumbnail (GC keeps referenced blobs).
+8. Old sessions (pre-phase-5) restore with name tags only — no errors from missing attachment metadata.
+9. **Legacy image rows** (attached between phase 1 and phase 4, i.e. before the archive rendition existed): these persisted the full ~1024px copy with no dimensions. On restore they render a fixed 64×64 box (cropped via object-fit, CSS-locked — must NOT resize when bytes arrive) and the fetched blob can be up to 1.5MB — watch for a noticeable stall on a session with many of them.
+
+**Pass criteria:** live and restored turns are visually identical, placeholders reserve exact dimensions, each blob is fetched at most once per session view, and forks/dedupe/GC behave per ADR 0014.
+
+---
+
 ## Removing items from this backlog
 
 When a scenario has been verified in a dev host:
