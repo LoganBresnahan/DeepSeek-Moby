@@ -964,15 +964,43 @@ export class DeepSeekClient {
     this.calibrateTokenEstimation(charCount, apiCount);
   }
 
+  /**
+   * Name the provider the ACTIVE model actually talks to. A user on Kimi,
+   * Ollama or Groq who gets "check your DeepSeek API key" is being pointed
+   * at a key that has nothing to do with the failure. Sub-clients are
+   * isolated per modelId, so `this.getModel()` is the right context here.
+   */
+  private describeActiveProvider(): { isDeepSeek: boolean; label: string; keyHint: string } {
+    const modelId = this.getModel();
+    const endpoint = getCapabilities(modelId).apiEndpoint;
+    if (endpoint === this.deepseekProviderBase) {
+      return {
+        isDeepSeek: true,
+        label: 'DeepSeek',
+        keyHint: 'Please check your DeepSeek API key in settings.'
+      };
+    }
+    let host = endpoint;
+    try {
+      host = new URL(endpoint).host;
+    } catch { /* keep the raw endpoint string */ }
+    return {
+      isDeepSeek: false,
+      label: `${host} (model "${modelId}")`,
+      keyHint: `Set the key for "${modelId}" via "Moby: Set Custom Model API Key".`
+    };
+  }
+
   private handleError(error: HttpError): Error {
+    const provider = this.describeActiveProvider();
     if (error.response) {
       switch (error.response.status) {
         case 401:
-          return new Error('Invalid API key. Please check your DeepSeek API key in settings.');
+          return new Error(`Invalid API key for ${provider.label}. ${provider.keyHint}`);
         case 429:
           return new Error('Rate limit exceeded. Please wait before making more requests.');
         case 500:
-          return new Error('DeepSeek API server error. Please try again later.');
+          return new Error(`${provider.label} API server error. Please try again later.`);
         default: {
           const errorData = error.response.data as { error?: { message?: string } } | undefined;
           return new Error(`API error: ${errorData?.error?.message || error.message}`);
@@ -980,7 +1008,7 @@ export class DeepSeekClient {
       }
     }
     if (error.code === 'ENOTFOUND') {
-      return new Error('Cannot connect to DeepSeek API. Check your internet connection.');
+      return new Error(`Cannot connect to ${provider.label}. Check your internet connection.`);
     }
     return new Error(error.message || 'Unknown error occurred');
   }

@@ -471,9 +471,10 @@ describe('DeepSeekClient — non-streaming', () => {
       }
     }
 
-    it('maps 401 → "Invalid API key" message', async () => {
+    it('maps 401 → "Invalid API key" message naming DeepSeek on a DeepSeek model', async () => {
       const err = await chatWithHttpError(401);
-      expect(err.message).toMatch(/Invalid API key/i);
+      expect(err.message).toMatch(/Invalid API key for DeepSeek/i);
+      expect(err.message).toMatch(/DeepSeek API key/i);
     });
 
     it('maps 429 → rate-limit message', async () => {
@@ -501,7 +502,61 @@ describe('DeepSeekClient — non-streaming', () => {
       const client = new DeepSeekClient(createContext());
 
       await expect(client.chat([{ role: 'user', content: 'hi' }]))
-        .rejects.toThrow(/Cannot connect to DeepSeek API/i);
+        .rejects.toThrow(/Cannot connect to DeepSeek/i);
+    });
+
+    // Release-gate bug #1: a custom-model user must be pointed at THEIR
+    // provider and THEIR key command — not told to check a DeepSeek key
+    // that has nothing to do with the failure.
+    describe('custom-model provider naming', () => {
+      async function registerKimiAndSelect() {
+        const { registerCustomModels } = await import('../../src/models/registry');
+        registerCustomModels([{
+          id: 'kimi-test', name: 'Kimi Test',
+          toolCalling: 'native', reasoningTokens: 'inline',
+          editProtocol: ['native-tool'], shellProtocol: 'native-tool',
+          supportsTemperature: false, maxOutputTokens: 32768,
+          maxTokensConfigKey: 'customModels.kimi-test.maxOutputTokens',
+          streaming: true, apiEndpoint: 'https://api.moonshot.ai/v1',
+          requestFormat: 'openai'
+        }]);
+        mockConfigValues.set('model', 'kimi-test');
+      }
+
+      afterEach(async () => {
+        const { __resetCustomModelsForTests } = await import('../../src/models/registry');
+        __resetCustomModelsForTests();
+      });
+
+      it('401 names the custom provider host and the per-model key command', async () => {
+        await registerKimiAndSelect();
+        mockSecrets.get.mockResolvedValue('test-key');
+        const { HttpError } = await import('../../src/utils/httpClient');
+        const httpErr: any = new HttpError('unauthorized');
+        httpErr.response = { status: 401, statusText: 'X' };
+        mockHttpClient.post.mockRejectedValue(httpErr);
+        const client = new DeepSeekClient(createContext());
+
+        const err = await client.chat([{ role: 'user', content: 'hi' }]).catch((e: Error) => e) as Error;
+        expect(err.message).toContain('api.moonshot.ai');
+        expect(err.message).toContain('kimi-test');
+        expect(err.message).toContain('Set Custom Model API Key');
+        expect(err.message).not.toMatch(/DeepSeek API key/);
+      });
+
+      it('ENOTFOUND names the custom provider host, not DeepSeek', async () => {
+        await registerKimiAndSelect();
+        mockSecrets.get.mockResolvedValue('test-key');
+        const { HttpError } = await import('../../src/utils/httpClient');
+        const httpErr: any = new HttpError('getaddrinfo ENOTFOUND');
+        httpErr.code = 'ENOTFOUND';
+        mockHttpClient.post.mockRejectedValue(httpErr);
+        const client = new DeepSeekClient(createContext());
+
+        const err = await client.chat([{ role: 'user', content: 'hi' }]).catch((e: Error) => e) as Error;
+        expect(err.message).toContain('api.moonshot.ai');
+        expect(err.message).not.toMatch(/DeepSeek/);
+      });
     });
   });
 
