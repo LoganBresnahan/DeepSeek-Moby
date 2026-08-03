@@ -625,6 +625,31 @@ const CUSTOM_MODEL_TEMPLATES: Array<{
     }
   },
   {
+    // Vision sibling of the entry above. Declares the two axes the
+    // image-describe subagent gates on, so it shows up in the settings
+    // popup's vision picker rather than needing hand-edited JSON.
+    label: 'Kimi Vision (Moonshot) — for image describe',
+    description: 'https://api.moonshot.ai/v1',
+    detail: 'Vision-capable Moonshot model. Select it under Settings → Image Description.',
+    endpointKind: 'hosted',
+    entry: {
+      id: 'moonshot-v1-128k-vision-preview',
+      name: 'Kimi Vision (Moonshot)',
+      toolCalling: 'native',
+      reasoningTokens: 'none',
+      editProtocol: ['native-tool'],
+      shellProtocol: 'none',
+      supportsTemperature: true,
+      maxOutputTokens: 32768,
+      maxTokensConfigKey: 'maxTokensCustomKimiVision',
+      streaming: true,
+      apiEndpoint: 'https://api.moonshot.ai/v1',
+      requestFormat: 'openai',
+      acceptsImages: true,
+      subagentRoles: ['image-describe']
+    }
+  },
+  {
     label: 'Llama 3.3 70B (Groq)',
     description: 'https://api.groq.com/openai/v1',
     detail: 'Hosted Groq — fast inference, set API key via settings popup',

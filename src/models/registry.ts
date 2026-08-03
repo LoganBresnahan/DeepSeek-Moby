@@ -138,6 +138,12 @@ export interface ModelCapabilities {
    *  [src/subagents/types.ts]. Empty / absent = main-only model (default).
    *  See [docs/plans/subagents.md]. */
   subagentRoles?: string[];
+
+  /** Model accepts image content parts (OpenAI `image_url` blocks). Gates
+   *  which models may serve the `image-describe` role — DeepSeek's first-party
+   *  API is text-only, so this is opt-in per custom-model entry.
+   *  See [docs/plans/image-describe-subagent.md]. */
+  acceptsImages?: boolean;
 }
 
 export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
@@ -287,6 +293,14 @@ export interface RegisteredModelInfo {
    *  the model never emits. The toolbar uses this to hide Manual from the
    *  edit-mode cycle. Mirrors `supportsManualMode(id)`. */
   supportsManualMode: boolean;
+  /** Model accepts image content. Drives the image-describe subagent picker,
+   *  which lists only vision-capable models. */
+  acceptsImages?: boolean;
+  /** Roles this model is declared willing to serve. The picker filters on this
+   *  as well as `acceptsImages`, because the router requires both — offering a
+   *  model that fails one gate surfaces as a placeholder in chat, far from the
+   *  setting that caused it. */
+  subagentRoles?: string[];
 }
 
 /**
@@ -305,6 +319,8 @@ export function getAllRegisteredModels(): RegisteredModelInfo[] {
       maxTokens: caps.maxOutputTokensCap ?? caps.maxOutputTokens,
       isCustom: false,
       supportsManualMode: caps.toolCalling !== 'native',
+      ...(caps.acceptsImages !== undefined && { acceptsImages: caps.acceptsImages }),
+      ...(caps.subagentRoles !== undefined && { subagentRoles: caps.subagentRoles }),
       ...(caps.reasoningEffort !== undefined && { reasoningEffortDefault: caps.reasoningEffort }),
     });
   }
@@ -316,6 +332,8 @@ export function getAllRegisteredModels(): RegisteredModelInfo[] {
       maxTokens: caps.maxOutputTokensCap ?? caps.maxOutputTokens,
       isCustom: true,
       supportsManualMode: caps.toolCalling !== 'native',
+      ...(caps.acceptsImages !== undefined && { acceptsImages: caps.acceptsImages }),
+      ...(caps.subagentRoles !== undefined && { subagentRoles: caps.subagentRoles }),
       ...(caps.reasoningEffort !== undefined && { reasoningEffortDefault: caps.reasoningEffort }),
     });
   }
@@ -403,6 +421,9 @@ export function validateCustomModelEntry(entry: unknown): { ok: true } | { ok: f
   }
   if (e.lspTools !== undefined && typeof e.lspTools !== 'boolean') {
     return { ok: false, error: 'lspTools must be boolean if provided' };
+  }
+  if (e.acceptsImages !== undefined && typeof e.acceptsImages !== 'boolean') {
+    return { ok: false, error: 'acceptsImages must be boolean if provided' };
   }
   if (e.subagentRoles !== undefined) {
     if (!Array.isArray(e.subagentRoles)) {

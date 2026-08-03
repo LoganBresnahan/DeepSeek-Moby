@@ -15,10 +15,72 @@ import type { Message } from '../deepseekClient';
 import { tracer } from '../tracing';
 import { logger } from '../utils/logger';
 import { getCapabilities } from '../models/registry';
-import type { RouteResult, SubagentRole, SubagentTaskContext } from './types';
+import type { RouteResult, SubagentMessageContent, SubagentRole, SubagentTaskContext } from './types';
+
+/**
+ * Size of a sub call's input for tracing. A content array has no `.length`
+ * that means anything, so measure the parts: text by its own length, an image
+ * by its encoded URL (a data URI's length is a fair proxy for payload size).
+ */
+function measureContentBytes(content: SubagentMessageContent): number {
+  if (typeof content === 'string') return content.length;
+  return content.reduce(
+    (sum, part) => sum + (part.type === 'text' ? part.text.length : part.image_url.url.length),
+    0
+  );
+}
+
+/**
+ * How a sub's JSON was obtained. Recorded on the trace span because
+ * "did this backend honour `response_format`?" is only answerable from real
+ * traffic — a recovered fence still yields `validationResult: 'ok'`, so
+ * without this the success case hides whether the contingency (a per-role
+ * jsonMode opt-out) is ever needed.
+ */
+export type JsonRecovery = 'none' | 'fence' | 'brace-scan';
+
+/**
+ * Parse a sub's response, tolerating the two ways models wrap JSON even when
+ * told not to: a ```json fence, or prose around the object. Reports which
+ * path was taken.
+ *
+ * This lives in the router, not in a role's `parse`, because the router does
+ * the `JSON.parse` — a fenced response would fail here and never reach the
+ * role. Vision backends are the worst offenders (many ignore `response_format`
+ * entirely), but every role benefits.
+ *
+ * Throws like `JSON.parse` when nothing parses, so the caller's `parse-fail`
+ * path is unchanged.
+ */
+export function parseWithRecovery(raw: string): { value: unknown; recovery: JsonRecovery } {
+  const trimmed = raw.trim();
+  try {
+    return { value: JSON.parse(trimmed), recovery: 'none' };
+  } catch (firstError) {
+    const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(trimmed);
+    if (fenced) {
+      try {
+        return { value: JSON.parse(fenced[1].trim()), recovery: 'fence' };
+      } catch { /* fall through to brace scan */ }
+    }
+
+    const start = trimmed.indexOf('{');
+    const end = trimmed.lastIndexOf('}');
+    if (start !== -1 && end > start) {
+      return { value: JSON.parse(trimmed.slice(start, end + 1)), recovery: 'brace-scan' };
+    }
+    throw firstError;
+  }
+}
+
+/** Value-only wrapper over {@link parseWithRecovery}. */
+export function tolerantJsonParse(raw: string): unknown {
+  return parseWithRecovery(raw).value;
+}
 
 export class SubagentRouter {
   private readonly clients = new Map<string, DeepSeekClient>();
+  private readonly warnedMessages = new Set<string>();
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -42,7 +104,17 @@ export class SubagentRouter {
     const caps = getCapabilities(modelId);
     if (!caps.subagentRoles?.includes(role.name)) {
       logger.warn(
-        `[Subagent] Model "${modelId}" is not declared for role "${role.name}". Falling back to raw input.`
+        `[Subagent] Model "${modelId}" is not declared for role "${role.name}". ` +
+        `Add "subagentRoles": ["${role.name}"] to its moby.customModels entry. Falling back to raw input.`
+      );
+      return { routed: false, reason: 'no-model' };
+    }
+
+    // Declaring the role is not enough for an image role — a text-only backend
+    // would 400 on the image_url block rather than degrade.
+    if (role.requiresImageSupport && !caps.acceptsImages) {
+      logger.warn(
+        `[Subagent] Model "${modelId}" does not declare acceptsImages, which role "${role.name}" requires. Falling back to raw input.`
       );
       return { routed: false, reason: 'no-model' };
     }
@@ -52,13 +124,17 @@ export class SubagentRouter {
       data: { role: role.name, modelId }
     });
     const startedAt = performance.now();
-    const userMessage = role.buildUserMessage(input);
+    // Multimodal roles (image-describe) supply a content array; text roles
+    // keep returning a plain string.
+    const userContent: SubagentMessageContent =
+      role.buildUserContent?.(input) ?? role.buildUserMessage(input);
+    const inputBytes = measureContentBytes(userContent);
     const systemPrompt = role.buildSystemPrompt(taskContext);
 
     let rawContent = '';
     try {
       const client = this.getClient(modelId);
-      const messages: Message[] = [{ role: 'user', content: userMessage }];
+      const messages: Message[] = [{ role: 'user', content: userContent }];
       // Force non-thinking on every sub call — digest roles never need
       // reasoning, and thinking-mode reasoning was the dominant latency
       // cost in Phase 1+polish observations (4-7s per call). For models
@@ -76,7 +152,7 @@ export class SubagentRouter {
         data: {
           role: role.name,
           modelId,
-          inputBytes: userMessage.length,
+          inputBytes,
           validationResult: 'sub-error',
           durationMs: Math.round(performance.now() - startedAt)
         }
@@ -86,8 +162,14 @@ export class SubagentRouter {
     }
 
     let parsedJson: unknown;
+    let recovery: JsonRecovery = 'none';
     try {
-      parsedJson = JSON.parse(rawContent);
+      ({ value: parsedJson, recovery } = parseWithRecovery(rawContent));
+      if (recovery !== 'none') {
+        logger.info(
+          `[Subagent] ${role.name} on "${modelId}": JSON recovered via ${recovery} — the backend ignored response_format`
+        );
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       tracer.endSpan(span, {
@@ -96,7 +178,7 @@ export class SubagentRouter {
         data: {
           role: role.name,
           modelId,
-          inputBytes: userMessage.length,
+          inputBytes,
           outputBytes: rawContent.length,
           validationResult: 'parse-fail',
           preview: rawContent.slice(0, 200),
@@ -114,7 +196,7 @@ export class SubagentRouter {
         data: {
           role: role.name,
           modelId,
-          inputBytes: userMessage.length,
+          inputBytes,
           outputBytes: rawContent.length,
           validationResult: 'schema-fail',
           preview: rawContent.slice(0, 200),
@@ -130,10 +212,11 @@ export class SubagentRouter {
       data: {
         role: role.name,
         modelId,
-        inputBytes: userMessage.length,
+        inputBytes,
         outputBytes: rawContent.length,
         digestBytes: digest.length,
         validationResult: 'ok',
+        jsonRecovery: recovery,
         durationMs: Math.round(performance.now() - startedAt)
       }
     });
@@ -144,10 +227,31 @@ export class SubagentRouter {
    *  when the setting is missing or set to "off". */
   private resolveModelId(roleName: string): string | null {
     const config = vscode.workspace.getConfiguration('moby');
-    const subs = config.get<Record<string, string>>('subagents');
+    const subs = config.get<Record<string, unknown>>('subagents');
     const raw = subs?.[roleName];
-    if (!raw || raw === 'off') return null;
+    if (raw === undefined || raw === null || raw === 'off') return null;
+
+    // Every value here must be a model id string. A non-string is a
+    // misconfiguration that would otherwise be silently inert — the schema
+    // warns in the editor, but nothing tells you at runtime that the setting
+    // isn't doing what it looks like it's doing.
+    if (typeof raw !== 'string') {
+      this.warnOnce(
+        `[Subagent] moby.subagents.${roleName} must be a model id string or "off", but is ${Array.isArray(raw) ? 'an array' : typeof raw}. ` +
+        'Ignoring it (role stays off). Note `moby.subagents.webSearchDigest.maxResults` is a separate top-level setting, not a key inside this object.'
+      );
+      return null;
+    }
+    if (raw.trim() === '') return null;
     return raw;
+  }
+
+  /** Misconfiguration warnings repeat on every route call otherwise — the
+   *  router runs once per search. One line per distinct message is enough. */
+  private warnOnce(message: string): void {
+    if (this.warnedMessages.has(message)) return;
+    this.warnedMessages.add(message);
+    logger.warn(message);
   }
 
   /** Lazy per-modelId client cache. Each subagent backend gets its own

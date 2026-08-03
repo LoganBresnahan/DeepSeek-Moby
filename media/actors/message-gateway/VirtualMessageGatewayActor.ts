@@ -716,6 +716,22 @@ export class VirtualMessageGatewayActor extends EventStateActor {
         }
         break;
 
+      case 'analyzingImages': {
+        const count = (msg.count as number) ?? 1;
+        const label = count > 1 ? `Analyzing ${count} images...` : 'Analyzing image...';
+        this._manager.publishDirect('status.message', { type: 'info', message: label });
+        if (this._currentTurnId) {
+          this._actors.virtualList.pushTurnActivity(this._currentTurnId, 'image-describe', label);
+        }
+        break;
+      }
+
+      case 'analyzingImagesComplete':
+        if (this._currentTurnId) {
+          this._actors.virtualList.popTurnActivity(this._currentTurnId, 'image-describe');
+        }
+        break;
+
       case 'webSearchCached':
         this._manager.publishDirect('status.message', { type: 'info', message: 'Using cached search results' });
         break;
@@ -733,6 +749,24 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       case 'fileContent':
         // Include timestamp to bypass dedup (same file can be re-requested after deselection)
         this._manager.publishDirect('files.content', { path: msg.filePath, content: msg.content, _ts: Date.now() });
+        break;
+
+      case 'attachmentBlob':
+        // Reply to requestAttachmentBlob — bytes for a persisted image the
+        // transcript is rendering. null dataUrl = blob missing; the sized
+        // placeholder stays and the id is cached so it isn't re-requested.
+        this._actors.virtualList.handleAttachmentBlob(
+          (msg.blobId as string) ?? '',
+          (msg.dataUrl as string | null) ?? null
+        );
+        break;
+
+      case 'droppedFileContents':
+        // Reply to requestDroppedFiles — a drop the webview couldn't read
+        // itself (dragged from the Explorer, so it carried only a uri-list).
+        this._actors.inputArea.handleDroppedFileContents(
+          (msg.files || []) as Array<{ name: string; content: string; isImage?: boolean; mimeType?: string }>
+        );
         break;
 
       // ---- Status Messages ----
@@ -1437,6 +1471,14 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       role: string;
       content: string;
       files?: string[];
+      attachments?: Array<{
+        name: string;
+        type: 'file' | 'image';
+        blobId?: string;
+        width?: number;
+        height?: number;
+        mimeType?: string;
+      }>;
       reasoning_iterations?: string[];
       contentIterations?: string[];
       toolCalls?: Array<{ name: string; detail: string; status: string }>;
@@ -1464,6 +1506,7 @@ export class VirtualMessageGatewayActor extends EventStateActor {
           if (m.role === 'user') {
             virtualList.addTurn(turnId, 'user', {
               files: m.files,
+              attachments: m.attachments,
               timestamp: m.timestamp || Date.now(),
               sequence: m.sequence
             });

@@ -81,6 +81,57 @@ describe('HttpClient', () => {
     });
   });
 
+  // Clients are cached per endpoint, so a fixed timeout would pin whatever the
+  // setting was when that endpoint was first used. A turn was lost to the old
+  // hardcoded 60s in dev-host testing on 2026-08-03.
+  describe('timeout resolution', () => {
+    let setTimeoutSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+      mockFetch.mockResolvedValue(createMockResponse({ json: {} }));
+    });
+
+    afterEach(() => setTimeoutSpy.mockRestore());
+
+    function abortDelays(): number[] {
+      return setTimeoutSpy.mock.calls
+        .map(call => call[1] as number)
+        .filter((ms): ms is number => typeof ms === 'number');
+    }
+
+    it('resolves a function timeout per request', async () => {
+      const c = new HttpClient({ baseURL: 'https://api.test.com', timeout: () => 120000 });
+      await c.get('/x');
+      expect(abortDelays()).toContain(120000);
+    });
+
+    it('picks up a changed value on the next request without rebuilding the client', async () => {
+      let current = 30000;
+      const c = new HttpClient({ baseURL: 'https://api.test.com', timeout: () => current });
+
+      await c.get('/first');
+      current = 180000;
+      await c.get('/second');
+
+      const delays = abortDelays();
+      expect(delays).toContain(30000);
+      expect(delays).toContain(180000);
+    });
+
+    it('still accepts a plain number', async () => {
+      const c = new HttpClient({ baseURL: 'https://api.test.com', timeout: 7000 });
+      await c.get('/x');
+      expect(abortDelays()).toContain(7000);
+    });
+
+    it('falls back to the default when omitted', async () => {
+      const c = new HttpClient({ baseURL: 'https://api.test.com' });
+      await c.get('/x');
+      expect(abortDelays()).toContain(60000);
+    });
+  });
+
   describe('get', () => {
     it('makes a GET request with correct URL', async () => {
       mockFetch.mockResolvedValue(createMockResponse({ json: { result: 'ok' } }));

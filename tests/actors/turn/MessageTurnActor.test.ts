@@ -1905,4 +1905,198 @@ describe('MessageTurnActor', () => {
       expect(filePath).toBe('/workspace/src/config.ts');
     });
   });
+
+  // ============================================
+  // User Attachments (plan phase 5)
+  // ============================================
+
+  describe('User attachments (plan phase 5)', () => {
+    const BLOB_ID = 'c'.repeat(64);
+    const DATA_URL = 'data:image/webp;base64,UklGRg==';
+
+    beforeEach(() => {
+      actor = new MessageTurnActor({ manager, element });
+    });
+
+    function bindUserTurn(attachments: Array<Record<string, unknown>>): HTMLElement {
+      actor.bind({
+        turnId: 'turn-1',
+        role: 'user',
+        timestamp: Date.now(),
+        attachments: attachments as never
+      });
+      actor.createTextSegment('here you go');
+      return findContainers('text')[0];
+    }
+
+    it('renders a restored image attachment as a sized placeholder (no src yet)', () => {
+      const container = bindUserTurn([
+        { name: 'shot.png', type: 'image', blobId: BLOB_ID, width: 512, height: 288 }
+      ]);
+
+      const img = queryInShadow(container, 'img.attachment-thumb') as HTMLImageElement;
+      expect(img).toBeTruthy();
+      // 512×288 scaled to the 128px chip edge → 128×72, reserved before bytes arrive
+      expect(img.getAttribute('width')).toBe('128');
+      expect(img.getAttribute('height')).toBe('72');
+      expect(img.getAttribute('src')).toBeNull();
+      expect(img.getAttribute('data-blob-id')).toBe(BLOB_ID);
+      expect(img.getAttribute('title')).toBe('shot.png');
+    });
+
+    it('does not upscale small images to the chip edge', () => {
+      const container = bindUserTurn([
+        { name: 'tiny.png', type: 'image', blobId: BLOB_ID, width: 100, height: 50 }
+      ]);
+
+      const img = queryInShadow(container, 'img.attachment-thumb') as HTMLImageElement;
+      expect(img.getAttribute('width')).toBe('100');
+      expect(img.getAttribute('height')).toBe('50');
+    });
+
+    it('renders the live path with src immediately (archive data URL in hand)', () => {
+      const container = bindUserTurn([
+        { name: 'shot.png', type: 'image', dataUrl: DATA_URL, width: 512, height: 288 }
+      ]);
+
+      const img = queryInShadow(container, 'img.attachment-thumb') as HTMLImageElement;
+      expect(img.getAttribute('src')).toBe(DATA_URL);
+    });
+
+    it('renders text attachments as name tags alongside image chips', () => {
+      const container = bindUserTurn([
+        { name: 'notes.md', type: 'file' },
+        { name: 'shot.png', type: 'image', blobId: BLOB_ID, width: 512, height: 288 }
+      ]);
+
+      const tag = queryInShadow(container, '.file-tag');
+      expect(tag?.textContent).toBe('notes.md');
+      expect(queryInShadow(container, 'img.attachment-thumb')).toBeTruthy();
+    });
+
+    it('updateAttachmentBlob fills the placeholder without touching dimensions', () => {
+      const container = bindUserTurn([
+        { name: 'shot.png', type: 'image', blobId: BLOB_ID, width: 512, height: 288 }
+      ]);
+
+      actor.updateAttachmentBlob(BLOB_ID, DATA_URL);
+
+      const img = queryInShadow(container, 'img.attachment-thumb') as HTMLImageElement;
+      expect(img.getAttribute('src')).toBe(DATA_URL);
+      expect(img.getAttribute('width')).toBe('128');
+      expect(img.getAttribute('height')).toBe('72');
+    });
+
+    it('name-only files fallback still renders tags (legacy shape)', () => {
+      actor.bind({
+        turnId: 'turn-1',
+        role: 'user',
+        timestamp: Date.now(),
+        files: ['a.ts', 'b.ts']
+      });
+      actor.createTextSegment('legacy');
+
+      const container = findContainers('text')[0];
+      const tags = container.shadowRoot?.querySelectorAll('.file-tag');
+      expect(tags?.length).toBe(2);
+      expect(queryInShadow(container, 'img.attachment-thumb')).toBeNull();
+    });
+
+    it('image with neither dataUrl nor blobId degrades to a name tag, not an empty box', () => {
+      const container = bindUserTurn([
+        { name: 'corrupt.png', type: 'image' }
+      ]);
+
+      expect(queryInShadow(container, 'img.attachment-thumb')).toBeNull();
+      expect(queryInShadow(container, '.file-tag')?.textContent).toBe('corrupt.png');
+    });
+
+    it('CSS-locks the fallback box for dimensionless rows so late bytes cannot reflow', () => {
+      const container = bindUserTurn([
+        { name: 'legacy.png', type: 'image', blobId: BLOB_ID }
+      ]);
+
+      const img = queryInShadow(container, 'img.attachment-thumb') as HTMLImageElement;
+      // No persisted dimensions → 64×64 fallback, locked via inline style
+      // (stylesheet `height: auto` would otherwise let the real aspect ratio
+      // resize the box when the blob arrives).
+      expect(img.getAttribute('width')).toBe('64');
+      expect(img.getAttribute('style')).toContain('width:64px');
+      expect(img.getAttribute('style')).toContain('height:64px');
+    });
+
+    it('does not CSS-lock rows with real dimensions (ratio already matches)', () => {
+      const container = bindUserTurn([
+        { name: 'shot.png', type: 'image', blobId: BLOB_ID, width: 512, height: 288 }
+      ]);
+
+      const img = queryInShadow(container, 'img.attachment-thumb') as HTMLImageElement;
+      expect(img.getAttribute('style')).toBeNull();
+    });
+
+    it('image-only turn (no caption) keeps its container visible', () => {
+      actor.bind({
+        turnId: 'turn-1',
+        role: 'user',
+        timestamp: Date.now(),
+        attachments: [
+          { name: 'shot.png', type: 'image', blobId: BLOB_ID, width: 512, height: 288 }
+        ] as never
+      });
+      // The composer allows sending with an attachment and no text; the
+      // empty-content hide must not swallow the thumbnail row.
+      actor.createTextSegment('');
+
+      const container = findContainers('text')[0];
+      expect(container.hasAttribute('hidden')).toBe(false);
+      expect(queryInShadow(container, 'img.attachment-thumb')).toBeTruthy();
+    });
+
+    it('file-only turn (no caption, legacy files shape) keeps its container visible', () => {
+      actor.bind({
+        turnId: 'turn-1',
+        role: 'user',
+        timestamp: Date.now(),
+        files: ['notes.md']
+      });
+      actor.createTextSegment('');
+
+      const container = findContainers('text')[0];
+      expect(container.hasAttribute('hidden')).toBe(false);
+    });
+
+    it('assistant empty text segment still hides (regression guard)', () => {
+      actor.bind({ turnId: 'turn-1', role: 'assistant', timestamp: Date.now() });
+      actor.createTextSegment('');
+
+      const container = findContainers('text')[0];
+      expect(container.hasAttribute('hidden')).toBe(true);
+    });
+
+    it('escapes quotes in attachment names — no attribute injection', () => {
+      const evil = 'x" onerror="window.pwned=1';
+      const container = bindUserTurn([
+        { name: evil, type: 'image', blobId: BLOB_ID, width: 512, height: 288 }
+      ]);
+
+      const img = queryInShadow(container, 'img.attachment-thumb') as HTMLImageElement;
+      expect(img).toBeTruthy();
+      // The name must land as a literal attribute value, not break out of it.
+      expect(img.getAttribute('alt')).toBe(evil);
+      expect(img.getAttribute('onerror')).toBeNull();
+      expect(img.getAttribute('title')).toBe(evil);
+    });
+
+    it('reset clears attachments so a recycled actor cannot leak thumbnails', () => {
+      bindUserTurn([
+        { name: 'shot.png', type: 'image', blobId: BLOB_ID, width: 512, height: 288 }
+      ]);
+      actor.reset();
+      actor.bind({ turnId: 'turn-2', role: 'user', timestamp: Date.now() });
+      actor.createTextSegment('clean turn');
+
+      const container = findContainers('text')[0];
+      expect(queryInShadow(container, 'img.attachment-thumb')).toBeNull();
+    });
+  });
 });

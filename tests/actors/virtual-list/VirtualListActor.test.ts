@@ -1010,4 +1010,128 @@ describe('VirtualListActor', () => {
       expect(turn?.contentOrder[2].type).toBe('text');
     });
   });
+
+  // ============================================
+  // Attachment Lazy Blob Fetch (plan phase 5)
+  // ============================================
+
+  describe('Attachment lazy blob fetch (plan phase 5)', () => {
+    const BLOB_ID = 'd'.repeat(64);
+    const DATA_URL = 'data:image/webp;base64,UklGRg==';
+    let postMessage: Mock;
+
+    const restoredImage = () => ({
+      name: 'shot.png',
+      type: 'image' as const,
+      blobId: BLOB_ID,
+      width: 512,
+      height: 288
+    });
+
+    beforeEach(() => {
+      postMessage = vi.fn();
+      actor = new VirtualListActor(manager, scrollContainer, {
+        config: { minPoolSize: 2, maxPoolSize: 5, defaultTurnHeight: 50, overscan: 1 },
+        postMessage
+      });
+    });
+
+    function blobRequests(): unknown[] {
+      return postMessage.mock.calls
+        .map(c => c[0] as { type: string })
+        .filter(m => m.type === 'requestAttachmentBlob');
+    }
+
+    function findThumb(turnId: string): HTMLImageElement | null {
+      const bound = actor.getBoundActor(turnId);
+      if (!bound) return null;
+      for (const child of Array.from(bound.element.children)) {
+        const img = (child as HTMLElement).shadowRoot?.querySelector('img.attachment-thumb');
+        if (img) return img as HTMLImageElement;
+      }
+      return null;
+    }
+
+    it('requests blob bytes when a turn with an unfetched image binds', () => {
+      actor.addTurn('turn-1', 'user', { attachments: [restoredImage()] });
+
+      expect(blobRequests()).toEqual([{ type: 'requestAttachmentBlob', blobId: BLOB_ID }]);
+    });
+
+    it('deduplicates requests across turns sharing a blob', () => {
+      actor.addTurn('turn-1', 'user', { attachments: [restoredImage()] });
+      actor.addTurn('turn-2', 'user', { attachments: [restoredImage()] });
+
+      expect(blobRequests()).toHaveLength(1);
+    });
+
+    it('does not request when the data URL is already in hand (live path)', () => {
+      actor.addTurn('turn-1', 'user', {
+        attachments: [{ name: 'shot.png', type: 'image', dataUrl: DATA_URL, width: 512, height: 288 }]
+      });
+
+      expect(blobRequests()).toHaveLength(0);
+    });
+
+    it('does not request for text attachments', () => {
+      actor.addTurn('turn-1', 'user', {
+        attachments: [{ name: 'notes.md', type: 'file' }]
+      });
+
+      expect(blobRequests()).toHaveLength(0);
+    });
+
+    it('handleAttachmentBlob fills turn data and the bound placeholder', () => {
+      actor.addTurn('turn-1', 'user', { attachments: [restoredImage()] });
+      actor.addTextSegment('turn-1', 'look');
+
+      expect(findThumb('turn-1')?.getAttribute('src')).toBeNull();
+
+      actor.handleAttachmentBlob(BLOB_ID, DATA_URL);
+
+      expect(actor.getTurn('turn-1')?.attachments?.[0].dataUrl).toBe(DATA_URL);
+      expect(findThumb('turn-1')?.getAttribute('src')).toBe(DATA_URL);
+    });
+
+    it('fills every turn sharing the blob, not just the first', () => {
+      actor.addTurn('turn-1', 'user', { attachments: [restoredImage()] });
+      actor.addTurn('turn-2', 'user', { attachments: [restoredImage()] });
+
+      actor.handleAttachmentBlob(BLOB_ID, DATA_URL);
+
+      expect(actor.getTurn('turn-1')?.attachments?.[0].dataUrl).toBe(DATA_URL);
+      expect(actor.getTurn('turn-2')?.attachments?.[0].dataUrl).toBe(DATA_URL);
+    });
+
+    it('serves later turns from the cache without a second round-trip', () => {
+      actor.addTurn('turn-1', 'user', { attachments: [restoredImage()] });
+      actor.handleAttachmentBlob(BLOB_ID, DATA_URL);
+
+      actor.addTurn('turn-2', 'user', { attachments: [restoredImage()] });
+
+      expect(blobRequests()).toHaveLength(1);
+      expect(actor.getTurn('turn-2')?.attachments?.[0].dataUrl).toBe(DATA_URL);
+    });
+
+    it('caches a missing blob (null) and never re-requests it', () => {
+      actor.addTurn('turn-1', 'user', { attachments: [restoredImage()] });
+      actor.handleAttachmentBlob(BLOB_ID, null);
+
+      actor.addTurn('turn-2', 'user', { attachments: [restoredImage()] });
+
+      expect(blobRequests()).toHaveLength(1);
+      expect(actor.getTurn('turn-2')?.attachments?.[0].dataUrl).toBeUndefined();
+    });
+
+    it('clear() resets the cache and pending requests', () => {
+      actor.addTurn('turn-1', 'user', { attachments: [restoredImage()] });
+      actor.handleAttachmentBlob(BLOB_ID, DATA_URL);
+
+      actor.clear();
+      actor.addTurn('turn-1', 'user', { attachments: [restoredImage()] });
+
+      // Cache was dropped, so the blob is requested again.
+      expect(blobRequests()).toHaveLength(2);
+    });
+  });
 });

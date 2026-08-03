@@ -19,11 +19,46 @@ import { ShadowActor } from '../../state/ShadowActor';
 import { EventStateManager } from '../../state/EventStateManager';
 import { inputAreaShadowStyles } from './shadowStyles';
 
+/** One encoded copy of an image. */
+export interface Rendition {
+  dataUrl: string;
+  bytes: number;
+  width: number;
+  height: number;
+}
+
 export interface Attachment {
+  /** Text body, or a data URI for images. */
   content: string;
   name: string;
   size: number;
+  /** Absent means 'file' — the extension side defaults it. */
+  type?: 'file' | 'image';
+  mimeType?: string;
+  /** Images only: the 512px copy that gets persisted. `content` carries the
+   *  larger copy the vision subagent reads, which is never stored. */
+  archive?: Rendition;
 }
+
+/**
+ * Longest edge of the copy sent to the vision subagent. Most VLM encoders
+ * downsample to 336–448px tiles, so this is near-lossless from a model's
+ * point of view while keeping the data URI small enough to post.
+ */
+const IMAGE_MAX_EDGE = 1024;
+
+/**
+ * Longest edge of the copy we keep. Small enough that a long transcript stays
+ * cheap to hydrate, big enough to recognize a screenshot by — and, since most
+ * VLM encoders downsample to 336-448px tiles, still usable input if a digest
+ * ever needs regenerating from the archive.
+ */
+const IMAGE_ARCHIVE_EDGE = 512;
+
+/** Hard ceiling on an encoded image, enforced AFTER re-encode. */
+const IMAGE_MAX_BYTES = 1.5 * 1024 * 1024;
+
+const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'];
 
 export interface InputAreaState {
   value: string;
@@ -50,6 +85,11 @@ export class InputAreaShadowActor extends ShadowActor {
 
   // Mid-stream interrupt state
   private _pendingInterrupt: { content: string; attachments?: Attachment[] } | null = null;
+
+  // Drag-drop: depth counter (dragenter/leave fire per child crossing) and
+  // the teardown for the document-level navigation guard.
+  private _dragDepth = 0;
+  private _dragGuards: (() => void) | null = null;
 
   // Handlers
   private _onSend: SendHandler | null = null;
@@ -96,7 +136,7 @@ export class InputAreaShadowActor extends ShadowActor {
           <span class="file-chips-label">Context:</span>
           <div class="file-chips"></div>
         </div>
-        <input type="file" class="hidden-input" accept=".js,.ts,.jsx,.tsx,.py,.java,.go,.rs,.cpp,.c,.h,.cs,.rb,.php,.swift,.kt,.scala,.vue,.svelte,.json,.yaml,.yml,.toml,.xml,.env,.ini,.conf,.md,.txt,.rst,.log,.html,.css,.scss,.less,.sh,.bash,.zsh,.sql,.graphql,.proto" multiple>
+        <input type="file" class="hidden-input" accept=".js,.ts,.jsx,.tsx,.py,.java,.go,.rs,.cpp,.c,.h,.cs,.rb,.php,.swift,.kt,.scala,.vue,.svelte,.json,.yaml,.yml,.toml,.xml,.env,.ini,.conf,.md,.txt,.rst,.log,.html,.css,.scss,.less,.sh,.bash,.zsh,.sql,.graphql,.proto,.png,.jpg,.jpeg,.webp,.gif,.bmp" multiple>
       </div>
     `);
   }
@@ -111,6 +151,8 @@ export class InputAreaShadowActor extends ShadowActor {
 
     // File input
     this.delegate('change', '.hidden-input', (e) => this.handleFileSelect(e));
+
+    this.setupDragAndDrop();
 
     // Attachment remove
     this.delegate('click', '.attachment .remove', (_, el) => {
@@ -158,21 +200,239 @@ export class InputAreaShadowActor extends ShadowActor {
 
   private handleFileSelect(e: Event): void {
     const input = e.target as HTMLInputElement;
-    const files = Array.from(input.files || []);
+    this.ingestFiles(Array.from(input.files || []));
+    input.value = ''; // Reset for next selection
+  }
 
+  /**
+   * The one place a File becomes an attachment. Both entry points — the
+   * picker and drag-drop — funnel through here so an image can never take the
+   * text branch (which would store it as mojibake in a code fence).
+   */
+  private ingestFiles(files: File[]): void {
     files.forEach(file => {
+      if (this.isImage(file)) {
+        void this.attachImage(file);
+        return;
+      }
       const reader = new FileReader();
       reader.onload = (event) => {
         const content = event.target?.result as string;
-        const attachment: Attachment = { content, name: file.name, size: file.size };
-        this._attachments.push(attachment);
-        this.renderAttachments();
-        this.publish({ 'input.attachments': [...this._attachments] });
+        this.addAttachment({ content, name: file.name, size: file.size, type: 'file' });
       };
       reader.readAsText(file);
     });
+  }
 
-    input.value = ''; // Reset for next selection
+  // ============================================
+  // Drag and drop
+  // ============================================
+
+  /**
+   * Drop-to-attach on the input box.
+   *
+   * Two listener sets with different jobs:
+   * - The **panel guard** on `document` exists because an unhandled drop makes
+   *   the webview frame navigate to the dropped file, blanking the chat and
+   *   losing the in-flight turn. It swallows drops everywhere outside the
+   *   input box; it never attaches anything.
+   * - The **input-box listeners** do the attaching. `dragenter`/`dragleave`
+   *   fire on every child crossing (chips, textarea), so the highlight tracks
+   *   a depth counter rather than a boolean or it flickers as the pointer
+   *   moves within the box.
+   */
+  private setupDragAndDrop(): void {
+    const swallow = (e: DragEvent) => {
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'none';
+    };
+    document.addEventListener('dragover', swallow);
+    document.addEventListener('drop', swallow);
+    this._dragGuards = () => {
+      document.removeEventListener('dragover', swallow);
+      document.removeEventListener('drop', swallow);
+    };
+
+    const zone = this.query<HTMLElement>('.input-area');
+    if (!zone) return;
+
+    zone.addEventListener('dragenter', (e: DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this._dragDepth++;
+      zone.classList.add('dragging');
+    });
+
+    zone.addEventListener('dragover', (e: DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+    });
+
+    zone.addEventListener('dragleave', (e: DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this._dragDepth = Math.max(0, this._dragDepth - 1);
+      if (this._dragDepth === 0) zone.classList.remove('dragging');
+    });
+
+    zone.addEventListener('drop', (e: DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this._dragDepth = 0;
+      zone.classList.remove('dragging');
+      this.handleDrop(e.dataTransfer);
+    });
+  }
+
+  /**
+   * A drop carries either real Files (OS file manager) or only a uri-list
+   * (dragged from the VS Code Explorer or an editor tab — the webview has no
+   * filesystem access, so the extension has to read those for us).
+   */
+  private handleDrop(dataTransfer: DataTransfer | null): void {
+    if (!dataTransfer) return;
+
+    const files = Array.from(dataTransfer.files || []);
+    if (files.length > 0) {
+      this.ingestFiles(files);
+      return;
+    }
+
+    const uris = this.parseUriList(dataTransfer.getData('text/uri-list'));
+    if (uris.length > 0) {
+      this._vscode?.postMessage({ type: 'requestDroppedFiles', uris });
+    }
+  }
+
+  private parseUriList(raw: string): string[] {
+    if (!raw) return [];
+    return raw
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(line => line.length > 0 && !line.startsWith('#'));
+  }
+
+  /**
+   * Extension's reply to `requestDroppedFiles`. Images come back as data URIs
+   * (they still need the canvas downscale); text comes back as text.
+   */
+  handleDroppedFileContents(files: Array<{ name: string; content: string; isImage?: boolean; mimeType?: string }>): void {
+    for (const file of files) {
+      if (file.isImage) {
+        void this.attachImageFromDataUrl(file.content, file.name);
+      } else {
+        this.addAttachment({ content: file.content, name: file.name, size: file.content.length, type: 'file' });
+      }
+    }
+  }
+
+  private isImage(file: File): boolean {
+    if (file.type.startsWith('image/')) return true;
+    const lower = file.name.toLowerCase();
+    return IMAGE_EXTENSIONS.some(ext => lower.endsWith(ext));
+  }
+
+  /**
+   * Downscale an image to {@link IMAGE_MAX_EDGE} and attach it as a data URI.
+   * The cap is checked after re-encoding and the attachment is rejected rather
+   * than truncated — a clipped image decodes to garbage, unlike clipped text.
+   */
+  private async attachImage(file: File): Promise<void> {
+    const url = URL.createObjectURL(file);
+    try {
+      await this.attachRenditions(url, file.name);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  /** Same guards as {@link attachImage}, for bytes the extension read for us. */
+  private async attachImageFromDataUrl(dataUrl: string, name: string): Promise<void> {
+    await this.attachRenditions(dataUrl, name);
+  }
+
+  /**
+   * Build both renditions from one decode and attach them.
+   *
+   * The two exist for different consumers and must not be conflated:
+   * - `content` (~1024px) is what the vision subagent sees. **Ephemeral** —
+   *   it is never persisted, so image quality for the digest costs nothing
+   *   at rest.
+   * - `archive` (512px) is what goes in the database. Small enough that a
+   *   long transcript stays cheap to hydrate, large enough to recognize a
+   *   screenshot by and to re-describe from if the backend changes.
+   */
+  private async attachRenditions(url: string, name: string): Promise<void> {
+    try {
+      const { full, archive } = await this.renderRenditions(url);
+      if (full.bytes > IMAGE_MAX_BYTES) {
+        this.reportAttachmentError(
+          `"${name}" is too large to attach (${(full.bytes / 1024 / 1024).toFixed(1)}MB after downscaling).`
+        );
+        return;
+      }
+      this.addAttachment({
+        content: full.dataUrl,
+        name,
+        size: full.bytes,
+        type: 'image',
+        mimeType: 'image/webp',
+        archive
+      });
+    } catch (err) {
+      this.reportAttachmentError(
+        `Could not read "${name}" as an image: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
+
+  /** Draw the decoded image at a bounded longest edge and encode it to WebP. */
+  private encodeAt(img: HTMLImageElement, maxEdge: number): Rendition {
+    const scale = Math.min(1, maxEdge / Math.max(img.width, img.height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(img.width * scale));
+    canvas.height = Math.max(1, Math.round(img.height * scale));
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('canvas 2d context unavailable');
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    const dataUrl = canvas.toDataURL('image/webp', 0.8);
+    return {
+      dataUrl,
+      // Data URI length overstates payload by ~4/3; report decoded bytes.
+      bytes: Math.round((dataUrl.length - dataUrl.indexOf(',') - 1) * 0.75),
+      width: canvas.width,
+      height: canvas.height
+    };
+  }
+
+  /** Decode once, encode twice. */
+  private renderRenditions(url: string): Promise<{ full: Rendition; archive: Rendition }> {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        try {
+          resolve({
+            full: this.encodeAt(img, IMAGE_MAX_EDGE),
+            archive: this.encodeAt(img, IMAGE_ARCHIVE_EDGE)
+          });
+        } catch (err) {
+          reject(err instanceof Error ? err : new Error(String(err)));
+        }
+      };
+      img.onerror = () => reject(new Error('not a decodable image'));
+      img.src = url;
+    });
+  }
+
+  private addAttachment(attachment: Attachment): void {
+    this._attachments.push(attachment);
+    this.renderAttachments();
+    this.publish({ 'input.attachments': [...this._attachments] });
+  }
+
+  private reportAttachmentError(message: string): void {
+    this._vscode?.postMessage({ type: 'showError', message });
   }
 
   // ============================================
@@ -355,9 +615,13 @@ export class InputAreaShadowActor extends ShadowActor {
 
     container.innerHTML = this._attachments.map((att, idx) => {
       const sizeKB = (att.size / 1024).toFixed(1);
+      // Images show a thumbnail of themselves; the data URI is already in hand.
+      const icon = att.type === 'image'
+        ? `<img class="thumb" src="${this.escapeHtml(att.content)}" alt="">`
+        : '<span class="icon">📄</span>';
       return `
         <div class="attachment" data-index="${idx}">
-          <span class="icon">📄</span>
+          ${icon}
           <span class="name" title="${this.escapeHtml(att.name)}">${this.escapeHtml(att.name)}</span>
           <span class="size">${sizeKB}KB</span>
           <button class="remove" title="Remove">×</button>
@@ -490,6 +754,9 @@ export class InputAreaShadowActor extends ShadowActor {
     this._onSend = null;
     this._onStop = null;
     this._vscode = null;
+    // Document-level listeners outlive the shadow root — remove them explicitly.
+    this._dragGuards?.();
+    this._dragGuards = null;
     super.destroy();
   }
 }

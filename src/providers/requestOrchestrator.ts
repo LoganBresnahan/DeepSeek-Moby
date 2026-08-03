@@ -50,6 +50,43 @@ import { EditValidator, ApprovalState } from './editValidator';
 import { recordRepairRegression, FileRepairState } from './editValidation';
 import type { SavedPromptManager } from './savedPromptManager';
 import type { PlanManager } from './planManager';
+import type { SubagentRouter } from '../subagents/router';
+import { makeImageDescribeRole } from '../subagents/roles/imageDescribe';
+import { RouteSkipReason } from '../subagents/types';
+
+/**
+ * Stand-in for a digest we could not produce. Named, never silent: a dropped
+ * image leaves the model answering about something it was never told existed.
+ */
+/**
+ * Guard the text-only contract for the main model. Logs loudly and strips
+ * rather than throwing: a malformed message should degrade the turn, not kill
+ * it mid-conversation. If this ever fires, an image escaped the digest path.
+ */
+export function assertNoArrayContent(messages: Array<{ role: string; content: unknown }>): void {
+  for (const message of messages) {
+    if (Array.isArray(message.content)) {
+      logger.error(
+        `[ImageDescribe] BUG: array content reached the main model on a "${message.role}" message. ` +
+        'Images must be digested to text before this point. Flattening to text parts.'
+      );
+      message.content = message.content
+        .map(part => (part && typeof part === 'object' && 'text' in part ? String((part as { text: unknown }).text) : '[image omitted]'))
+        .join('\n');
+    }
+  }
+}
+
+function noVisionBackendPlaceholder(name: string, reason?: RouteSkipReason): string {
+  const why = reason === 'no-model'
+    ? 'the configured vision model cannot accept images (it must declare `acceptsImages`)'
+    : reason === 'parse-fail' || reason === 'schema-fail'
+      ? 'the vision model returned an unusable response'
+      : reason === 'sub-error'
+        ? 'the vision model call failed'
+        : 'no vision backend is configured (set `moby.subagents.image-describe`)';
+  return `[Image "${name}" was attached but could not be described — ${why}. You cannot see this image; say so rather than guessing at its contents.]`;
+}
 import {
   shouldIgnoreWatcherPath,
   findProjectRoots,
@@ -89,6 +126,10 @@ export class RequestOrchestrator {
 
   // ── Events (session) ──
   private readonly _onSessionCreated = new vscode.EventEmitter<{ sessionId: string; model: string }>();
+
+  // ── Events (image describe) ── count 0 means "done"; mirrors webSearching.
+  private readonly _onAnalyzingImages = new vscode.EventEmitter<{ count: number }>();
+  public readonly onAnalyzingImages = this._onAnalyzingImages.event;
 
   // ── Events (summarization) ──
   private readonly _onSummarizationStarted = new vscode.EventEmitter<void>();
@@ -185,6 +226,7 @@ export class RequestOrchestrator {
     private commandApprovalManager?: CommandApprovalManager,
     private savedPromptManager?: SavedPromptManager,
     private planManager?: PlanManager,
+    private subagentRouter?: SubagentRouter,
   ) {
     // DiffManager needs to flush the content buffer before emitting events
     this.diffManager.setFlushCallback(() => {
@@ -798,6 +840,63 @@ export class RequestOrchestrator {
   private _currentSessionIdForRecorder: string | null = null;
 
   /**
+   * Resolve every image attachment to a text digest before the turn is
+   * recorded. Text attachments pass through untouched.
+   *
+   * Guarantees, in order of how badly each would fail:
+   * - An image NEVER rides the `--- Attached Files ---` text formatter. Its
+   *   bytes would arrive as mojibake in a code fence.
+   * - A `routed: false` image is never silently dropped — it becomes a
+   *   placeholder naming the setting, so the model knows something was
+   *   attached that it cannot see, rather than answering a question about an
+   *   image nobody told it existed.
+   * - Multiple images resolve concurrently; one failure cannot fail the turn.
+   */
+  private async digestImageAttachments(
+    attachments: Array<{ content: string; name: string; size: number; type?: 'file' | 'image'; mimeType?: string; archive?: { dataUrl: string; bytes: number; width: number; height: number } }> | undefined,
+    userPrompt: string
+  ): Promise<typeof attachments> {
+    if (!attachments || attachments.length === 0) return attachments;
+    const images = attachments.filter(a => a.type === 'image');
+    if (images.length === 0) return attachments;
+
+    if (!this.subagentRouter) {
+      return attachments.map(a => a.type === 'image' ? { ...a, digest: noVisionBackendPlaceholder(a.name) } : a) as typeof attachments;
+    }
+
+    this._onAnalyzingImages.fire({ count: images.length });
+    try {
+      const role = makeImageDescribeRole();
+      const digests = new Map<string, string>();
+
+      await Promise.all(images.map(async image => {
+        try {
+          const result = await this.subagentRouter!.route(
+            role,
+            { dataUrl: image.content, name: image.name },
+            { recentUserPrompt: userPrompt }
+          );
+          digests.set(
+            image.name,
+            result.routed ? result.digest : noVisionBackendPlaceholder(image.name, result.reason)
+          );
+        } catch (err) {
+          // route() swallows its own errors; this is belt-and-braces so one
+          // bad image cannot take the whole turn down.
+          logger.warn(`[ImageDescribe] Unexpected failure for "${image.name}": ${err}`);
+          digests.set(image.name, noVisionBackendPlaceholder(image.name, 'sub-error'));
+        }
+      }));
+
+      return attachments.map(a =>
+        a.type === 'image' ? { ...a, digest: digests.get(a.name) ?? noVisionBackendPlaceholder(a.name) } : a
+      ) as typeof attachments;
+    } finally {
+      this._onAnalyzingImages.fire({ count: 0 });
+    }
+  }
+
+  /**
    * Main entry point — replaces ChatProvider.handleUserMessage().
    * currentSessionId is passed in (ChatProvider owns session lifecycle).
    * Returns the final sessionId so ChatProvider can update its state.
@@ -806,7 +905,7 @@ export class RequestOrchestrator {
     message: string,
     currentSessionId: string | null,
     editorContextProvider: () => Promise<string>,
-    attachments?: Array<{ content: string; name: string; size: number }>,
+    attachments?: Array<{ content: string; name: string; size: number; type?: 'file' | 'image'; mimeType?: string; archive?: { dataUrl: string; bytes: number; width: number; height: number } }>,
     options?: { skipRecord?: boolean }
   ): Promise<{ sessionId: string | null }> {
     // Clear processed code blocks and pending diffs for new conversation turn
@@ -852,7 +951,17 @@ export class RequestOrchestrator {
     // Save user message to history (UI already shows it from frontend)
     // Skip when re-sending after fork (message already in event store)
     if (sessionId && !options?.skipRecord) {
-      await this.conversationManager.recordUserMessage(sessionId, message);
+      // ADR 0014: attachments are persisted here and materialized into context
+      // on read (getSessionMessagesCompat) — there is no live injection.
+      //
+      // Image digests are resolved BEFORE the record so the digest is part of
+      // the persisted attachment (plan §7 option (i)). Injecting the digest
+      // live instead would reintroduce exactly the reload-drift ADR 0014 just
+      // fixed: the model sees the description live and nothing after a reload.
+      // Cost: a crash during routing loses the typed message, which is
+      // retypeable — cheaper than silently divergent history.
+      const recorded = await this.digestImageAttachments(attachments, message);
+      await this.conversationManager.recordUserMessage(sessionId, message, recorded);
     }
 
     // ADR 0003: begin structural event recording for this turn. turnId is
@@ -1047,22 +1156,9 @@ export class RequestOrchestrator {
         });
       }
 
-      // If this message has file attachments, include their contents in the context
-      if (attachments && attachments.length > 0) {
-        let fileContext = '\n\n--- Attached Files ---\n';
-        for (const attachment of attachments) {
-          const content = attachment.content || '';
-          fileContext += `\n### File: ${attachment.name}\n\`\`\`\n${content}\n\`\`\`\n`;
-        }
-        fileContext += '--- End Attached Files ---\n';
-
-        if (historyMessages.length > 0) {
-          const lastMsg = historyMessages[historyMessages.length - 1];
-          if (lastMsg.role === 'user') {
-            lastMsg.content = lastMsg.content + fileContext;
-          }
-        }
-      }
+      // Attachment context is NOT injected here — ADR 0014 makes
+      // getSessionMessagesCompat the single call site, so what the model sees
+      // live and what it sees after a reload are the same bytes.
 
       // If user has selected files for context, include them
       const selectedFilesContext = this.fileContextManager.getSelectedFilesContext();
@@ -1108,6 +1204,12 @@ export class RequestOrchestrator {
       );
 
       const contextMessages: ApiMessage[] = contextResult.messages as ApiMessage[];
+
+      // The main model is text-only: an image must reach it as a digest string,
+      // never as an OpenAI content array — DeepSeek 400s on `image_url` blocks.
+      // This is the single choke point all three pipelines below flow through,
+      // so one check covers the streaming loop, the legacy tool loop, and R1.
+      assertNoArrayContent(contextMessages);
 
       // ── Pipeline selection ────────────────────────────────────────────
       // Three paths today:

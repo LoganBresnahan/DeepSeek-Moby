@@ -108,12 +108,32 @@ export interface PendingGroup {
 export type TurnRole = 'user' | 'assistant';
 export type EditMode = 'manual' | 'ask' | 'auto';
 
+/**
+ * A user-turn attachment as the transcript renders it. Live sends carry the
+ * data URL already (the composer's 512px archive rendition); restored turns
+ * carry only {blobId, width, height} and the bytes arrive lazily via
+ * requestAttachmentBlob when the turn becomes visible.
+ */
+export interface TurnAttachment {
+  name: string;
+  type: 'file' | 'image';
+  /** Persisted images only — key for the lazy blob fetch. */
+  blobId?: string;
+  /** Pixel size of the stored rendition — reserves the box before bytes arrive. */
+  width?: number;
+  height?: number;
+  mimeType?: string;
+  /** Present once bytes are in hand (live send, cache hit, or fetch reply). */
+  dataUrl?: string;
+}
+
 export interface TurnData {
   turnId: string;
   role: TurnRole;
   timestamp: number;
   model?: string;
   files?: string[];
+  attachments?: TurnAttachment[];
   /** Event sequence number from backend (for fork API) */
   sequence?: number;
 }

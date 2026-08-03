@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { DeepSeekClient } from '../deepseekClient';
 import { StatusBar } from '../views/statusBar';
@@ -41,7 +42,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
 
   // Message queuing during post-response summarization
   private _summarizing = false;
-  private _pendingMessages: Array<{ message: string; attachments?: Array<{ content: string; name: string; size: number }> }> = [];
+  private _pendingMessages: Array<{ message: string; attachments?: Array<{ content: string; name: string; size: number; type?: 'file' | 'image'; mimeType?: string; archive?: { dataUrl: string; bytes: number; width: number; height: number } }> }> = [];
   private _lastPendingDiffCount = 0;
   private webSearchManager: WebSearchManager;
   private fileContextManager: FileContextManager;
@@ -92,7 +93,8 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     this.requestOrchestrator = new RequestOrchestrator(
       this.deepSeekClient, this.conversationManager, this.statusBar,
       this.diffManager, this.webSearchManager, this.fileContextManager,
-      this.commandApprovalManager, this.savedPromptManager, this.planManager
+      this.commandApprovalManager, this.savedPromptManager, this.planManager,
+      this.subagentRouter
     );
 
     // Wire manager events → webview
@@ -137,6 +139,12 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     });
     this.webSearchManager.onSearchComplete(() => {
       this._view?.webview.postMessage({ type: 'webSearchComplete' });
+    });
+    // RequestOrchestrator → webview: image digest routing. count 0 = done.
+    this.requestOrchestrator.onAnalyzingImages(({ count }) => {
+      this._view?.webview.postMessage(
+        count > 0 ? { type: 'analyzingImages', count } : { type: 'analyzingImagesComplete' }
+      );
     });
     this.webSearchManager.onSearchCached(() => {
       this._view?.webview.postMessage({ type: 'webSearchCached' });
@@ -564,6 +572,11 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         case 'loadHistory':
           await this.loadCurrentSessionHistory();
           break;
+        case 'showError':
+          // Webview-side failures the user must see (e.g. an image too large
+          // to attach after downscaling) — the webview has no notification UI.
+          vscode.window.showErrorMessage(String(data.message ?? 'Unknown error'));
+          break;
         case 'stopGeneration':
           // ADR 0008: await teardown so generationStopped fires only after the
           // in-flight loop has fully unwound (the webview gates the next send on it).
@@ -829,6 +842,27 @@ export class ChatProvider implements vscode.WebviewViewProvider {
           break;
         case 'getFileContent':
           await this.fileContextManager.sendFileContent(data.filePath);
+          break;
+        case 'requestAttachmentBlob':
+          this.sendAttachmentBlob(String(data.blobId ?? ''));
+          break;
+        case 'poolWarning':
+          // VirtualListActor's actor-pool exhaustion warning, surfaced here so
+          // it lands in the persistent extension log, not just the console.
+          logger.warn(`[Webview] ${data.message}: ${JSON.stringify(data.stats)}`);
+          break;
+        case 'setSubagentModel': {
+          // `moby.subagents` is a nested object, so this rewrites one key
+          // rather than going through the flat-setting path.
+          const config = vscode.workspace.getConfiguration('moby');
+          const subs = { ...(config.get<Record<string, string>>('subagents') ?? {}) };
+          subs[data.role as string] = data.modelId as string;
+          await config.update('subagents', subs, vscode.ConfigurationTarget.Global);
+          logger.settingsChanged(`subagents.${data.role}`, data.modelId);
+          break;
+        }
+        case 'requestDroppedFiles':
+          await this.handleDroppedUris((data.uris as string[]) ?? []);
           break;
         case 'setSelectedFiles':
           this.fileContextManager.setSelectedFiles(data.files);
@@ -1241,6 +1275,13 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  /** Current `moby.subagents.<role>` selection; '' when off or unset. */
+  private getSubagentModelId(role: string): string {
+    const subs = vscode.workspace.getConfiguration('moby').get<Record<string, string>>('subagents') ?? {};
+    const raw = subs[role];
+    return !raw || raw === 'off' ? '' : raw;
+  }
+
   private async sendCurrentSettings() {
     const snapshot = this.settingsManager.getCurrentSettings();
     const wsState = await this.webSearchManager.getSettings();
@@ -1255,6 +1296,9 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         ...snapshot,
         apiKeyConfigured,
         systemPrompt: this.savedPromptManager.getActiveContent(),
+        // Current image-describe subagent selection ('' = off) for the
+        // settings-popup picker.
+        imageDescribeModelId: this.getSubagentModelId('image-describe'),
         webSearch: {
           searchDepth: wsState.settings.searchDepth,
           creditsPerPrompt: wsState.settings.creditsPerPrompt,
@@ -1604,6 +1648,34 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  /**
+   * Lazy blob fetch: hydration ships image attachments as {blobId, w, h} only;
+   * the webview asks for bytes when a turn actually becomes visible. A null
+   * dataUrl reply means the blob is unavailable (GC'd, foreign DB, non-image,
+   * or a read error) — the webview caches that and leaves the placeholder
+   * rather than re-requesting. Every request gets a reply: a silent drop
+   * would wedge the blobId in the webview's pending set for the session.
+   */
+  private sendAttachmentBlob(blobId: string): void {
+    if (!this._view) return;
+    let dataUrl: string | null = null;
+    try {
+      const blob = blobId ? this.conversationManager.getBlobStore().get(blobId) : null;
+      if (!blob) {
+        logger.warn(`[ChatProvider] requestAttachmentBlob: blob ${blobId.substring(0, 8)} not found`);
+      } else if (!blob.mime.startsWith('image/')) {
+        // The projection only hands the webview image blobIds; refuse anything
+        // else so that invariant holds on both sides (text bodies stay put).
+        logger.warn(`[ChatProvider] requestAttachmentBlob: refusing non-image blob ${blobId.substring(0, 8)} (${blob.mime})`);
+      } else {
+        dataUrl = `data:${blob.mime};base64,${blob.data.toString('base64')}`;
+      }
+    } catch (error) {
+      logger.error(`[ChatProvider] requestAttachmentBlob failed for ${blobId.substring(0, 8)}: ${error}`);
+    }
+    this._view.webview.postMessage({ type: 'attachmentBlob', blobId, dataUrl });
+  }
+
   public async loadSession(sessionId: string) {
     // Stop active generation before switching sessions
     if (this.requestOrchestrator.isGenerating()) {
@@ -1877,5 +1949,65 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       </body>
       </html>
     `;
+  }
+
+  /**
+   * Read files for a drop the webview couldn't read itself — a drag from the
+   * VS Code Explorer or an editor tab carries a uri-list, not File objects,
+   * and the webview has no filesystem access.
+   *
+   * Images come back as data URIs because the downscale needs a canvas, which
+   * only exists on the webview side.
+   */
+  private async handleDroppedUris(uris: string[]): Promise<void> {
+    const MAX_DROPPED_BYTES = 10 * 1024 * 1024;
+    const IMAGE_EXT = /\.(png|jpe?g|webp|gif|bmp)$/i;
+    const files: Array<{ name: string; content: string; isImage?: boolean; mimeType?: string }> = [];
+
+    for (const raw of uris.slice(0, 20)) {
+      let uri: vscode.Uri;
+      try {
+        uri = vscode.Uri.parse(raw, true);
+      } catch {
+        continue;
+      }
+      if (uri.scheme !== 'file' && uri.scheme !== 'vscode-file') continue;
+
+      const name = path.basename(uri.fsPath);
+      try {
+        const stat = await vscode.workspace.fs.stat(uri);
+        if (stat.type === vscode.FileType.Directory) {
+          vscode.window.showWarningMessage(`Cannot attach "${name}" — dropping a folder is not supported.`);
+          continue;
+        }
+        if (stat.size > MAX_DROPPED_BYTES) {
+          vscode.window.showWarningMessage(
+            `Cannot attach "${name}" — ${(stat.size / 1024 / 1024).toFixed(1)}MB exceeds the 10MB drop limit.`
+          );
+          continue;
+        }
+
+        const bytes = await vscode.workspace.fs.readFile(uri);
+        if (IMAGE_EXT.test(name)) {
+          const ext = name.split('.').pop()!.toLowerCase();
+          const mime = `image/${ext === 'jpg' ? 'jpeg' : ext}`;
+          files.push({
+            name,
+            content: `data:${mime};base64,${Buffer.from(bytes).toString('base64')}`,
+            isImage: true,
+            mimeType: mime
+          });
+        } else {
+          files.push({ name, content: Buffer.from(bytes).toString('utf8') });
+        }
+      } catch (err) {
+        logger.warn(`[ChatProvider] Could not read dropped file "${name}": ${err}`);
+        vscode.window.showErrorMessage(`Could not read "${name}".`);
+      }
+    }
+
+    if (files.length > 0) {
+      this._view?.webview.postMessage({ type: 'droppedFileContents', files });
+    }
   }
 }

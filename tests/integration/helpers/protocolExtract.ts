@@ -56,7 +56,10 @@ function braceMatchedBody(text: string, openIdx: number): string {
   return text.slice(openIdx + 1);
 }
 
-const SEND_RE = /postMessage\(\s*\{\s*type:\s*'([^']+)'/g;
+// `(?:\?\.)?` — injected postMessage callbacks are invoked optional-chained
+// (`this._postMessage?.({...})`); without it those sends are invisible and
+// land as undetectable orphans (poolWarning was one for weeks).
+const SEND_RE = /postMessage(?:\?\.)?\(\s*\{\s*type:\s*'([^']+)'/g;
 
 /** Extract message types from postMessage({ type: '...' }) call sites. */
 export function extractSentTypes(file: string): Set<string> {

@@ -45,6 +45,8 @@ export interface SettingsValues {
    *  is in use (so users who see both rows know which one is actually wired
    *  up for searches). */
   webSearchProvider?: string;
+  /** Current `moby.subagents.image-describe` selection; '' means off. */
+  imageDescribeModelId?: string;
 }
 
 export interface DefaultPrompt {
@@ -84,6 +86,18 @@ export class SettingsShadowActor extends PopupShadowActor {
   // without editing JSON.
   private _customModels: Array<{ id: string; name: string; hasApiKey?: boolean }> = [];
 
+  // Vision-capable models only — the image-describe subagent sends an
+  // `image_url` block, which a text-only backend rejects outright. Populated
+  // from the same `model.list` channel, filtered on the `acceptsImages`
+  // capability the registry reports.
+  private _visionModels: Array<{ id: string; name: string }> = [];
+  /** Vision-capable but NOT declared for the image-describe role. The router
+   *  would refuse these, so they are listed as a fixable diagnosis rather than
+   *  offered as choices. */
+  private _visionModelsMissingRole: Array<{ id: string; name: string }> = [];
+  /** Current `moby.subagents.image-describe` value; '' means off. */
+  private _imageDescribeModelId = '';
+
   constructor(manager: EventStateManager, element: HTMLElement, vscode: VSCodeAPI) {
     const config: PopupConfig = {
       manager,
@@ -105,6 +119,17 @@ export class SettingsShadowActor extends PopupShadowActor {
           this._customModels = all
             .filter(m => m.isCustom)
             .map(m => ({ id: m.id, name: m.name, hasApiKey: m.hasApiKey }));
+          // The router requires BOTH gates, so the picker must too — offering a
+          // model that fails one shows up as a placeholder mid-conversation,
+          // far from the setting that caused it.
+          const vision = (value as Array<{ id: string; name: string; acceptsImages?: boolean; subagentRoles?: string[] }>)
+            .filter(m => m.acceptsImages);
+          this._visionModels = vision
+            .filter(m => m.subagentRoles?.includes('image-describe'))
+            .map(m => ({ id: m.id, name: m.name }));
+          this._visionModelsMissingRole = vision
+            .filter(m => !m.subagentRoles?.includes('image-describe'))
+            .map(m => ({ id: m.id, name: m.name }));
           this.updateBodyContent(this.renderPopupContent());
         }
       },
@@ -177,6 +202,10 @@ export class SettingsShadowActor extends PopupShadowActor {
 
       <div class="settings-divider"></div>
 
+      ${this.renderImageDescribeSection()}
+
+      <div class="settings-divider"></div>
+
       <!-- Database Encryption Key Section -->
       <div class="settings-section">
         <div class="settings-section-title">Database Encryption Key</div>
@@ -201,6 +230,47 @@ export class SettingsShadowActor extends PopupShadowActor {
     `;
   }
 
+  /**
+   * Image-describe subagent picker.
+   *
+   * Lists ONLY models declaring `acceptsImages`. DeepSeek's own API is
+   * text-only, so this list is empty until the user adds a vision-capable
+   * custom model — and an empty list is a real state worth explaining rather
+   * than rendering as an empty dropdown.
+   */
+  private renderImageDescribeSection(): string {
+    // The base-class constructor renders before this subclass's field
+    // initializers run, so these can be undefined on the very first pass —
+    // same reason `_customModels` is read with `?.` above.
+    const visionModels = this._visionModels ?? [];
+    const selectedId = this._imageDescribeModelId ?? '';
+
+    const options = visionModels
+      .map(m => `<option value="${this.escapeHtml(m.id)}"${m.id === selectedId ? ' selected' : ''}>${this.escapeHtml(m.name)}</option>`)
+      .join('');
+
+    const missingRole = this._visionModelsMissingRole ?? [];
+    const body = visionModels.length === 0
+      ? (missingRole.length > 0
+          // Distinguish "you have no vision model" from "you have one but it
+          // is missing one line" — the second is a fixable diagnosis, and
+          // saying "none registered" when one is right there reads as a bug.
+          ? `<div class="settings-hint">${missingRole.map(m => this.escapeHtml(m.name)).join(', ')} accept${missingRole.length === 1 ? 's' : ''} images but ${missingRole.length === 1 ? 'does' : 'do'} not declare the role. Add <code>"subagentRoles": ["image-describe"]</code> to ${missingRole.length === 1 ? 'its' : 'their'} <code>moby.customModels</code> entry.</div>`
+          : `<div class="settings-hint">No vision-capable models registered. Add one to <code>moby.customModels</code> with <code>"acceptsImages": true</code> and <code>"subagentRoles": ["image-describe"]</code>.</div>`)
+      : `<select class="settings-select" data-id="imageDescribeModel">
+           <option value=""${selectedId ? '' : ' selected'}>Off — images are not described</option>
+           ${options}
+         </select>
+         <div class="settings-hint">Attached images are described by this model; the assistant reads the description, not the image.</div>`;
+
+    return `
+      <div class="settings-section">
+        <div class="settings-section-title">Image Description (Vision)</div>
+        ${body}
+      </div>
+    `;
+  }
+
   private renderDefaultPromptPreview(): string {
     return `
       <div class="settings-preview" data-preview>
@@ -220,6 +290,17 @@ export class SettingsShadowActor extends PopupShadowActor {
       const setting = select.getAttribute('data-setting');
       if (setting) {
         this.updateSetting(setting, select.value);
+        return;
+      }
+      // Subagent role pickers write `moby.subagents.<role>`, a nested object
+      // rather than a flat setting, so they go through their own message.
+      if (select.getAttribute('data-id') === 'imageDescribeModel') {
+        this._imageDescribeModelId = select.value;
+        this._vscode.postMessage({
+          type: 'setSubagentModel',
+          role: 'image-describe',
+          modelId: select.value || 'off'
+        });
       }
     });
 
@@ -275,6 +356,10 @@ export class SettingsShadowActor extends PopupShadowActor {
 
     let changed = false;
 
+    if (settings.imageDescribeModelId !== undefined && settings.imageDescribeModelId !== this._imageDescribeModelId) {
+      this._imageDescribeModelId = settings.imageDescribeModelId;
+      changed = true;
+    }
     if (settings.logLevel !== undefined && settings.logLevel !== this._logLevel) {
       this._logLevel = settings.logLevel;
       changed = true;

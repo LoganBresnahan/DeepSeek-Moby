@@ -140,6 +140,36 @@ describe('ConversationManager.getSessionRichHistory', () => {
     expect(turns[0].files).toEqual(['index.ts', 'utils.ts']);
   });
 
+  it('ships attachment render metadata — image blobId/dimensions, never bodies (plan phase 5)', async () => {
+    eventStore.append({
+      sessionId: SESSION_ID,
+      timestamp: 1000,
+      type: 'user_message',
+      content: 'Look at these',
+      attachments: [
+        {
+          type: 'image', name: 'shot.png', mimeType: 'image/webp',
+          blobId: 'a'.repeat(64), bytes: 30000, width: 512, height: 288,
+          digest: 'a screenshot of a login form'
+        },
+        { type: 'file', name: 'notes.md', blobId: 'b'.repeat(64), bytes: 120 }
+      ]
+    });
+
+    const turns = await callRichHistory(SESSION_ID);
+    expect(turns[0].attachments).toEqual([
+      {
+        name: 'shot.png', type: 'image', mimeType: 'image/webp',
+        blobId: 'a'.repeat(64), width: 512, height: 288
+      },
+      // Text attachments carry no blobId out — the webview must never be
+      // handed a key it could use to fetch a text body.
+      { name: 'notes.md', type: 'file' }
+    ]);
+    // The digest is model-facing context, not transcript data.
+    expect(JSON.stringify(turns[0].attachments)).not.toContain('login form');
+  });
+
   it('handles events from different sessions independently', async () => {
     // Session 1
     eventStore.append({

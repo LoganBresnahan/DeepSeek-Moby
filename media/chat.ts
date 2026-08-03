@@ -326,9 +326,22 @@ function initializeActorSystem(): void {
     // Add user message to UI immediately via VirtualListActor
     const fileNames = attachments?.map(a => a.name) || [];
 
+    // Transcript chips render from the same 512px archive rendition the DB
+    // will persist, so the live view matches what a reload will lazy-fetch.
+    const turnAttachments = attachments?.map(a => a.type === 'image'
+      ? {
+          name: a.name,
+          type: 'image' as const,
+          dataUrl: a.archive?.dataUrl ?? a.content,
+          width: a.archive?.width,
+          height: a.archive?.height
+        }
+      : { name: a.name, type: 'file' as const });
+
     const turnId = `turn-user-${Date.now()}`;
     virtualList.addTurn(turnId, 'user', {
       files: fileNames.length > 0 ? fileNames : undefined,
+      attachments: turnAttachments && turnAttachments.length > 0 ? turnAttachments : undefined,
       timestamp: Date.now()
     });
     virtualList.addTextSegment(turnId, content);

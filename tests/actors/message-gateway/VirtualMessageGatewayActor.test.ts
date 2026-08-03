@@ -97,6 +97,7 @@ function createMockVirtualListActor() {
     updatePendingFileStatusByPath: vi.fn(),
     markCodeBlockApplied: vi.fn(),
     addDrawingSegment: vi.fn(),
+    handleAttachmentBlob: vi.fn(),
     setEditMode: vi.fn(),
     clear: vi.fn(() => turns.clear()),
     scrollToEnd: vi.fn(),
@@ -573,6 +574,25 @@ describe('VirtualMessageGatewayActor', () => {
       expect(mockActors.virtualList.addTextSegment).toHaveBeenCalledWith('turn-2', 'Hi there!');
     });
 
+    it('passes user-turn attachment metadata through to addTurn (plan phase 5)', () => {
+      const attachments = [
+        { name: 'shot.png', type: 'image', blobId: 'e'.repeat(64), width: 512, height: 288 }
+      ];
+      dispatchMessage({
+        type: 'loadHistory',
+        history: [
+          { role: 'user', content: 'Look', files: ['shot.png'], attachments, timestamp: 1000 }
+        ]
+      });
+
+      expect(mockActors.virtualList.addTurn).toHaveBeenCalledWith('turn-1', 'user', {
+        files: ['shot.png'],
+        attachments,
+        timestamp: 1000,
+        sequence: undefined
+      });
+    });
+
     it('restores Reasoner conversation with interleaved thinking + shell', () => {
       // Default mock session model is 'deepseek-chat'. The renderSegment text
       // branch only strips <shell> tags when model === 'deepseek-reasoner';
@@ -938,6 +958,30 @@ describe('VirtualMessageGatewayActor', () => {
           url: 'http://192.168.0.135:8839',
           isWSL: true
         })
+      );
+    });
+  });
+
+  describe('attachmentBlob replies (plan phase 5)', () => {
+    it('delegates to virtualList.handleAttachmentBlob', () => {
+      dispatchMessage({
+        type: 'attachmentBlob',
+        blobId: 'f'.repeat(64),
+        dataUrl: 'data:image/webp;base64,UklGRg=='
+      });
+
+      expect(mockActors.virtualList.handleAttachmentBlob).toHaveBeenCalledWith(
+        'f'.repeat(64),
+        'data:image/webp;base64,UklGRg=='
+      );
+    });
+
+    it('normalizes a missing dataUrl to null (blob gone server-side)', () => {
+      dispatchMessage({ type: 'attachmentBlob', blobId: 'f'.repeat(64) });
+
+      expect(mockActors.virtualList.handleAttachmentBlob).toHaveBeenCalledWith(
+        'f'.repeat(64),
+        null
       );
     });
   });

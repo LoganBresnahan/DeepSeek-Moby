@@ -7,6 +7,16 @@
  * routing happened. See [docs/plans/subagents.md].
  */
 
+/** Message body a sub call can carry. Mirrors the transport's `MessageContent`
+ *  (deepseekClient) — declared structurally here so roles don't import the
+ *  client just to describe their input. */
+export type SubagentMessageContent =
+  | string
+  | Array<
+      | { type: 'text'; text: string }
+      | { type: 'image_url'; image_url: { url: string } }
+    >;
+
 export type SubagentRoleName =
   | 'web-search-digest'
   | 'search-digest'
@@ -57,6 +67,17 @@ export interface SubagentRole<TInput, TOutput> {
   /** User-message body for the sub call — the raw input serialized for the
    *  model. */
   buildUserMessage(input: TInput): string;
+
+  /** Multimodal variant. When present the router uses it instead of
+   *  `buildUserMessage`, letting a role send the OpenAI content-array form
+   *  (text parts + `image_url` parts) rather than a plain string. Text-only
+   *  roles omit it. */
+  buildUserContent?(input: TInput): SubagentMessageContent;
+
+  /** Role sends image content, so the configured model must declare
+   *  `acceptsImages`. Declaring the role is not enough — a text-only backend
+   *  would 400 on the `image_url` block. */
+  readonly requiresImageSupport?: boolean;
 
   /** Parse + validate the sub's JSON response. Returns `null` on schema
    *  failure; router falls back to raw input. */

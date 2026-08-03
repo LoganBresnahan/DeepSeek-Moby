@@ -538,6 +538,160 @@ Not a pass/fail scenario yet — investigation only.
 
 ---
 
+## M34. Attachment persistence + replay (ADR 0014) (P0)
+
+**Why this matters:** attachments were never persisted — `recordUserMessage` dropped them and the `--- Attached Files ---` block was appended to the ephemeral per-request array. A reloaded session rebuilt model context *without* the attachment, silently differing from the conversation that actually happened. ADR 0014 persists bodies as content-addressed blobs and makes `getSessionMessagesCompat` the single place the context block is materialized. Unit tests pin byte-identical replay, exactly-once emission, fork carry-over, and GC — but nothing exercises the real DB file, a real reload, or the webview's restored view, which is precisely the path that used to break silently.
+
+**Setup:** a workspace with a text file of a few KB. Tail the *DeepSeek Moby* output channel.
+
+**Steps:**
+1. New chat. Attach the text file, send a message that requires reading it (e.g. *"summarize the attached file"*). Model answers using the content — confirms the block still reaches the model now that the live injection is gone.
+2. *Moby: Export Turn as JSON (Debug)* → the user message's context contains **exactly one** `--- Attached Files ---` block. **Fail (the double-inject regression):** two blocks.
+3. Switch to another session, then restore this one from the history sidebar. Ask a follow-up that depends on the attachment (*"what was the third bullet in that file?"*). **Pass:** the model still knows. **Fail (old bug):** it has no idea what file you mean.
+4. Fork the session at that turn → same follow-up → still answered.
+5. Attach a file larger than 256KB. **Pass:** the model sees the head of the file plus a `[... truncated: N of M bytes omitted ...]` marker, and says so if asked. Logs show `[Attachments] Truncated "<name>" for persistence`.
+6. Attach the *same* file twice in one session → only one row lands in `attachment_blobs` (content-addressed dedupe). Check via the DB or by confirming no size jump.
+7. Delete the session from the history modal → its blobs are collected (`[AttachmentBlobStore] Collected N orphaned blob(s)` in the log). Delete a *forked* session while the parent survives → blobs are **kept**, and the parent's attachment still replays.
+
+**Pass criteria:** the model's view of an attachment is identical live, after reload, and after fork; the block appears exactly once; oversized bodies truncate visibly; blob lifetime follows event lifetime in both directions.
+
+**Note on the migration:** this run upgrades the database v1 → v2. Additive-only, but one-way — a DB touched by this build then opened by an older build loses blob rows.
+
+---
+
+## M35. Image attach — capture, downscale, chip (image-describe Phase 1) (P1)
+
+**Why this matters:** the file picker now accepts `.png/.jpg/.jpeg/.webp/.gif/.bmp`. The webview downscales to a 1024px longest edge, re-encodes to WebP q0.8, and enforces a 1.5MB cap *after* re-encoding (a clipped image decodes to garbage, so oversize is rejected rather than truncated). Unit tests mock the canvas — happy-dom has no real encoder — so the actual downscale, the WebP encode, and the thumbnail rendering have never run.
+
+**Interim behaviour, expected:** nothing routes the image to a model yet (that's phase 3). The image is stored and shown as a chip; the model is told nothing about it. Don't file that as a bug.
+
+**Steps:**
+1. Click attach → the picker offers image files alongside source files.
+2. Attach a large screenshot (>2MB, e.g. a full 4K capture). **Pass:** a chip appears within a beat showing a **thumbnail of the image**, its name, and a size in the tens-to-low-hundreds of KB — i.e. the downscale ran. **Fail:** multi-MB size, or a 📄 icon instead of a thumbnail.
+3. Attach a text file in the same batch → it still shows the 📄 icon and its own size. Both chips coexist.
+4. Remove the image chip via × → it disappears; the text chip is unaffected.
+5. Attach a `.gif` and a `.bmp` → both attach (canvas decodes them; they re-encode to WebP).
+6. Rename a non-image file to `.png` and attach it → a VS Code error notification reads *"Could not read … as an image"*, and **no chip is added**.
+7. Attach an enormous image (e.g. a 20000×20000 PNG, if you can produce one) → either it attaches downscaled, or a *"too large to attach"* notification appears. Never a silent no-op.
+8. Send a message with an image attached → the turn sends normally and the model responds to the text. Reload the session → the turn restores. Check *Moby: Export Turn as JSON*: the persisted attachment carries a `blobId` and a small `bytes` value, **not** a base64 data URI.
+
+**Pass criteria:** images downscale visibly, chips render thumbnails, non-images are rejected loudly, and no data URI ever lands in the event JSON.
+
+---
+
+## M36. Drag-and-drop attach (Phase 1b) (P1)
+
+**Why this matters:** the automated tests synthesize a `DataTransfer` and dispatch `drop`, which exercises our handler, the image-vs-text branch, the highlight counter and the navigation guard. **Nothing automated can cross the real OS → webview boundary**, and nothing can reproduce what the VS Code Explorer actually puts on a drag payload — the `text/uri-list` round-trip is built against a documented assumption that has never been observed running.
+
+**The dangerous failure mode is step 4.** An unhandled drop makes the webview frame navigate to the dropped file, blanking the chat and losing the in-flight turn. The document-level guard exists solely to prevent that.
+
+**Steps:**
+1. Drag an image from the OS file manager onto the **input box**. Chip appears with a thumbnail; size is tens-to-low-hundreds of KB (the downscale ran).
+2. Drag a source file from the OS file manager onto the input box → 📄 chip with its name. Send a message → the model can quote the file's contents.
+3. Drag a file **from the VS Code Explorer** onto the input box → same result. This is the `text/uri-list` path: the webview can't read it, so the extension does. Try both a text file and an image (e.g. `media/icon.png`).
+4. **Drag a file over the transcript / header / anywhere that is not the input box, and drop it.** Nothing should attach — and critically **the chat must not disappear or navigate away**. If the panel goes blank, the guard isn't engaging.
+5. While dragging over the input box, move the pointer across the textarea and over existing chips. The dashed highlight must stay **steady**, not flicker — that's the depth counter.
+6. Drag over the input box then drag back out without dropping → highlight clears.
+7. Drop a **folder** from the Explorer → warning notification, nothing attached.
+8. Drop a very large file (>10MB) → warning naming the 10MB limit, nothing attached.
+9. Drop several files at once (mixed image + text) → all attach, correct chip types.
+10. Regression: the paperclip picker still works, and dropping still works after switching sessions (listeners survive re-render).
+
+**Pass criteria:** both drop sources attach, off-target drops are inert and never navigate, the highlight is steady, and folder/oversize cases warn instead of failing silently.
+
+**Not implemented, deliberately:** modifier keys. Shift+drop does nothing special — plain drop attaches, that's the whole interaction.
+
+---
+
+## M37. Image describe — vision digest end to end (Phases 2–3) (P0)
+
+**Partially discharged 2026-08-03** (dev-host, `kimi-k3` as the vision backend). Verified from the trace + log export: **S2** — two routes, `validationResult: 'ok'`, digest reached the main model, and the model produced an accurate unprompted description (a stamp-style lighthouse illustration) on both a `deepseek-v4-flash-thinking` main and a `kimi-k3` main. **S3** — answered for this backend, see below. Still owed: **S0** (picker states), **S1** (no-backend placeholder), **S4** (ineligible model refuses without a 400), **S5** (replay after switch/fork — a session switch happened in that run but no post-restore follow-up was asked), **S6** (multiple images + failure isolation). Two costs observed and tracked in CLAUDE.md rather than here: the digest blocks the turn for **15–20s** on Kimi (the `thinkingMode: 'disabled'` no-op), and a Kimi *main* pays that twice via the legacy non-streaming probe.
+
+**Why this matters:** the whole point of the feature. Everything up to now stored and displayed images; this is where an attached image finally reaches the model — as a *text digest* produced by a separate vision model, since DeepSeek's API is text-only. Two things no test can check: whether a real VL backend honours `jsonMode` (the plan's open empirical question), and whether the digests are actually *good enough* to answer questions from.
+
+**Setup:** add a vision-capable custom model in `moby.customModels` — must declare `"acceptsImages": true` and `"subagentRoles": ["image-describe"]`. Worked example is SiliconFlow `deepseek-ai/deepseek-vl2`. Then pick it in **Settings → Image Description (Vision)** (or set `"moby.subagents": { "image-describe": "<id>" }` by hand).
+
+**S0. The picker.**
+1. Before adding any vision model, open the settings popup → the Image Description section reads *"No vision-capable models registered"* with the required JSON keys. No empty dropdown.
+2. Add the vision model to `moby.customModels`, reopen → it appears in the dropdown. Text-only models (Chat, Reasoner, a custom text model) must **not** appear.
+3. Select it → `moby.subagents.image-describe` updates in settings.json. Reopen the popup → the selection persisted.
+4. Select **Off** → the setting becomes `"off"` (not empty), and attaching an image falls back to the S1 placeholder.
+
+**S1. No backend configured → explicit placeholder.**
+1. Leave `moby.subagents.image-describe` unset. Attach a screenshot, ask *"what does this show?"*
+2. **Pass:** the model says it cannot see the image and names the setting. **Fail:** it hallucinates a description, or ignores the image entirely.
+
+**S2. Backend configured → real digest.**
+1. Attach a screenshot of a UI with visible text. Ask *"what does the error message say?"*
+2. Status shows **"Analyzing image..."** while routing, then clears.
+3. **Pass:** the model quotes the error text accurately. That text came through the digest's `text` field.
+4. *Moby: Show Logs* → a `subagent.route` span with `role: image-describe`, `validationResult: 'ok'`.
+
+**S3. jsonMode on the VL backend — ANSWERED for Kimi 2026-08-03, still open for other backends.**
+
+Two `image-describe` routes on `kimi-k3` both returned `validationResult: 'ok'` (digestBytes 975 and 1,396). The per-role `jsonMode` opt-out contingency was **not** built. What remains is confirming the same on a *second* backend, and reading the new recovery label.
+
+1. Check the route span for `parse-fail` or `schema-fail`.
+2. Read `jsonRecovery` on a successful span: `none` = the backend honoured `response_format`; `fence` or `brace-scan` = it did not and `tolerantJsonParse` covered for it (still a pass, but the signal that matters). An info log names the recovery when it fires. **Before this field existed a recovered fence was indistinguishable from clean JSON** — which is why the Kimi run above can't say which happened.
+3. **If `fence`/`brace-scan` is persistent on a backend**, revisit the per-role `jsonMode` opt-out plus a plain-text `formatForMain` — see the plan's risk list.
+4. Worth one route against SiliconFlow `deepseek-vl2` before treating this as settled — one backend is not a population.
+
+**S4. Ineligible model → refuses rather than 400s.**
+1. Point `moby.subagents.image-describe` at a text-only model that declares the role but not `acceptsImages`.
+2. **Pass:** placeholder mentioning `acceptsImages`, log line naming it, and **no 400 in the logs** — we must never send an `image_url` block to a text-only backend.
+
+**S5. Replay (the reload-drift guard).**
+1. With a backend configured, attach an image and get an answer.
+2. Switch sessions, restore this one, ask a follow-up about the image (*"what colour was the button?"*).
+3. **Pass:** the model still knows — it's reading the persisted digest. **Fail:** it has no idea, meaning the digest didn't persist.
+4. Fork at that turn → same follow-up → still answered.
+
+**S6. Multiple images + failure isolation.**
+1. Attach three images in one turn → all three digests appear; they resolve concurrently, so this should not take 3× one image.
+2. Attach one valid image and one that will fail (e.g. point at an unreachable endpoint mid-turn) → the good one still describes, the bad one becomes a placeholder, **the turn still completes**.
+
+**Pass criteria:** an attached image reliably reaches the model as usable text, failures are always named rather than silent, no `image_url` ever reaches the main model, and digests survive reload and fork.
+
+---
+
+## M38. Archive rendition — the silent one (Phase 4) (P0)
+
+**Why this matters:** the webview now builds **two** copies of every attached image from one decode — a ~1024px copy the vision subagent reads (**never persisted**) and a 512px archive (**the only one stored**). Getting this backwards is invisible: everything works, transcripts just quietly bloat until hydration crawls. Unit tests pin which rendition reaches the table, but nothing exercises real canvas encoding, so the actual byte sizes have never been observed.
+
+**Steps:**
+1. Attach a large screenshot (>2MB). Chip shows a thumbnail; the size on the chip is the **subagent** copy (expect low hundreds of KB).
+2. Send the turn, then run *Moby: Export Turn as JSON (Debug)*. The persisted attachment must carry **`blobId`, `bytes`, `width`, `height`** and **no** `content` field — no base64 anywhere in the event JSON.
+3. **`bytes` should be markedly smaller than the chip size** — the 512px archive, not the 1024px copy. If they're equal, the archive fell back (a `[Attachments] No archive rendition` warning will say so).
+4. `width` should be ≤512 with the aspect ratio preserved — a 16:9 screenshot gives roughly 512×288, **not** 512×512.
+5. Attach a small image (e.g. 200×150). It must **not** be upscaled — `width`/`height` stay 200×150.
+6. Attach the same image twice → one row in `attachment_blobs` (content-addressed dedupe still holds with the archive).
+7. Reload the session → the digest still replays (Phase 3 behaviour must be unaffected).
+
+**Pass criteria:** only the 512px archive is stored, dimensions are recorded and aspect-correct, small images are untouched, and no base64 ever appears in `events.data`.
+
+---
+
+## M39. Transcript thumbnails — live/restore parity + lazy blob fetch (Phase 5) (P0)
+
+**Why this matters:** a restored user turn now renders image attachments as thumbnails. Live and restore share one render path by design, but the phase's whole risk is that live testing can't catch a restore-only divergence — and no automated test crosses a real reload with a real DB. The lazy fetch (`requestAttachmentBlob` → `attachmentBlob`) has also never run against real SQLCipher blobs, only mocks.
+
+**Setup:** vision backend optional (thumbnails render regardless of digest routing). Attach any image.
+
+**Steps:**
+1. Attach an image and send. **The user turn in the transcript shows a thumbnail chip** (not just a name tag) — this is the live path, drawn from the composer's 512px archive copy. A text file attached in the same turn shows a name tag beside it.
+2. Note the thumbnail's rendered size. Switch to another session, restore this one. **Pass:** the same turn shows the same thumbnail at the same size. **Fail:** name tag only, doubled chips, or a blank box that never fills.
+3. Watch for reflow: on restore of a long session, scroll so the image turn enters the viewport. The thumbnail box must be reserved at its final size *before* the image paints — no visible layout jump when bytes arrive.
+4. Scroll the image turn far off-screen and back (virtual list recycles at ~20 turns). The thumbnail must re-render — and the log must show **no second** `requestAttachmentBlob` for the same blob (cache hit).
+5. Fork the session at or after the image turn → the forked transcript shows the thumbnail too (blob shared by hash).
+6. Attach the same image twice in two turns → both render; only one fetch on restore.
+7. Delete the session that owns the blob while a fork survives → the fork still renders the thumbnail (GC keeps referenced blobs).
+8. Old sessions (pre-phase-5) restore with name tags only — no errors from missing attachment metadata.
+9. **Legacy image rows** (attached between phase 1 and phase 4, i.e. before the archive rendition existed): these persisted the full ~1024px copy with no dimensions. On restore they render a fixed 64×64 box (cropped via object-fit, CSS-locked — must NOT resize when bytes arrive) and the fetched blob can be up to 1.5MB — watch for a noticeable stall on a session with many of them.
+
+**Pass criteria:** live and restored turns are visually identical, placeholders reserve exact dimensions, each blob is fetched at most once per session view, and forks/dedupe/GC behave per ADR 0014.
+
+---
+
 ## Removing items from this backlog
 
 When a scenario has been verified in a dev host:

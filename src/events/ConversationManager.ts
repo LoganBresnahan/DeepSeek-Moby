@@ -18,6 +18,12 @@ import { Database } from './SqlJsWrapper';
 import { openDbWithRecovery } from './dbRecovery';
 import { runMigrations } from './migrations';
 import { EventStore } from './EventStore';
+import { AttachmentBlobStore } from './AttachmentBlobStore';
+import {
+  formatAttachmentsForContext,
+  prepareAttachmentsForPersistence,
+  IncomingAttachment
+} from './attachmentContext';
 import { SnapshotManager, SummarizerFn } from './SnapshotManager';
 import { logger } from '../utils/logger';
 import { DEFAULT_MODEL_ID } from '../models/registry';
@@ -48,9 +54,40 @@ export interface RichHistoryTurn {
   turnEvents?: Array<Record<string, unknown>>;
   // User-only fields:
   files?: string[];
+  /** Attachment metadata for transcript rendering. Image bytes are NOT here —
+   *  the webview lazy-fetches them by blobId when the turn becomes visible. */
+  attachments?: RichHistoryAttachment[];
   timestamp: number;
   /** Event sequence number for this turn boundary (used by fork API) */
   sequence?: number;
+}
+
+/** What the transcript needs to draw an attachment chip — never the body. */
+export interface RichHistoryAttachment {
+  name: string;
+  type: 'file' | 'image';
+  /** Images only — key for requestAttachmentBlob. */
+  blobId?: string;
+  width?: number;
+  height?: number;
+  mimeType?: string;
+}
+
+/**
+ * Project a persisted attachment down to render metadata. Only images carry a
+ * blobId out — the webview has no reason to fetch text bodies, and shipping
+ * text blobIds would invite exactly that.
+ */
+function toRichHistoryAttachment(a: Attachment): RichHistoryAttachment {
+  const isImage = a.type === 'image';
+  return {
+    name: a.name,
+    type: isImage ? 'image' : 'file',
+    ...(isImage && a.blobId ? { blobId: a.blobId } : {}),
+    ...(isImage && a.width !== undefined ? { width: a.width } : {}),
+    ...(isImage && a.height !== undefined ? { height: a.height } : {}),
+    ...(a.mimeType ? { mimeType: a.mimeType } : {})
+  };
 }
 
 // Statement interface for our wrapper
@@ -96,6 +133,7 @@ export interface ConversationManagerOptions {
 export class ConversationManager {
   private db: Database;
   private eventStore: EventStore;
+  private blobStore: AttachmentBlobStore;
   private snapshotManager: SnapshotManager;
 
   private context: vscode.ExtensionContext;
@@ -145,6 +183,7 @@ export class ConversationManager {
 
     // Initialize components (prepareStatements only — migrations own the schema)
     this.eventStore = new EventStore(this.db);
+    this.blobStore = new AttachmentBlobStore(this.db);
     this.snapshotManager = new SnapshotManager(
       this.db,
       this.eventStore,
@@ -247,6 +286,10 @@ export class ConversationManager {
       this.db.prepare(
         'DELETE FROM events WHERE id NOT IN (SELECT event_id FROM event_sessions)'
       ).run();
+      // ADR 0014: deleting those events cascaded their event_blobs links away;
+      // now drop blobs nothing references. Same transaction so a crash between
+      // the two can't strand rows.
+      this.blobStore.collectGarbage();
     });
     deleteAll();
 
@@ -460,17 +503,41 @@ export class ConversationManager {
   // Event Recording
   // ==========================================================================
 
+  /** Expose the blob store for attachment payload reads (ADR 0014). */
+  getBlobStore(): AttachmentBlobStore {
+    return this.blobStore;
+  }
+
   /**
    * Record a user message.
+   *
+   * ADR 0014: attachment bodies are written to the blob store and the event
+   * keeps only references, so the turn can be replayed with the same context
+   * the model originally saw.
    */
-  async recordUserMessage(sessionId: string, content: string, attachments?: Attachment[]): Promise<ConversationEvent> {
+  async recordUserMessage(
+    sessionId: string,
+    content: string,
+    attachments?: Array<Attachment | IncomingAttachment>
+  ): Promise<ConversationEvent> {
+    const persisted = attachments && attachments.length > 0
+      ? prepareAttachmentsForPersistence(attachments as IncomingAttachment[], this.blobStore)
+      : undefined;
+
     const event = this.eventStore.append({
       sessionId,
       timestamp: Date.now(),
       type: 'user_message',
       content,
-      attachments
+      attachments: persisted
     });
+
+    // Link after append — the event row must exist for the FK to hold.
+    if (persisted) {
+      for (const attachment of persisted) {
+        if (attachment.blobId) this.blobStore.link(event.id, attachment.blobId);
+      }
+    }
 
     // Update session metadata
     this.updateSessionMetadata(sessionId, event);
@@ -712,14 +779,25 @@ export class ConversationManager {
     // written at turn start to anchor structural events for crash recovery,
     // but they carry empty content and must never leak into API context —
     // DeepSeek rejects consecutive assistant messages and empty assistant turns.
+    // ADR 0014: the ONLY place attachment context is materialized. The live
+    // injection this replaced is deliberately gone — the user message is
+    // recorded before context is built, so replay already covers this turn.
+    const readBlobText = (blobId: string) => this.blobStore.getText(blobId);
+
     return events
       .filter(e => e.type !== 'assistant_message' || (e as any).status !== 'in_progress')
-      .map(e => ({
-        role: e.type === 'user_message' ? 'user' as const : 'assistant' as const,
-        content: (e as any).content,
-        timestamp: new Date(e.timestamp),
-        eventId: e.id
-      }));
+      .map(e => {
+        const isUser = e.type === 'user_message';
+        const content = isUser
+          ? (e as any).content + formatAttachmentsForContext((e as UserMessageEvent).attachments, readBlobText)
+          : (e as any).content;
+        return {
+          role: isUser ? 'user' as const : 'assistant' as const,
+          content,
+          timestamp: new Date(e.timestamp),
+          eventId: e.id
+        };
+      });
   }
 
   /**
@@ -803,6 +881,7 @@ export class ConversationManager {
           role: 'user',
           content: userEvent.content,
           files: userEvent.attachments?.map(a => a.name),
+          attachments: userEvent.attachments?.map(a => toRichHistoryAttachment(a)),
           timestamp: userEvent.timestamp,
           sequence: event.sequence
         });

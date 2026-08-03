@@ -155,6 +155,28 @@
             ],
             [
               {
+                "id": "moonshot-v1-128k-vision-preview",
+                "name": "Kimi Vision (Moonshot)",
+                "toolCalling": "native",
+                "reasoningTokens": "none",
+                "editProtocol": [
+                  "native-tool"
+                ],
+                "shellProtocol": "none",
+                "supportsTemperature": true,
+                "maxOutputTokens": 32768,
+                "maxTokensConfigKey": "maxTokensCustomKimiVision",
+                "streaming": true,
+                "apiEndpoint": "https://api.moonshot.ai/v1",
+                "requestFormat": "openai",
+                "acceptsImages": true,
+                "subagentRoles": [
+                  "image-describe"
+                ]
+              }
+            ],
+            [
+              {
                 "id": "llama-3.3-70b-versatile",
                 "name": "Llama 3.3 70B (Groq)",
                 "toolCalling": "native",
@@ -293,6 +315,25 @@
                 ],
                 "default": "openai",
                 "description": "Wire format for the API request/response. Only \"openai\" is supported today."
+              },
+              "subagentRoles": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "web-search-digest",
+                    "search-digest",
+                    "file-summarize",
+                    "tool-classify",
+                    "image-describe"
+                  ]
+                },
+                "markdownDescription": "Subagent roles this model may serve when selected in `moby.subagents`. A model not declaring a role is skipped and the raw input passes through unchanged."
+              },
+              "acceptsImages": {
+                "type": "boolean",
+                "default": false,
+                "markdownDescription": "Model accepts image content (OpenAI `image_url` blocks). Required for the `image-describe` role — DeepSeek's first-party API is text-only, so point this at a vision-capable endpoint (e.g. SiliconFlow `deepseek-ai/deepseek-vl2`)."
               }
             },
             "additionalProperties": false
@@ -502,6 +543,11 @@
               "type": "string",
               "default": "off",
               "description": "Compress web_search responses into a ranked digest before they reach the main model. Set to \"off\" to disable, or to a model id (e.g. \"deepseek-v4-flash-thinking\") to enable."
+            },
+            "image-describe": {
+              "type": "string",
+              "default": "off",
+              "description": "Describe attached images via a vision model, injecting a text digest into the conversation. Set to \"off\", or to a custom model id that declares acceptsImages + the image-describe role."
             }
           },
           "additionalProperties": {
@@ -578,6 +624,12 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "**Edit safety — verify on stop**: At turn completion (Auto mode), don't accept a model-declared \"done\" when the last build verdict was a regression or when a file the turn just wrote reads back empty. Re-consults the ADR 0006 build verdict and adds a language-agnostic artifact-presence check, giving the model one bounded repair pass. Bounded by the per-file repair budget — no new loop. (ADR 0011)"
+        },
+        "moby.requestTimeoutMs": {
+          "type": "number",
+          "default": 60000,
+          "minimum": 5000,
+          "markdownDescription": "Milliseconds before an API request is aborted. Raise this for slow providers — reasoning models and vision backends routinely take 30s or more, and a timeout mid-turn loses the whole turn. Applies to every endpoint, including custom models."
         }
       }
     },
