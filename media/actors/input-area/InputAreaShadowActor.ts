@@ -19,6 +19,14 @@ import { ShadowActor } from '../../state/ShadowActor';
 import { EventStateManager } from '../../state/EventStateManager';
 import { inputAreaShadowStyles } from './shadowStyles';
 
+/** One encoded copy of an image. */
+export interface Rendition {
+  dataUrl: string;
+  bytes: number;
+  width: number;
+  height: number;
+}
+
 export interface Attachment {
   /** Text body, or a data URI for images. */
   content: string;
@@ -27,6 +35,9 @@ export interface Attachment {
   /** Absent means 'file' — the extension side defaults it. */
   type?: 'file' | 'image';
   mimeType?: string;
+  /** Images only: the 512px copy that gets persisted. `content` carries the
+   *  larger copy the vision subagent reads, which is never stored. */
+  archive?: Rendition;
 }
 
 /**
@@ -35,6 +46,14 @@ export interface Attachment {
  * point of view while keeping the data URI small enough to post.
  */
 const IMAGE_MAX_EDGE = 1024;
+
+/**
+ * Longest edge of the copy we keep. Small enough that a long transcript stays
+ * cheap to hydrate, big enough to recognize a screenshot by — and, since most
+ * VLM encoders downsample to 336-448px tiles, still usable input if a digest
+ * ever needs regenerating from the archive.
+ */
+const IMAGE_ARCHIVE_EDGE = 512;
 
 /** Hard ceiling on an encoded image, enforced AFTER re-encode. */
 const IMAGE_MAX_BYTES = 1.5 * 1024 * 1024;
@@ -320,44 +339,46 @@ export class InputAreaShadowActor extends ShadowActor {
    * than truncated — a clipped image decodes to garbage, unlike clipped text.
    */
   private async attachImage(file: File): Promise<void> {
+    const url = URL.createObjectURL(file);
     try {
-      const { dataUrl, bytes } = await this.downscaleImage(file);
-      if (bytes > IMAGE_MAX_BYTES) {
-        this.reportAttachmentError(
-          `"${file.name}" is too large to attach (${(bytes / 1024 / 1024).toFixed(1)}MB after downscaling).`
-        );
-        return;
-      }
-      this.addAttachment({
-        content: dataUrl,
-        name: file.name,
-        size: bytes,
-        type: 'image',
-        mimeType: 'image/webp'
-      });
-    } catch (err) {
-      this.reportAttachmentError(
-        `Could not read "${file.name}" as an image: ${err instanceof Error ? err.message : String(err)}`
-      );
+      await this.attachRenditions(url, file.name);
+    } finally {
+      URL.revokeObjectURL(url);
     }
   }
 
   /** Same guards as {@link attachImage}, for bytes the extension read for us. */
   private async attachImageFromDataUrl(dataUrl: string, name: string): Promise<void> {
+    await this.attachRenditions(dataUrl, name);
+  }
+
+  /**
+   * Build both renditions from one decode and attach them.
+   *
+   * The two exist for different consumers and must not be conflated:
+   * - `content` (~1024px) is what the vision subagent sees. **Ephemeral** —
+   *   it is never persisted, so image quality for the digest costs nothing
+   *   at rest.
+   * - `archive` (512px) is what goes in the database. Small enough that a
+   *   long transcript stays cheap to hydrate, large enough to recognize a
+   *   screenshot by and to re-describe from if the backend changes.
+   */
+  private async attachRenditions(url: string, name: string): Promise<void> {
     try {
-      const scaled = await this.downscaleFromUrl(dataUrl);
-      if (scaled.bytes > IMAGE_MAX_BYTES) {
+      const { full, archive } = await this.renderRenditions(url);
+      if (full.bytes > IMAGE_MAX_BYTES) {
         this.reportAttachmentError(
-          `"${name}" is too large to attach (${(scaled.bytes / 1024 / 1024).toFixed(1)}MB after downscaling).`
+          `"${name}" is too large to attach (${(full.bytes / 1024 / 1024).toFixed(1)}MB after downscaling).`
         );
         return;
       }
       this.addAttachment({
-        content: scaled.dataUrl,
+        content: full.dataUrl,
         name,
-        size: scaled.bytes,
+        size: full.bytes,
         type: 'image',
-        mimeType: 'image/webp'
+        mimeType: 'image/webp',
+        archive
       });
     } catch (err) {
       this.reportAttachmentError(
@@ -366,31 +387,35 @@ export class InputAreaShadowActor extends ShadowActor {
     }
   }
 
-  private downscaleImage(file: File): Promise<{ dataUrl: string; bytes: number }> {
-    const url = URL.createObjectURL(file);
-    return this.downscaleFromUrl(url).finally(() => URL.revokeObjectURL(url));
+  /** Draw the decoded image at a bounded longest edge and encode it to WebP. */
+  private encodeAt(img: HTMLImageElement, maxEdge: number): Rendition {
+    const scale = Math.min(1, maxEdge / Math.max(img.width, img.height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(img.width * scale));
+    canvas.height = Math.max(1, Math.round(img.height * scale));
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('canvas 2d context unavailable');
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    const dataUrl = canvas.toDataURL('image/webp', 0.8);
+    return {
+      dataUrl,
+      // Data URI length overstates payload by ~4/3; report decoded bytes.
+      bytes: Math.round((dataUrl.length - dataUrl.indexOf(',') - 1) * 0.75),
+      width: canvas.width,
+      height: canvas.height
+    };
   }
 
-  /** Downscale from any loadable source — an object URL or a data URI. */
-  private downscaleFromUrl(url: string): Promise<{ dataUrl: string; bytes: number }> {
+  /** Decode once, encode twice. */
+  private renderRenditions(url: string): Promise<{ full: Rendition; archive: Rendition }> {
     return new Promise((resolve, reject) => {
       const img = new Image();
       img.onload = () => {
         try {
-          const scale = Math.min(1, IMAGE_MAX_EDGE / Math.max(img.width, img.height));
-          const canvas = document.createElement('canvas');
-          canvas.width = Math.max(1, Math.round(img.width * scale));
-          canvas.height = Math.max(1, Math.round(img.height * scale));
-          const ctx = canvas.getContext('2d');
-          if (!ctx) {
-            reject(new Error('canvas 2d context unavailable'));
-            return;
-          }
-          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-          const dataUrl = canvas.toDataURL('image/webp', 0.8);
-          // Data URI length overstates payload by ~4/3; report decoded bytes.
-          const bytes = Math.round((dataUrl.length - dataUrl.indexOf(',') - 1) * 0.75);
-          resolve({ dataUrl, bytes });
+          resolve({
+            full: this.encodeAt(img, IMAGE_MAX_EDGE),
+            archive: this.encodeAt(img, IMAGE_ARCHIVE_EDGE)
+          });
         } catch (err) {
           reject(err instanceof Error ? err : new Error(String(err)));
         }

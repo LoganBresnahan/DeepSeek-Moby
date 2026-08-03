@@ -42,7 +42,7 @@ export class ChatProvider implements vscode.WebviewViewProvider {
 
   // Message queuing during post-response summarization
   private _summarizing = false;
-  private _pendingMessages: Array<{ message: string; attachments?: Array<{ content: string; name: string; size: number; type?: 'file' | 'image'; mimeType?: string }> }> = [];
+  private _pendingMessages: Array<{ message: string; attachments?: Array<{ content: string; name: string; size: number; type?: 'file' | 'image'; mimeType?: string; archive?: { dataUrl: string; bytes: number; width: number; height: number } }> }> = [];
   private _lastPendingDiffCount = 0;
   private webSearchManager: WebSearchManager;
   private fileContextManager: FileContextManager;

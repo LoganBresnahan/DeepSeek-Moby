@@ -34,6 +34,9 @@ export interface IncomingAttachment {
   filePath?: string;
   /** Images only — the digest resolved before the turn was recorded. */
   digest?: string;
+  /** Images only — the 512px copy to persist. `content` holds the larger copy
+   *  the vision subagent read, which must never reach the database. */
+  archive?: { dataUrl: string; bytes: number; width: number; height: number };
 }
 
 /** Split a `data:<mime>;base64,<payload>` URI into its mime and raw bytes. */
@@ -74,14 +77,27 @@ export function prepareAttachmentsForPersistence(
     // from the text cap — truncating an image yields bytes that don't decode,
     // where truncating text still reads.
     if (type === 'image') {
-      const decoded = decodeDataUri(incoming.content ?? '');
+      // Persist the ARCHIVE rendition, never `content` — that one is the
+      // larger copy the vision subagent read, and storing it is the silent
+      // failure this phase exists to prevent (a transcript full of full-size
+      // images looks fine until hydration slows to a crawl).
+      const source = incoming.archive?.dataUrl ?? incoming.content ?? '';
+      const decoded = decodeDataUri(source);
       if (decoded) {
-        const ref = blobStore.put(decoded.bytes, incoming.mimeType ?? decoded.mime);
+        const ref = blobStore.put(decoded.bytes, incoming.mimeType ?? decoded.mime, {
+          width: incoming.archive?.width,
+          height: incoming.archive?.height
+        });
+        if (!incoming.archive) {
+          logger.warn(`[Attachments] No archive rendition for "${incoming.name}" — persisting the full copy`);
+        }
         return {
           ...base,
           mimeType: incoming.mimeType ?? decoded.mime,
           blobId: ref.blobId,
           bytes: ref.bytes,
+          ...(ref.width !== undefined ? { width: ref.width } : {}),
+          ...(ref.height !== undefined ? { height: ref.height } : {}),
           ...(incoming.digest ? { digest: incoming.digest } : {})
         };
       }

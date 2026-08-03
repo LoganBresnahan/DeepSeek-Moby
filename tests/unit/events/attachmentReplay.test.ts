@@ -276,6 +276,80 @@ describe('ADR 0014 — attachment replay', () => {
     expect(blobStore.get(persisted.blobId!)!.data).toEqual(raw);
   });
 
+  // ── Archive rendition (plan Phase 4) ──
+  //
+  // The failure this phase exists to prevent is SILENT: persisting the large
+  // copy the vision subagent read looks fine until a transcript full of them
+  // makes hydration crawl. These pin which rendition reaches the table.
+
+  function dataUri(bytes: Buffer) {
+    return `data:image/webp;base64,${bytes.toString('base64')}`;
+  }
+
+  it('persists the archive rendition, not the copy the subagent read', () => {
+    const subCopy = Buffer.alloc(40_000, 1);   // ~1024px, ephemeral
+    const archive = Buffer.alloc(6_000, 2);    // 512px, the one we keep
+
+    const [persisted] = prepareAttachmentsForPersistence(
+      [{
+        type: 'image', name: 'shot.png', mimeType: 'image/webp',
+        content: dataUri(subCopy),
+        archive: { dataUrl: dataUri(archive), bytes: archive.length, width: 512, height: 288 }
+      }],
+      blobStore
+    );
+
+    expect(persisted.bytes).toBe(archive.length);
+    expect(blobStore.get(persisted.blobId!)!.data).toEqual(archive);
+    // The larger copy must not be in the table at all.
+    expect(blobStore.count()).toBe(1);
+  });
+
+  it('records the archive dimensions so the transcript can reserve space', () => {
+    const archive = Buffer.alloc(100, 3);
+    const [persisted] = prepareAttachmentsForPersistence(
+      [{
+        type: 'image', name: 'wide.png', content: dataUri(Buffer.alloc(500, 9)),
+        archive: { dataUrl: dataUri(archive), bytes: archive.length, width: 512, height: 288 }
+      }],
+      blobStore
+    );
+
+    expect(persisted.width).toBe(512);
+    expect(persisted.height).toBe(288);
+    const stored = blobStore.get(persisted.blobId!)!;
+    expect(stored.width).toBe(512);
+    expect(stored.height).toBe(288);
+  });
+
+  it('falls back to the full copy when no archive was produced, and says so', () => {
+    const only = Buffer.alloc(700, 4);
+    const [persisted] = prepareAttachmentsForPersistence(
+      [{ type: 'image', name: 'legacy.png', content: dataUri(only) }],
+      blobStore
+    );
+
+    // Degrades rather than dropping the image — but the warning is the signal
+    // that the webview did not send what this path expects.
+    expect(blobStore.get(persisted.blobId!)!.data).toEqual(only);
+    expect(persisted.width).toBeUndefined();
+  });
+
+  it('keeps the digest alongside the archive', () => {
+    const archive = Buffer.alloc(50, 5);
+    const [persisted] = prepareAttachmentsForPersistence(
+      [{
+        type: 'image', name: 'x.png', content: dataUri(Buffer.alloc(900, 8)),
+        archive: { dataUrl: dataUri(archive), bytes: archive.length, width: 512, height: 512 },
+        digest: 'a login form'
+      }],
+      blobStore
+    );
+
+    expect(persisted.digest).toBe('a login form');
+    expect(persisted.bytes).toBe(archive.length);
+  });
+
   // ── Digest replay (plan Phase 3): the whole reason digests are resolved
   // before the record rather than injected live. ──
 

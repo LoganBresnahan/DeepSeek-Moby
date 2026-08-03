@@ -68,8 +68,8 @@ describe('InputAreaShadowActor — drag and drop', () => {
   });
 
   it('sends a dropped image through the downscale branch, not the text branch', async () => {
-    const downscale = vi.spyOn(asAny(), 'downscaleImage')
-      .mockResolvedValue({ dataUrl: 'data:image/webp;base64,AA', bytes: 100 });
+    const downscale = vi.spyOn(asAny(), 'renderRenditions')
+      .mockResolvedValue({ full: { dataUrl: 'data:image/webp;base64,AA', bytes: 100, width: 1024, height: 576 }, archive: { dataUrl: 'data:image/webp;base64,ARCH', bytes: 1000, width: 512, height: 288 } });
 
     asAny().handleDrop(makeDataTransfer({ files: [makeFile('shot.png', 'image/png')] }));
     await vi.waitFor(() => expect(actor.getState().attachments).toHaveLength(1));
@@ -79,7 +79,7 @@ describe('InputAreaShadowActor — drag and drop', () => {
   });
 
   it('splits a mixed drop correctly', async () => {
-    vi.spyOn(asAny(), 'downscaleImage').mockResolvedValue({ dataUrl: 'data:image/webp;base64,AA', bytes: 100 });
+    vi.spyOn(asAny(), 'renderRenditions').mockResolvedValue({ full: { dataUrl: 'data:image/webp;base64,AA', bytes: 100, width: 1024, height: 576 }, archive: { dataUrl: 'data:image/webp;base64,ARCH', bytes: 1000, width: 512, height: 288 } });
 
     asAny().handleDrop(makeDataTransfer({
       files: [makeFile('shot.png', 'image/png'), makeFile('notes.md', 'text/markdown')]
@@ -136,8 +136,8 @@ describe('InputAreaShadowActor — drag and drop', () => {
   });
 
   it('downscales image content returned by the extension', async () => {
-    const downscale = vi.spyOn(asAny(), 'downscaleFromUrl')
-      .mockResolvedValue({ dataUrl: 'data:image/webp;base64,SMALL', bytes: 50 });
+    const downscale = vi.spyOn(asAny(), 'renderRenditions')
+      .mockResolvedValue({ full: { dataUrl: 'data:image/webp;base64,SMALL', bytes: 50, width: 1024, height: 576 }, archive: { dataUrl: 'data:image/webp;base64,ARCH', bytes: 1000, width: 512, height: 288 } });
 
     actor.handleDroppedFileContents([
       { name: 'icon.png', content: 'data:image/png;base64,BIG', isImage: true, mimeType: 'image/png' }
@@ -151,7 +151,7 @@ describe('InputAreaShadowActor — drag and drop', () => {
   });
 
   it('rejects an extension-read image that is still too large', async () => {
-    vi.spyOn(asAny(), 'downscaleFromUrl').mockResolvedValue({ dataUrl: 'data:image/webp;base64,X', bytes: 9e6 });
+    vi.spyOn(asAny(), 'renderRenditions').mockResolvedValue({ full: { dataUrl: 'data:image/webp;base64,X', bytes: 9e6, width: 1024, height: 576 }, archive: { dataUrl: 'data:image/webp;base64,ARCH', bytes: 1000, width: 512, height: 288 } });
 
     actor.handleDroppedFileContents([{ name: 'huge.png', content: 'data:image/png;base64,X', isImage: true }]);
     await vi.waitFor(() =>

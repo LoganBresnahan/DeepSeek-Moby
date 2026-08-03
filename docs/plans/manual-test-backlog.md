@@ -648,6 +648,23 @@ Not a pass/fail scenario yet — investigation only.
 
 ---
 
+## M38. Archive rendition — the silent one (Phase 4) (P0)
+
+**Why this matters:** the webview now builds **two** copies of every attached image from one decode — a ~1024px copy the vision subagent reads (**never persisted**) and a 512px archive (**the only one stored**). Getting this backwards is invisible: everything works, transcripts just quietly bloat until hydration crawls. Unit tests pin which rendition reaches the table, but nothing exercises real canvas encoding, so the actual byte sizes have never been observed.
+
+**Steps:**
+1. Attach a large screenshot (>2MB). Chip shows a thumbnail; the size on the chip is the **subagent** copy (expect low hundreds of KB).
+2. Send the turn, then run *Moby: Export Turn as JSON (Debug)*. The persisted attachment must carry **`blobId`, `bytes`, `width`, `height`** and **no** `content` field — no base64 anywhere in the event JSON.
+3. **`bytes` should be markedly smaller than the chip size** — the 512px archive, not the 1024px copy. If they're equal, the archive fell back (a `[Attachments] No archive rendition` warning will say so).
+4. `width` should be ≤512 with the aspect ratio preserved — a 16:9 screenshot gives roughly 512×288, **not** 512×512.
+5. Attach a small image (e.g. 200×150). It must **not** be upscaled — `width`/`height` stay 200×150.
+6. Attach the same image twice → one row in `attachment_blobs` (content-addressed dedupe still holds with the archive).
+7. Reload the session → the digest still replays (Phase 3 behaviour must be unaffected).
+
+**Pass criteria:** only the 512px archive is stored, dimensions are recorded and aspect-correct, small images are untouched, and no base64 ever appears in `events.data`.
+
+---
+
 ## Removing items from this backlog
 
 When a scenario has been verified in a dev host:

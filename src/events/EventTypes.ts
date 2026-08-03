@@ -43,6 +43,10 @@ export interface Attachment {
   /** Set when the body was capped before persisting; `originalBytes` is pre-cap. */
   truncated?: boolean;
   originalBytes?: number;
+  /** Images only: pixel dimensions of the stored archive rendition. Lets the
+   *  transcript reserve space before the blob arrives (plan phase 5). */
+  width?: number;
+  height?: number;
   /** Images only: the vision subagent's description, resolved at attach time.
    *  This is what the model reads — image bytes never reach it. Persisted so
    *  a reloaded turn rebuilds the same context. */

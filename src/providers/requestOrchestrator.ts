@@ -853,7 +853,7 @@ export class RequestOrchestrator {
    * - Multiple images resolve concurrently; one failure cannot fail the turn.
    */
   private async digestImageAttachments(
-    attachments: Array<{ content: string; name: string; size: number; type?: 'file' | 'image'; mimeType?: string }> | undefined,
+    attachments: Array<{ content: string; name: string; size: number; type?: 'file' | 'image'; mimeType?: string; archive?: { dataUrl: string; bytes: number; width: number; height: number } }> | undefined,
     userPrompt: string
   ): Promise<typeof attachments> {
     if (!attachments || attachments.length === 0) return attachments;
@@ -905,7 +905,7 @@ export class RequestOrchestrator {
     message: string,
     currentSessionId: string | null,
     editorContextProvider: () => Promise<string>,
-    attachments?: Array<{ content: string; name: string; size: number; type?: 'file' | 'image'; mimeType?: string }>,
+    attachments?: Array<{ content: string; name: string; size: number; type?: 'file' | 'image'; mimeType?: string; archive?: { dataUrl: string; bytes: number; width: number; height: number } }>,
     options?: { skipRecord?: boolean }
   ): Promise<{ sessionId: string | null }> {
     // Clear processed code blocks and pending diffs for new conversation turn
