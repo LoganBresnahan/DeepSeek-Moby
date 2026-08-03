@@ -91,6 +91,12 @@ export interface ModelCapabilities {
    *  upstream DeepSeek API sees the bare `deepseek-v4-flash` / `-pro`. */
   sendThinkingParam?: boolean;
 
+  /** Pin the request temperature to exactly this value, overriding both the
+   *  global `moby.temperature` and `supportsTemperature`. For providers that
+   *  accept only one temperature (Kimi rejects anything but 1) — a boolean
+   *  can't express "must be exactly N". */
+  temperatureFixedValue?: number;
+
   /** Custom models only: the provider's own request params for turning
    *  reasoning OFF, merged into the body when a caller asks for
    *  `thinkingMode: 'disabled'` (every subagent role does). There is no
@@ -416,6 +422,10 @@ export function validateCustomModelEntry(entry: unknown): { ok: true } | { ok: f
   }
   if (e.sendThinkingParam !== undefined && typeof e.sendThinkingParam !== 'boolean') {
     return { ok: false, error: 'sendThinkingParam must be boolean if provided' };
+  }
+  if (e.temperatureFixedValue !== undefined &&
+      (typeof e.temperatureFixedValue !== 'number' || !Number.isFinite(e.temperatureFixedValue))) {
+    return { ok: false, error: 'temperatureFixedValue must be a finite number if provided' };
   }
   if (e.disableThinkingParam !== undefined &&
       (typeof e.disableThinkingParam !== 'object' || e.disableThinkingParam === null || Array.isArray(e.disableThinkingParam))) {

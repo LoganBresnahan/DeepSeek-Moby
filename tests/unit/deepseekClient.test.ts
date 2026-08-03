@@ -560,6 +560,52 @@ describe('DeepSeekClient — non-streaming', () => {
     });
   });
 
+  describe('temperatureFixedValue (release-gate bug #4)', () => {
+    // Kimi rejects any temperature but 1 ("invalid temperature: only 1 is
+    // allowed"); the boolean supportsTemperature could only express all-or-
+    // nothing, so the only workaround was setting the GLOBAL temperature to
+    // 1 for every model. A per-model pin beats both.
+    afterEach(async () => {
+      const { __resetCustomModelsForTests } = await import('../../src/models/registry');
+      __resetCustomModelsForTests();
+    });
+
+    it('pins the request temperature regardless of the global setting', async () => {
+      const { registerCustomModels } = await import('../../src/models/registry');
+      registerCustomModels([{
+        id: 'kimi-pin', name: 'Kimi Pin',
+        toolCalling: 'native', reasoningTokens: 'none',
+        editProtocol: ['native-tool'], shellProtocol: 'none',
+        supportsTemperature: true, temperatureFixedValue: 1,
+        maxOutputTokens: 8192,
+        maxTokensConfigKey: 'customModels.kimi-pin.maxOutputTokens',
+        streaming: true, apiEndpoint: 'https://api.moonshot.ai/v1',
+        requestFormat: 'openai'
+      }]);
+      mockConfigValues.set('model', 'kimi-pin');
+      mockConfigValues.set('temperature', 0.3);
+      mockSecrets.get.mockResolvedValue('test-key');
+      stubChatResponse();
+      const client = new DeepSeekClient(createContext());
+
+      await client.chat([{ role: 'user', content: 'hi' }]);
+
+      expect(lastRequestBody().temperature).toBe(1);
+    });
+
+    it('without a pin, the global temperature still applies', async () => {
+      mockConfigValues.set('model', 'deepseek-chat');
+      mockConfigValues.set('temperature', 0.3);
+      mockSecrets.get.mockResolvedValue('test-key');
+      stubChatResponse();
+      const client = new DeepSeekClient(createContext());
+
+      await client.chat([{ role: 'user', content: 'hi' }]);
+
+      expect(lastRequestBody().temperature).toBe(0.3);
+    });
+  });
+
   describe('disableThinkingParam on custom models (release-gate bug #3)', () => {
     // The router forces thinkingMode:'disabled' on every sub-call, but
     // applyThinkingMode returned early on !sendThinkingParam — so the force

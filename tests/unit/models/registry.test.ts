@@ -312,6 +312,18 @@ describe('model registry', () => {
         expect(validateCustomModelEntry(validEntry)).toEqual({ ok: true });
       });
 
+      it('accepts a numeric temperatureFixedValue', () => {
+        expect(validateCustomModelEntry({ ...validEntry, temperatureFixedValue: 1 })).toEqual({ ok: true });
+      });
+
+      it('rejects a non-finite or non-numeric temperatureFixedValue', () => {
+        for (const bad of ['1', NaN, Infinity]) {
+          const result = validateCustomModelEntry({ ...validEntry, temperatureFixedValue: bad });
+          expect(result.ok).toBe(false);
+          if (!result.ok) expect(result.error).toMatch(/temperatureFixedValue/);
+        }
+      });
+
       it('accepts disableThinkingParam as an object of request params', () => {
         expect(validateCustomModelEntry({
           ...validEntry,

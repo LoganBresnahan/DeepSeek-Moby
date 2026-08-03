@@ -416,7 +416,12 @@ export class DeepSeekClient {
       };
 
       const caps = getCapabilities(model);
-      if (caps.supportsTemperature) {
+      // A fixed value beats the boolean: some providers accept exactly one
+      // temperature (Kimi: "only 1 is allowed") — a per-model pin keeps the
+      // global moby.temperature usable for every other model.
+      if (caps.temperatureFixedValue !== undefined) {
+        requestBody.temperature = caps.temperatureFixedValue;
+      } else if (caps.supportsTemperature) {
         requestBody.temperature = temperature;
       }
 
@@ -545,7 +550,12 @@ export class DeepSeekClient {
       };
 
       const caps = getCapabilities(model);
-      if (caps.supportsTemperature) {
+      // A fixed value beats the boolean: some providers accept exactly one
+      // temperature (Kimi: "only 1 is allowed") — a per-model pin keeps the
+      // global moby.temperature usable for every other model.
+      if (caps.temperatureFixedValue !== undefined) {
+        requestBody.temperature = caps.temperatureFixedValue;
+      } else if (caps.supportsTemperature) {
         requestBody.temperature = temperature;
       }
 

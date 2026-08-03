@@ -146,6 +146,7 @@
                 ],
                 "shellProtocol": "none",
                 "supportsTemperature": true,
+                "temperatureFixedValue": 1,
                 "maxOutputTokens": 32768,
                 "maxTokensConfigKey": "maxTokensCustomKimi",
                 "streaming": true,
@@ -164,6 +165,7 @@
                 ],
                 "shellProtocol": "none",
                 "supportsTemperature": true,
+                "temperatureFixedValue": 1,
                 "maxOutputTokens": 32768,
                 "maxTokensConfigKey": "maxTokensCustomKimiVision",
                 "streaming": true,
@@ -334,6 +336,15 @@
                 "type": "boolean",
                 "default": false,
                 "markdownDescription": "Model accepts image content (OpenAI `image_url` blocks). Required for the `image-describe` role — DeepSeek's first-party API is text-only, so point this at a vision-capable endpoint (e.g. SiliconFlow `deepseek-ai/deepseek-vl2`)."
+              },
+              "temperatureFixedValue": {
+                "type": "number",
+                "markdownDescription": "Pin the request temperature to exactly this value, overriding the global `moby.temperature`. For providers that accept only one temperature — Kimi rejects anything but `1`."
+              },
+              "streamingToolCalls": {
+                "type": "boolean",
+                "default": false,
+                "markdownDescription": "Model streams tool-call deltas (OpenAI-style `tool_calls` in stream chunks). When true, Moby uses the single streaming pipeline instead of the legacy probe-then-stream loop — halving wall-clock on tool turns. Enable only if the provider actually streams tool calls."
               },
               "disableThinkingParam": {
                 "type": "object",
