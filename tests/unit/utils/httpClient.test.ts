@@ -379,6 +379,44 @@ describe('HttpClient', () => {
       controller.abort();
       await assertion;
     });
+
+    // Found live in /verify: headers arrived, then silence — the old code
+    // cleared the timer at headers, so response.json() waited forever and a
+    // hung non-streaming probe only died via Stop.
+    it('the timeout bounds the JSON body, not just the headers', async () => {
+      mockFetch.mockImplementation((_url: string, init: RequestInit) =>
+        Promise.resolve({
+          ...createMockResponse({}),
+          // A body read that only settles when the request signal aborts —
+          // models a server that sent headers then went silent.
+          json: () => new Promise((_resolve, reject) => {
+            init.signal!.addEventListener('abort', () => {
+              const e = new Error('aborted');
+              e.name = 'AbortError';
+              reject(e);
+            });
+          })
+        } as unknown as Response)
+      );
+
+      const pending = client.get('/headers-then-silence');
+      const assertion = expect(pending).rejects.toMatchObject({
+        message: 'Request timeout',
+        code: 'ECONNABORTED'
+      });
+      await vi.advanceTimersByTimeAsync(5000);
+      await assertion;
+    });
+
+    it('a stream response still releases the timer at headers (long streams live)', async () => {
+      const body = new ReadableStream();
+      mockFetch.mockResolvedValue(createMockResponse({ body }));
+
+      const res = await client.get('/stream', { responseType: 'stream' });
+      // Advancing past the timeout must not abort anything — the timer is gone.
+      await vi.advanceTimersByTimeAsync(10000);
+      expect(res.status).toBe(200);
+    });
   });
 });
 

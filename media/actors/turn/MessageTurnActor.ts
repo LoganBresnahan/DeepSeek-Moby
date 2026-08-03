@@ -1449,13 +1449,15 @@ export class MessageTurnActor extends InterleavedShadowActor {
     const src = att.dataUrl ? ` src="${this.escapeAttr(att.dataUrl)}"` : '';
     const blobId = att.blobId ? ` data-blob-id="${this.escapeAttr(att.blobId)}"` : '';
     const name = this.escapeAttr(att.name);
-    // Rows without persisted dimensions (pre-phase-4 images) get the 64×64
-    // fallback box CSS-locked: with `height: auto` in the stylesheet, the
-    // attribute-derived 1:1 ratio would otherwise be replaced by the image's
-    // real ratio when bytes arrive — a reflow. Locking the box crops via
-    // object-fit instead. Rows with real dimensions match by construction.
-    const hasDims = (att.width ?? 0) > 0 && (att.height ?? 0) > 0;
-    const lock = hasDims ? '' : ` style="width:${width}px;height:${height}px"`;
+    // CSS-lock the box on EVERY thumb. With `height: auto` in the stylesheet,
+    // the loaded image's intrinsic ratio replaces the attribute-derived one —
+    // so any blob whose dimensions disagree with the persisted metadata
+    // (legacy dimensionless rows, or a corrupt/substituted blob) would
+    // resize the box on arrival. Locking makes no-reflow hold by
+    // construction; object-fit crops a mismatch instead. Verified live in
+    // the /verify harness: an unlocked 128×72 box snapped to 128×128 when a
+    // mismatched blob loaded.
+    const lock = ` style="width:${width}px;height:${height}px"`;
     return `<img class="attachment-thumb"${src}${blobId}${lock} width="${width}" height="${height}" alt="${name}" title="${name}">`;
   }
 

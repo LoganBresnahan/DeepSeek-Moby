@@ -22,7 +22,7 @@ The development loop: orient → (design doc/ADR → design-plan) → implement 
 
 ## Release gate — must fix before the next release
 
-The next release ships the image-describe work, and these were all found while exercising it. **Do not cut a release with any of them open** (2026-08-03):
+The next release ships the image-describe work, and these were all found while exercising it. **Gate clear as of 2026-08-03** — all five fixed, `/shipshape` green, and `/verify` exercised the fixes against a fake provider in a real VS Code instance. Real-provider residuals are tracked as M40 in the [manual-test backlog](docs/plans/manual-test-backlog.md):
 
 1. ~~**401 names DeepSeek on any provider**~~ — **FIXED 2026-08-03** (see Recently Fixed).
 2. ~~**Timeout inert on streams; `chat()` drops its abort signal**~~ — **FIXED 2026-08-03** (see Recently Fixed; ADR 0008 follow-up updated).

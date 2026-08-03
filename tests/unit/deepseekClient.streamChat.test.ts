@@ -566,6 +566,39 @@ describe('DeepSeekClient.streamChat — SSE accumulator', () => {
     });
   });
 
+  // Release-gate bug #5: the streaming validate site passed no tools while the
+  // probe's did — the same turn's two calls disagreed by the entire tools-JSON
+  // share. Pin that the calibration sample now covers the tools.
+  describe('token validation symmetry (streaming passes tools)', () => {
+    it('calibration charCount includes the tools JSON', async () => {
+      mockReader.reset();
+      const client = new DeepSeekClient(createContext());
+      const spy = vi.spyOn(client, 'calibrateTokenEstimation');
+      const tools = [{
+        type: 'function' as const,
+        function: { name: 'x', description: 'd'.repeat(500), parameters: { type: 'object' as const, properties: {} } }
+      }];
+
+      const promise = client.streamChat(
+        [{ role: 'user', content: 'hi' }], () => {}, undefined, undefined, { tools }
+      );
+      await new Promise(r => setTimeout(r, 0));
+      await new Promise(r => setTimeout(r, 0));
+      mockReader.pushData(delta({ content: 'ok' }, {
+        finish_reason: 'stop',
+        usage: { prompt_tokens: 500, completion_tokens: 2, total_tokens: 502 }
+      }));
+      mockReader.pushData('data: [DONE]\n');
+      await promise;
+
+      expect(spy).toHaveBeenCalled();
+      const [charCount] = spy.mock.calls[0];
+      // Message content is 2 chars; anything near the tools JSON size proves
+      // the tools reached the sample.
+      expect(charCount).toBeGreaterThan(JSON.stringify(tools).length);
+    });
+  });
+
   // Release-gate bug #2: the inactivity timer's zero-data branch used to do
   // NOTHING — and since the timer only re-arms on data, a stream that hung
   // before its first byte left the promise pending until the user hit Stop.

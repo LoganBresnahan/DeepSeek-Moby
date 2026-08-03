@@ -95,11 +95,10 @@ export class HttpClient {
         signal
       });
 
-      clearTimeout(timeoutId);
-
-      // Handle error responses
+      // Handle error responses (timer stays armed — the error body is a read too)
       if (!response.ok) {
         const errorData = await this.safeParseJson(response);
+        clearTimeout(timeoutId);
         const error = new Error(`HTTP ${response.status}: ${response.statusText}`) as HttpError;
         error.response = {
           status: response.status,
@@ -109,8 +108,11 @@ export class HttpClient {
         throw error;
       }
 
-      // For streaming responses, return the body stream directly
+      // Streaming: the body legitimately outlives the request timeout, so the
+      // timer is released once headers arrive; mid-stream liveness is the
+      // caller's watchdog's job (streamChat's 30s inactivity timer).
       if (config?.responseType === 'stream') {
+        clearTimeout(timeoutId);
         return {
           data: response.body as T,
           status: response.status,
@@ -119,8 +121,12 @@ export class HttpClient {
         };
       }
 
-      // Parse JSON response
+      // JSON: the timeout bounds the WHOLE request, body included. Clearing
+      // at headers left `response.json()` unguarded — a server that sent
+      // headers and then went silent parked a non-streaming probe forever
+      // (found live in /verify: the hung-probe send only died via Stop).
       const data = await response.json() as T;
+      clearTimeout(timeoutId);
       return {
         data,
         status: response.status,

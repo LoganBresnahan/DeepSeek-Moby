@@ -2025,13 +2025,18 @@ describe('MessageTurnActor', () => {
       expect(img.getAttribute('style')).toContain('height:64px');
     });
 
-    it('does not CSS-lock rows with real dimensions (ratio already matches)', () => {
+    it('CSS-locks rows with real dimensions too — intrinsic ratio must never win', () => {
+      // Found live in the /verify harness: with height:auto in the stylesheet,
+      // a loaded image whose intrinsic ratio disagrees with the metadata
+      // (legacy rows, corrupt blob) resized the box on arrival. Locked, the
+      // mismatch crops via object-fit instead of reflowing.
       const container = bindUserTurn([
         { name: 'shot.png', type: 'image', blobId: BLOB_ID, width: 512, height: 288 }
       ]);
 
       const img = queryInShadow(container, 'img.attachment-thumb') as HTMLImageElement;
-      expect(img.getAttribute('style')).toBeNull();
+      expect(img.getAttribute('style')).toContain('width:128px');
+      expect(img.getAttribute('style')).toContain('height:72px');
     });
 
     it('image-only turn (no caption) keeps its container visible', () => {

@@ -673,6 +673,8 @@ Two `image-describe` routes on `kimi-k3` both returned `validationResult: 'ok'` 
 
 ## M39. Transcript thumbnails — live/restore parity + lazy blob fetch (Phase 5) (P0)
 
+**Partially discharged 2026-08-03** (headless harness against the built bundle, `/verify` Handle 1): restore-path render from metadata, reserved dimensions, exactly-one `requestAttachmentBlob` per shared blob, blob reply filling every referencing turn, no-reflow on arrival, image-only turns visible, no re-fetch. **The run also caught and fixed a real bug:** a blob whose intrinsic ratio disagrees with the persisted metadata resized the box on load (`height: auto` let the intrinsic ratio win) — thumbs are now CSS-locked unconditionally and a mismatch crops via `object-fit` instead. Still owed in a real dev host: steps 2 (visual parity across a real reload), 4 (scroll-recycle against real SQLCipher blobs), 5 (fork), 7 (GC), 8 (pre-phase-5 sessions).
+
 **Why this matters:** a restored user turn now renders image attachments as thumbnails. Live and restore share one render path by design, but the phase's whole risk is that live testing can't catch a restore-only divergence — and no automated test crosses a real reload with a real DB. The lazy fetch (`requestAttachmentBlob` → `attachmentBlob`) has also never run against real SQLCipher blobs, only mocks.
 
 **Setup:** vision backend optional (thumbnails render regardless of digest routing). Attach any image.
@@ -689,6 +691,19 @@ Two `image-describe` routes on `kimi-k3` both returned `validationResult: 'ok'` 
 9. **Legacy image rows** (attached between phase 1 and phase 4, i.e. before the archive rendition existed): these persisted the full ~1024px copy with no dimensions. On restore they render a fixed 64×64 box (cropped via object-fit, CSS-locked — must NOT resize when bytes arrive) and the fetched blob can be up to 1.5MB — watch for a noticeable stall on a session with many of them.
 
 **Pass criteria:** live and restored turns are visually identical, placeholders reserve exact dimensions, each blob is fetched at most once per session view, and forks/dedupe/GC behave per ADR 0014.
+
+---
+
+## M40. Release-gate fixes — real-provider residuals (P1)
+
+**Why this matters:** all five release-gate bugs are fixed and verified against a **fake** OpenAI-compatible server in a real VS Code instance (2026-08-03 `/verify`: streamed turn end-to-end, `temperatureFixedValue` on every wire request, 401 naming the custom host + *Set Custom Model API Key*, and the 30s hung-stream watchdog self-terminating with a clean recovery send). What a fake server cannot prove is real-provider behaviour:
+
+1. **`disableThinkingParam` against a real knob.** Add the provider's actual off-param to a custom entry (e.g. a Qwen-style `{"enable_thinking": false}`), point a subagent role at it, and confirm the backend honours it — reasoning chars ≈ 0 on the route span and the digest latency drops accordingly. A provider that 400s on the declared param is the failure to catch.
+2. **Moonshot streams tool deltas?** Add `"streamingToolCalls": true` to a Kimi entry, run a tool-using turn, and verify tool calls stream (single pipeline, no probe). If Moonshot doesn't stream them, the turn breaks — that's why the shipped templates don't enable it. On success, update the templates.
+3. **Kimi temperature pin.** One send on the stock Kimi template → no `invalid temperature` error (the template now pins 1).
+4. **Watchdog against a real slow provider.** A reasoning model that legitimately takes >30s before its FIRST streamed byte (zero chunks, no keep-alives) would now be cut off at 30s and read as a hung stream. Kimi's first token came at ~10s; if any configured provider gets cut, the watchdog needs to become configurable rather than reverted.
+
+**Pass criteria:** declared knobs verified against their real providers; no legitimate slow provider tripped by the watchdog.
 
 ---
 
