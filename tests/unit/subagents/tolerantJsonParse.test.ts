@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { tolerantJsonParse } from '../../../src/subagents/router';
+import { tolerantJsonParse, parseWithRecovery } from '../../../src/subagents/router';
 
 describe('tolerantJsonParse', () => {
   it('parses clean JSON', () => {
@@ -50,5 +50,27 @@ describe('tolerantJsonParse', () => {
 
   it('throws when the braces contain malformed JSON', () => {
     expect(() => tolerantJsonParse('{this is not, valid}')).toThrow();
+  });
+
+  // The recovery label is what makes "did this backend honour response_format?"
+  // answerable from a trace — a recovered fence still validates as 'ok'.
+  describe('recovery reporting (plan phase 6 — the jsonMode empirical question)', () => {
+    it('reports none for clean JSON', () => {
+      expect(parseWithRecovery('{"a":1}')).toEqual({ value: { a: 1 }, recovery: 'none' });
+    });
+
+    it('reports fence when a ```json wrapper had to be stripped', () => {
+      expect(parseWithRecovery('```json\n{"a":1}\n```')).toEqual({ value: { a: 1 }, recovery: 'fence' });
+    });
+
+    it('reports brace-scan when prose had to be discarded', () => {
+      expect(parseWithRecovery('Sure!\n{"a":1}\nHope that helps.')).toEqual({
+        value: { a: 1 }, recovery: 'brace-scan'
+      });
+    });
+
+    it('still throws when nothing parses', () => {
+      expect(() => parseWithRecovery('not json at all')).toThrow();
+    });
   });
 });

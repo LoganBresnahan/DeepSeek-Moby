@@ -31,8 +31,18 @@ function measureContentBytes(content: SubagentMessageContent): number {
 }
 
 /**
+ * How a sub's JSON was obtained. Recorded on the trace span because
+ * "did this backend honour `response_format`?" is only answerable from real
+ * traffic — a recovered fence still yields `validationResult: 'ok'`, so
+ * without this the success case hides whether the contingency (a per-role
+ * jsonMode opt-out) is ever needed.
+ */
+export type JsonRecovery = 'none' | 'fence' | 'brace-scan';
+
+/**
  * Parse a sub's response, tolerating the two ways models wrap JSON even when
- * told not to: a ```json fence, or prose around the object.
+ * told not to: a ```json fence, or prose around the object. Reports which
+ * path was taken.
  *
  * This lives in the router, not in a role's `parse`, because the router does
  * the `JSON.parse` — a fenced response would fail here and never reach the
@@ -42,25 +52,30 @@ function measureContentBytes(content: SubagentMessageContent): number {
  * Throws like `JSON.parse` when nothing parses, so the caller's `parse-fail`
  * path is unchanged.
  */
-export function tolerantJsonParse(raw: string): unknown {
+export function parseWithRecovery(raw: string): { value: unknown; recovery: JsonRecovery } {
   const trimmed = raw.trim();
   try {
-    return JSON.parse(trimmed);
+    return { value: JSON.parse(trimmed), recovery: 'none' };
   } catch (firstError) {
     const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(trimmed);
     if (fenced) {
       try {
-        return JSON.parse(fenced[1].trim());
+        return { value: JSON.parse(fenced[1].trim()), recovery: 'fence' };
       } catch { /* fall through to brace scan */ }
     }
 
     const start = trimmed.indexOf('{');
     const end = trimmed.lastIndexOf('}');
     if (start !== -1 && end > start) {
-      return JSON.parse(trimmed.slice(start, end + 1));
+      return { value: JSON.parse(trimmed.slice(start, end + 1)), recovery: 'brace-scan' };
     }
     throw firstError;
   }
+}
+
+/** Value-only wrapper over {@link parseWithRecovery}. */
+export function tolerantJsonParse(raw: string): unknown {
+  return parseWithRecovery(raw).value;
 }
 
 export class SubagentRouter {
@@ -147,8 +162,14 @@ export class SubagentRouter {
     }
 
     let parsedJson: unknown;
+    let recovery: JsonRecovery = 'none';
     try {
-      parsedJson = tolerantJsonParse(rawContent);
+      ({ value: parsedJson, recovery } = parseWithRecovery(rawContent));
+      if (recovery !== 'none') {
+        logger.info(
+          `[Subagent] ${role.name} on "${modelId}": JSON recovered via ${recovery} — the backend ignored response_format`
+        );
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       tracer.endSpan(span, {
@@ -195,6 +216,7 @@ export class SubagentRouter {
         outputBytes: rawContent.length,
         digestBytes: digest.length,
         validationResult: 'ok',
+        jsonRecovery: recovery,
         durationMs: Math.round(performance.now() - startedAt)
       }
     });

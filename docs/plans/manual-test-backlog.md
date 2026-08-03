@@ -605,6 +605,8 @@ Not a pass/fail scenario yet — investigation only.
 
 ## M37. Image describe — vision digest end to end (Phases 2–3) (P0)
 
+**Partially discharged 2026-08-03** (dev-host, `kimi-k3` as the vision backend). Verified from the trace + log export: **S2** — two routes, `validationResult: 'ok'`, digest reached the main model, and the model produced an accurate unprompted description (a stamp-style lighthouse illustration) on both a `deepseek-v4-flash-thinking` main and a `kimi-k3` main. **S3** — answered for this backend, see below. Still owed: **S0** (picker states), **S1** (no-backend placeholder), **S4** (ineligible model refuses without a 400), **S5** (replay after switch/fork — a session switch happened in that run but no post-restore follow-up was asked), **S6** (multiple images + failure isolation). Two costs observed and tracked in CLAUDE.md rather than here: the digest blocks the turn for **15–20s** on Kimi (the `thinkingMode: 'disabled'` no-op), and a Kimi *main* pays that twice via the legacy non-streaming probe.
+
 **Why this matters:** the whole point of the feature. Everything up to now stored and displayed images; this is where an attached image finally reaches the model — as a *text digest* produced by a separate vision model, since DeepSeek's API is text-only. Two things no test can check: whether a real VL backend honours `jsonMode` (the plan's open empirical question), and whether the digests are actually *good enough* to answer questions from.
 
 **Setup:** add a vision-capable custom model in `moby.customModels` — must declare `"acceptsImages": true` and `"subagentRoles": ["image-describe"]`. Worked example is SiliconFlow `deepseek-ai/deepseek-vl2`. Then pick it in **Settings → Image Description (Vision)** (or set `"moby.subagents": { "image-describe": "<id>" }` by hand).
@@ -625,10 +627,14 @@ Not a pass/fail scenario yet — investigation only.
 3. **Pass:** the model quotes the error text accurately. That text came through the digest's `text` field.
 4. *Moby: Show Logs* → a `subagent.route` span with `role: image-describe`, `validationResult: 'ok'`.
 
-**S3. jsonMode on the VL backend (the open empirical question).**
-1. Check the logs for `parse-fail` or `schema-fail` on the route span.
-2. Occasional fenced-JSON responses should now be *recovered* by `tolerantJsonParse` — a fence is not a failure.
-3. **If failures are persistent**, the contingency is a per-role `jsonMode` opt-out plus a plain-text `formatForMain` — see the plan's risk list. Record what the backend actually did.
+**S3. jsonMode on the VL backend — ANSWERED for Kimi 2026-08-03, still open for other backends.**
+
+Two `image-describe` routes on `kimi-k3` both returned `validationResult: 'ok'` (digestBytes 975 and 1,396). The per-role `jsonMode` opt-out contingency was **not** built. What remains is confirming the same on a *second* backend, and reading the new recovery label.
+
+1. Check the route span for `parse-fail` or `schema-fail`.
+2. Read `jsonRecovery` on a successful span: `none` = the backend honoured `response_format`; `fence` or `brace-scan` = it did not and `tolerantJsonParse` covered for it (still a pass, but the signal that matters). An info log names the recovery when it fires. **Before this field existed a recovered fence was indistinguishable from clean JSON** — which is why the Kimi run above can't say which happened.
+3. **If `fence`/`brace-scan` is persistent on a backend**, revisit the per-role `jsonMode` opt-out plus a plain-text `formatForMain` — see the plan's risk list.
+4. Worth one route against SiliconFlow `deepseek-vl2` before treating this as settled — one backend is not a population.
 
 **S4. Ineligible model → refuses rather than 400s.**
 1. Point `moby.subagents.image-describe` at a text-only model that declares the role but not `acceptsImages`.
