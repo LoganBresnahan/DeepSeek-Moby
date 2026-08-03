@@ -560,6 +560,27 @@ describe('DeepSeekClient — non-streaming', () => {
     });
   });
 
+  describe('chat() abort signal (release-gate bug #2, half two)', () => {
+    // chat() accepted options.signal but never passed it to the HTTP layer,
+    // so Stop could not cancel a non-streaming runToolLoop probe — it stayed
+    // parked until the request timeout. ADR 0008's teardown relies on the
+    // abort actually reaching the request.
+    it('forwards options.signal to the HTTP layer', async () => {
+      mockConfigValues.set('model', 'deepseek-chat');
+      mockSecrets.get.mockResolvedValue('test-key');
+      mockHttpClient.post.mockResolvedValue({
+        data: { choices: [{ message: { content: 'hi' }, finish_reason: 'stop' }] }
+      });
+      const client = new DeepSeekClient(createContext());
+      const controller = new AbortController();
+
+      await client.chat([{ role: 'user', content: 'hi' }], undefined, { signal: controller.signal });
+
+      const requestConfig = mockHttpClient.post.mock.calls[0][2];
+      expect(requestConfig.signal).toBe(controller.signal);
+    });
+  });
+
   describe('estimateTokens', () => {
     it('returns a positive integer for non-empty input', () => {
       mockConfigValues.set('model', 'deepseek-chat');

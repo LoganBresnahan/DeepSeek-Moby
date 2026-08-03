@@ -444,7 +444,11 @@ export class DeepSeekClient {
       }>('/chat/completions', requestBody, {
         headers: {
           'Authorization': `Bearer ${apiKey}`
-        }
+        },
+        // ADR 0008 follow-up: without this, Stop could not cancel a
+        // non-streaming probe — the abort only reached streamChat, and an
+        // aborted runToolLoop probe stayed parked until the timeout.
+        signal: options?.signal
       });
 
       const choice = response.data.choices[0];
@@ -622,8 +626,10 @@ export class DeepSeekClient {
         const resetInactivityTimer = () => {
           clearInactivityTimer();
           inactivityTimer = setTimeout(() => {
-            if (!resolved && (fullResponse || fullReasoning || toolCallAcc.size > 0)) {
-              resolved = true;
+            if (resolved) return;
+            resolved = true;
+            if (fullResponse || fullReasoning || toolCallAcc.size > 0) {
+              // Mid-stream stall with partial data: return what we have.
               resolve({
                 content: fullResponse,
                 reasoning_content: fullReasoning || undefined,
@@ -635,6 +641,18 @@ export class DeepSeekClient {
                   total_tokens: 0
                 }
               });
+            } else {
+              // Zero bytes ever. This branch used to do NOTHING — and since
+              // the timer only re-arms on data, the promise then hung until
+              // the user hit Stop ("a hung stream never self-terminates",
+              // release-gate bug #2). Headers arriving means the HTTP-layer
+              // timeout is already cleared, so this is the only watchdog
+              // left on the connection.
+              const err = new Error(
+                `Stream produced no data for ${INACTIVITY_TIMEOUT_MS / 1000}s — giving up`
+              ) as HttpError;
+              err.code = 'ECONNABORTED';
+              reject(err);
             }
           }, INACTIVITY_TIMEOUT_MS);
         };

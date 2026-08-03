@@ -565,4 +565,45 @@ describe('DeepSeekClient.streamChat — SSE accumulator', () => {
       expect(result.content).toBe('crlf');
     });
   });
+
+  // Release-gate bug #2: the inactivity timer's zero-data branch used to do
+  // NOTHING — and since the timer only re-arms on data, a stream that hung
+  // before its first byte left the promise pending until the user hit Stop.
+  describe('inactivity watchdog (hung stream)', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('rejects when the stream produces no data at all', async () => {
+      mockReader.reset();
+      const client = new DeepSeekClient(createContext());
+      const promise = client.streamChat(
+        [{ role: 'user', content: 'hi' }], () => {}, undefined, undefined, {}
+      );
+      const assertion = expect(promise).rejects.toThrow(/no data for 30s/);
+
+      await vi.advanceTimersByTimeAsync(0);      // post() resolves, handlers attach, timer arms
+      await vi.advanceTimersByTimeAsync(30000);  // watchdog fires with zero data
+      await assertion;
+    });
+
+    it('still resolves partial content on a mid-stream stall (existing behavior)', async () => {
+      mockReader.reset();
+      const client = new DeepSeekClient(createContext());
+      const promise = client.streamChat(
+        [{ role: 'user', content: 'hi' }], () => {}, undefined, undefined, {}
+      );
+
+      await vi.advanceTimersByTimeAsync(0);
+      mockReader.pushData(frame({ content: 'partial' }));
+      await vi.advanceTimersByTimeAsync(30000);  // stall after data → resolve what we have
+
+      const result = await promise;
+      expect(result.content).toBe('partial');
+    });
+  });
 });
