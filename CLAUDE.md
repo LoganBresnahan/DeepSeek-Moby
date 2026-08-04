@@ -20,9 +20,11 @@ The development loop: orient → (design doc/ADR → design-plan) → implement 
 - `/verify` — runtime verification recipe: headless webview harness (~5s) or full extension in real VS Code via WSLg (~60s), no real API key needed. This is Moby's deploy-gate analog — `/shipshape` green does not discharge manual-test-backlog items; `/verify` (or hand-testing in the dev host) does.
 - `design-plan` workflow ([.claude/workflows/design-plan.js](.claude/workflows/design-plan.js)) — decompose an accepted design doc or ADR into an effort-ranked, dependency-ordered, model-batched build checklist before implementing. Skip it for small changes where the decomposition would just restate the doc. Write the output into the plan doc (phases + verification roster).
 
-## Release gate — 0.7.0
+## Release 0.7.0 — SHIPPED 2026-08-04
 
-**Version 0.7.0 is prepared on `release/0.7.0`** (CHANGELOG entry cut, README updated, version bumped). Automated gates are all clear as of 2026-08-04:
+**`v0.7.0` published to the Marketplace, all six platforms, 2026-08-04 22:29 UTC** ([release run](https://github.com/LoganBresnahan/DeepSeek-Moby/releases/tag/v0.7.0) — 6/6 `vsce publish` succeeded, GitHub Release carries all six VSIXes). Tagged from `beea73a` after `release/0.7.0` fast-forwarded into main.
+
+Gates that were run before the tag, for the record:
 
 - `npm run typecheck` clean; `npm run test:all` green **twice** (3,269 tests)
 - `test:e2e:harness` 45/45
@@ -30,7 +32,7 @@ The development loop: orient → (design doc/ADR → design-plan) → implement 
 
 Note `release.yml` fires on the `v*` tag and publishes straight to the Marketplace across six platforms, and it runs **only** the four vitest suites — no typecheck, no e2e. Those are manual gates by construction.
 
-**What still blocks the tag:** the dev-host items in the [manual-test backlog](docs/plans/manual-test-backlog.md) — M37 S0/S3, M41 (phone), M40 (real-provider residuals), M42 (non-native local model), plus the untouched fork/dedupe/GC steps of M34, M38, M39. Also: merge `release/0.7.0` into main before tagging.
+**Shipped with eyes open:** the dev-host items in the [manual-test backlog](docs/plans/manual-test-backlog.md) were deliberately left undone (user call, 2026-08-04) — M37 S0/S3, M41 (phone), M40 (real-provider residuals), M42 (non-native local model), plus the fork/dedupe/GC steps of M34, M38, M39. Walk them against the shipped build; anything found is 0.7.1 material.
 
 The five bugs below were found while exercising the image work and are all fixed (2026-08-03). Real-provider residuals are tracked as M40:
 
@@ -40,7 +42,7 @@ The five bugs below were found while exercising the image work and are all fixed
 4. ~~**Registry booleans that need values**~~ — **ADDRESSED 2026-08-03** (see Recently Fixed): `temperatureFixedValue` pins Kimi's must-be-1; `disableThinkingParam` covers the thinking knob (#3); `streamingToolCalls` was already runtime-valid for custom entries but invisible — now in the JSON schema so entries can declare it without a squiggle. Residual: the Kimi templates don't enable `streamingToolCalls` yet (needs one dev-host turn to confirm Moonshot streams tool deltas before the template claims it).
 5. ~~**Token over-count on image turns (~2.4×)**~~ — **FIXED 2026-08-03** (see Recently Fixed; root cause was tools-JSON asymmetry, not the image data URI — the hypothesis is falsified and recorded).
 
-Detail for each is in the Active Bugs list below.
+Detail for each is in Recently Fixed below.
 
 ## Active Bugs
 
