@@ -421,6 +421,11 @@ export class DeepSeekClient {
       // global moby.temperature usable for every other model.
       if (caps.temperatureFixedValue !== undefined) {
         requestBody.temperature = caps.temperatureFixedValue;
+        // Observable on purpose: "did the pin actually engage" must be
+        // answerable from a log export (M40.3), not by guessing at the wire.
+        if (caps.temperatureFixedValue !== temperature) {
+          logger.info(`[Temperature] Pinned to ${caps.temperatureFixedValue} for ${model} (global setting is ${temperature})`);
+        }
       } else if (caps.supportsTemperature) {
         requestBody.temperature = temperature;
       }
@@ -555,6 +560,11 @@ export class DeepSeekClient {
       // global moby.temperature usable for every other model.
       if (caps.temperatureFixedValue !== undefined) {
         requestBody.temperature = caps.temperatureFixedValue;
+        // Observable on purpose: "did the pin actually engage" must be
+        // answerable from a log export (M40.3), not by guessing at the wire.
+        if (caps.temperatureFixedValue !== temperature) {
+          logger.info(`[Temperature] Pinned to ${caps.temperatureFixedValue} for ${model} (global setting is ${temperature})`);
+        }
       } else if (caps.supportsTemperature) {
         requestBody.temperature = temperature;
       }
