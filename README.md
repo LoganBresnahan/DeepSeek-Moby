@@ -7,22 +7,22 @@
 <h2 align="center">v0.7.0</h2>
 
 <p align="center">
-  <sub><em>Core functionality is validated on the maintainer's primary development environment; coverage across the full matrix of operating systems, VS Code versions, shell environments, and model configurations is still expanding. Bug reports and reproduction steps are welcome via the <a href="https://github.com/LoganBresnahan/DeepSeek-Moby/issues">issue tracker</a>.</em></sub>
-</p>
-
-<p align="center">
-  <strong>An AI coding assistant for VS Code, powered by DeepSeek.</strong>
+  <strong>An AI coding assistant for VS Code.</strong>
   <br />
-  Chat, edit, search, execute — all from your editor.
+  Chat, edit, run commands, search the web, see images — with DeepSeek's models or any OpenAI-compatible endpoint, hosted or fully local.
 </p>
 
 <p align="center">
+  <a href="#quick-start">Quick Start</a> &middot;
   <a href="#features">Features</a> &middot;
-  <a href="#getting-started">Getting Started</a> &middot;
   <a href="#configuration">Configuration</a> &middot;
   <a href="#commands">Commands</a> &middot;
-  <a href="#architecture">Architecture</a> &middot;
-  <a href="#roadmap">Roadmap</a>
+  <a href="#troubleshooting--faq">FAQ</a> &middot;
+  <a href="#under-the-hood">Under the Hood</a>
+</p>
+
+<p align="center">
+  <sub><em>Validated primarily on the maintainer's development environment — coverage across OSes, VS Code versions, and model configurations is still expanding. Reproducible bug reports are very welcome on the <a href="https://github.com/LoganBresnahan/DeepSeek-Moby/issues">issue tracker</a>.</em></sub>
 </p>
 
 ---
@@ -33,258 +33,148 @@
 
 ---
 
-## Features
-
-### Four Models, One Interface
-
-Pick the model that fits the task — or register your own (see [Custom Models](#custom-models)).
-
-| Model | Best For | Context | Max Output |
-|-------|----------|---------|------------|
-| **DeepSeek V4 Pro** *(default)* | Hardest problems — agentic work, multi-step reasoning, large refactors | 1M tokens | 384K tokens |
-| **DeepSeek V4 Flash** | Cheap reasoning — exploration, planning, lightweight agentic tasks | 1M tokens | 384K tokens |
-| **DeepSeek Chat (V3)** *(retiring 2026-07-24)* | Legacy non-reasoning fast tier | 128K tokens | 8K tokens |
-| **DeepSeek Reasoner (R1)** *(retiring 2026-07-24)* | Legacy chain-of-thought + shell-driven agentic work | 128K tokens | 64K tokens |
-
-- **V4 Pro / V4 Flash** stream native tool calls — file reads, searches, code edits, and shell commands dispatch inline as the model emits them, with reasoning tokens streaming live during tool decisions
-- **V3 Chat** uses native tool calls without inline reasoning — fast and cheap, no thinking overhead
-- **R1** uses inline `<shell>...</shell>` tags — `cat`, `grep`, `sed`, heredocs — with full terminal access
-- Switching models automatically creates a new session (no mixed-model conversations)
-- Reasoning tokens (V4 Pro / V4 Flash / R1) display in expandable "Thinking" dropdowns so you can follow the model's logic
-
-### Three Edit Modes
-
-Control how code changes are applied to your files:
-
-- **Manual (M)** — Code diffs appear in a collapsible dropdown. You click Diff to view, then Apply to write
-- **Ask (Q)** — Diffs auto-display in a side-by-side view. You confirm or reject each change
-- **Auto (A)** — Changes are applied immediately. A "Modified Files" dropdown shows what was changed
-
-All edits use a precise SEARCH/REPLACE format with strict multi-strategy matching (exact, fuzzy-whitespace, then a strict jsdiff patch). A SEARCH that can't be matched is refused — not force-applied to an approximate location — so the model re-reads and retries instead of corrupting the file. A fail-safe wrapper around auto-apply (checkpoint, atomic batch, post-apply validation against the project's own build, revert-on-regression) is specified in [docs/architecture/integration/edit-safety.md](docs/architecture/integration/edit-safety.md) ([ADR 0006](docs/architecture/decisions/0006-edit-safety-checkpoint-and-validation.md)).
-
-### Images (Vision via Digest Routing)
-
-Attach a screenshot, ask about it, and the model answers — even though DeepSeek's API is text-only.
-
-Moby gets there by routing, not by pretending. A **separate vision model that you configure** looks at the image and writes a text description; the main model reads only that text. The digest is labelled as second-hand, so the assistant knows it is working from another model's account of the image rather than from the image itself.
-
-- **Three ways in** — the paperclip picker, drag-and-drop onto the input box (from your OS file manager or the VS Code Explorer), or the phone drawing pad below. `.png`, `.jpg`, `.webp`, `.gif`, and `.bmp` are all accepted
-- **Downscaled in the browser, twice** — a ~1024px copy goes to the vision model and is never stored; a 512px archive is the only copy persisted, so a long transcript stays cheap to load. Nothing base64 ever lands in the event history
-- **Persisted and replayed** — the digest resolves before the turn is recorded, so reloading a session or forking it keeps the model's view of the image intact. Ask a follow-up a week later and it still knows what the screenshot said
-- **Thumbnails in the transcript** — attached images render inline in your own turn, live and on restore, fetched lazily so scrolling stays fast
-- **Never silently blind** — with no vision model configured, or one that can't accept images, the model is told so explicitly and names the setting to fix. It says it cannot see the image rather than guessing at it
-
-**Setup:** register a vision-capable model under [Custom Models](#custom-models) declaring `"acceptsImages": true` and `"subagentRoles": ["image-describe"]` — the **Kimi Vision (Moonshot)** template does both — then pick it under **Settings → Image Description (Vision)**. Any OpenAI-compatible vision endpoint works.
-
-Point the role at a fast non-reasoning model where you can. A reasoning model burns thinking tokens describing a picture; if your provider exposes an off switch, declare it as `disableThinkingParam` on the entry (e.g. `{"enable_thinking": false}`) and Moby will send it.
-
-### Web Search (Tavily or SearXNG)
-
-Real-time web search integrated into the conversation. Pick a backend via `moby.webSearch.provider`:
-
-- **Tavily** *(default)* — hosted, paid; requires an API key from [tavily.com](https://tavily.com) (free tier available). Set via the **Set Tavily API Key** command.
-- **SearXNG** — self-hosted metasearch, free, no API key. Point `moby.webSearch.searxng.endpoint` at a running instance (e.g. `http://localhost:8080`); the instance must have the JSON format enabled. Configure engines via `moby.webSearch.searxng.engines`. Use the **Set SearXNG Endpoint** command for the URL.
-
-Modes (`moby.webSearchMode`):
-
-- **Off** — Disabled
-- **Auto** — The model decides when to search (recommended)
-- **Manual** — Search only when the user toggles it on
-
-Results cache in-memory with configurable duration. Tavily depth is selectable (`basic` / `advanced`); per-prompt search count is capped via `moby.tavilySearchesPerPrompt`.
-
-### Custom Models
-
-Register any OpenAI-compatible endpoint as a first-class model alongside the DeepSeek built-ins:
-
-- **Local runners** — Ollama, LM Studio, llama.cpp Server, vLLM
-- **Hosted APIs** — OpenAI, Groq, Moonshot/Kimi, OpenRouter, Together, Fireworks, or any service that speaks the OpenAI Chat Completions wire format
-- Use the **Add Custom Model** command (or edit `moby.customModels` directly) to declare an entry with `id`, `apiEndpoint`, `apiKey`, capability flags (`toolCalling`, `reasoningTokens`, `editProtocol`, `shellProtocol`), and per-model token limits
-- Per-model API keys via **Set Custom Model API Key** (encrypted in SecretStorage), or omit `apiKey` to fall back to the global `moby.apiKey`
-- Capability flags decide which protocols the model supports — native tool calling, SEARCH/REPLACE-only edits, R1-style `<shell>` tags, or any combination
-- Custom models appear in the model selector below the built-ins; the "Switch Model" command cycles through all registered models
-
-See [docs/guides/custom-models.md](docs/guides/custom-models.md) for end-to-end examples (Ollama, LM Studio, OpenAI, Groq, Kimi, llama.cpp).
-
-### Shell Command Security
-
-Every shell command goes through an approval system before execution:
-
-- **Inline approval prompts** — When the model attempts to run a command you haven't seen before, an approval widget appears during streaming. You choose:
-  - **Allow Once** — Run this command now, ask again next time
-  - **Always Allow** — Add this command prefix to your permanent allowlist
-  - **Block Once** — Reject this command, the model will adapt
-  - **Always Block** — Add this command prefix to your permanent blocklist
-- **Command Rules modal** — View and edit your full allowlist/blocklist via the Commands popup or Command Palette. Ships with bash defaults (all platforms use the same rules since Windows runs commands through Git Bash)
-- **Override toggle** — "Allow All Commands" setting bypasses all checks (use with caution)
-- Commands execute inline during streaming, one at a time, with results visible immediately
-
-### Conversation History
-
-Event-sourced conversation storage with full session management:
-
-- **Forking** — Click the fork button (🍴) on any message to branch the conversation. Forking from a user message auto-sends it for a fresh response
-- **Search** — Full-text search across all sessions
-- **Export** — JSON, Markdown, or plain text format
-- **Import** — Load sessions from JSON files
-- **Auto-save** — Every message persisted automatically
-
-### Plan Mode
-
-Create and manage plan files that are injected into every request:
-
-- Click the **P** button to open the plans popup
-- Create named plan files (stored in `.moby-plans/` in your workspace)
-- Toggle plans active/inactive — only active plans are included in context
-- Multiple plans can be active simultaneously
-- Plans are regular Markdown files — edit them in VS Code with full editor features
-- **Write your plan as a checklist** — `- [ ]` items or a numbered `## Steps` list — and Moby tracks your progress through a long agentic turn: the full plan goes in the system prompt for orientation, and a terse "current step N of M + remaining items" reminder is pinned next to the model's live action so it doesn't drift off-plan mid-turn. Moby checks items off (`[ ]` → `[x]`) as it completes them, so the plan file doubles as live progress. (See [active-plan context](docs/architecture/integration/active-plan-context.md).)
-
-### Custom System Prompts
-
-Add custom instructions that get prepended to every request:
-
-- Accessible via the Commands popup or toolbar
-- Saved prompts stored in the encrypted database with per-model tags
-- Multiple named prompts with load/save/delete
-- Active prompt indicator with deactivation support
-- Empty = use built-in defaults (no prompt overhead)
-
-### Drawing Server
-
-Start a local server for desktop or phone/tablet-based drawing input:
-
-- ASCII diagram mode for text-based sketches — send diagrams directly to the model as context
-- Freehand drawing pad with touch support (brush color, size, undo/redo). A finished drawing lands in the composer as an ordinary image attachment, so it rides the same path as any screenshot — described by your vision model, thumbnailed in the transcript, and replayed on reload. Drawings are flattened onto white at send, so what you drew is what the model is told about
-- **Draw mode requires a vision model.** With none configured the pad is hidden and `/draw` redirects to the ASCII editor — the QR popup tells you which mode you're in, and a page left open from before a settings change refuses the upload with a reason instead of dead-ending. The ASCII editor is never gated
-- QR code for quick phone connection
-- WSL2 support with port forwarding instructions
-
-### File Context Selection
-
-Manually curate which files the model sees:
-
-- Modal with live list of open editor tabs
-- Workspace search for finding files in large repos
-- Selected files injected as full content into the system prompt
-- Independent of the model's tool-based file reading
-
-### LSP-Backed Code Navigation
-
-The model navigates code by symbol, not just by line offset, using whatever language servers VS Code already runs:
-
-- **Five tools** — `outline` (file structure), `get_symbol_source` (read one function without the rest of the file), `find_symbol` (workspace-wide symbol search), `find_definition` and `find_references` (jump and call-graph queries)
-- **Per-language availability** — Moby probes each language in your workspace at activation, then declares in the system prompt which languages have working LSP and which don't (e.g., *"LSP works for: typescript, python. No LSP for: ruby — use grep + read_file for those."*) so the model picks the right tool the first time
-- **Reactive recovery** — cold-starting language servers (rust-analyzer, gopls, ruby-lsp) are re-probed automatically: 30s after activation, and again on tab focus when you fix a broken setup mid-session
-- **Timeout-safe** — every LSP call is bounded at 5s, so a hung or deadlocked server can't stall the chat
-- **Works with whatever you have installed** — no Moby-specific configuration; if VS Code's "Go to Definition" works on a file, so do these tools
-- **Refresh on demand** — *Moby: Refresh LSP Availability* command flushes the cache after you install a language server outside VS Code (e.g. `gem install`, `asdf install`)
-
-Available on V4 Pro, V4 Flash, and V3 Chat (every model with native tool calling). R1 uses its shell-only transport and doesn't ship LSP tools.
-
-### Context Window Management
-
-Automatic context budgeting so conversations can run indefinitely:
-
-- Per-model context windows — **1M tokens** for V4 Pro / V4 Flash, **128K** for V3 Chat and R1
-- Oldest messages dropped first when budget is exceeded
-- Compressed summaries injected to preserve key context
-- WASM-based tokenizer for exact token counting (fallback estimation available)
-- Silent operation — no user intervention needed
-
-### Encrypted Storage
-
-All conversation data stored in an encrypted SQLite database:
-
-- **SQLCipher** (AES-256-CBC) — the same encryption library used by Signal
-- Encryption key auto-generated on first launch and stored securely:
-  - **Primary:** OS keychain via VS Code's SecretStorage API (macOS Keychain, Windows Credential Manager, Linux SecretService/kwallet)
-  - **Fallback:** File-based storage in VS Code's global storage directory (for environments without a keyring: WSL, containers, headless Linux, SSH sessions)
-- Key management UI for viewing, changing, or regenerating the encryption key
-- WAL mode for crash safety and concurrent access
-- Stored data: conversations, session metadata, command rules, saved prompts, context snapshots
-
-### Shadow DOM Isolation
-
-The entire chat UI is built with Shadow DOM encapsulation:
-
-- Each UI component (messages, toolbars, popups, modals) renders in its own shadow root
-- CSS styles cannot leak between components or be affected by other extensions
-- DOM isolation prevents other extensions from reading or manipulating the chat content
-- VS Code theme variables (`--vscode-*`) flow through for consistent theming
-- Actor-based architecture with pub/sub communication between isolated components
-
----
-
-## Requirements
-
-- **VS Code** 1.85.0 or later
-- **Node.js** 20.x or later (for building from source)
-- **Git** — Required for shell command execution on Windows. [Git for Windows](https://git-scm.com/download/win) includes Git Bash, which provides the POSIX-compatible shell needed to run AI-generated commands (heredocs, grep, pipes, etc.). On Linux/macOS, the system shell is used automatically.
-- **DeepSeek API Key** — From [platform.deepseek.com](https://platform.deepseek.com)
-
-## Help & Troubleshooting
-
-Hit a snag? Common issues and recovery guides:
-
-- **[Database recovery](docs/guides/database-recovery.md)** — If Moby fails to start with a `SQLITE_NOTADB` error or shows "file is not a database", the encrypted history file may be corrupt or the encryption key has changed (Keychain wipe, OS reinstall, etc.). Moby auto-recovers from small partial-init files but refuses to discard larger files that may contain real history. The guide walks through both scenarios with diagrams.
-- **[Custom models](docs/guides/custom-models.md)** — Setting up Ollama, LM Studio, llama.cpp, or hosted OpenAI-compatible endpoints.
-- **[Logging and tracing](docs/guides/logging-and-tracing.md)** — How to surface logs when filing a bug or debugging behavior.
-- **[Shell execution](docs/guides/shell-execution.md)** — How approval flows work and how to allow/block specific commands.
-
-For bugs not covered above, run `Moby: Show Log` from the Command Palette, then file an issue with the relevant snippet.
-
-## Getting Started
+## Quick Start
 
 ### 1. Install
 
-**From VSIX:**
-1. Download the `.vsix` file from [Releases](https://github.com/LoganBresnahan/DeepSeek-Moby/releases)
-2. In VS Code: Extensions view &rarr; `...` menu &rarr; "Install from VSIX..."
+**From VSIX:** download the `.vsix` for your platform from [Releases](https://github.com/LoganBresnahan/DeepSeek-Moby/releases), then in VS Code: Extensions view → `...` menu → **Install from VSIX...**
 
-**From Source:**
+**From source:**
 ```bash
 git clone https://github.com/LoganBresnahan/DeepSeek-Moby.git
 cd DeepSeek-Moby
 npm install
-npm run package
-# Press F5 to debug, or install the generated .vsix
+npm run package                  # production build
+npx @vscode/vsce package         # produces the .vsix
+# install the .vsix as above, or press F5 to run it in a dev host
 ```
 
-### 2. Set Your API Key
+**Windows only:** install [Git for Windows](https://git-scm.com/download/win) — Moby runs AI-generated shell commands through Git Bash. Linux/macOS use the system shell as-is.
 
-**Option A: Command Palette (recommended)**
+### 2. Connect a model
 
-Open the Command Palette (`Ctrl+Shift+P`) and run:
-- **DeepSeek Moby: Set API Key** — Enter your key from [platform.deepseek.com](https://platform.deepseek.com)
-- **DeepSeek Moby: Set Tavily API Key** — (Optional) For web search, get a key from [tavily.com](https://tavily.com)
+Pick either path — a DeepSeek account is **not** required if you bring your own model.
 
-**Option B: Environment Variables**
+**Option A — DeepSeek:** get a key from [platform.deepseek.com](https://platform.deepseek.com), then run **DeepSeek Moby: Set API Key** from the Command Palette (`Ctrl+Shift+P`). For CI or headless setups, `export DEEPSEEK_API_KEY="sk-..."` works too — SecretStorage is checked first, environment second.
 
-For CI, containers, or headless environments, set environment variables instead:
-```bash
-export DEEPSEEK_API_KEY="sk-..."        # Required
-export TAVILY_API_KEY="tvly-..."        # Optional, for web search
-```
+**Option B — your own model (local or hosted):** run **DeepSeek Moby: Add Custom Model** and pick a template — Ollama, LM Studio, llama.cpp Server, OpenAI, Groq, Kimi (Moonshot) — or point it at any OpenAI-compatible endpoint. Local models need no API key at all. Full walkthroughs: [docs/guides/custom-models.md](docs/guides/custom-models.md).
 
-The extension checks SecretStorage first, then falls back to environment variables.
+### 3. Chat
 
-### 3. Start Chatting
+Click the Moby whale in the activity bar, type, press Enter. Two decisions worth making early:
 
-Click the Moby icon in the sidebar activity bar, type a message, and press Enter.
+- **Edit mode** (toolbar button): `manual` — you review and apply every change; `ask` — diffs open side-by-side for confirm/reject; `auto` — changes apply immediately with a safety net. Start with `ask`.
+- **Web search** defaults to auto (the model decides when to search) but needs a backend — a [Tavily](https://tavily.com) key or a self-hosted SearXNG instance. Without one it stays quietly off.
+
+---
+
+## Features
+
+### Agentic coding
+
+The model doesn't just answer — it reads your files, searches your workspace, navigates code by symbol, runs shell commands, and edits, all mid-conversation as it reasons.
+
+| Model | Best for | Context | Max output |
+|-------|----------|---------|------------|
+| **DeepSeek V4 Pro** *(default)* | Hardest problems — multi-step agentic work, large refactors | 1M tokens | 384K tokens |
+| **DeepSeek V4 Flash** | Cheap reasoning — exploration, planning, lighter tasks | 1M tokens | 384K tokens |
+| DeepSeek Chat (V3) | Legacy fast tier, no reasoning | 128K tokens | 8K tokens |
+| DeepSeek Reasoner (R1) | Legacy chain-of-thought, shell-driven | 128K tokens | 64K tokens |
+
+- Reasoning streams live in expandable **Thinking** dropdowns; tool calls dispatch inline as the model emits them
+- **Every shell command needs your approval** before it runs — allow/block once or permanently, with an editable rule list. (An "Allow All Commands" override exists for the brave.)
+- **LSP-backed navigation** — where VS Code's "Go to Definition" works, the model gets symbol-level tools (`outline`, `find_references`, and friends) instead of grepping blind. Availability is probed per language and declared to the model up front
+- **File context picker** — hand the model specific files yourself, independent of what it reads on its own
+- Switching models starts a fresh session — no mixed-model conversations
+
+*V3 and R1 remain available but are a generation behind; new work belongs on V4. R1 drives its agentic loop through inline `<shell>` tags rather than native tool calls — a deliberate design for models without tool-calling APIs, which is also what makes local text-only models workable.*
+
+### Code edits you control
+
+Three modes, switchable mid-session from the toolbar:
+
+- **Manual** — diffs collect in a dropdown; you click Diff to inspect, Apply to write
+- **Ask** — each change opens a side-by-side diff; confirm or reject
+- **Auto** — changes apply immediately, listed in a Modified Files dropdown
+
+Edits that can't be matched exactly are **refused, not force-applied** — the model re-reads and retries instead of corrupting your file. Auto mode adds a safety net: files are checkpointed before each edit, validated against your project's own build afterward, and reverted on regression. ([How it works.](docs/architecture/integration/edit-safety.md))
+
+### Images
+
+Attach a screenshot, ask about it, and the model answers — even though DeepSeek's API is text-only.
+
+Moby gets there by routing, not pretending: a **vision model you configure** describes the image, and the main model reads that description, clearly labelled as second-hand. If no vision model is set up, the model says it cannot see the image and names the setting to fix — it never silently guesses.
+
+- Attach via the **paperclip**, **drag-and-drop** onto the input box (OS file manager or VS Code Explorer), or the [phone drawing pad](#draw-from-your-phone). `.png`, `.jpg`, `.webp`, `.gif`, `.bmp`
+- Images are **downscaled in your browser** before anything is sent or stored, so transcripts stay fast to load
+- Descriptions **persist with the conversation** — reload or fork a session and the model still knows what the screenshot said; attached images render as thumbnails in the transcript
+
+**Setup:** add a vision-capable model under custom models declaring `"acceptsImages": true` and `"subagentRoles": ["image-describe"]` — the **Kimi Vision (Moonshot)** template does both — then select it under **Settings → Image Description (Vision)**. Any OpenAI-compatible vision endpoint works. Prefer a fast non-reasoning model for this role; if your provider has a thinking-off switch, declare it as `disableThinkingParam` (e.g. `{"enable_thinking": false}`) and Moby sends it.
+
+### Web search
+
+Real-time search woven into the conversation. Two backends:
+
+- **Tavily** *(default)* — hosted; free tier available at [tavily.com](https://tavily.com). Set the key via **Set Tavily API Key**
+- **SearXNG** — self-hosted, free, no key. Point `moby.webSearch.searxng.endpoint` at your instance (JSON format must be enabled)
+
+Modes: **auto** (the model decides when to search — recommended), **manual** (only when you toggle it), **off**. Results are cached, and a digest subagent can condense them before they reach the main model.
+
+### Draw from your phone
+
+**Start Drawing Server** launches a local server with a QR code — open it on a phone or tablet:
+
+- **ASCII diagram editor** — sketch box-and-arrow diagrams, send them into the chat as text
+- **Freehand drawing pad** — draw with touch, hit Send, and the drawing lands in the composer as an ordinary image attachment: described by your vision model, thumbnailed, and preserved on reload. Requires a vision model — without one the pad hides itself and the QR popup says so; the ASCII editor always works
+- WSL2 users get port-forwarding instructions in the popup. More: [docs/guides/drawing-server.md](docs/guides/drawing-server.md)
+
+### Sessions that persist
+
+Every conversation is saved automatically to a local encrypted database:
+
+- **Fork** any message (🍴) to branch the conversation and explore an alternative
+- **Search** full-text across all sessions; **export** as JSON/Markdown/text; **import** from JSON
+- Conversations survive crashes — kill VS Code mid-response and the partial restores with a marker
+- **Plan files** — Markdown checklists in `.moby-plans/` injected into every request. Moby tracks progress through long agentic turns and checks items off as it completes them
+- **Custom system prompts** — named, per-model, stored encrypted, toggleable
+
+### Bring your own model
+
+Any OpenAI-compatible endpoint registers as a first-class model next to the built-ins — same chat, same edit modes, same tools where supported:
+
+- **Local:** Ollama, LM Studio, llama.cpp Server, vLLM — no API key, nothing leaves your machine
+- **Hosted:** OpenAI, Groq, Moonshot/Kimi, OpenRouter, Together, Fireworks, or anything speaking the Chat Completions wire format
+- Capability flags describe what each model can do — native tool calling vs. text-only protocols, reasoning tokens, streaming tool calls, vision — and Moby picks matching pipelines automatically. Provider quirks are declarable too: a fixed temperature the provider insists on (`temperatureFixedValue`), or its thinking-off knob (`disableThinkingParam`)
+- Per-model API keys live encrypted in SecretStorage (**Set Custom Model API Key**)
+
+Templates for common setups ship in the **Add Custom Model** picker; end-to-end examples in [docs/guides/custom-models.md](docs/guides/custom-models.md).
 
 ---
 
 ## Configuration
 
+The settings most people touch:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `moby.model` | `deepseek-v4-pro-thinking` | Active model — any built-in or custom model `id`. |
+| `moby.editMode` | `manual` | How code changes apply: `manual`, `ask`, or `auto`. |
+| `moby.webSearchMode` | `auto` | `off`, `manual`, or `auto` (the model decides). |
+| `moby.customModels` | `[]` | Your registered OpenAI-compatible models. |
+| `moby.subagents` | `{}` | Per-role model routing, e.g. `{"image-describe": "kimi-vision"}`. |
+| `moby.requestTimeoutMs` | `60000` | Abort an API request after this long. Raise for slow providers — reasoning and vision models routinely take 30s+. |
+
+<details>
+<summary><strong>Full settings reference (all 34)</strong></summary>
+
 **Model selection**
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `moby.model` | `deepseek-v4-pro-thinking` | Active model. Built-ins: `deepseek-v4-pro-thinking`, `deepseek-v4-flash-thinking`, `deepseek-chat` (retiring 2026-07-24), `deepseek-reasoner` (retiring 2026-07-24). Also accepts any custom model `id`. |
-| `moby.customModels` | `[]` | Array of custom OpenAI-compatible models to register alongside the built-ins. See [Custom Models](#custom-models). |
+| `moby.model` | `deepseek-v4-pro-thinking` | Active model. Built-ins: `deepseek-v4-pro-thinking`, `deepseek-v4-flash-thinking`, `deepseek-chat`, `deepseek-reasoner`. Also accepts any custom model `id`. |
+| `moby.customModels` | `[]` | Array of custom OpenAI-compatible models to register alongside the built-ins. |
 | `moby.modelOptions` | `{}` | Per-model options keyed by model id. Currently supports `reasoningEffort` (`high` or `max`) for V4 models. |
-| `moby.temperature` | `0.7` | Creativity (0-2). V3 chat only — V4 and R1 reject temperature. |
+| `moby.temperature` | `0.7` | Creativity (0–2), for models that accept it (V3 chat, custom models). V4 and R1 reject temperature; a custom entry can pin its own via `temperatureFixedValue`. |
 
 **Token / iteration limits**
 
@@ -292,8 +182,8 @@ Click the Moby icon in the sidebar activity bar, type a message, and press Enter
 |---------|---------|-------------|
 | `moby.maxTokensV4ProThinking` | `65536` | Max output tokens for V4 Pro. API cap: 384,000. |
 | `moby.maxTokensV4FlashThinking` | `65536` | Max output tokens for V4 Flash. API cap: 384,000. |
-| `moby.maxTokensChatModel` | `8192` | Max output tokens for Chat (V3). Range: 256-8,192. |
-| `moby.maxTokensReasonerModel` | `65536` | Max output tokens for Reasoner (R1). Range: 256-65,536. |
+| `moby.maxTokensChatModel` | `8192` | Max output tokens for Chat (V3). Range: 256–8,192. |
+| `moby.maxTokensReasonerModel` | `65536` | Max output tokens for Reasoner (R1). Range: 256–65,536. |
 | `moby.maxToolCalls` | `100` | Tool call iteration limit (native-tool models). 100 = no limit. |
 | `moby.maxShellIterations` | `100` | Shell command iteration limit (Reasoner). 100 = no limit. |
 | `moby.maxFileEditLoops` | `100` | Continuations after R1 produces file edits. 100 = no limit. |
@@ -303,7 +193,7 @@ Click the Moby icon in the sidebar activity bar, type a message, and press Enter
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `moby.editMode` | `manual` | How code changes apply: `manual`, `ask`, or `auto`. |
-| `moby.allowAllShellCommands` | `false` | Bypass command approval system. Disables the safety blocklist. |
+| `moby.allowAllShellCommands` | `false` | Bypass command approval entirely. Disables the safety blocklist. |
 | `moby.editSafety.checkpoint` | `true` | Auto mode: snapshot each file before an auto-applied edit so a batch can be reverted. |
 | `moby.editSafety.validate` | `auto` | Auto mode: validate after an edit batch against your own toolchain. `auto` discovers the check command (dotnet / npm / make / cargo / go); `off` disables. |
 | `moby.editSafety.validateTimeoutMs` | `60000` | Hard timeout for the post-apply check. A timeout counts as inconclusive, not a regression. |
@@ -324,7 +214,7 @@ Click the Moby icon in the sidebar activity bar, type a message, and press Enter
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `moby.webSearchMode` | `auto` | `off`, `manual` (user toggle only), or `auto` (LLM decides). |
-| `moby.webSearch.provider` | `tavily` | Backend: `tavily` (hosted, paid) or `searxng` (self-hosted, free). |
+| `moby.webSearch.provider` | `tavily` | Backend: `tavily` (hosted) or `searxng` (self-hosted, free). |
 | `moby.webSearch.searxng.endpoint` | `""` | Base URL of your SearXNG instance (e.g. `http://localhost:8080`). |
 | `moby.webSearch.searxng.engines` | `["google","bing","duckduckgo"]` | SearXNG engines to query. Empty = instance default. |
 | `moby.tavilySearchDepth` | `basic` | Tavily depth: `basic` (1 credit) or `advanced` (2 credits). |
@@ -341,108 +231,99 @@ Click the Moby icon in the sidebar activity bar, type a message, and press Enter
 | `moby.tracing.enabled` | `true` | Enable trace collection for debugging. |
 | `moby.devMode` | `false` | Enable developer tools (inspector panel). |
 
+</details>
+
 ---
 
 ## Commands
 
-Open the Command Palette (`Ctrl+Shift+P`) and search "Moby":
+Open the Command Palette (`Ctrl+Shift+P`) and search "Moby".
 
-| Command | Description |
-|---------|-------------|
-| **Open Chat** | Open the chat sidebar |
-| **New Chat** | Start a fresh conversation |
-| **Switch Model** | Cycle through registered models (built-ins + custom) |
-| **Set API Key** | Configure your DeepSeek API key |
-| **Set Tavily API Key** | Configure Tavily web search API key |
-| **Set SearXNG Endpoint** | Configure the URL of your SearXNG instance |
-| **Add Custom Model** | Walk through registering an OpenAI-compatible custom model |
-| **Set Custom Model API Key** | Store an API key for a registered custom model (encrypted) |
-| **Clear Custom Model API Key** | Remove a stored custom-model API key |
-| **Show Chat History** | Browse, search, and manage past conversations |
-| **Export All Chat History** | Export all sessions as JSON, Markdown, or text |
-| **Import Chat History** | Load sessions from a JSON file |
-| **Clear All Chat History** | Delete all saved conversations |
-| **Export Current Session** | Export the active session |
-| **Command Rules** | View and edit shell command approval rules |
-| **Accept Changes** | Accept the active diff (also bound to the diff toolbar) |
-| **Reject Changes** | Reject the active diff |
-| **Show Pending Diffs** | Quick pick for pending code changes (`Ctrl+Shift+D`) |
-| **Statistics** | View token usage and API call stats |
-| **Show Log** | Open the extension output channel |
-| **Export Logs** | Export logs and traces for bug reports |
-| **Export Turn as JSON (Debug)** | Snapshot the live event stream for the current turn (devMode) |
-| **Export Session (Test Fixture)** | Export a session as a fixture file for tests |
-| **Start Drawing Server** | Launch the drawing pad server |
-| **Stop Drawing Server** | Shut down the drawing server |
-| **Manage Database Encryption Key** | View or regenerate the database encryption key |
-| **Refresh LSP Availability** | Re-probe language servers after installing one outside VS Code |
+**Setup & models** — Open Chat · New Chat · Switch Model · Set API Key · Set Tavily API Key · Set SearXNG Endpoint · Add Custom Model · Set / Clear Custom Model API Key
+
+**Sessions** — Show Chat History · Export All Chat History · Import Chat History · Export Current Session · Clear All Chat History
+
+**Editing & shell** — Accept Changes · Reject Changes · Show Pending Diffs (`Ctrl+Shift+D`) · Command Rules
+
+**Drawing** — Start Drawing Server · Stop Drawing Server
+
+**Diagnostics & maintenance** — Statistics · Show Log · Export Logs · Manage Database Encryption Key · Refresh LSP Availability · Export Turn as JSON (Debug) · Export Session (Test Fixture)
 
 ---
 
-## Architecture
+## Troubleshooting & FAQ
 
-Moby is built with a layered architecture designed for reliability and extensibility:
+**"The model says it can't see my image."** No vision model is configured. Add one under custom models with `"acceptsImages": true` and `"subagentRoles": ["image-describe"]`, then select it in **Settings → Image Description (Vision)**. See [Images](#images).
 
-```
-┌─────────────────────────────────────────────────┐
-│  VS Code Extension (Node.js)                     │
-│  ┌─────────────┐  ┌──────────────────────────┐  │
-│  │ DeepSeek API │  │ Managers                  │  │
-│  │  Client      │  │  ├─ RequestOrchestrator   │  │
-│  │  (V4/V3/R1)  │  │  ├─ DiffManager           │  │
-│  │              │  │  ├─ WebSearchManager      │  │
-│  └─────────────┘  │  ├─ FileContextManager    │  │
-│                    │  ├─ CommandApprovalMgr    │  │
-│  ┌─────────────┐  │  ├─ PlanManager           │  │
-│  │ SQLCipher DB │  │  └─ SettingsManager       │  │
-│  │ (Encrypted)  │  └──────────────────────────┘  │
-│  └─────────────┘                                 │
-│         ↕ postMessage                            │
-│  ┌───────────────────────────────────────────┐   │
-│  │  Webview (Browser)                         │   │
-│  │  ┌─────────────────────────────────────┐  │   │
-│  │  │ Actor System (Shadow DOM)            │  │   │
-│  │  │  ├─ EventStateManager (pub/sub)      │  │   │
-│  │  │  ├─ VirtualListActor (pooling)       │  │   │
-│  │  │  ├─ MessageTurnActor (per-message)   │  │   │
-│  │  │  ├─ ToolbarShadowActor              │  │   │
-│  │  │  ├─ InputAreaShadowActor            │  │   │
-│  │  │  └─ PopupShadowActor (base)         │  │   │
-│  │  └─────────────────────────────────────┘  │   │
-│  └───────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────┘
-```
+**"Shell commands fail on Windows."** Install [Git for Windows](https://git-scm.com/download/win) — Moby runs commands through Git Bash for POSIX compatibility (heredocs, pipes, `grep`).
 
-**Key design decisions:**
+**"Moby won't start / `SQLITE_NOTADB` / 'file is not a database'."** The encrypted history file is corrupt or the encryption key changed (keychain wipe, OS reinstall). Moby auto-recovers the harmless cases and refuses to touch files that may hold real history — the [database recovery guide](docs/guides/database-recovery.md) walks through both.
 
-- **Event-sourced persistence** — Conversations stored as append-only event logs. Enables forking (zero-copy via join table), compression snapshots, and reliable history restore
-- **Actor model UI** — Each UI component is a ShadowActor with its own shadow root, styles, and lifecycle. Communication via EventStateManager pub/sub. No global CSS, no DOM conflicts
-- **Coordinator pattern** — ChatProvider routes messages between managers. Managers own their domain logic and communicate via VS Code EventEmitters
-- **Streaming pipeline** — ContentTransformBuffer handles token-by-token streaming with progressive flush (emit safe content immediately, hold back potential `<shell>` tags until complete)
+**"Turns die mid-response on my slow provider."** Raise `moby.requestTimeoutMs` (default 60s). Reasoning and vision models routinely take 30s+ before answering.
 
-For contributors, see the full architecture documentation in `docs/architecture/`.
+**Which model should I pick?** V4 Pro for real work, V4 Flash when you want the same reasoning cheaper. V3 and R1 still function but are a generation behind. For fully-local or another provider, see [Bring your own model](#bring-your-own-model).
+
+**Filing a bug?** Run **Moby: Export Logs** and attach the relevant snippet — it bundles extension, trace, and webview logs in one file. More detail: [logging guide](docs/guides/logging-and-tracing.md).
+
+Deeper guides: [custom models](docs/guides/custom-models.md) · [shell execution & approval](docs/guides/shell-execution.md) · [web search](docs/guides/web-search.md) · [drawing server](docs/guides/drawing-server.md) · [database recovery](docs/guides/database-recovery.md)
 
 ---
 
 ## Privacy & Security
 
-- **API keys** stored in VS Code's encrypted SecretStorage (OS keychain when available, file-based fallback otherwise)
-- **Conversations** stored locally in an AES-256 encrypted SQLite database
-- **No telemetry** — no data leaves your machine except to the model endpoints you configure: the DeepSeek API, Tavily or your SearXNG instance if web search is on, any custom model you register, and the vision provider you point `image-describe` at. Attached images go to that vision provider and nowhere else; they are never sent to the main model
-- **Shell commands** gated by an approval system with user-configurable rules
-- **Shadow DOM isolation** prevents other extensions from accessing chat content
-- **Works without a workspace** — the extension activates and is fully functional even when VS Code is opened without a folder
+- **No telemetry** — data leaves your machine only for the model endpoints you configure: the DeepSeek API, Tavily or your SearXNG instance if web search is on, any custom model you register, and the vision provider you point `image-describe` at. Attached images go to that vision provider and nowhere else — never to the main model
+- **API keys** live in VS Code's SecretStorage (OS keychain when available)
+- **Conversations** are stored locally in an AES-256 encrypted SQLite database ([SQLCipher](https://www.zetetic.net/sqlcipher/), the library Signal uses), with a key-management UI for viewing or regenerating the key
+- **Shell commands** are gated by the approval system with user-editable rules
+- **Shadow DOM isolation** keeps other extensions from reading or manipulating chat content
+- Works without a workspace — a folder is not required for activation
+
+---
+
+## Under the Hood
+
+For the curious and for contributors. Full documentation lives in [docs/architecture/](docs/architecture/), with significant decisions recorded as [ADRs](docs/architecture/decisions/).
+
+```
+┌─────────────────────────────────────────────────┐
+│  VS Code Extension (Node.js)                     │
+│  ┌─────────────┐  ┌──────────────────────────┐  │
+│  │ API Client   │  │ Managers                  │  │
+│  │ (DeepSeek +  │  │  ├─ RequestOrchestrator   │  │
+│  │  custom)     │  │  ├─ DiffManager           │  │
+│  └─────────────┘  │  ├─ WebSearchManager      │  │
+│                    │  ├─ FileContextManager    │  │
+│  ┌─────────────┐  │  ├─ CommandApprovalMgr    │  │
+│  │ SQLCipher DB │  │  ├─ PlanManager           │  │
+│  │ (Encrypted)  │  │  └─ SettingsManager       │  │
+│  └─────────────┘  └──────────────────────────┘  │
+│         ↕ postMessage                            │
+│  ┌───────────────────────────────────────────┐   │
+│  │  Webview (Browser)                         │   │
+│  │  Actor system on Shadow DOM —              │   │
+│  │  EventStateManager pub/sub, virtualized    │   │
+│  │  turn list, per-component shadow roots     │   │
+│  └───────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────┘
+```
+
+- **Event-sourced persistence** — conversations are append-only event logs in SQLCipher (WAL mode for crash safety). This is what makes forking zero-copy (a join table, not a data copy), crash recovery lossless, and history restore render-identical to the live stream
+- **Actor-model UI** — every component owns a shadow root with its own styles and lifecycle; communication is pub/sub. No global CSS, no DOM conflicts with other extensions
+- **Streaming pipeline** — a transform buffer flushes safe content immediately while holding back structures that might still change (fences, `<shell>` tags) until they close
+- **Context management** — a WASM tokenizer counts exactly; when a conversation outgrows the model's window, oldest messages drop first and compressed summaries stand in for them. Runs silently
+- **Vision by digest routing** — image bytes go only to the configured vision subagent; the main model receives labelled text. Two renditions from one decode: a ~1024px copy for the vision call (never stored) and a 512px archive (the only stored copy, content-addressed and shared across forks). See [ADR 0014](docs/architecture/decisions/0014-attachment-persistence-and-replay.md)
+- **Edit safety** — checkpoint, atomic batch apply, post-apply validation against the project's own build, revert-on-regression: [ADR 0006](docs/architecture/decisions/0006-edit-safety-checkpoint-and-validation.md)
+
+**Requirements for building from source:** Node.js 20.x+, VS Code 1.85.0+.
 
 ---
 
 ## Roadmap
 
-Planned features for future releases:
-
-- **Expanded sub-agent routing** — Web-search digestion and [image description](#images-vision-via-digest-routing) already offload to a subagent model of your choice (`src/subagents/`); a file-digest role and broader concurrent fan-out are planned
-- **MCP client** — Spawn external MCP servers declared in settings and register their tools alongside the built-ins, using the same config shape as Claude Desktop
-- **Plugin system** — Extensible tool definitions for domain-specific workflows
-- **Per-turn lazy event load** — On-demand hydration of large session histories (deferred until real usage surfaces the need)
+- **Expanded sub-agent routing** — web-search digestion and [image description](#images) already offload to a model of your choice; a file-digest role and broader concurrent fan-out are planned
+- **MCP client** — spawn external MCP servers declared in settings and register their tools alongside the built-ins, using the same config shape as Claude Desktop
+- **Plugin system** — extensible tool definitions for domain-specific workflows
+- **Per-turn lazy event load** — on-demand hydration of very large session histories
 
 ---
 

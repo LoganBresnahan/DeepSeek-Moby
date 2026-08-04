@@ -53,7 +53,7 @@
             "deepseek-chat",
             "deepseek-reasoner"
           ],
-          "markdownDescription": "Which model to use. Built-ins: `deepseek-v4-pro-thinking`, `deepseek-v4-flash-thinking`, `deepseek-chat` (retiring 2026-07-24), `deepseek-reasoner` (retiring 2026-07-24). Also accepts any `id` declared in `#moby.customModels#`."
+          "markdownDescription": "Which model to use. Built-ins: `deepseek-v4-pro-thinking`, `deepseek-v4-flash-thinking`, `deepseek-chat`, `deepseek-reasoner`. Also accepts any `id` declared in `#moby.customModels#`."
         },
         "moby.customModels": {
           "type": "array",
@@ -387,14 +387,14 @@
           "default": 8192,
           "minimum": 256,
           "maximum": 8192,
-          "description": "[Chat model only — retiring 2026-07-24] Maximum output tokens per response. Max: 8,192"
+          "description": "[Chat model only] Maximum output tokens per response. Max: 8,192"
         },
         "moby.maxTokensReasonerModel": {
           "type": "number",
           "default": 65536,
           "minimum": 256,
           "maximum": 65536,
-          "description": "[Reasoner model only — retiring 2026-07-24] Maximum output tokens per response. Max: 65,536"
+          "description": "[Reasoner model only] Maximum output tokens per response. Max: 65,536"
         },
         "moby.maxTokensV4FlashThinking": {
           "type": "number",

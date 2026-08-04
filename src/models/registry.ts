@@ -357,9 +357,11 @@ export function getAllRegisteredModels(): RegisteredModelInfo[] {
 }
 
 const BUILTIN_DISPLAY_NAMES: Record<string, string> = {
-  // V3 models — retiring 2026-07-24, hint in the label so users start migrating.
-  'deepseek-chat': 'DeepSeek Chat (V3 — retiring Jul 2026)',
-  'deepseek-reasoner': 'DeepSeek Reasoner (R1 — retiring Jul 2026)',
+  // V3-era models. The announced 2026-07-24 retirement date passed with the
+  // API still serving both (verified 2026-08-04 — R1 answered a real e2e
+  // turn), so the "retiring" label came off rather than stating a stale date.
+  'deepseek-chat': 'DeepSeek Chat (V3)',
+  'deepseek-reasoner': 'DeepSeek Reasoner (R1)',
   // V4 thinking models. The "-thinking" id suffix is preserved for wire-format
   // compatibility (drives `thinking: { type: 'enabled' }` + reasoning_effort).
   // Display labels drop the "(Thinking)" qualifier — V4 always reasons; the
