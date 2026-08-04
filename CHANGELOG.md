@@ -2,6 +2,69 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-04
+
+The images release. You can attach a screenshot and ask about it, and the model answers — despite DeepSeek's API being text-only, which it still is. Getting there took a persistence layer for attachments, a second model in the loop, and a database migration. Alongside it: the freeform drawing pad comes back after being parked since before vision existed, custom-model entries can now describe three provider quirks they previously couldn't, and five bugs found while exercising all of the above are fixed.
+
+Minor, not patch: new features, new settings, and a one-way database upgrade. No breaking changes to existing configuration.
+
+### Images reach the model as a text digest from a vision model you choose (ADR 0014)
+
+DeepSeek's first-party API accepts no image input, and no amount of client work changes that. So Moby routes instead: a **separate vision model you configure** describes the image, and the main model reads only that description — labelled as second-hand, so the assistant knows it is working from another model's account rather than from the image itself. Attach via the paperclip, drag-and-drop, or the phone drawing pad; `.png`, `.jpg`, `.webp`, `.gif`, and `.bmp` all work.
+
+Several design points are load-bearing and look arbitrary without the reasoning:
+
+- **Digests resolve *before* the turn is recorded**, not after. That is what makes them persist on the attachment and replay by construction — reload a session or fork it and the model's view of the image is unchanged, because it is reading the same stored text it read live. ([src/subagents/roles/imageDescribe.ts](src/subagents/roles/imageDescribe.ts), [requestOrchestrator.ts](src/providers/requestOrchestrator.ts))
+- **Two renditions from one decode.** A ~1024px copy goes to the vision model and is **never persisted**; a 512px archive is the only copy stored. Reversing these is invisible — everything works, transcripts just bloat until hydration crawls — so which one reaches the table is pinned by test and was verified against real canvas encoding. ([InputAreaShadowActor.ts](media/actors/input-area/InputAreaShadowActor.ts))
+- **Attachment bodies are content-addressed blobs, not inline JSON.** `events.data` carries only a reference, so hydration stays cheap; bodies live in a new `attachment_blobs` table keyed by sha256 and linked through `event_blobs`. Not sidecar files — those would break zero-copy fork refcounting and leave SQLCipher's envelope. Bodies over 256KB truncate with an explicit marker rather than silently. ([ADR 0014](docs/architecture/decisions/0014-attachment-persistence-and-replay.md))
+- **One injection point.** `formatAttachmentsForContext` has a single call site, and the live injection in the orchestrator was **deleted** — record-before-read means two callers would double-inject the current turn. ([attachmentContext.ts](src/events/attachmentContext.ts))
+- **A failed route becomes a named placeholder, never silence.** No vision model configured, or one that can't accept images, and the main model is told exactly that plus the setting to fix — so it says it cannot see the image instead of inventing one. An ineligible backend is refused *before* the request, so an `image_url` block can never reach a text-only endpoint and 400 it.
+- **`assertNoArrayContent` guards the one choke point** every pipeline flows through, keeping `image_url` content blocks away from the main model no matter which path a turn takes.
+- **Transcript thumbnails share one render path** between live and restore, because a restore-only path is the failure mode that passes every live test. Blobs are fetched lazily, once per blob per session view, into a box reserved at its final size so arrival causes no reflow.
+
+Setup is one custom-model entry declaring `"acceptsImages": true` and `"subagentRoles": ["image-describe"]` — there's a **Kimi Vision (Moonshot)** template that does both — then pick it under **Settings → Image Description (Vision)**. The picker filters on *both* gates the router enforces, so a model that would be refused at request time never appears as an option.
+
+**Database upgrade, one-way.** This release migrates the database from schema v1 to v2 — the first versioned upgrade. It is additive, but not reversible: a database opened by this build and then by an older build loses its blob rows. ([migrations.ts](src/events/migrations.ts))
+
+### The freeform drawing pad is back, gated on a live vision model
+
+The `/draw` canvas has been dark behind a compile-time flag since before vision existed — an image nothing could read was worth nothing. Now it produces an ordinary image attachment: it lands in the composer as a chip, gets described, thumbnails in the transcript, and replays on reload, exactly like a screenshot. It no longer mints a transcript-only drawing turn that the model never saw.
+
+Availability is checked per request at four points — the pad button, the `/draw` route, `/health`, and the upload itself — so a phone page opened before you changed the setting refuses with a named reason instead of dead-ending. The QR popup says which mode you're in. The ASCII editor is never gated. Drawings are also flattened onto opaque white at export: the canvas is transparent where undrawn, so an exported drawing used to composite onto the chat's dark background and hand the vision model alpha to interpret. ([drawingServer.ts](src/providers/drawingServer.ts), [availability.ts](src/subagents/availability.ts))
+
+### Custom models can declare three provider quirks they previously couldn't
+
+Real third-party endpoints disagree with the OpenAI shape in small ways that a boolean can't express. Three new optional axes on a `moby.customModels` entry:
+
+- **`temperatureFixedValue`** pins the request temperature per model. Moonshot's Kimi accepts only `1`; the previous boolean could say "supports temperature" or "doesn't", which forced the *global* temperature to 1 for every model to satisfy one of them. Both Kimi templates now carry it, and the client logs when the pin overrides a differing global.
+- **`disableThinkingParam`** is an object of request params (e.g. `{"enable_thinking": false}`) merged in whenever a caller asks for `thinkingMode: 'disabled'` — which every subagent role does. Moby still never *invents* such a param, because a wrong guess is a 400: no declaration, no merge. This closes a 30s image digest that was burning reasoning tokens the router had explicitly asked to skip.
+- **`streamingToolCalls`** was already valid at runtime but absent from the JSON schema, so declaring it was an editor error. Now declarable. The shipped Kimi templates deliberately do **not** enable it until a real Moonshot turn confirms it streams tool deltas.
+
+Practical guidance unchanged: point subagent roles at a fast non-reasoning model. An entry that declares no off-knob keeps paying the reasoning tax on every sub-call.
+
+### Requests survive slow providers, and failures name the right one
+
+- **`moby.requestTimeoutMs`** (default 60000, floor 5000) replaces a hardcoded timeout that lost whole turns mid-loop on slow backends. Resolved **per request** rather than pinned at construction — `HttpClient`s are cached per endpoint, so a fixed value would freeze whatever the setting happened to be when that endpoint was first used.
+- **Abort and timeout now reach every request shape.** `httpClient` combines the caller's signal with the timeout via `AbortSignal.any` instead of choosing one, so a user abort keeps its `AbortError` identity while only the timeout maps to `ECONNABORTED`; `chat()` forwards `options.signal`, so Stop cancels a non-streaming probe; and `streamChat`'s inactivity watchdog now **rejects** on its zero-data branch. That branch previously did nothing and never re-armed — the actual mechanism behind "a hung stream never self-terminates". ([ADR 0008](docs/architecture/decisions/0008-request-scoped-stream-lifecycle-and-interrupt-teardown.md) follow-up)
+- **401 / 500 / ENOTFOUND name the active provider**, derived from the failing model's endpoint host rather than always saying DeepSeek. Custom models are pointed at *Set Custom Model API Key* instead of the DeepSeek key setting.
+
+### Token accounting counts what the API actually bills
+
+An investigation into "image turns over-count by ~2.4×" ended with the image hypothesis **falsified** — the image bytes never entered any counted payload — and two real defects in its place. The probe's `crossValidateTokens` counted the tools-definition JSON while the streaming site passed no `tools` at all, producing a disagreement equal to the entire tools share (~11 schemas ≈ 4K tokens). And the calibration sample's character count covered message content only, while `prompt_tokens` bills messages *and* tools, so every short tool-bearing turn inflated the ratio. Image turns correlated only because they are short turns where the tools share dominates.
+
+`countRequestChars` now mirrors `countRequestTokens`' traversal, and the streaming validate site passes its tools array. The `(with images)` request log was also relabelled "(attachments on this turn)" — it was attachment metadata, never wire content, and it sent an entire day's investigation chasing a leak that never existed.
+
+### Two defects found by the dev-host verification pass
+
+Both surfaced while exercising the image work against a fake OpenAI-compatible backend in a real VS Code instance, and neither was visible to any test tier.
+
+- **Custom models without native tool calling paid for every turn twice.** The legacy pipeline branch keyed on "not a reasoner", so any entry without `streamingToolCalls` entered `runToolLoop` — including entries declaring `toolCalling: 'none'`. The client only attaches tools for native tool callers, so those probes went out with no tools, could never return a tool call, and had their entire answer discarded when the streaming pass regenerated it. Two billed generations per turn, every turn. Now gated on native tool calling, which leaves V3 chat untouched and makes non-native entries behave like R1, which already skipped the loop. Like R1, they now sit outside [ADR 0011](docs/architecture/decisions/0011-verification-gated-turn-completion.md)'s native-tool-loop verification gate.
+- **A multi-file drop attached in encode-completion order.** Each file appended its chip when its own decode finished, so a small image overtook a large one — three dropped screenshots became chips ordered 1, 3, 2, and the digests reached the model in that same scrambled order with nothing signalling it. Both ingest paths are now sequential.
+
+### Testing
+
+The Playwright suite is now **tiered by cost**, because the config has no project filter and `playwright test` meant all of it: `test:e2e:harness` (~45 tests, no VS Code, no model calls) runs on every check, `test:e2e:vscode` when the extension host changed, and the full `test:e2e` (~7.5 minutes, real tokens) as a release gate. The workflow suite itself went from 102 failures to zero — the failures were test-infrastructure staleness rather than product bugs, and the invariants learned repairing it (never count rendered turns, never select a session by list position, tolerate either edit mechanism) are recorded in [CLAUDE.md](CLAUDE.md).
+
 ## [0.6.1] - 2026-07-04
 
 A bug-fix patch: plans now write to (and inject from) the right place, history restore matches the live render, the startup API-key prompt stops nagging keyed setups, and deleting a session updates the list instantly. No new features or config; no breaking changes.

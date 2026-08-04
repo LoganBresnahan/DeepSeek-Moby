@@ -4,7 +4,7 @@
 </p>
 
 <h1 align="center">DeepSeek Moby</h1>
-<h2 align="center">v0.6.1</h2>
+<h2 align="center">v0.7.0</h2>
 
 <p align="center">
   <sub><em>Core functionality is validated on the maintainer's primary development environment; coverage across the full matrix of operating systems, VS Code versions, shell environments, and model configurations is still expanding. Bug reports and reproduction steps are welcome via the <a href="https://github.com/LoganBresnahan/DeepSeek-Moby/issues">issue tracker</a>.</em></sub>
@@ -61,6 +61,22 @@ Control how code changes are applied to your files:
 - **Auto (A)** — Changes are applied immediately. A "Modified Files" dropdown shows what was changed
 
 All edits use a precise SEARCH/REPLACE format with strict multi-strategy matching (exact, fuzzy-whitespace, then a strict jsdiff patch). A SEARCH that can't be matched is refused — not force-applied to an approximate location — so the model re-reads and retries instead of corrupting the file. A fail-safe wrapper around auto-apply (checkpoint, atomic batch, post-apply validation against the project's own build, revert-on-regression) is specified in [docs/architecture/integration/edit-safety.md](docs/architecture/integration/edit-safety.md) ([ADR 0006](docs/architecture/decisions/0006-edit-safety-checkpoint-and-validation.md)).
+
+### Images (Vision via Digest Routing)
+
+Attach a screenshot, ask about it, and the model answers — even though DeepSeek's API is text-only.
+
+Moby gets there by routing, not by pretending. A **separate vision model that you configure** looks at the image and writes a text description; the main model reads only that text. The digest is labelled as second-hand, so the assistant knows it is working from another model's account of the image rather than from the image itself.
+
+- **Three ways in** — the paperclip picker, drag-and-drop onto the input box (from your OS file manager or the VS Code Explorer), or the phone drawing pad below. `.png`, `.jpg`, `.webp`, `.gif`, and `.bmp` are all accepted
+- **Downscaled in the browser, twice** — a ~1024px copy goes to the vision model and is never stored; a 512px archive is the only copy persisted, so a long transcript stays cheap to load. Nothing base64 ever lands in the event history
+- **Persisted and replayed** — the digest resolves before the turn is recorded, so reloading a session or forking it keeps the model's view of the image intact. Ask a follow-up a week later and it still knows what the screenshot said
+- **Thumbnails in the transcript** — attached images render inline in your own turn, live and on restore, fetched lazily so scrolling stays fast
+- **Never silently blind** — with no vision model configured, or one that can't accept images, the model is told so explicitly and names the setting to fix. It says it cannot see the image rather than guessing at it
+
+**Setup:** register a vision-capable model under [Custom Models](#custom-models) declaring `"acceptsImages": true` and `"subagentRoles": ["image-describe"]` — the **Kimi Vision (Moonshot)** template does both — then pick it under **Settings → Image Description (Vision)**. Any OpenAI-compatible vision endpoint works.
+
+Point the role at a fast non-reasoning model where you can. A reasoning model burns thinking tokens describing a picture; if your provider exposes an off switch, declare it as `disableThinkingParam` on the entry (e.g. `{"enable_thinking": false}`) and Moby will send it.
 
 ### Web Search (Tavily or SearXNG)
 
@@ -139,7 +155,8 @@ Add custom instructions that get prepended to every request:
 Start a local server for desktop or phone/tablet-based drawing input:
 
 - ASCII diagram mode for text-based sketches — send diagrams directly to the model as context
-- Freehand drawing pad with touch support (brush color, size, undo/redo) — *note: drawing pad output is image-based and not currently usable by DeepSeek models, which do not support image input*
+- Freehand drawing pad with touch support (brush color, size, undo/redo). A finished drawing lands in the composer as an ordinary image attachment, so it rides the same path as any screenshot — described by your vision model, thumbnailed in the transcript, and replayed on reload. Drawings are flattened onto white at send, so what you drew is what the model is told about
+- **Draw mode requires a vision model.** With none configured the pad is hidden and `/draw` redirects to the ASCII editor — the QR popup tells you which mode you're in, and a page left open from before a settings change refuses the upload with a reason instead of dead-ending. The ASCII editor is never gated
 - QR code for quick phone connection
 - WSL2 support with port forwarding instructions
 
@@ -287,6 +304,20 @@ Click the Moby icon in the sidebar activity bar, type a message, and press Enter
 |---------|---------|-------------|
 | `moby.editMode` | `manual` | How code changes apply: `manual`, `ask`, or `auto`. |
 | `moby.allowAllShellCommands` | `false` | Bypass command approval system. Disables the safety blocklist. |
+| `moby.editSafety.checkpoint` | `true` | Auto mode: snapshot each file before an auto-applied edit so a batch can be reverted. |
+| `moby.editSafety.validate` | `auto` | Auto mode: validate after an edit batch against your own toolchain. `auto` discovers the check command (dotnet / npm / make / cargo / go); `off` disables. |
+| `moby.editSafety.validateTimeoutMs` | `60000` | Hard timeout for the post-apply check. A timeout counts as inconclusive, not a regression. |
+| `moby.editSafety.maxRepairAttempts` | `3` | How many times one file may revert with the *same* build error before the turn halts. |
+| `moby.editSafety.onInconclusive` | `commit` | When validation can't run: `commit` applies with a note, `halt` stops the turn. |
+| `moby.editSafety.verifyOnStop` | `true` | Don't accept a model-declared "done" when the last build verdict was a regression or a written file reads back empty. |
+
+**Images & subagents**
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `moby.subagents` | `{}` | Per-role subagent routing, e.g. `{"image-describe": "my-vision-model"}`. Value is a registered model id or `"off"`. The model must declare the role in `subagentRoles`. |
+| `moby.subagents.webSearchDigest.maxResults` | `5` | Output cap for the web-search digest subagent (1–20). Also exposed as a slider in the web-search popup. |
+| `moby.requestTimeoutMs` | `60000` | Milliseconds before an API request is aborted. Raise for slow providers — reasoning models and vision backends routinely take 30s or more. Applies to every endpoint, custom models included. |
 
 **Web search**
 
@@ -397,7 +428,7 @@ For contributors, see the full architecture documentation in `docs/architecture/
 
 - **API keys** stored in VS Code's encrypted SecretStorage (OS keychain when available, file-based fallback otherwise)
 - **Conversations** stored locally in an AES-256 encrypted SQLite database
-- **No telemetry** — no data sent anywhere except the DeepSeek API (and Tavily if web search is enabled)
+- **No telemetry** — no data leaves your machine except to the model endpoints you configure: the DeepSeek API, Tavily or your SearXNG instance if web search is on, any custom model you register, and the vision provider you point `image-describe` at. Attached images go to that vision provider and nowhere else; they are never sent to the main model
 - **Shell commands** gated by an approval system with user-configurable rules
 - **Shadow DOM isolation** prevents other extensions from accessing chat content
 - **Works without a workspace** — the extension activates and is fully functional even when VS Code is opened without a folder
@@ -408,7 +439,8 @@ For contributors, see the full architecture documentation in `docs/architecture/
 
 Planned features for future releases:
 
-- **Expanded sub-agent routing** — Web-search digestion already offloads to a subagent model of your choice (`src/subagents/`); more roles (search/file digest) and concurrent calls for complex tasks are planned
+- **Expanded sub-agent routing** — Web-search digestion and [image description](#images-vision-via-digest-routing) already offload to a subagent model of your choice (`src/subagents/`); a file-digest role and broader concurrent fan-out are planned
+- **MCP client** — Spawn external MCP servers declared in settings and register their tools alongside the built-ins, using the same config shape as Claude Desktop
 - **Plugin system** — Extensible tool definitions for domain-specific workflows
 - **Per-turn lazy event load** — On-demand hydration of large session histories (deferred until real usage surfaces the need)
 
