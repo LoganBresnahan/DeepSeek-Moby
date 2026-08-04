@@ -90,6 +90,59 @@ describe('InputAreaShadowActor — drag and drop', () => {
     expect(types).toEqual(['file', 'image']);
   });
 
+  // ── Order (regression: chips followed encode-completion, not drop order) ──
+
+  it('keeps a multi-image drop in drop order even when a later image encodes first', async () => {
+    // First image is slow, second is instant — the shape that used to let a
+    // small screenshot overtake a large one and scramble the digests.
+    let call = 0;
+    vi.spyOn(asAny(), 'renderRenditions').mockImplementation(() => {
+      const delay = call++ === 0 ? 40 : 0;
+      return new Promise(resolve => setTimeout(() => resolve({
+        full: { dataUrl: 'data:image/webp;base64,AA', bytes: 100, width: 1024, height: 576 },
+        archive: { dataUrl: 'data:image/webp;base64,ARCH', bytes: 1000, width: 512, height: 288 }
+      }), delay));
+    });
+
+    asAny().handleDrop(makeDataTransfer({
+      files: [makeFile('big.png', 'image/png'), makeFile('small.png', 'image/png')]
+    }));
+    await vi.waitFor(() => expect(actor.getState().attachments).toHaveLength(2));
+
+    expect(actor.getState().attachments.map(a => a.name)).toEqual(['big.png', 'small.png']);
+  });
+
+  it('keeps a mixed drop in drop order', async () => {
+    vi.spyOn(asAny(), 'renderRenditions').mockImplementation(() =>
+      new Promise(resolve => setTimeout(() => resolve({
+        full: { dataUrl: 'data:image/webp;base64,AA', bytes: 100, width: 1024, height: 576 },
+        archive: { dataUrl: 'data:image/webp;base64,ARCH', bytes: 1000, width: 512, height: 288 }
+      }), 20)));
+
+    asAny().handleDrop(makeDataTransfer({
+      files: [makeFile('shot.png', 'image/png'), makeFile('notes.md', 'text/markdown')]
+    }));
+    await vi.waitFor(() => expect(actor.getState().attachments).toHaveLength(2));
+
+    expect(actor.getState().attachments.map(a => a.name)).toEqual(['shot.png', 'notes.md']);
+  });
+
+  it('keeps extension-read files in order when an image precedes text', async () => {
+    vi.spyOn(asAny(), 'renderRenditions').mockImplementation(() =>
+      new Promise(resolve => setTimeout(() => resolve({
+        full: { dataUrl: 'data:image/webp;base64,AA', bytes: 100, width: 1024, height: 576 },
+        archive: { dataUrl: 'data:image/webp;base64,ARCH', bytes: 1000, width: 512, height: 288 }
+      }), 20)));
+
+    actor.handleDroppedFileContents([
+      { name: 'shot.png', content: 'data:image/png;base64,AAA', isImage: true },
+      { name: 'a.ts', content: 'const x = 1;' }
+    ]);
+    await vi.waitFor(() => expect(actor.getState().attachments).toHaveLength(2));
+
+    expect(actor.getState().attachments.map(a => a.name)).toEqual(['shot.png', 'a.ts']);
+  });
+
   it('ignores an empty drop', () => {
     asAny().handleDrop(makeDataTransfer({}));
     expect(actor.getState().attachments).toHaveLength(0);
@@ -126,8 +179,9 @@ describe('InputAreaShadowActor — drag and drop', () => {
     expect(mockVscode.postMessage).not.toHaveBeenCalled();
   });
 
-  it('attaches text content returned by the extension', () => {
+  it('attaches text content returned by the extension', async () => {
     actor.handleDroppedFileContents([{ name: 'a.ts', content: 'const x = 1;' }]);
+    await vi.waitFor(() => expect(actor.getState().attachments).toHaveLength(1));
 
     const [attachment] = actor.getState().attachments;
     expect(attachment.type).toBe('file');

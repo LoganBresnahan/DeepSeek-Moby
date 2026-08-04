@@ -1401,6 +1401,40 @@ describe('RequestOrchestrator', () => {
       expect(mockClient.chat).not.toHaveBeenCalled();
     });
 
+    // Regression: a non-native model used to enter runToolLoop anyway. The
+    // client only attaches tools for `toolCalling: 'native'`, so the probe went
+    // out with no tools, could never return a tool call, and its whole answer
+    // was discarded when streamAndIterate regenerated it — every turn billed
+    // twice. Found in the 2026-08-04 dev-host verify pass.
+    it('should not run tool loop for a non-native custom model', async () => {
+      const registry = await import('../../../src/models/registry');
+      registry.registerCustomModels([{
+        id: 'test-textonly-model',
+        name: 'Test Text-Only Model',
+        toolCalling: 'none',
+        reasoningTokens: 'none',
+        editProtocol: ['search-replace'],
+        shellProtocol: 'none',
+        supportsTemperature: true,
+        maxOutputTokens: 4096,
+        maxTokensConfigKey: 'maxTokensTextOnly',
+        streaming: true,
+        apiEndpoint: 'http://test.local',
+        apiKey: 'test',
+        requestFormat: 'openai',
+      }]);
+      mockClient.getModel.mockReturnValue('test-textonly-model');
+
+      try {
+        await orchestrator.handleMessage('Hello', null, async () => '', undefined);
+
+        expect(mockClient.chat).not.toHaveBeenCalled();
+        expect(mockClient.streamChat).toHaveBeenCalled();
+      } finally {
+        registry.__resetCustomModelsForTests();
+      }
+    });
+
     // edit_file takes a structured `edits: [{search, replace}, ...]`
     // array. The orchestrator synthesizes the SEARCH/REPLACE block string
     // that downstream diff machinery expects, so the assertions check the

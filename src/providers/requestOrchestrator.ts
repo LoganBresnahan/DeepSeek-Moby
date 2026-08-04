@@ -1218,7 +1218,7 @@ export class RequestOrchestrator {
       //      tools inline (Phase 4.5). Replaces the runToolLoop + streamAndIterate
       //      split for V4-thinking, V4 non-thinking, and any custom model
       //      that opts in.
-      //   2. `!isReasonerModel` (chat model, flag off) — legacy path:
+      //   2. native tool calling, flag off (V3 chat) — legacy path:
       //      `runToolLoop` runs a non-streaming probe to collect tool messages,
       //      then `streamAndIterate` streams the final no-tools answer.
       //   3. R1 reasoner — `streamAndIterate` directly (no tool loop; R1's
@@ -1236,7 +1236,14 @@ export class RequestOrchestrator {
         // amendment is also dropped: there's no separate exploration phase.
       } else {
         let streamingSystemPrompt = systemPrompt;
-        if (!isReasonerModel) {
+        // Native tool calling only. The client attaches the tools array solely
+        // for `toolCalling: 'native'`, so a non-native model's probe goes out
+        // with no tools, cannot return a tool call, and its full answer is
+        // thrown away when streamAndIterate regenerates it — two billed
+        // generations per turn. R1 already skipped this via isReasonerModel;
+        // custom non-native entries now match it (and, like R1, sit outside
+        // ADR 0011's native-tool-loop verification gate).
+        if (!isReasonerModel && caps.toolCalling === 'native') {
           const { toolMessages, limitReached, budgetExceeded, allToolDetails: toolDetails } = await this.runToolLoop(
             contextMessages, systemPrompt, signal,
             contextResult.tokenCount, contextResult.budget

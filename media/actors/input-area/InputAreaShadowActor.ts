@@ -208,17 +208,37 @@ export class InputAreaShadowActor extends ShadowActor {
    * The one place a File becomes an attachment. Both entry points — the
    * picker and drag-drop — funnel through here so an image can never take the
    * text branch (which would store it as mojibake in a code fence).
+   *
+   * Sequential, not concurrent: each file appends its own chip when its decode
+   * finishes, so running them in parallel lets a small image overtake a large
+   * one. That reorders the chips *and* the digests the vision subagent
+   * produces, so a dropped sequence of screenshots reaches the model
+   * scrambled. The encodes are local and fast; the concurrency worth having is
+   * in digest routing, which is network-bound and happens later.
    */
   private ingestFiles(files: File[]): void {
-    files.forEach(file => {
+    void files.reduce(async (previous, file) => {
+      await previous;
       if (this.isImage(file)) {
-        void this.attachImage(file);
+        await this.attachImage(file);
         return;
       }
+      await this.attachTextFile(file);
+    }, Promise.resolve());
+  }
+
+  private attachTextFile(file: File): Promise<void> {
+    return new Promise<void>(resolve => {
       const reader = new FileReader();
       reader.onload = (event) => {
         const content = event.target?.result as string;
         this.addAttachment({ content, name: file.name, size: file.size, type: 'file' });
+        resolve();
+      };
+      // Resolve on failure too — one unreadable file must not stall the batch.
+      reader.onerror = () => {
+        this.reportAttachmentError(`Could not read "${file.name}".`);
+        resolve();
       };
       reader.readAsText(file);
     });
@@ -318,13 +338,16 @@ export class InputAreaShadowActor extends ShadowActor {
    * (they still need the canvas downscale); text comes back as text.
    */
   handleDroppedFileContents(files: Array<{ name: string; content: string; isImage?: boolean; mimeType?: string }>): void {
-    for (const file of files) {
+    // Sequential for the same reason as {@link ingestFiles} — order must match
+    // what the user dropped, not which image finished encoding first.
+    void files.reduce(async (previous, file) => {
+      await previous;
       if (file.isImage) {
-        void this.attachImageFromDataUrl(file.content, file.name);
-      } else {
-        this.addAttachment({ content: file.content, name: file.name, size: file.content.length, type: 'file' });
+        await this.attachImageFromDataUrl(file.content, file.name);
+        return;
       }
-    }
+      this.addAttachment({ content: file.content, name: file.name, size: file.content.length, type: 'file' });
+    }, Promise.resolve());
   }
 
   private isImage(file: File): boolean {
