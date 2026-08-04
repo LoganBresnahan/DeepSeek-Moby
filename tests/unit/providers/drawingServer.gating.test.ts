@@ -65,6 +65,10 @@ describe('DrawingServer image-mode gating', () => {
     let res = await request(port, '/draw');
     expect(res.status).toBe(200);
     expect(res.body).toContain('Moby Drawing Pad');
+    // The canvas is transparent where undrawn; the page must flatten onto
+    // white at send so the export matches what the artist saw.
+    expect(res.body).toContain('flattenToWhite');
+    expect(res.body).toContain("fillStyle = '#ffffff'");
 
     imageMode = false;
     res = await request(port, '/draw');

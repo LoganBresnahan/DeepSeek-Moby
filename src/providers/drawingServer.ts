@@ -184,13 +184,29 @@ const DRAWING_HTML = `<!DOCTYPE html>
       ctx.clearRect(0, 0, c.width / devicePixelRatio, c.height / devicePixelRatio);
     }
 
+    // The canvas is transparent where undrawn — the white seen while drawing
+    // is the page CSS behind it, not pixels. Exported raw, the PNG composites
+    // onto the chat's dark background (and the vision model gets alpha it may
+    // composite unpredictably). Flatten onto white so what was drawn is what
+    // everyone sees.
+    function flattenToWhite() {
+      const out = document.createElement('canvas');
+      out.width = c.width;
+      out.height = c.height;
+      const octx = out.getContext('2d');
+      octx.fillStyle = '#ffffff';
+      octx.fillRect(0, 0, out.width, out.height);
+      octx.drawImage(c, 0, 0);
+      return out.toDataURL('image/png');
+    }
+
     function send() {
       sendBtn.disabled = true;
       sendBtn.innerHTML = '&#8943;';
       fetch('/upload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image: c.toDataURL('image/png') })
+        body: JSON.stringify({ image: flattenToWhite() })
       })
       .then(r => r.json().then(j => ({ ok: r.ok, j })))
       .then(({ ok, j }) => {
