@@ -27,6 +27,7 @@ import type {
   Suggestion,
   SuggestionAction,
   SuggestionProvider,
+  TriggerChar,
   TriggerSpan
 } from './types';
 import { createLogger } from '../../logging';
@@ -44,6 +45,26 @@ export class ComposerAutocompleteActor extends PopupShadowActor {
   /** Set only while hiding for want of results, so a late async reply can still open. */
   private _retainSpanOnClose = false;
 
+  /**
+   * The Escape-dismissed trigger: same trigger char at the same offset stays
+   * dismissed while the user keeps typing it. Forgotten when a different
+   * trigger appears, on accept, or — via the `input.value` subscription —
+   * whenever the composer text no longer carries that trigger char at that
+   * offset (draft sent, cleared, or replaced). Without the text check, one
+   * Escape at offset 0 would suppress every draft-initial trigger forever.
+   */
+  private _dismissed: { start: number; trigger: TriggerChar } | null = null;
+
+  /**
+   * Keyboard arbitration (ADR 0015 decision 4): a document-level CAPTURE
+   * listener, attached only while the overlay is visible. Capture at the
+   * document is the first invocation on any composed event path, so it
+   * deterministically precedes InputAreaShadowActor's bubble-phase
+   * Enter-to-send delegate — and with the overlay closed the listener is not
+   * attached at all, leaving the composer byte-for-byte untouched.
+   */
+  private readonly _boundArbitrateKeydown = this.arbitrateKeydown.bind(this);
+
   constructor(manager: EventStateManager, element: HTMLElement, vscode: VSCodeAPI, host: ComposerHost) {
     const config: PopupConfig = {
       manager,
@@ -51,7 +72,12 @@ export class ComposerAutocompleteActor extends PopupShadowActor {
       vscode,
       position: 'top-left',
       publications: {},
-      subscriptions: {},
+      subscriptions: {
+        // The composer's programmatic edits (send-clear, draft restore) fire
+        // no input events; its published value is the one signal they all
+        // share. Used to drop state the real text no longer supports.
+        'input.value': (value: unknown) => this.handleComposerValueChange(String(value ?? ''))
+      },
       additionalStyles: composerAutocompleteShadowStyles,
       openRequestKey: 'composer.autocomplete.open',
       visibleStateKey: 'composer.autocomplete.visible'
@@ -87,6 +113,13 @@ export class ComposerAutocompleteActor extends PopupShadowActor {
    * later via {@link updateSuggestions}.
    */
   openFor(span: TriggerSpan): boolean {
+    if (this._dismissed) {
+      if (span.start === this._dismissed.start && span.trigger === this._dismissed.trigger) {
+        return false; // the dismissed trigger, still being typed
+      }
+      this._dismissed = null; // a different trigger — forget the dismissal
+    }
+
     const provider = this._registry.get(span.trigger);
     if (!provider || span.query.length < provider.minQueryLength) {
       this.cancel();
@@ -106,16 +139,38 @@ export class ComposerAutocompleteActor extends PopupShadowActor {
 
   /**
    * Deliver async results. Ignored when the query has moved on, which is the
-   * stale-reply guard for providers whose transport carries no query token.
+   * stale-reply guard for providers whose transport carries no query token —
+   * and re-checked against the live text, so a reply cannot resurrect a span
+   * whose characters are no longer in the composer.
    */
   updateSuggestions(query: string, suggestions: Suggestion[]): boolean {
-    if (!this._span || this._span.query !== query) return false;
+    const span = this._span;
+    if (!span || span.query !== query) return false;
+    if (this._host.getText().slice(span.start, span.end) !== span.trigger + span.query) {
+      this.cancel();
+      return false;
+    }
     this.showSuggestions(suggestions);
     return true;
   }
 
+  /**
+   * Escape's version of cancel: additionally remembers the span start so
+   * continuing to type the SAME trigger does not reopen the overlay on every
+   * keystroke. A trigger at a new offset (or an accept) forgets the dismissal.
+   */
+  dismiss(): void {
+    const span = this._span;
+    this.cancel();
+    this._dismissed = span ? { start: span.start, trigger: span.trigger } : null;
+  }
+
   /** Drop the active trigger entirely — the overlay will not reopen on its own. */
   cancel(): void {
+    // Already idle — keep this a true no-op so detection can call it freely
+    // on every keystroke without re-rendering a hidden popup.
+    if (!this._span && !this.isVisible() && this._suggestions.length === 0) return;
+
     this._span = null;
     if (this.isVisible()) {
       this.close();
@@ -152,6 +207,7 @@ export class ComposerAutocompleteActor extends PopupShadowActor {
     this._host.replaceRange(span.start, span.end, action.kind === 'insertText' ? action.text : '');
 
     log.debug(`accept: ${action.kind} from "${span.trigger}${span.query}"`);
+    this._dismissed = null;
 
     // Close before the side effect so a command that opens its own UI does not
     // fight the overlay for focus.
@@ -164,6 +220,22 @@ export class ComposerAutocompleteActor extends PopupShadowActor {
   // ============================================
   // Internals
   // ============================================
+
+  /**
+   * Re-validate against the composer's published value. Programmatic edits
+   * (send-clear, draft restore) fire no input events, so this subscription is
+   * how a span or a dismissal whose text is gone gets dropped.
+   */
+  private handleComposerValueChange(text: string): void {
+    if (this._dismissed && text[this._dismissed.start] !== this._dismissed.trigger) {
+      this._dismissed = null;
+    }
+
+    const span = this._span;
+    if (span && text.slice(span.start, span.end) !== span.trigger + span.query) {
+      this.cancel();
+    }
+  }
 
   private dispatchAction(action: SuggestionAction): void {
     switch (action.kind) {
@@ -203,19 +275,72 @@ export class ComposerAutocompleteActor extends PopupShadowActor {
   }
 
   // ============================================
+  // Keyboard arbitration
+  // ============================================
+
+  private arbitrateKeydown(e: KeyboardEvent): void {
+    if (!this.isVisible()) return;
+    // Never fight an IME — composition keydowns pass through untouched.
+    if (e.isComposing) return;
+
+    switch (e.key) {
+      case 'ArrowDown':
+        if (this.moveSelection(1)) this.consumeKey(e);
+        break;
+      case 'ArrowUp':
+        if (this.moveSelection(-1)) this.consumeKey(e);
+        break;
+      case 'Enter':
+        // Modified Enter (Shift for newline, etc.) belongs to the composer.
+        if (e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return;
+        if (this.acceptSelected()) this.consumeKey(e);
+        break;
+      case 'Tab':
+        if (this.acceptSelected()) this.consumeKey(e);
+        break;
+      case 'Escape':
+        this.dismiss();
+        this.consumeKey(e);
+        break;
+      // Every other key falls through to the composer untouched.
+    }
+  }
+
+  /**
+   * Capture-phase stopPropagation at the document suppresses every later
+   * node on the composed path — including the input area's bubble-phase
+   * Enter-to-send delegate and the popup base class's own document-bubble
+   * Escape listener.
+   */
+  private consumeKey(e: KeyboardEvent): void {
+    e.preventDefault();
+    e.stopPropagation();
+  }
+
+  // ============================================
   // PopupShadowActor overrides
   // ============================================
 
   /** Never show an empty box — including for a stray `composer.autocomplete.open` publish. */
   open(): void {
     if (this._suggestions.length === 0) return;
+    const wasVisible = this.isVisible();
     super.open();
+    if (!wasVisible && this.isVisible()) {
+      document.addEventListener('keydown', this._boundArbitrateKeydown, true);
+    }
   }
 
   protected onClose(): void {
+    document.removeEventListener('keydown', this._boundArbitrateKeydown, true);
     this._suggestions = [];
     this._selectedIndex = 0;
     if (!this._retainSpanOnClose) this._span = null;
+  }
+
+  destroy(): void {
+    document.removeEventListener('keydown', this._boundArbitrateKeydown, true);
+    super.destroy();
   }
 
   protected renderPopupContent(): string {
@@ -234,6 +359,10 @@ export class ComposerAutocompleteActor extends PopupShadowActor {
   }
 
   protected setupPopupEvents(): void {
+    // Keep composer focus while clicking a suggestion — a mousedown that
+    // blurred the textarea would race the accept's span replacement.
+    this.delegate('mousedown', '[data-popup-container]', (e) => e.preventDefault());
+
     this.delegate('click', '[data-suggestion-index]', (_e, el) => {
       const index = parseInt(el.getAttribute('data-suggestion-index') || '', 10);
       if (Number.isNaN(index)) return;

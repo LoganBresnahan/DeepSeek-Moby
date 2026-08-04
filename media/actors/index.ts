@@ -55,7 +55,13 @@ export { CommandsShadowActor } from './commands';
 export type { CommandItem, CommandHandler } from './commands';
 
 // Composer Autocomplete (typed invocation overlay — ADR 0015)
-export { ComposerAutocompleteActor, ProviderRegistry, createComposerHost } from './composer-autocomplete';
+export {
+  ComposerAutocompleteActor,
+  ProviderRegistry,
+  TriggerDetectionController,
+  createComposerHost,
+  detectTriggerSpan
+} from './composer-autocomplete';
 export type {
   ComposerHost,
   ComposerTextSurface,

@@ -282,6 +282,22 @@ describe('ComposerAutocompleteActor', () => {
       expect(actor.isVisible()).toBe(false);
     });
 
+    it('rejects a reply whose span text is no longer in the composer', () => {
+      build('@sr');
+      actor.registerProvider(pendingProvider('@'));
+      actor.openFor(span('@', 'sr'));
+
+      // Draft cleared (e.g. sent) between request and reply.
+      fake.state.text = '';
+      fake.state.caret = 0;
+
+      expect(actor.updateSuggestions('sr', [
+        suggestion('src/index.ts', { kind: 'attachFile', path: 'src/index.ts' })
+      ])).toBe(false);
+      expect(actor.isVisible()).toBe(false);
+      expect(actor.getActiveSpan()).toBeNull();
+    });
+
     it('hides but keeps the trigger live when results go empty', () => {
       build('@sr');
       actor.registerProvider(pendingProvider('@'));

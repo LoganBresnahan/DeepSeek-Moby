@@ -18,6 +18,9 @@ import {
   VirtualMessageGatewayActor,
   VirtualListActor,
   InputAreaShadowActor,
+  ComposerAutocompleteActor,
+  TriggerDetectionController,
+  createComposerHost,
   StatusPanelShadowActor,
   ToolbarShadowActor,
   HistoryShadowActor,
@@ -189,6 +192,26 @@ function initializeActorSystem(): void {
 
   // InputAreaShadowActor - owns its DOM, renders into inputAreaContainer
   const inputArea = new InputAreaShadowActor(manager, inputAreaContainer, vscode);
+
+  // ComposerAutocompleteActor — typed-invocation overlay (ADR 0015).
+  // No providers are registered yet (they land with the provider slices), so
+  // detection finds no active triggers and the overlay can never open. Wired
+  // now so the closed-overlay contract — composer behaviour byte-for-byte
+  // unchanged — is what actually ships from phase 2 onward.
+  const composerAutocompleteHost = document.createElement('div');
+  composerAutocompleteHost.id = 'composerAutocompleteHost';
+  composerAutocompleteHost.style.cssText = 'position: fixed; top: 0; left: 0; width: 0; height: 0;';
+  document.body.appendChild(composerAutocompleteHost);
+  const composerHost = createComposerHost(inputArea, (path) => {
+    log.warn(`attachFile("${path}") requested but no files provider is registered yet`);
+  });
+  const composerAutocomplete = new ComposerAutocompleteActor(
+    manager, composerAutocompleteHost, vscode, composerHost
+  );
+  const triggerDetection = new TriggerDetectionController(
+    composerAutocomplete, composerHost, inputAreaContainer, composerAutocompleteHost
+  );
+  triggerDetection.attach();
 
   // StatusPanelShadowActor - owns its DOM, renders into statusPanelContainer
   const statusPanel = new StatusPanelShadowActor(manager, statusPanelContainer, mobyIconUrl, vscode);
