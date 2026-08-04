@@ -1688,7 +1688,12 @@ export class VirtualMessageGatewayActor extends EventStateActor {
       apiKeyConfigured: msg.apiKeyConfigured,
       tavilyConfigured: providerStatus.tavily ?? webSearch?.configured ?? false,
       searxngConfigured: providerStatus.searxng ?? false,
-      webSearchProvider: webSearch?.provider
+      webSearchProvider: webSearch?.provider,
+      // Dropping this here was the bug: the extension sends it on every
+      // settings push, the picker handles it — but this explicit republish
+      // list silently ate it, so the image-describe picker showed "Off"
+      // after every webview boot even with the setting persisted.
+      imageDescribeModelId: msg.imageDescribeModelId
     });
   }
 

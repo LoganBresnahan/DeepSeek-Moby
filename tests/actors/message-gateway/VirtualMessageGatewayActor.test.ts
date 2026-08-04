@@ -524,6 +524,21 @@ describe('VirtualMessageGatewayActor', () => {
 
       expect(mockActors.toolbar.setWebSearchMode).toHaveBeenCalledWith('manual');
     });
+
+    it('relays imageDescribeModelId into settings.values (picker survives a reload)', () => {
+      // The republish uses an explicit field list; this field being dropped
+      // there is exactly why the image-describe picker showed "Off" after
+      // every webview boot. The picker's own tests publish settings.values
+      // directly, so only a gateway-level test can catch the relay gap.
+      const publishSpy = vi.spyOn(manager, 'publishDirect');
+
+      dispatchMessage({ type: 'settings', imageDescribeModelId: 'kimi-vision' });
+
+      expect(publishSpy).toHaveBeenCalledWith(
+        'settings.values',
+        expect.objectContaining({ imageDescribeModelId: 'kimi-vision' })
+      );
+    });
   });
 
   describe('generationStopped', () => {
