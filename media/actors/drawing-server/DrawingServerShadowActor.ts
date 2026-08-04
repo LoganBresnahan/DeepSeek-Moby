@@ -30,6 +30,9 @@ export interface DrawingServerState {
   qrMatrix?: boolean[][];
   isWSL?: boolean;
   portForwardCmd?: string;
+  /** Whether the phone pages offer freeform draw mode (/draw) — true only
+   *  when an image-describe subagent is configured and capable. */
+  imageMode?: boolean;
 }
 
 // ============================================
@@ -104,6 +107,12 @@ export class DrawingServerShadowActor extends PopupShadowActor {
         Server running${state.isWSL ? ' (WSL2)' : ''}
       </div>
     `;
+
+    // Freeform draw-mode availability — tell the person starting the server
+    // here, instead of letting them discover it on the phone.
+    html += state.imageMode
+      ? `<div class="ds-description">ASCII editor + freeform draw. Drawings attach to the chat as images.</div>`
+      : `<div class="ds-description">ASCII editor only. To enable freeform drawing, pick a vision model in Settings &rarr; Image Description.</div>`;
 
     // QR code
     if (state.qrMatrix && state.qrMatrix.length > 0) {

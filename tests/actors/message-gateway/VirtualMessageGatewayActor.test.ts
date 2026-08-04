@@ -106,7 +106,7 @@ function createMockVirtualListActor() {
 }
 
 function createMockInputAreaActor() {
-  return { appendText: vi.fn(), destroy: vi.fn() };
+  return { appendText: vi.fn(), handleDroppedFileContents: vi.fn(), destroy: vi.fn() };
 }
 
 function createMockToolbarActor() {
@@ -892,32 +892,30 @@ describe('VirtualMessageGatewayActor', () => {
   // ============================================
 
   describe('drawing messages', () => {
-    it('handles drawingReceived by creating a user turn with drawing segment', () => {
+    it('drawingReceived is retired — phone drawings ride droppedFileContents into the composer', () => {
+      // The old handler minted a transcript-only `turn-drawing-*` the model
+      // never saw. The extension now sends droppedFileContents instead, so a
+      // stray legacy message must do nothing rather than resurrect the
+      // second image pipeline.
       dispatchMessage({
         type: 'drawingReceived',
         imageDataUrl: 'data:image/png;base64,abc123',
         timestamp: 1700000000000
       });
 
-      expect(mockActors.virtualList.addTurn).toHaveBeenCalledWith(
-        expect.stringContaining('turn-drawing-'),
-        'user',
-        expect.objectContaining({ timestamp: 1700000000000 })
-      );
-      expect((mockActors.virtualList as any).addDrawingSegment).toHaveBeenCalledWith(
-        expect.stringContaining('turn-drawing-'),
-        'data:image/png;base64,abc123',
-        1700000000000
-      );
+      expect(mockActors.virtualList.addTurn).not.toHaveBeenCalled();
+      expect((mockActors.virtualList as any).addDrawingSegment).not.toHaveBeenCalled();
     });
 
-    it('ignores drawingReceived with no imageDataUrl', () => {
+    it('routes a phone drawing (droppedFileContents, isImage) to the composer attach path', () => {
       dispatchMessage({
-        type: 'drawingReceived',
-        timestamp: 1700000000000
+        type: 'droppedFileContents',
+        files: [{ name: 'drawing-2026.png', content: 'data:image/png;base64,abc123', isImage: true, mimeType: 'image/png' }]
       });
 
-      expect((mockActors.virtualList as any).addDrawingSegment).not.toHaveBeenCalled();
+      expect(mockActors.inputArea.handleDroppedFileContents).toHaveBeenCalledWith(
+        [{ name: 'drawing-2026.png', content: 'data:image/png;base64,abc123', isImage: true, mimeType: 'image/png' }]
+      );
     });
 
     it('stages asciiDrawingReceived in the composer instead of auto-sending it', () => {

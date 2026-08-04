@@ -846,12 +846,16 @@ export class VirtualMessageGatewayActor extends EventStateActor {
           qrMatrix: msg.qrMatrix,
           isWSL: msg.isWSL,
           portForwardCmd: msg.portForwardCmd,
+          // Explicit republish list — same trap that ate imageDescribeModelId
+          // in settings.values; forward new fields deliberately.
+          imageMode: msg.imageMode,
         });
         break;
 
-      case 'drawingReceived':
-        this.handleDrawingReceived(msg);
-        break;
+      // 'drawingReceived' was retired 2026-08-04: phone drawings now arrive
+      // as droppedFileContents (composer attach), so they ride the one image
+      // pipeline — digest, persistence, transcript thumbnail — instead of a
+      // transcript-only drawing turn the model never saw.
 
       case 'asciiDrawingReceived':
         this.handleAsciiDrawingReceived(msg);
@@ -1379,21 +1383,6 @@ export class VirtualMessageGatewayActor extends EventStateActor {
   // ============================================
   // Drawing Handlers
   // ============================================
-
-  private handleDrawingReceived(msg: { type: string; [key: string]: unknown }): void {
-    const { virtualList } = this._actors;
-    const imageDataUrl = msg.imageDataUrl as string;
-    const timestamp = (msg.timestamp as number) || Date.now();
-
-    if (!imageDataUrl) return;
-
-    // Create a user turn for the drawing
-    const turnId = `turn-drawing-${Date.now()}`;
-    virtualList.addTurn(turnId, 'user', { timestamp });
-    virtualList.addDrawingSegment(turnId, imageDataUrl, timestamp);
-
-    log.info(`Drawing received, added to turn ${turnId}`);
-  }
 
   private handleAsciiDrawingReceived(msg: { type: string; [key: string]: unknown }): void {
     const { inputArea } = this._actors;

@@ -707,6 +707,24 @@ Two `image-describe` routes on `kimi-k3` both returned `validationResult: 'ok'` 
 
 ---
 
+## M41. Phone drawing → composer attach + availability gating (P1)
+
+**Why this matters:** the freeform `/draw` page is back after being parked pre-vision, and drawings now enter the same pipeline as picked/dropped images. Unit tests drive the real HTTP server and the gateway routing, but nothing automated crosses a real phone browser, the QR flow, or the canvas touch surface — and the whole feature is gated on live config, which only a dev host exercises end to end.
+
+**Setup:** vision subagent configured (e.g. your kimi entry); *Moby: Start Drawing Server*; phone on the same LAN (or WSL2 port-forward per the popup).
+
+**Steps:**
+1. QR popup shows **"ASCII editor + freeform draw"** while the subagent is set. Set the picker to Off, stop/start the server popup → hint flips to **"ASCII editor only…"**.
+2. With the subagent ON: phone loads the ASCII editor; the pencil (Draw Mode) button is present → tap → canvas page. Draw something, Send → **a chip appears in the composer** (thumbnail, `drawing-<timestamp>.png`), nothing auto-sends.
+3. Send the message → digest routes ("Analyzing image…"), model describes the drawing. Reload the session → the turn shows the drawing's thumbnail (phase-5 path).
+4. With the subagent OFF: reload the phone page → pencil button gone; `/draw` typed directly redirects to the ASCII editor.
+5. **Stale-page race:** open `/draw` with the subagent ON, then turn it OFF in VS Code, then hit Send on the phone → the button shows "!" and an alert names the fix ("No vision model is configured…"). Nothing lands in the composer.
+6. ASCII flow regression: ASCII editor Send still stages the fenced diagram in the composer regardless of the subagent setting.
+
+**Pass criteria:** drawings become ordinary image attachments end to end; availability is visible at the QR popup, the page buttons, and the upload gate; the ASCII editor is never gated.
+
+---
+
 ## Removing items from this backlog
 
 When a scenario has been verified in a dev host:

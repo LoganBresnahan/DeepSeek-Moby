@@ -23,6 +23,7 @@ import { TokenService } from '../services/tokenService';
 import { qrcodegen } from '../vendor/qrcodegen';
 import { getCapabilities, getAllRegisteredModels, supportsManualMode, MODEL_REGISTRY } from '../models/registry';
 import { SubagentRouter } from '../subagents/router';
+import { isImageDescribeAvailable } from '../subagents/availability';
 
 export class ChatProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'deepseek-chat-view';
@@ -213,14 +214,22 @@ export class ChatProvider implements vscode.WebviewViewProvider {
     // DrawingServer → webview
     if (this.drawingServer) {
       this.drawingServer.onImageReceived(event => {
+        // A phone drawing enters the SAME pipeline as a picked or dropped
+        // image: composer attach → renditions → digest routing on send →
+        // blob persistence → transcript thumbnail. The old path minted a
+        // transcript-only drawing turn the model never saw (and whose
+        // restore case was a projector no-op) — one image pipeline,
+        // whatever the origin. Reuses the droppedFileContents seam.
+        const stamp = new Date(event.timestamp).toISOString().replace(/[:.]/g, '-');
         this._view?.webview.postMessage({
-          type: 'drawingReceived',
-          imageDataUrl: event.imageDataUrl,
-          timestamp: event.timestamp
+          type: 'droppedFileContents',
+          files: [{
+            name: `drawing-${stamp}.png`,
+            content: event.imageDataUrl,
+            isImage: true,
+            mimeType: 'image/png'
+          }]
         });
-        // ADR 0003 Phase 2.5 #7: also record into the structural event stream
-        // so hydration can replay the drawing in turn order.
-        this.requestOrchestrator.recordDrawing(event.imageDataUrl);
       });
       this.drawingServer.onAsciiReceived(event => {
         this._view?.webview.postMessage({
@@ -1821,6 +1830,9 @@ export class ChatProvider implements vscode.WebviewViewProvider {
       qrMatrix,
       isWSL,
       portForwardCmd,
+      // Whether /draw is being offered — lets the QR popup tell the person
+      // starting the server, instead of them discovering it on the phone.
+      imageMode: isImageDescribeAvailable(),
     });
   }
 

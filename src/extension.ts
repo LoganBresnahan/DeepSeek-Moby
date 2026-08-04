@@ -14,6 +14,7 @@ import { LspAvailability } from './services/lspAvailability';
 import { DrawingServer } from './providers/drawingServer';
 import { registerCustomModels } from './models/registry';
 import { SubagentRouter } from './subagents/router';
+import { isImageDescribeAvailable } from './subagents/availability';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -136,8 +137,11 @@ export async function activate(context: vscode.ExtensionContext) {
   // sole entry; the registry resolves `active()` to it unconditionally.
   webSearchRegistry = new WebSearchProviderRegistry(context);
 
-  // Initialize drawing server (starts on-demand via command)
-  drawingServer = new DrawingServer();
+  // Initialize drawing server (starts on-demand via command). Freeform draw
+  // mode is gated on a live image-describe subagent — without one a drawing
+  // could never reach the model, so the phone pages only offer /draw when a
+  // send would actually digest.
+  drawingServer = new DrawingServer(undefined, { isImageModeAvailable: isImageDescribeAvailable });
   drawingServer.onImageReceived((event) => {
     const sizeKB = Math.round(event.imageDataUrl.length / 1024);
     vscode.window.showInformationMessage(`Drawing received (${sizeKB} KB)`);

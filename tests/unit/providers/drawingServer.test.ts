@@ -107,9 +107,15 @@ function createMockRequest(method: string, url: string, body?: string) {
 
 describe('DrawingServer', () => {
   let server: DrawingServer;
+  // Freeform draw mode is predicate-gated (2026-08-04). Default FALSE here so
+  // the legacy hidden-mode expectations (/draw redirect, no pencil button)
+  // keep holding; image-upload tests flip it true. Live-gating behavior has
+  // its own suite: drawingServer.gating.test.ts (real http server).
+  let imageModeAvailable = false;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    imageModeAvailable = false;
     capturedRequestHandler = null;
     mockServerInstance.listening = true;
     mockServerInstance.listen.mockImplementation((port: number, cb?: () => void) => {
@@ -127,7 +133,7 @@ describe('DrawingServer', () => {
     vi.spyOn(DrawingServer, 'isWSL').mockReturnValue(false);
     vi.spyOn(DrawingServer, 'getWSLHostIP').mockReturnValue(null);
     vi.spyOn(DrawingServer, 'getWindowsLanIP').mockReturnValue(null);
-    server = new DrawingServer(9999);
+    server = new DrawingServer(9999, { isImageModeAvailable: () => imageModeAvailable });
   });
 
   afterEach(() => {
@@ -575,7 +581,7 @@ describe('DrawingServer', () => {
         expect(res.writeHead).toHaveBeenCalledWith(200, {
           'Content-Type': 'application/json',
         });
-        expect(res.end).toHaveBeenCalledWith(JSON.stringify({ status: 'ok' }));
+        expect(res.end).toHaveBeenCalledWith(JSON.stringify({ status: 'ok', imageMode: false }));
       });
     });
 
@@ -595,6 +601,7 @@ describe('DrawingServer', () => {
 
     describe('POST /upload', () => {
       it('should accept a valid image upload and fire event', async () => {
+        imageModeAvailable = true;
         const events: DrawingReceivedEvent[] = [];
         server.onImageReceived(e => events.push(e));
 
@@ -618,6 +625,7 @@ describe('DrawingServer', () => {
       });
 
       it('should log and trace image receipt', async () => {
+        imageModeAvailable = true;
         const body = JSON.stringify({ image: 'data:image/png;base64,abc123' });
         const req = createMockRequest('POST', '/upload', body);
         const res = createMockResponse();
@@ -805,6 +813,7 @@ describe('DrawingServer', () => {
 
   describe('event subscriptions', () => {
     it('should allow subscribing and unsubscribing from onImageReceived', async () => {
+        imageModeAvailable = true;
       await server.start();
 
       const events: DrawingReceivedEvent[] = [];
@@ -829,6 +838,7 @@ describe('DrawingServer', () => {
     });
 
     it('should allow multiple subscribers', async () => {
+        imageModeAvailable = true;
       await server.start();
 
       const events1: DrawingReceivedEvent[] = [];

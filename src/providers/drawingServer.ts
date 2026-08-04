@@ -41,14 +41,12 @@ const MAX_BODY_SIZE = 5 * 1024 * 1024;
 const DEFAULT_PORT = 0;
 
 /**
- * Image/drawing mode is hidden until multimodal image support lands. The phone
- * can draw a picture and it renders in chat, but it is never sent to the model
- * — a dead end. While this is `false`, the "Draw Mode" button is omitted from
- * the ASCII editor and the `/draw` route redirects there instead of serving the
- * drawing page. `DRAWING_HTML` / `serveDrawingPage` are kept intact; flip this
- * to `true` (and wire image send) to bring it back.
+ * Marker substituted at serve time (NOT at module load — the availability of
+ * an image-describe subagent is live config, so the Draw Mode button must
+ * reflect it per page load, not per extension start).
  */
-const IMAGE_MODE_ENABLED = false;
+const DRAW_MODE_BUTTON_MARKER = '<!--DRAW_MODE_BUTTON-->';
+const DRAW_MODE_BUTTON_HTML = `<button onclick="location.href='/draw'" title="Draw Mode">&#9998;</button>`;
 
 /**
  * HTML page served to the phone browser.
@@ -194,8 +192,10 @@ const DRAWING_HTML = `<!DOCTYPE html>
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ image: c.toDataURL('image/png') })
       })
-      .then(r => r.json())
-      .then(() => {
+      .then(r => r.json().then(j => ({ ok: r.ok, j })))
+      .then(({ ok, j }) => {
+        // An error body parses as JSON too — r.ok is the actual verdict.
+        if (!ok) throw new Error(j && j.error ? j.error : 'Upload failed');
         sendBtn.innerHTML = '&#10003;';
         sendBtn.classList.add('sent');
         setTimeout(() => {
@@ -204,8 +204,9 @@ const DRAWING_HTML = `<!DOCTYPE html>
           sendBtn.disabled = false;
         }, 1500);
       })
-      .catch(() => {
+      .catch((err) => {
         sendBtn.innerHTML = '!';
+        if (err && err.message && err.message !== 'Upload failed') alert(err.message);
         setTimeout(() => {
           sendBtn.innerHTML = '&#9654;';
           sendBtn.disabled = false;
@@ -270,7 +271,7 @@ const ASCII_HTML = `<!DOCTYPE html>
     <button onclick="undo()" title="Undo">&#8617;</button>
     <button onclick="redo()" title="Redo">&#8618;</button>
     <button onclick="clearGrid()" title="Clear All">&#10006;</button>
-    ${IMAGE_MODE_ENABLED ? `<button onclick="location.href='/draw'" title="Draw Mode">&#9998;</button>` : ''}
+    ${DRAW_MODE_BUTTON_MARKER}
     <button class="btn-send" id="sendBtn" onclick="send()" title="Send">&#9654;</button>
   </div>
   <div class="grid-wrap" id="gridWrap">
@@ -838,8 +839,18 @@ export class DrawingServer {
   readonly onServerStarted = this._onServerStarted.event;
   readonly onServerStopped = this._onServerStopped.event;
 
-  constructor(port: number = DEFAULT_PORT) {
+  /**
+   * Freeform draw mode is offered only while an image-describe subagent is
+   * actually available — otherwise a drawing would dead-end as a placeholder.
+   * Injected as a predicate (not a snapshot) and consulted per request, so
+   * the phone pages track live config. Defaults to off for callers that
+   * don't wire it (tests, future embedders).
+   */
+  private readonly isImageModeAvailable: () => boolean;
+
+  constructor(port: number = DEFAULT_PORT, options?: { isImageModeAvailable?: () => boolean }) {
     this._port = port;
+    this.isImageModeAvailable = options?.isImageModeAvailable ?? (() => false);
   }
 
   /** Whether the server is currently listening */
@@ -1064,11 +1075,12 @@ export class DrawingServer {
     }
 
     if (req.method === 'GET' && req.url === '/draw') {
-      if (IMAGE_MODE_ENABLED) {
+      if (this.isImageModeAvailable()) {
         this.serveDrawingPage(res);
       } else {
-        // Hidden until multimodal image support — send users to the working
-        // ASCII editor instead of a dead-end page whose output is never sent.
+        // No image-describe subagent configured — send users to the working
+        // ASCII editor instead of a dead-end page whose output would only
+        // ever become a placeholder.
         res.writeHead(302, { Location: '/' });
         res.end();
       }
@@ -1080,10 +1092,11 @@ export class DrawingServer {
       return;
     }
 
-    // Health check
+    // Health check. `imageMode` lets an already-open phone page discover a
+    // config change without a reload (poll or on-focus check).
     if (req.method === 'GET' && req.url === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok' }));
+      res.end(JSON.stringify({ status: 'ok', imageMode: this.isImageModeAvailable() }));
       return;
     }
 
@@ -1096,7 +1109,11 @@ export class DrawingServer {
    */
   private serveAsciiPage(res: http.ServerResponse): void {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(ASCII_HTML);
+    // Substituted per request, not at module load — button tracks live config.
+    res.end(ASCII_HTML.replace(
+      DRAW_MODE_BUTTON_MARKER,
+      this.isImageModeAvailable() ? DRAW_MODE_BUTTON_HTML : ''
+    ));
     logger.debug('[DrawingServer] Served ASCII editor page');
   }
 
@@ -1166,6 +1183,19 @@ export class DrawingServer {
           logger.warn('[DrawingServer] Upload rejected: invalid upload data');
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Invalid upload data' }));
+          return;
+        }
+
+        // Server-side gate, not just UI: a page opened while the subagent
+        // was configured can outlive the config. A drawing that arrives with
+        // no vision model would only ever become a placeholder — refuse it
+        // with a named reason instead ("never silence").
+        if (!this.isImageModeAvailable()) {
+          logger.warn('[DrawingServer] Drawing rejected: no image-describe subagent available');
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            error: 'No vision model is configured — pick one in Moby Settings under Image Description, then try again.'
+          }));
           return;
         }
 
