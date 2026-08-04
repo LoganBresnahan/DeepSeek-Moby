@@ -722,6 +722,26 @@ export class InputAreaShadowActor extends ShadowActor {
     this.query<HTMLTextAreaElement>('textarea')?.focus();
   }
 
+  /** Caret offset, or the end of the text when the textarea isn't available. */
+  getCaret(): number {
+    const textarea = this.query<HTMLTextAreaElement>('textarea');
+    return textarea ? textarea.selectionStart : this._value.length;
+  }
+
+  /**
+   * Replace `[start, end)` and leave the caret after what was written. Used by
+   * composer autocomplete to swap a typed trigger for its result.
+   */
+  replaceRange(start: number, end: number, text: string): void {
+    const from = Math.max(0, Math.min(start, this._value.length));
+    const to = Math.max(from, Math.min(end, this._value.length));
+    const next = this._value.slice(0, from) + text + this._value.slice(to);
+    const caret = from + text.length;
+
+    this.setValue(next);
+    this.query<HTMLTextAreaElement>('textarea')?.setSelectionRange(caret, caret);
+  }
+
   /**
    * Append text to the composer (blank-line separated if it isn't empty),
    * then place the cursor at the end. Used to stage external content — e.g. an

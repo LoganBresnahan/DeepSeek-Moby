@@ -54,6 +54,18 @@ export type { FileData, FilesState, FilesChangeHandler } from './files';
 export { CommandsShadowActor } from './commands';
 export type { CommandItem, CommandHandler } from './commands';
 
+// Composer Autocomplete (typed invocation overlay — ADR 0015)
+export { ComposerAutocompleteActor, ProviderRegistry, createComposerHost } from './composer-autocomplete';
+export type {
+  ComposerHost,
+  ComposerTextSurface,
+  Suggestion,
+  SuggestionAction,
+  SuggestionProvider,
+  TriggerChar,
+  TriggerSpan
+} from './composer-autocomplete';
+
 // Command Rules (command approval rules modal)
 export { CommandRulesModalActor } from './command-rules';
 export type { CommandRule } from './command-rules';

@@ -24,6 +24,7 @@ Short, dated records of significant architectural and behavioral decisions. Each
 | [0012](0012-project-root-awareness.md) | Project-root awareness (workspace root ≠ project root) | Accepted | 2026-06-21 |
 | [0013](0013-temporal-grounding-data-seeding.md) | Temporal grounding II: data-seeding classification clause | Accepted | 2026-06-21 |
 | [0014](0014-attachment-persistence-and-replay.md) | Attachment persistence and replay (blobs beside the events table) | Accepted | 2026-08-02 |
+| [0015](0015-composer-autocomplete-typed-invocation.md) | Composer autocomplete — typed invocation via a provider registry | Accepted — not yet implemented | 2026-08-04 |
 
 ## When to write an ADR
 
