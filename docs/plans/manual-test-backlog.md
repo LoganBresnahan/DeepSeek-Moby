@@ -1,6 +1,22 @@
 # Manual Test Backlog
 
-_Last reconciled with code 2026-07-31._
+_Last reconciled with code 2026-08-04._
+
+## The 2026-08-04 driver pass — what it discharged, and what it can't
+
+A scripted runtime pass closed most of the image backlog without a human at the keyboard. Two handles from [/verify](../../.claude/skills/verify/SKILL.md): the built webview in headless Chromium (real canvas, so real WebP encoding and real rendition sizes), and the full extension in a real VS Code instance driven over CDP against a **fake OpenAI-compatible backend serving two roles** — a text-only main model and a vision model that returns an `image-describe` digest. The fake server logged every request, so claims below are asserted against what actually went on the wire, not inferred from what the model said.
+
+Discharged this way: **M38 in full but for dedupe**, **M37 S1/S4/S5/S6**, **M34 steps 1–3**, **M39 steps 1–2**, **M35 steps 2 and 6**, and the flatten-to-white half of **M41**. Marked inline below.
+
+What this method **cannot** reach, and why the remaining items are still here:
+
+- **A real vision provider.** The fake backend honours `response_format` by construction, so it says nothing about whether a real VL model does — M37 S3 is exactly that question.
+- **A real phone browser.** No driver crosses the QR code, a touch canvas, or a page left open across a settings change.
+- **The OS → webview boundary.** Synthesized `DataTransfer` exercises our handler; it does not reproduce what the OS file manager or the VS Code Explorer actually puts on a drag payload.
+- **Anything eyes-only** — reflow, animation, whether a thumbnail *looks* right.
+- **SQLCipher internals.** The database is unreadable without its secret-storage key, so dedupe, truncation, and blob GC were not observed directly; they have unit coverage but no real-file confirmation.
+
+---
 
 Scenarios that have been implemented but not yet exercised in a VS Code dev host. Once a scenario has been walked through and passes, remove it from here (or move evergreen regressions into [test-scenarios.md](./test-scenarios.md)).
 
@@ -540,6 +556,8 @@ Not a pass/fail scenario yet — investigation only.
 
 ## M34. Attachment persistence + replay (ADR 0014) (P0)
 
+**Steps 1–3 discharged 2026-08-04** (driver pass, real VS Code + real DB). Step 1: the model answered from the attachment. Step 2: the user message carried **exactly one** `--- Attached Images ---` block — no double-inject. Step 3: after the webview was disposed and recreated, the follow-up request still carried the full digest, proven in the wire log rather than inferred from the answer. **Still owed: steps 4 (fork), 5 (>256KB truncation), 6 (dedupe), 7 (blob GC)** — all four need either a real fork or DB observation the driver can't do.
+
 **Why this matters:** attachments were never persisted — `recordUserMessage` dropped them and the `--- Attached Files ---` block was appended to the ephemeral per-request array. A reloaded session rebuilt model context *without* the attachment, silently differing from the conversation that actually happened. ADR 0014 persists bodies as content-addressed blobs and makes `getSessionMessagesCompat` the single place the context block is materialized. Unit tests pin byte-identical replay, exactly-once emission, fork carry-over, and GC — but nothing exercises the real DB file, a real reload, or the webview's restored view, which is precisely the path that used to break silently.
 
 **Setup:** a workspace with a text file of a few KB. Tail the *DeepSeek Moby* output channel.
@@ -561,6 +579,8 @@ Not a pass/fail scenario yet — investigation only.
 
 ## M35. Image attach — capture, downscale, chip (image-describe Phase 1) (P1)
 
+**Steps 2 and 6 discharged 2026-08-04** (headless Chromium, real canvas). A 7MB source PNG became a 107.4KB chip with a rendered thumbnail — the downscale and WebP encode genuinely ran. A file that isn't a decodable image was rejected with *"Could not read … as an image"* and **no chip added**. **Still owed: steps 1 (picker offers images), 3 (mixed batch), 4 (remove ×), 5 (`.gif`/`.bmp`), 7 (enormous image), 8 (no data URI in the event JSON — though M38 step 2 now covers the same claim).**
+
 **Why this matters:** the file picker now accepts `.png/.jpg/.jpeg/.webp/.gif/.bmp`. The webview downscales to a 1024px longest edge, re-encodes to WebP q0.8, and enforces a 1.5MB cap *after* re-encoding (a clipped image decodes to garbage, so oversize is rejected rather than truncated). Unit tests mock the canvas — happy-dom has no real encoder — so the actual downscale, the WebP encode, and the thumbnail rendering have never run.
 
 **Interim behaviour, expected:** nothing routes the image to a model yet (that's phase 3). The image is stored and shown as a chip; the model is told nothing about it. Don't file that as a bug.
@@ -580,6 +600,8 @@ Not a pass/fail scenario yet — investigation only.
 ---
 
 ## M36. Drag-and-drop attach (Phase 1b) (P1)
+
+**Partially discharged 2026-08-04** (driver pass): a synthesized `DataTransfer` carrying real `File` objects was dropped on the input box **in a real VS Code instance**, and the image attached, downscaled, digested, and persisted end to end — so the handler and the image branch work against the live extension, not just a mock. A three-file drop also confirmed the new drop-order guarantee. **This does not touch the OS or Explorer payloads, which is the whole risk of this item** — steps 1–3 and 7–10 still need real drags, and **step 4 (the off-target drop guard) is untouched and remains the dangerous one**: an unhandled drop navigates the frame and blanks the chat.
 
 **Why this matters:** the automated tests synthesize a `DataTransfer` and dispatch `drop`, which exercises our handler, the image-vs-text branch, the highlight counter and the navigation guard. **Nothing automated can cross the real OS → webview boundary**, and nothing can reproduce what the VS Code Explorer actually puts on a drag payload — the `text/uri-list` round-trip is built against a documented assumption that has never been observed running.
 
@@ -605,7 +627,19 @@ Not a pass/fail scenario yet — investigation only.
 
 ## M37. Image describe — vision digest end to end (Phases 2–3) (P0)
 
-**Partially discharged 2026-08-03** (dev-host, `kimi-k3` as the vision backend). Verified from the trace + log export: **S2** — two routes, `validationResult: 'ok'`, digest reached the main model, and the model produced an accurate unprompted description (a stamp-style lighthouse illustration) on both a `deepseek-v4-flash-thinking` main and a `kimi-k3` main. **S3** — answered for this backend, see below. Still owed: **S0** (picker states), **S1** (no-backend placeholder), **S4** (ineligible model refuses without a 400), **S5** (replay after switch/fork — a session switch happened in that run but no post-restore follow-up was asked), **S6** (multiple images + failure isolation). Two costs observed and tracked in CLAUDE.md rather than here: the digest blocks the turn for **15–20s** on Kimi (the `thinkingMode: 'disabled'` no-op), and a Kimi *main* pays that twice via the legacy non-streaming probe.
+**Largely discharged. S3 is the only substantive item left, and it needs a real VL backend.**
+
+**2026-08-03** (dev-host, `kimi-k3`): **S2** — two routes, `validationResult: 'ok'`, digest reached the main model, accurate unprompted description on both a `deepseek-v4-flash-thinking` main and a `kimi-k3` main.
+
+**2026-08-04** (driver pass, fake dual-role backend), asserted against the wire log:
+
+- **S1** — with `moby.subagents` unset: **zero** vision calls, and the main model received `[Image "shot-1.png" was attached but could not be described — no vision backend is configured (set \`moby.subagents.image-describe\`). You cannot see this image; say so rather than guessing at its contents.]`
+- **S4** — pointed at a model declaring the role but not `acceptsImages`: **zero requests reached it**, so a 400 is structurally impossible, and the placeholder named `acceptsImages`.
+- **S5** — after a webview dispose/recreate, the follow-up request still carried the full digest.
+- **S6** — three images produced three concurrent vision calls, each carrying its own `image_url`, resolving into one main turn.
+- **The headline pass criterion, hard:** across every main-model request in the pass, **zero** array content, **zero** `image_url`, **zero** base64 in any string.
+
+**Still owed: S0** (the four picker states — cheap, do it while you're in there) and **S3** (below). Two costs observed and tracked in CLAUDE.md rather than here: the digest blocks the turn for **15–20s** on Kimi (the `thinkingMode: 'disabled'` no-op), and a Kimi *main* pays that twice via the legacy non-streaming probe.
 
 **Why this matters:** the whole point of the feature. Everything up to now stored and displayed images; this is where an attached image finally reaches the model — as a *text digest* produced by a separate vision model, since DeepSeek's API is text-only. Two things no test can check: whether a real VL backend honours `jsonMode` (the plan's open empirical question), and whether the digests are actually *good enough* to answer questions from.
 
@@ -656,6 +690,10 @@ Two `image-describe` routes on `kimi-k3` both returned `validationResult: 'ok'` 
 
 ## M38. Archive rendition — the silent one (Phase 4) (P0)
 
+**DISCHARGED 2026-08-04 except step 6** (headless Chromium for the encode, real VS Code + real DB for what got stored). A 3200×1800 source produced a **512×288** archive at **35,070 bytes** against a **110,010-byte** subagent copy — markedly smaller (step 3), aspect-correct rather than squared (step 4). A 200×150 image stayed 200×150, not upscaled (step 5). The restored transcript served that thumbnail with an intrinsic **512×288**, which is direct evidence the archive — not the 1024px copy — is what reached the table (step 2), and the digest still replayed afterward (step 7). `attachmentContext.ts:84` prefers `archive.dataUrl` with a logged fallback, confirming the mechanism.
+
+**Still owed: step 6 (attach the same image twice → one row in `attachment_blobs`).** Content-addressed dedupe has unit coverage but was never observed against a real SQLCipher file.
+
 **Why this matters:** the webview now builds **two** copies of every attached image from one decode — a ~1024px copy the vision subagent reads (**never persisted**) and a 512px archive (**the only one stored**). Getting this backwards is invisible: everything works, transcripts just quietly bloat until hydration crawls. Unit tests pin which rendition reaches the table, but nothing exercises real canvas encoding, so the actual byte sizes have never been observed.
 
 **Steps:**
@@ -673,7 +711,11 @@ Two `image-describe` routes on `kimi-k3` both returned `validationResult: 'ok'` 
 
 ## M39. Transcript thumbnails — live/restore parity + lazy blob fetch (Phase 5) (P0)
 
-**Partially discharged 2026-08-03** (headless harness against the built bundle, `/verify` Handle 1): restore-path render from metadata, reserved dimensions, exactly-one `requestAttachmentBlob` per shared blob, blob reply filling every referencing turn, no-reflow on arrival, image-only turns visible, no re-fetch. **The run also caught and fixed a real bug:** a blob whose intrinsic ratio disagrees with the persisted metadata resized the box on load (`height: auto` let the intrinsic ratio win) — thumbs are now CSS-locked unconditionally and a mismatch crops via `object-fit` instead. Still owed in a real dev host: steps 2 (visual parity across a real reload), 4 (scroll-recycle against real SQLCipher blobs), 5 (fork), 7 (GC), 8 (pre-phase-5 sessions).
+**Partially discharged 2026-08-03** (headless harness against the built bundle, `/verify` Handle 1): restore-path render from metadata, reserved dimensions, exactly-one `requestAttachmentBlob` per shared blob, blob reply filling every referencing turn, no-reflow on arrival, image-only turns visible, no re-fetch. **The run also caught and fixed a real bug:** a blob whose intrinsic ratio disagrees with the persisted metadata resized the box on load (`height: auto` let the intrinsic ratio win) — thumbs are now CSS-locked unconditionally and a mismatch crops via `object-fit` instead.
+
+**Steps 1–2 discharged 2026-08-04** (driver pass, real VS Code + real DB): the live turn rendered a thumbnail at 128×72, and after a webview dispose/recreate the same turn rendered the **same thumbnail at the same 128×72**, with an intrinsic 512×288 fetched from a real SQLCipher blob. That is live/restore parity across a real reload — the failure mode this phase was most exposed to.
+
+**Still owed: steps 3 (no reflow on a long session), 4 (scroll-recycle → no second fetch), 5 (fork), 6 (same image twice), 7 (GC), 8 (pre-phase-5 sessions), 9 (legacy 1024px rows).**
 
 **Why this matters:** a restored user turn now renders image attachments as thumbnails. Live and restore share one render path by design, but the phase's whole risk is that live testing can't catch a restore-only divergence — and no automated test crosses a real reload with a real DB. The lazy fetch (`requestAttachmentBlob` → `attachmentBlob`) has also never run against real SQLCipher blobs, only mocks.
 
@@ -711,17 +753,41 @@ Two `image-describe` routes on `kimi-k3` both returned `validationResult: 'ok'` 
 
 **Why this matters:** the freeform `/draw` page is back after being parked pre-vision, and drawings now enter the same pipeline as picked/dropped images. Unit tests drive the real HTTP server and the gateway routing, but nothing automated crosses a real phone browser, the QR flow, or the canvas touch surface — and the whole feature is gated on live config, which only a dev host exercises end to end.
 
+**Flatten-to-white discharged 2026-08-04** (headless Chromium driving the real `/draw` page): a drawn stroke exported with **zero transparent pixels across all 341,040**, all four corners opaque white, stroke intact. Everything else below needs the phone.
+
 **Setup:** vision subagent configured (e.g. your kimi entry); *Moby: Start Drawing Server*; phone on the same LAN (or WSL2 port-forward per the popup).
 
 **Steps:**
 1. QR popup shows **"ASCII editor + freeform draw"** while the subagent is set. Set the picker to Off, stop/start the server popup → hint flips to **"ASCII editor only…"**.
-2. With the subagent ON: phone loads the ASCII editor; the pencil (Draw Mode) button is present → tap → canvas page. Draw something, Send → **a chip appears in the composer** (thumbnail, `drawing-<timestamp>.png`), nothing auto-sends.
-3. Send the message → digest routes ("Analyzing image…"), model describes the drawing. Reload the session → the turn shows the drawing's thumbnail (phase-5 path).
+2. With the subagent ON: phone loads the ASCII editor; the pencil (Draw Mode) button is present → tap → canvas page. Draw something, Send → **a chip appears in the composer** (thumbnail, `drawing-<timestamp>.png`), nothing auto-sends. **Check the thumbnail's background is white, not the chat's dark background showing through** — the canvas is transparent where undrawn, and the flatten-on-export exists to stop that. Verified headless; this is the real-device confirmation.
+3. Send the message → digest routes ("Analyzing image…"), model describes the drawing. **Ask it what colour the background is** — a transparent export that slipped through would read as black or dark grey. Reload the session → the turn shows the drawing's thumbnail (phase-5 path).
 4. With the subagent OFF: reload the phone page → pencil button gone; `/draw` typed directly redirects to the ASCII editor.
 5. **Stale-page race:** open `/draw` with the subagent ON, then turn it OFF in VS Code, then hit Send on the phone → the button shows "!" and an alert names the fix ("No vision model is configured…"). Nothing lands in the composer.
 6. ASCII flow regression: ASCII editor Send still stages the fenced diagram in the composer regardless of the subagent setting.
 
 **Pass criteria:** drawings become ordinary image attachments end to end; availability is visible at the QR popup, the page buttons, and the upload gate; the ASCII editor is never gated.
+
+---
+
+## M42. Non-native custom models skip the tool loop (P1)
+
+**Why this matters:** the 2026-08-04 verify pass found that any custom entry declaring `toolCalling: 'none'` was entering `runToolLoop` anyway. The client only attaches tools for native tool callers, so that probe went out with no tools, could never return a tool call, and its entire answer was discarded when the streaming pass regenerated it — **two billed generations per turn, every turn**. The branch is now gated on native tool calling.
+
+Confirmed against a fake backend (four main-model requests for a two-turn session became two) and pinned by a unit regression. What neither covers is a **real** non-native provider actually producing a good turn on the changed path — the shipped `llama.cpp Server` template is the one built-in affected, and local models are a supported audience (M1, M13).
+
+Two consequences to watch for, not just the token saving:
+
+- **The ADR 0011 verification gate no longer runs for these models.** They now match R1, which was always outside it, and the ADR's scope was always "the native-tool loops". But if you rely on Auto mode catching a broken build with a local model, that backstop is gone — that is the change most likely to surprise someone.
+- **DSML recovery no longer applies to them.** DSML is a DeepSeek V3 text-format quirk and V3 is native, so this should be a no-op; it is listed because it was the one behaviour the removed path also provided.
+
+**Steps:**
+1. Register a local model with `"toolCalling": "none"` (the **llama.cpp Server** template, or Ollama with the flag flipped). Point `moby.model` at it.
+2. Send a plain question. **Pass:** one streamed answer, and *Moby: Show Logs* shows **one** `[ApiCall]` for the turn. **Fail (the old behaviour):** two calls, the first non-streaming.
+3. Ask for a file edit. The model should answer with a SEARCH/REPLACE block and the edit should apply normally — the tool loop was never what drove edits for these models.
+4. Compare wall-clock against 0.6.1 on the same prompt. It should be roughly halved.
+5. In Auto mode, have it make an edit that breaks the build. **Expected:** the turn completes without the verification gate re-injecting feedback. This is now correct-by-design, not a regression — confirm it doesn't manifest as something worse (a silent half-edit, a turn that hangs).
+
+**Pass criteria:** one generation per turn, edits still land, and the absent verification gate degrades gracefully.
 
 ---
 
