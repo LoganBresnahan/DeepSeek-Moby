@@ -58,9 +58,9 @@ Eleven slices, effort-ranked and dependency-ordered. Only two are hard-reasoning
 | 5 | ~~`emoji-provider`~~ **DONE 2026-08-04** — vendored dataset, prefix-over-substring rank, closing-colon auto-accept | medium | moderate | opus | — | low | 1, 2 |
 | 6 | ~~`commands-provider`~~ **DONE 2026-08-04** — hoisted `DEFAULT_COMMANDS` to a shared catalog; routes through `CommandsShadowActor.runCommand` | low | mechanical | opus | — | low | 1 |
 | 7 | ~~`files-provider-async`~~ **DONE 2026-08-04** — pending/debounce/stale-discard on the shared reply channel | medium | moderate | opus | — | medium | 1, 2 |
-| 8 | `unit-test-matrix` — boundary matrix, ranking, stale discard, one dispatch test per action kind | medium | mechanical | opus | — | low | 1, 2, 5, 6, 7 |
+| 8 | ~~`unit-test-matrix`~~ **DONE 2026-08-04/05** — written alongside each slice rather than deferred: 133 tests over 7 files (boundary matrix, ranking, stale discard, dispatch per action kind, chip round trip, end-to-end composition) | medium | mechanical | opus | — | low | 1, 2, 5, 6, 7 |
 | 9 | ~~`bundle-size-guard`~~ **MEASURED 2026-08-04** — `dist/media/chat.js` 937,990 → 1,018,350 bytes, **+78.5KB** for all of phase 3 (dataset is the bulk). Inside the predicted ~60–80KB, so no trim | low | mechanical | opus | — | low | 5 |
-| 10 | `harness-e2e-interplay` — headless-Chromium specs for the overlay/InputArea seam; joins the `/shipshape` harness tier | medium | moderate | opus | — | medium | 1–7 |
+| 10 | ~~`harness-e2e-interplay`~~ **DONE 2026-08-05** — [composer-autocomplete.spec.ts](../../tests/e2e/composer-autocomplete.spec.ts), 37 specs in the `/shipshape` harness tier (45 → 82) | medium | moderate | opus | — | medium | 1–7 |
 | 11 | `manual-backlog-entries` — IME/CJK, positioning feel, emoji fonts, M10 force-expanded interplay | low | mechanical | opus | — | low | 2, 4, 5 |
 
 **Phases** (batched by model — one Fable batch, minimal model switches):
@@ -74,7 +74,13 @@ Eleven slices, effort-ranked and dependency-ordered. Only two are hard-reasoning
   - **Contract additions:** `Suggestion.autoAccept` (unambiguous single completions), `ComposerHost.runCommand`, `SuggestionProvider.reset?()`, and an optional `stateSubscriptions` actor arg.
   - **Bug caught by the end-to-end test:** detection relied on shadow-DOM retargeting of `event.target`; it now matches on `composedPath()`, which is portable and does not depend on the DOM implementation retargeting.
   - Gates: typecheck, suites green **twice** (3,390), harness e2e 45/45, bundle +78.5KB. **Still owed: `/verify` in a dev host** — positioning feel, emoji font rendering, and the files-popup cross-talk check against a real workspace.
-- **Phase 4 (opus): automated verification + guards** — slices 8, 9, 10 (fold 9 into 8's commit window). Watch each new spec fail first — a vacuously-green harness spec is this phase's own failure mode. `/shipshape`.
+- **Phase 4 (opus): automated verification + guards — LANDED 2026-08-05.** [composer-autocomplete.spec.ts](../../tests/e2e/composer-autocomplete.spec.ts) adds 37 harness specs (tier 45 → 82) covering emoji/commands/files end to end, trigger discipline with *real* `inputType` values, arbitration against the real composer, and layout. **The real-browser tier immediately earned itself — it found two defects happy-dom structurally cannot see:**
+  - **The overlay rendered off the top of the viewport** (measured at `y = -231`) whenever the space above the composer was smaller than the list. The base class pins the container's *bottom* to the anchor, so a tall overlay grows off-screen — invisible and unclickable, with no error. Now the height is capped to the room actually available and placement **flips below** when above cannot hold a usable list.
+  - **Position was computed once at `open()`** and never revisited, so the auto-resizing textarea drifted out from under it. Now re-anchored on every render.
+  - Also caught a **vacuous test of my own**: AC5.4 asserted only "no `executeCommand` was posted" for a modal-routed command — which passed even when the overlay never opened (a space had ended the trigger). It now asserts the modal actually opens.
+  - Recorded as a limitation rather than fixed: **queries are single-token** — whitespace ends a span, so `/export logs` is not expressible. Pinned by AC5.5 and added to ADR 0015's revisit triggers.
+  - Slice 8 was pre-paid: tests were written alongside each slice, 133 unit tests over 7 files.
+  - Gates: typecheck, suites green **twice** (3,407), harness tier 82/82, webpack clean.
 - **Phase 5 (opus): docs on landing** — slice 11, written last so entries describe shipped behavior; the IME entry feeds ADR 0015's revisit trigger. Final `/shipshape` covers docs currency.
 
 **Critical path:** `autocomplete-actor-core → trigger-detection → emoji-provider → harness-e2e-interplay`.

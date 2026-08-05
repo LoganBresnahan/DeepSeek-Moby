@@ -70,6 +70,14 @@ While the overlay is open: ↑/↓ navigate, Enter/Tab accept, Esc dismisses —
 
 The overlay renders as a full-width bar above the input area — the VS Code suggest-widget shape — rather than tracking caret x-position. Caret mirroring in a Shadow DOM stack above a virtual list is fragile and buys little at this input width.
 
+**Amended 2026-08-05 by what the real-browser tier found.** "Above" is the intent, not an invariant. The popup base class pins the container's *bottom* to the anchor, so an overlay taller than the room above renders off the top of the viewport — invisible and unclickable, and silently so. Placement is therefore computed against the real geometry on every render:
+
+- height is capped to the space actually available on the chosen side;
+- placement **flips below** the composer when above cannot hold a usable list;
+- position is recomputed on each render, not once at open — the composer's textarea auto-resizes as the draft grows, so a position fixed at open time drifts out from under the overlay.
+
+None of this is visible to happy-dom, which has no layout; it is the reason this feature carries a real-browser tier at all.
+
 ### 6. Emoji ships first
 
 Build order is emoji → commands → files: the emoji provider is fully local and synchronous, so phase 1 proves the overlay, trigger detection, and keydown arbitration with no async plumbing and no extension-side changes. Files (phase 3) is the only phase that touches the extension side, and only to reuse an existing handler.
@@ -101,3 +109,4 @@ Build order is emoji → commands → files: the emoji provider is fully local a
 - ~~Bundle-size growth beyond the expected ~80KB~~ — **measured at +78.5KB, inside budget.** Re-check only if the dataset is regenerated from a much larger `gemoji`, in which case trim to a common subset.
 - A second accept kind gains an effect outside the text (MCP resources will) → it needs its own visible in-composer feedback, per decision 2. Do not assume the chip row covers it.
 - Users keep expecting the accepted path as prose → see the inline-path alternative above; make it a per-provider option, not a global rule change.
+- Users want multi-word filtering (`/export logs`) → **not expressible today**: whitespace is the span boundary, so every query is a single token. Changing it means a provider-declared "query may contain spaces" rule plus a new way to decide where the query ends, which is exactly the heuristic decision 3 avoids. Weigh carefully.

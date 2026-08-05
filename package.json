@@ -888,7 +888,7 @@
     "test:unit:ui": "vitest tests/unit --ui",
     "test:audit": "node scripts/check-test-coverage.js",
     "test:e2e": "playwright test",
-    "test:e2e:harness": "playwright test tests/e2e/webview-rendering.spec.ts tests/e2e/golden-rendering.spec.ts tests/e2e/smoke.spec.ts",
+    "test:e2e:harness": "playwright test tests/e2e/webview-rendering.spec.ts tests/e2e/golden-rendering.spec.ts tests/e2e/smoke.spec.ts tests/e2e/composer-autocomplete.spec.ts",
     "test:e2e:vscode": "playwright test tests/e2e/vscode-integration.spec.ts tests/e2e/chat-model-boot.spec.ts",
     "test:e2e:headed": "playwright test --headed",
     "test:e2e:debug": "playwright test --debug"

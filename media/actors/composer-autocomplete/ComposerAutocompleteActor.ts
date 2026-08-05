@@ -34,6 +34,13 @@ import { createLogger } from '../../logging';
 
 const log = createLogger('ComposerAutocomplete');
 
+/** Tallest the overlay ever gets, room permitting. */
+const MAX_OVERLAY_HEIGHT = 260;
+/** Floor for a pathologically short panel — a clipped list beats an invisible one. */
+const MIN_OVERLAY_HEIGHT = 72;
+/** Matches the base class's 4px offset from the anchor. */
+const OVERLAY_ANCHOR_GAP = 4;
+
 export class ComposerAutocompleteActor extends PopupShadowActor {
   private _host: ComposerHost;
   private _registry = new ProviderRegistry();
@@ -304,6 +311,10 @@ export class ComposerAutocompleteActor extends PopupShadowActor {
 
   private renderSuggestions(): void {
     this.updateBodyContent(this.renderPopupContent());
+    // Re-anchor on every render: the composer's textarea auto-resizes as the
+    // draft grows, so a position computed once at open() drifts out from
+    // under the overlay and can end up overlapping it.
+    if (this.isVisible()) this.syncToAnchor();
   }
 
   private scrollSelectionIntoView(): void {
@@ -367,19 +378,43 @@ export class ComposerAutocompleteActor extends PopupShadowActor {
     if (!wasVisible && this.isVisible()) {
       document.addEventListener('keydown', this._boundArbitrateKeydown, true);
     }
-    this.syncWidthToAnchor();
+    this.syncToAnchor();
   }
 
   /**
-   * Match the composer's width (ADR 0015 decision 5: a full-width bar above
-   * the composer, not a caret-anchored box). The base class already pins the
-   * container above the anchor via `setTriggerElement`; only width is ours.
+   * Size and place the overlay against the composer (ADR 0015 decision 5: a
+   * full-width bar at the composer, not a caret-anchored box).
+   *
+   * Above is the intended side and is used whenever it fits. The base class
+   * pins the container's *bottom* to the anchor, so an overlay taller than
+   * the room above renders off the top of the viewport — invisible and
+   * unclickable — which is why this both caps the height and flips below when
+   * above cannot hold a usable list.
    */
-  private syncWidthToAnchor(): void {
+  private syncToAnchor(): void {
     const anchor = this._config.triggerElement;
     const container = this.query<HTMLElement>('[data-popup-container]');
     if (!anchor || !container) return;
-    container.style.width = `${anchor.getBoundingClientRect().width}px`;
+
+    const rect = anchor.getBoundingClientRect();
+    container.style.width = `${rect.width}px`;
+
+    const roomAbove = rect.top - OVERLAY_ANCHOR_GAP;
+    const roomBelow = window.innerHeight - rect.bottom - OVERLAY_ANCHOR_GAP;
+    const placeAbove = roomAbove >= MIN_OVERLAY_HEIGHT || roomAbove >= roomBelow;
+
+    const capped = Math.max(0, Math.min(MAX_OVERLAY_HEIGHT, placeAbove ? roomAbove : roomBelow));
+    container.style.maxHeight = `${capped}px`;
+    const body = this.query<HTMLElement>('[data-popup-body]');
+    if (body) body.style.maxHeight = `${capped}px`;
+
+    if (placeAbove) {
+      container.style.bottom = `${window.innerHeight - rect.top + OVERLAY_ANCHOR_GAP}px`;
+      container.style.top = 'auto';
+    } else {
+      container.style.top = `${rect.bottom + OVERLAY_ANCHOR_GAP}px`;
+      container.style.bottom = 'auto';
+    }
   }
 
   protected onClose(): void {
