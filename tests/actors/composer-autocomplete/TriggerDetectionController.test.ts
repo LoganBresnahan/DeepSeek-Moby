@@ -66,6 +66,7 @@ describe('TriggerDetectionController', () => {
         state.caret = start + text.length;
       },
       attachFile: vi.fn(),
+      runCommand: vi.fn(),
       focus: vi.fn()
     };
 

@@ -36,6 +36,7 @@ const createFakeHost = (initial = '') => {
       state.caret = start + text.length;
     },
     attachFile: vi.fn(),
+    runCommand: vi.fn(),
     focus: vi.fn()
   };
   return { host, state };
@@ -132,7 +133,7 @@ describe('ComposerAutocompleteActor', () => {
       expect(fake.state.caret).toBe('hello 😄'.length);
     });
 
-    it('deletes the span and posts the command for runCommand', () => {
+    it('deletes the span and runs the command through the host', () => {
       build('/exp');
       actor.registerProvider(staticProvider('/', [suggestion('Export Logs', { kind: 'runCommand', id: 'moby.exportLogs' })]));
 
@@ -140,10 +141,10 @@ describe('ComposerAutocompleteActor', () => {
       expect(actor.acceptSelected()).toBe(true);
 
       expect(fake.state.text).toBe('');
-      expect(mockVSCode.postMessage).toHaveBeenCalledWith({
-        type: 'executeCommand',
-        command: 'moby.exportLogs'
-      });
+      // Routed through the host, not posted directly: several commands open
+      // webview-local modals instead of reaching the extension.
+      expect(fake.host.runCommand).toHaveBeenCalledWith('moby.exportLogs');
+      expect(mockVSCode.postMessage).not.toHaveBeenCalled();
     });
 
     it('deletes the span and routes the path for attachFile', () => {
@@ -335,15 +336,15 @@ describe('ComposerAutocompleteActor', () => {
 });
 
 describe('createComposerHost', () => {
-  it('forwards text operations and injects the attach side', () => {
+  it('forwards text operations and injects the side effects', () => {
     const surface = {
       getValue: vi.fn(() => 'hi @sr'),
       getCaret: vi.fn(() => 6),
       replaceRange: vi.fn(),
       focus: vi.fn()
     };
-    const attachFile = vi.fn();
-    const host = createComposerHost(surface, attachFile);
+    const effects = { attachFile: vi.fn(), runCommand: vi.fn() };
+    const host = createComposerHost(surface, effects);
 
     expect(host.getText()).toBe('hi @sr');
     expect(host.getCaret()).toBe(6);
@@ -352,7 +353,10 @@ describe('createComposerHost', () => {
     expect(surface.replaceRange).toHaveBeenCalledWith(3, 6, '');
 
     host.attachFile('src/a.ts');
-    expect(attachFile).toHaveBeenCalledWith('src/a.ts');
+    expect(effects.attachFile).toHaveBeenCalledWith('src/a.ts');
+
+    host.runCommand('moby.exportLogs');
+    expect(effects.runCommand).toHaveBeenCalledWith('moby.exportLogs');
 
     host.focus();
     expect(surface.focus).toHaveBeenCalled();

@@ -19,7 +19,7 @@
 
 import { PopupShadowActor, PopupConfig } from '../../state/PopupShadowActor';
 import { EventStateManager } from '../../state/EventStateManager';
-import type { VSCodeAPI } from '../../state/types';
+import type { SubscriptionMap, VSCodeAPI } from '../../state/types';
 import { composerAutocompleteShadowStyles } from './shadowStyles';
 import { ProviderRegistry } from './providerRegistry';
 import type {
@@ -65,7 +65,19 @@ export class ComposerAutocompleteActor extends PopupShadowActor {
    */
   private readonly _boundArbitrateKeydown = this.arbitrateKeydown.bind(this);
 
-  constructor(manager: EventStateManager, element: HTMLElement, vscode: VSCodeAPI, host: ComposerHost) {
+  /**
+   * @param stateSubscriptions extra state keys to watch on a provider's
+   *   behalf. Async providers cannot subscribe themselves — the manager
+   *   indexes subscriptions at registration time, before any provider is
+   *   registered — so the actor declares them and forwards.
+   */
+  constructor(
+    manager: EventStateManager,
+    element: HTMLElement,
+    vscode: VSCodeAPI,
+    host: ComposerHost,
+    stateSubscriptions: SubscriptionMap = {}
+  ) {
     const config: PopupConfig = {
       manager,
       element,
@@ -73,6 +85,7 @@ export class ComposerAutocompleteActor extends PopupShadowActor {
       position: 'top-left',
       publications: {},
       subscriptions: {
+        ...stateSubscriptions,
         // The composer's programmatic edits (send-clear, draft restore) fire
         // no input events; its published value is the one signal they all
         // share. Used to drop state the real text no longer supports.
@@ -171,6 +184,9 @@ export class ComposerAutocompleteActor extends PopupShadowActor {
     // on every keystroke without re-rendering a hidden popup.
     if (!this._span && !this.isVisible() && this._suggestions.length === 0) return;
 
+    // Tell an async provider its reply is no longer wanted.
+    if (this._span) this._registry.get(this._span.trigger)?.reset?.();
+
     this._span = null;
     if (this.isVisible()) {
       this.close();
@@ -188,6 +204,7 @@ export class ComposerAutocompleteActor extends PopupShadowActor {
     const count = this._suggestions.length;
     this._selectedIndex = (((this._selectedIndex + delta) % count) + count) % count;
     this.renderSuggestions();
+    this.scrollSelectionIntoView();
     return true;
   }
 
@@ -197,9 +214,15 @@ export class ComposerAutocompleteActor extends PopupShadowActor {
    * keyboard arbitration knows to let the key through to the composer.
    */
   acceptSelected(): boolean {
-    const span = this._span;
     const suggestion = this._suggestions[this._selectedIndex];
-    if (!span || !suggestion || !this.isVisible()) return false;
+    if (!this._span || !suggestion || !this.isVisible()) return false;
+    return this.performAccept(suggestion);
+  }
+
+  /** The accept path itself, shared with the auto-accept case (which fires while hidden). */
+  private performAccept(suggestion: Suggestion): boolean {
+    const span = this._span;
+    if (!span) return false;
 
     const action = suggestion.action;
     // One edit either way: `insertText` writes its text over the span, the
@@ -242,7 +265,7 @@ export class ComposerAutocompleteActor extends PopupShadowActor {
       case 'insertText':
         break; // replaceRange already wrote it
       case 'runCommand':
-        this._vscode.postMessage({ type: 'executeCommand', command: action.id });
+        this._host.runCommand(action.id);
         break;
       case 'attachFile':
         this._host.attachFile(action.path);
@@ -251,6 +274,15 @@ export class ComposerAutocompleteActor extends PopupShadowActor {
   }
 
   private showSuggestions(suggestions: Suggestion[]): void {
+    // An unambiguous single completion accepts itself — `:smile:` should land
+    // the emoji without a keystroke, whether or not the list ever showed.
+    if (suggestions.length === 1 && suggestions[0].autoAccept) {
+      this._suggestions = suggestions;
+      this._selectedIndex = 0;
+      this.performAccept(suggestions[0]);
+      return;
+    }
+
     this._suggestions = suggestions;
     this._selectedIndex = 0;
     this.renderSuggestions();
@@ -272,6 +304,12 @@ export class ComposerAutocompleteActor extends PopupShadowActor {
 
   private renderSuggestions(): void {
     this.updateBodyContent(this.renderPopupContent());
+  }
+
+  private scrollSelectionIntoView(): void {
+    const active = this.query<HTMLElement>('.popup-item.active');
+    // jsdom/happy-dom have no layout; guard so tests don't need a stub.
+    active?.scrollIntoView?.({ block: 'nearest' });
   }
 
   // ============================================
@@ -329,6 +367,19 @@ export class ComposerAutocompleteActor extends PopupShadowActor {
     if (!wasVisible && this.isVisible()) {
       document.addEventListener('keydown', this._boundArbitrateKeydown, true);
     }
+    this.syncWidthToAnchor();
+  }
+
+  /**
+   * Match the composer's width (ADR 0015 decision 5: a full-width bar above
+   * the composer, not a caret-anchored box). The base class already pins the
+   * container above the anchor via `setTriggerElement`; only width is ours.
+   */
+  private syncWidthToAnchor(): void {
+    const anchor = this._config.triggerElement;
+    const container = this.query<HTMLElement>('[data-popup-container]');
+    if (!anchor || !container) return;
+    container.style.width = `${anchor.getBoundingClientRect().width}px`;
   }
 
   protected onClose(): void {

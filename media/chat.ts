@@ -20,6 +20,9 @@ import {
   InputAreaShadowActor,
   ComposerAutocompleteActor,
   TriggerDetectionController,
+  CommandsProvider,
+  EmojiProvider,
+  FilesProvider,
   createComposerHost,
   StatusPanelShadowActor,
   ToolbarShadowActor,
@@ -193,26 +196,6 @@ function initializeActorSystem(): void {
   // InputAreaShadowActor - owns its DOM, renders into inputAreaContainer
   const inputArea = new InputAreaShadowActor(manager, inputAreaContainer, vscode);
 
-  // ComposerAutocompleteActor — typed-invocation overlay (ADR 0015).
-  // No providers are registered yet (they land with the provider slices), so
-  // detection finds no active triggers and the overlay can never open. Wired
-  // now so the closed-overlay contract — composer behaviour byte-for-byte
-  // unchanged — is what actually ships from phase 2 onward.
-  const composerAutocompleteHost = document.createElement('div');
-  composerAutocompleteHost.id = 'composerAutocompleteHost';
-  composerAutocompleteHost.style.cssText = 'position: fixed; top: 0; left: 0; width: 0; height: 0;';
-  document.body.appendChild(composerAutocompleteHost);
-  const composerHost = createComposerHost(inputArea, (path) => {
-    log.warn(`attachFile("${path}") requested but no files provider is registered yet`);
-  });
-  const composerAutocomplete = new ComposerAutocompleteActor(
-    manager, composerAutocompleteHost, vscode, composerHost
-  );
-  const triggerDetection = new TriggerDetectionController(
-    composerAutocomplete, composerHost, inputAreaContainer, composerAutocompleteHost
-  );
-  triggerDetection.attach();
-
   // StatusPanelShadowActor - owns its DOM, renders into statusPanelContainer
   const statusPanel = new StatusPanelShadowActor(manager, statusPanelContainer, mobyIconUrl, vscode);
 
@@ -282,6 +265,50 @@ function initializeActorSystem(): void {
     commandsHost.appendChild(commandsContainer);
     commands = new CommandsShadowActor(manager, commandsContainer, vscode);
   }
+
+  // ComposerAutocompleteActor — typed invocation (ADR 0015). Built after the
+  // commands actor because the `/` provider routes through its command
+  // handling: several commands open webview-local modals rather than posting
+  // to the extension.
+  const composerAutocompleteHost = document.createElement('div');
+  composerAutocompleteHost.id = 'composerAutocompleteHost';
+  composerAutocompleteHost.style.cssText = 'position: fixed; top: 0; left: 0; width: 0; height: 0;';
+  document.body.appendChild(composerAutocompleteHost);
+
+  const composerHost = createComposerHost(inputArea, {
+    // Same round trip the files popup uses — FilesShadowActor turns the
+    // `files.content` reply into a context chip regardless of who asked.
+    attachFile: (path) => vscode.postMessage({ type: 'getFileContent', filePath: path }),
+    runCommand: (id) => {
+      if (commands) commands.runCommand(id);
+      else vscode.postMessage({ type: 'executeCommand', command: id });
+    }
+  });
+
+  // Declared before the actor so the results subscription can reach it, and
+  // assigned before anything can fire — see the arrow closures below.
+  let composerAutocomplete: ComposerAutocompleteActor;
+  const filesProvider = new FilesProvider({
+    postMessage: (message) => vscode.postMessage(message),
+    onResults: (query, suggestions) => composerAutocomplete.updateSuggestions(query, suggestions)
+  });
+
+  composerAutocomplete = new ComposerAutocompleteActor(
+    manager, composerAutocompleteHost, vscode, composerHost,
+    // The manager indexes subscriptions at registration time, so a provider
+    // cannot subscribe for itself — the actor forwards on its behalf.
+    { 'files.searchResults': (value: unknown) => filesProvider.handleResults(value) }
+  );
+  composerAutocomplete.registerProvider(new EmojiProvider());
+  composerAutocomplete.registerProvider(new CommandsProvider());
+  composerAutocomplete.registerProvider(filesProvider);
+  // Full-width bar pinned above the composer (ADR 0015 decision 5).
+  composerAutocomplete.setTriggerElement(inputAreaContainer);
+
+  const triggerDetection = new TriggerDetectionController(
+    composerAutocomplete, composerHost, inputAreaContainer, composerAutocompleteHost
+  );
+  triggerDetection.attach();
 
   // ModelSelectorShadowActor - Model dropdown with parameters
   const modelHost = getElementOrNull<HTMLElement>('modelBtn')?.parentElement;

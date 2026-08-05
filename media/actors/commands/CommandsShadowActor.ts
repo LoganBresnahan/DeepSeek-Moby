@@ -16,6 +16,7 @@ import { PopupShadowActor, PopupConfig } from '../../state/PopupShadowActor';
 import { EventStateManager } from '../../state/EventStateManager';
 import type { VSCodeAPI } from '../../state/types';
 import { commandsShadowStyles } from './shadowStyles';
+import { getCommandCatalog, type CommandItem } from './commandCatalog';
 import { createLogger } from '../../logging';
 import { webviewTracer } from '../../tracing';
 
@@ -25,33 +26,9 @@ const log = createLogger('CommandsPopup');
 // Types
 // ============================================
 
-export interface CommandItem {
-  id: string;
-  name: string;
-  description: string;
-  icon: string;
-  shortcut?: string;
-  section?: string;
-}
+export type { CommandItem } from './commandCatalog';
 
 export type CommandHandler = (commandId: string) => void;
-
-// ============================================
-// Default Commands
-// ============================================
-
-const DEFAULT_COMMANDS: CommandItem[] = [
-  // History section
-  { id: 'moby.exportChatHistory', name: 'Export History', description: 'Export all chats', icon: '📤', section: 'History' },
-  // Logs section
-  { id: 'moby.exportLogs', name: 'Export Logs', description: 'Export all logs and traces', icon: '📝', section: 'Logs' },
-  // Settings section
-  { id: 'moby.editSystemPrompt', name: 'System Prompt', description: 'Edit system prompt', icon: '✏️', section: 'Settings' },
-  { id: 'moby.openCommandRules', name: 'System Rules', description: 'Manage command approval rules', icon: '🛡️', section: 'Settings' },
-  { id: 'moby.refreshLspAvailability', name: 'Refresh LSP', description: 'Re-probe language servers (use after installing an LSP outside VS Code)', icon: '🔄', section: 'Settings' },
-  // Info section
-  { id: 'moby.showStats', name: 'Account Stats', description: 'DeepSeek & Tavily usage', icon: '📊', section: 'Info' }
-];
 
 // ============================================
 // CommandsShadowActor
@@ -62,15 +39,8 @@ export class CommandsShadowActor extends PopupShadowActor {
   private _onCommand: CommandHandler | null = null;
 
   constructor(manager: EventStateManager, element: HTMLElement, vscode: VSCodeAPI) {
-    // Build command list — include dev commands when devMode is enabled
-    const isDevMode = document.body.getAttribute('data-dev-mode') === 'true';
-    const commands = [...DEFAULT_COMMANDS];
-    if (isDevMode) {
-      commands.push(
-        { id: 'moby.exportTestFixture', name: 'Export Test Fixture', description: 'Export session for testing', icon: '🧪', section: 'Dev' },
-        { id: 'moby.exportTurnAsJson', name: 'Export Turn as JSON', description: 'Dump live/saved/hydrated events', icon: '🔬', section: 'Dev' }
-      );
-    }
+    // Shared with the `/` autocomplete provider — see commandCatalog.ts
+    const commands = getCommandCatalog();
     const config: PopupConfig = {
       manager,
       element,
@@ -150,6 +120,16 @@ export class CommandsShadowActor extends PopupShadowActor {
   // ============================================
   // Command Execution
   // ============================================
+
+  /**
+   * Run a command by id. Public because the `/` autocomplete provider must
+   * route through the SAME logic — several commands open webview-local modals
+   * rather than posting `executeCommand`, and duplicating that list would
+   * drift.
+   */
+  runCommand(commandId: string): void {
+    this.executeCommand(commandId);
+  }
 
   private executeCommand(commandId: string): void {
     log.debug(`executeCommand: ${commandId}`);

@@ -59,8 +59,12 @@ export {
   ComposerAutocompleteActor,
   ProviderRegistry,
   TriggerDetectionController,
+  CommandsProvider,
+  EmojiProvider,
+  FilesProvider,
   createComposerHost,
-  detectTriggerSpan
+  detectTriggerSpan,
+  extractSearchResults
 } from './composer-autocomplete';
 export type {
   ComposerHost,

@@ -2,9 +2,9 @@
  * Adapter from InputAreaShadowActor to the narrow {@link ComposerHost} the
  * autocomplete actor sees.
  *
- * The attach side is injected rather than taken from the input area: routing a
- * path into the attach pipeline needs the extension round-trip that the files
- * provider owns, and the input area should not grow a dependency on it.
+ * The side effects are injected rather than taken from the input area:
+ * routing a path into the attach pipeline and running a command both need
+ * collaborators the composer has no business knowing about.
  */
 
 import type { ComposerHost } from './types';
@@ -17,15 +17,21 @@ export interface ComposerTextSurface {
   focus(): void;
 }
 
+export interface ComposerSideEffects {
+  attachFile(path: string): void;
+  runCommand(id: string): void;
+}
+
 export function createComposerHost(
   surface: ComposerTextSurface,
-  attachFile: (path: string) => void
+  effects: ComposerSideEffects
 ): ComposerHost {
   return {
     getText: () => surface.getValue(),
     getCaret: () => surface.getCaret(),
     replaceRange: (start, end, text) => surface.replaceRange(start, end, text),
-    attachFile,
+    attachFile: (path) => effects.attachFile(path),
+    runCommand: (id) => effects.runCommand(id),
     focus: () => surface.focus()
   };
 }

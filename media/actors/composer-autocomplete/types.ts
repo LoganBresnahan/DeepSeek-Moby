@@ -36,6 +36,12 @@ export interface Suggestion {
   /** Leading glyph. An emoji suggestion uses the emoji itself. */
   icon?: string;
   action: SuggestionAction;
+  /**
+   * Accept without waiting for a keystroke. Only honoured when a provider
+   * returns exactly one suggestion, i.e. the completion is unambiguous — the
+   * closed emoji shortcode `:smile:` is the case this exists for.
+   */
+  autoAccept?: boolean;
 }
 
 /**
@@ -65,6 +71,11 @@ export interface SuggestionProvider {
    * {@link ComposerAutocompleteActor.updateSuggestions}.
    */
   getSuggestions(query: string): Suggestion[] | 'pending';
+  /**
+   * Called when the trigger dies. Async providers use it to stop treating an
+   * in-flight reply as theirs; synchronous ones can omit it.
+   */
+  reset?(): void;
 }
 
 /**
@@ -82,5 +93,11 @@ export interface ComposerHost {
   replaceRange(start: number, end: number, text: string): void;
   /** Route a workspace-relative path into the attach pipeline. */
   attachFile(path: string): void;
+  /**
+   * Run a command by id. Injected rather than posted directly: several
+   * commands open webview-local modals instead of reaching the extension,
+   * and CommandsShadowActor already owns that routing.
+   */
+  runCommand(id: string): void;
   focus(): void;
 }

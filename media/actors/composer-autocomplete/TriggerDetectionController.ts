@@ -149,10 +149,8 @@ export class TriggerDetectionController {
     const active = this._actor.getActiveSpan();
     if (!active && !this._actor.isVisible()) return;
 
-    const target = e.target;
-    if (!(target instanceof Node)) return;
-    if (this.isWithin(target, this._composerRoot)) return;
-    if (this._overlayRoot && this.isWithin(target, this._overlayRoot)) return;
+    if (this.eventHits(e, this._composerRoot)) return;
+    if (this._overlayRoot && this.eventHits(e, this._overlayRoot)) return;
 
     this._actor.cancel();
   }
@@ -161,10 +159,23 @@ export class TriggerDetectionController {
   // Helpers
   // ============================================
 
-  /** Composed events from inside the composer's shadow retarget to its host. */
   private isComposerEvent(e: Event): boolean {
+    return this.eventHits(e, this._composerRoot);
+  }
+
+  /**
+   * Composed events from inside a shadow root retarget to the host, but the
+   * path is the portable answer — `target` alone depends on retargeting the
+   * DOM implementation may not do, and `contains` never crosses a shadow
+   * boundary.
+   */
+  private eventHits(e: Event, root: HTMLElement): boolean {
+    const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
+    if (path.length > 0) {
+      return path.some(node => node === root);
+    }
     const target = e.target;
-    return target instanceof Node && this.isWithin(target, this._composerRoot);
+    return target instanceof Node && this.isWithin(target, root);
   }
 
   private isWithin(target: Node, root: HTMLElement): boolean {

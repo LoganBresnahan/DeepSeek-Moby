@@ -69,7 +69,7 @@ describe('keydown arbitration', () => {
     onSend = vi.fn();
     inputArea.onSend(onSend);
 
-    const host = createComposerHost(inputArea, vi.fn());
+    const host = createComposerHost(inputArea, { attachFile: vi.fn(), runCommand: vi.fn() });
     overlay = new ComposerAutocompleteActor(manager, overlayElement, vscode, host);
     overlay.registerProvider(emojiProvider);
     overlay.registerProvider(multiProvider);
