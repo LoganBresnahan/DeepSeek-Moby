@@ -791,6 +791,66 @@ Two consequences to watch for, not just the token saving:
 
 ---
 
+## M43. Composer autocomplete — typed invocation (ADR 0015) (P0)
+
+**Why this matters:** `/` commands, `@` files and `:` emoji in the composer. Phases 1–5 have shipped and the automated coverage is unusually deep for a webview feature — 133 unit tests plus 37 harness specs driving the built bundle in real Chromium, including layout geometry. So this entry deliberately does **not** re-walk what those cover. What is left is the residue no tier can reach: a real IME, real fonts, the real VS Code sidebar's proportions, and cross-talk with the files popup against a real workspace.
+
+Two of these matter more than the rest. **S1 (IME)** is the one with a known revisit trigger attached in ADR 0015, and **S5 (files-popup cross-talk)** is the one the design flagged as risky from the start because both surfaces share the `files.searchResults` channel and it carries no query token.
+
+**Setup:** any workspace with a few source files. Open the Moby sidebar. For S1 you need a CJK input method installed (macOS Japanese/Pinyin, Windows IME, or ibus/fcitx on Linux).
+
+**S0. It exists and behaves.** Sanity pass before the rest — type `:smi`, `/exp`, `@` in turn and confirm each opens an overlay. If any does not, stop; the rest of this entry is moot.
+
+**S1. Real IME composition (P0 — has a revisit trigger).**
+1. Switch to a CJK input method. Click into the composer and type a word that requires composition (e.g. Japanese `にほんご`, or Pinyin `nihao` → 你好).
+2. **Pass:** the候補/candidate window behaves normally, committed text lands intact, and the autocomplete overlay **never appears mid-composition**. **Fail:** the overlay opens over the IME candidate list, Enter gets stolen from the IME, or committed text is mangled/duplicated.
+3. Now compose a word *immediately after* a `:` (i.e. `:` then start composing). The overlay must stay shut while composing.
+4. Type `:smi` with the IME active but not composing → the overlay should open normally.
+5. **If anything here fails**, ADR 0015 names the likely fix: the composition guard needs to extend to `selectionchange` handling, not just `input`. Record what you saw before changing code.
+
+**S2. Emoji font rendering.**
+1. Type `:smi` and look at the list. Each row shows the emoji as its own icon.
+2. **Pass:** glyphs render as emoji, not tofu boxes (□) or monochrome outlines. Check a few categories — `:rocket:`, `:fire:`, `:+1:`, `:flag` — since coverage varies by platform font.
+3. Accept one and confirm it renders the same in the composer *and* in the sent message bubble.
+4. Note the platform if anything renders as tofu; the dataset is GitHub's, so a gap is a font issue, not a data issue.
+
+**S3. Positioning feel in the real sidebar.**
+1. With the sidebar at its normal width, open the overlay. It should be a full-width bar sitting **above** the composer, flush with it.
+2. Drag the sidebar **narrow** (~250px) and reopen — the overlay tracks the width, and long file paths ellipsize instead of wrapping.
+3. Drag the Moby panel **short** (few hundred px tall) and reopen. The overlay must stay fully on screen — it caps its height and, if there is genuinely no room above, **flips below** the composer. **Fail:** any part renders off-screen or overlaps the composer. (This is the bug the harness tier caught at `y = -231`; the fix needs confirming at real sidebar proportions.)
+4. Type enough to make the textarea auto-grow to several lines while the overlay is open. The overlay must stay glued to the composer as it grows, not drift or overlap.
+5. Scroll the transcript while the overlay is open — it should stay put.
+
+**S4. Attach round trip against a real workspace.**
+1. Type `@` plus part of a real filename. Results should be real workspace paths.
+2. Accept one. **Pass:** the trigger text disappears and a chip appears in the `Context:` row naming the file. (The 2026-08-05 dogfooding bug was that no chip appeared — the attach worked but was invisible.)
+3. Send a message asking about that file's contents. The model should answer from it — proving the chip is not merely cosmetic.
+4. Remove the chip with `×`, then ask again in a new turn. The model should no longer have the file. **Fail:** it still does, meaning removal did not reach the extension.
+5. Attach a file whose name contains spaces. Note: the *query* cannot contain a space (whitespace ends the trigger), so search by the first token. Confirm the file still attaches correctly.
+
+**S5. Files-popup cross-talk (P0 — the flagged risk).**
+1. Open the files popup (paperclip/context button) and type a search there. Leave it open.
+2. Without closing it, click into the composer and type `@` plus a *different* query.
+3. **Pass:** each surface shows its own results. The popup's list must not be replaced by the composer's matches, and the overlay must not show the popup's. **Fail:** either list is populated by the other's search.
+4. Reverse the order — start an `@` query, then search in the popup — and confirm again.
+5. Attach a file from the popup and one via `@` in the same turn. Both chips appear in the `Context:` row; both files reach the model.
+
+**S6. Command invocation parity.**
+1. `/` and pick **Export Logs** → the same thing happens as clicking it in the commands popup.
+2. `/system` → **System Prompt** opens the system-prompt modal (this one routes to a webview-local modal, not the extension — the path most likely to break silently).
+3. Same for **System Rules** and **Account Stats**.
+4. Open the commands popup and confirm it still lists exactly what `/` lists — both read one catalog, so a divergence means the shared source was bypassed.
+
+**S7. The composer is unharmed (regression).**
+1. With no overlay open, Enter sends. Shift+Enter makes a newline. Escape does whatever it did before.
+2. Force-expand the textarea with the ▴ toggle, then type `:smi`. The overlay opens and the textarea **stays expanded** (M10 territory — the two features share the composer).
+3. Paste text containing `:smile` and `@path` → **no overlay opens**. A further keystroke may open one; the paste alone must not.
+4. Type a message with a colon in prose ("note: this is fine") and send it. No overlay, no interference.
+
+**Pass criteria:** IME input is untouched by the overlay; the overlay is always fully on screen and glued to the composer; `@` attachments are visible as chips and actually reach the model; the two file surfaces never populate each other; and the composer's own keyboard behaviour is unchanged whenever the overlay is closed.
+
+---
+
 ## Removing items from this backlog
 
 When a scenario has been verified in a dev host:

@@ -61,7 +61,7 @@ Eleven slices, effort-ranked and dependency-ordered. Only two are hard-reasoning
 | 8 | ~~`unit-test-matrix`~~ **DONE 2026-08-04/05** — written alongside each slice rather than deferred: 133 tests over 7 files (boundary matrix, ranking, stale discard, dispatch per action kind, chip round trip, end-to-end composition) | medium | mechanical | opus | — | low | 1, 2, 5, 6, 7 |
 | 9 | ~~`bundle-size-guard`~~ **MEASURED 2026-08-04** — `dist/media/chat.js` 937,990 → 1,018,350 bytes, **+78.5KB** for all of phase 3 (dataset is the bulk). Inside the predicted ~60–80KB, so no trim | low | mechanical | opus | — | low | 5 |
 | 10 | ~~`harness-e2e-interplay`~~ **DONE 2026-08-05** — [composer-autocomplete.spec.ts](../../tests/e2e/composer-autocomplete.spec.ts), 37 specs in the `/shipshape` harness tier (45 → 82) | medium | moderate | opus | — | medium | 1–7 |
-| 11 | `manual-backlog-entries` — IME/CJK, positioning feel, emoji fonts, M10 force-expanded interplay | low | mechanical | opus | — | low | 2, 4, 5 |
+| 11 | ~~`manual-backlog-entries`~~ **DONE 2026-08-05** — [M43](manual-test-backlog.md#m43-composer-autocomplete--typed-invocation-adr-0015-p0), S0–S7 | low | mechanical | opus | — | low | 2, 4, 5 |
 
 **Phases** (batched by model — one Fable batch, minimal model switches):
 
@@ -81,7 +81,9 @@ Eleven slices, effort-ranked and dependency-ordered. Only two are hard-reasoning
   - Recorded as a limitation rather than fixed: **queries are single-token** — whitespace ends a span, so `/export logs` is not expressible. Pinned by AC5.5 and added to ADR 0015's revisit triggers.
   - Slice 8 was pre-paid: tests were written alongside each slice, 133 unit tests over 7 files.
   - Gates: typecheck, suites green **twice** (3,407), harness tier 82/82, webpack clean.
-- **Phase 5 (opus): docs on landing** — slice 11, written last so entries describe shipped behavior; the IME entry feeds ADR 0015's revisit trigger. Final `/shipshape` covers docs currency.
+- **Phase 5 (opus): docs on landing — LANDED 2026-08-05.** [M43](manual-test-backlog.md#m43-composer-autocomplete--typed-invocation-adr-0015-p0) covers only what no tier can reach — real IME (S1, carries ADR 0015's revisit trigger), emoji fonts (S2), sidebar proportions incl. the flip-below fix (S3), the attach round trip against a real workspace (S4), files-popup cross-talk on the shared channel (S5, the flagged design risk), command parity (S6), and composer regressions incl. M10 force-expand (S7). It deliberately does *not* re-walk what the 133 unit tests and 37 harness specs already pin.
+
+**All five phases are complete. The feature is code-complete and gated; what remains is the dev-host walk of M43.**
 
 **Critical path:** `autocomplete-actor-core → trigger-detection → emoji-provider → harness-e2e-interplay`.
 
