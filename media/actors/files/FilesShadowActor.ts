@@ -76,6 +76,16 @@ export class FilesShadowActor extends ModalShadowActor {
         'files.content': (value: unknown) => {
           const data = value as FileData & { _ts?: number };
           this.handleFileContent(data);
+        },
+        // The composer's context chips can remove a file too; this actor owns
+        // the selection, so the removal has to come back here to reach the
+        // extension.
+        'files.removeSelected': (value: unknown) => {
+          const path = (value as { path?: string } | null)?.path;
+          if (path && this._selectedFiles.delete(path)) {
+            this.updateSelectedFilesList();
+            this.updateOpenFilesCheckboxes();
+          }
         }
       },
       additionalStyles: filesShadowStyles,

@@ -26,6 +26,26 @@ export function deepEqual(a: unknown, b: unknown): boolean {
     return a.toString() === b.toString();
   }
 
+  // Handle Map / Set. Without these both sides look like `{}` to the
+  // plain-object branch, so any two Maps compare equal and a state change
+  // carrying one is never detected. Keys match by SameValueZero (what Map
+  // itself uses); values compare deeply.
+  if (a instanceof Map || b instanceof Map) {
+    if (!(a instanceof Map) || !(b instanceof Map) || a.size !== b.size) return false;
+    for (const [key, value] of a) {
+      if (!b.has(key) || !deepEqual(value, b.get(key))) return false;
+    }
+    return true;
+  }
+
+  if (a instanceof Set || b instanceof Set) {
+    if (!(a instanceof Set) || !(b instanceof Set) || a.size !== b.size) return false;
+    for (const value of a) {
+      if (!b.has(value)) return false;
+    }
+    return true;
+  }
+
   // Handle arrays
   if (Array.isArray(a) && Array.isArray(b)) {
     if (a.length !== b.length) return false;

@@ -19,6 +19,16 @@ export function deepClone<T>(value: T): T {
     return new RegExp(value.source, value.flags) as T;
   }
 
+  // Handle Map / Set — without these they fall through to the plain-object
+  // branch, where Object.keys() is empty and the clone comes out as `{}`.
+  if (value instanceof Map) {
+    return new Map(Array.from(value, ([k, v]) => [deepClone(k), deepClone(v)])) as T;
+  }
+
+  if (value instanceof Set) {
+    return new Set(Array.from(value, v => deepClone(v))) as T;
+  }
+
   // Handle Array
   if (Array.isArray(value)) {
     return value.map(item => deepClone(item)) as T;

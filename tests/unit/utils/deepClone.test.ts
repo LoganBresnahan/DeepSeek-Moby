@@ -137,4 +137,48 @@ describe('deepClone', () => {
       expect(cloned.date).not.toBe(complex.date);
     });
   });
+
+  describe('Map and Set', () => {
+    // Without explicit handling these fall through to the plain-object branch,
+    // where Object.keys() is empty — every Map cloned to `{}`, which silently
+    // emptied any Map published through EventStateManager.
+    it('clones a Map by value', () => {
+      const original = new Map([['a', 1], ['b', 2]]);
+      const cloned = deepClone(original);
+
+      expect(cloned).toBeInstanceOf(Map);
+      expect(cloned).not.toBe(original);
+      expect(cloned.size).toBe(2);
+      expect(cloned.get('a')).toBe(1);
+      expect([...cloned.keys()]).toEqual(['a', 'b']);
+    });
+
+    it('deep-clones Map values', () => {
+      const nested = { list: [1, 2] };
+      const cloned = deepClone(new Map([['k', nested]]));
+
+      expect(cloned.get('k')).toEqual(nested);
+      expect(cloned.get('k')).not.toBe(nested);
+    });
+
+    it('clones a Set by value', () => {
+      const original = new Set(['a', 'b']);
+      const cloned = deepClone(original);
+
+      expect(cloned).toBeInstanceOf(Set);
+      expect(cloned).not.toBe(original);
+      expect([...cloned]).toEqual(['a', 'b']);
+    });
+
+    it('clones Maps nested inside plain objects', () => {
+      const cloned = deepClone({ files: new Map([['src/a.ts', 'body']]) });
+
+      expect(cloned.files).toBeInstanceOf(Map);
+      expect(cloned.files.get('src/a.ts')).toBe('body');
+    });
+
+    it('preserves an empty Map as a Map', () => {
+      expect(deepClone(new Map())).toBeInstanceOf(Map);
+    });
+  });
 });

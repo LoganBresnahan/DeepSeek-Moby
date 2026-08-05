@@ -109,7 +109,11 @@ export class InputAreaShadowActor extends ShadowActor {
         'input.attachments': () => [...this._attachments]
       },
       subscriptions: {
-        'streaming.active': (value: unknown) => this.handleStreamingChange(value as boolean)
+        'streaming.active': (value: unknown) => this.handleStreamingChange(value as boolean),
+        // Context files are owned by FilesShadowActor; the composer renders
+        // whatever it says is selected, whichever door added them (the files
+        // popup or `@` autocomplete).
+        'files.selected': (value: unknown) => this.updateFileChips(value as Map<string, string>)
       }
     });
 
@@ -160,12 +164,15 @@ export class InputAreaShadowActor extends ShadowActor {
       this.removeAttachment(index);
     });
 
-    // File chip remove
+    // File chip remove. Optimistic locally, but the request goes to the owner
+    // (FilesShadowActor) so the extension's copy drops it too — removing only
+    // our own copy would leave the file in the model's context.
     this.delegate('click', '.file-chip-remove', (_, el) => {
       const path = el.closest('.file-chip')?.getAttribute('data-path');
       if (path) {
         this._selectedFiles.delete(path);
         this.renderFileChips();
+        this.manager.publishDirect('files.removeSelected', { path, _ts: Date.now() }, this.actorId);
       }
     });
   }

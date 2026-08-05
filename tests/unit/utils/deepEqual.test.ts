@@ -146,4 +146,45 @@ describe('deepEqual', () => {
       expect(deepEqual('a', ['a'])).toBe(false);
     });
   });
+
+  describe('Map and Set', () => {
+    // Both sides used to look like `{}` to the plain-object branch, so ANY two
+    // Maps compared equal — a state change carrying one was never detected and
+    // subscribers were never notified.
+    it('distinguishes Maps by contents', () => {
+      expect(deepEqual(new Map([['a', 1]]), new Map([['a', 1]]))).toBe(true);
+      expect(deepEqual(new Map([['a', 1]]), new Map([['a', 2]]))).toBe(false);
+      expect(deepEqual(new Map([['a', 1]]), new Map([['b', 1]]))).toBe(false);
+    });
+
+    it('distinguishes Maps by size', () => {
+      expect(deepEqual(new Map([['a', 1]]), new Map([['a', 1], ['b', 2]]))).toBe(false);
+      expect(deepEqual(new Map(), new Map([['a', 1]]))).toBe(false);
+      expect(deepEqual(new Map(), new Map())).toBe(true);
+    });
+
+    it('compares Map values deeply', () => {
+      expect(deepEqual(new Map([['k', { a: [1] }]]), new Map([['k', { a: [1] }]]))).toBe(true);
+      expect(deepEqual(new Map([['k', { a: [1] }]]), new Map([['k', { a: [2] }]]))).toBe(false);
+    });
+
+    it('never equates a Map with a plain object', () => {
+      expect(deepEqual(new Map([['a', 1]]), { a: 1 })).toBe(false);
+      expect(deepEqual({ a: 1 }, new Map([['a', 1]]))).toBe(false);
+      expect(deepEqual(new Map(), {})).toBe(false);
+    });
+
+    it('distinguishes Sets by contents', () => {
+      expect(deepEqual(new Set([1, 2]), new Set([1, 2]))).toBe(true);
+      expect(deepEqual(new Set([1, 2]), new Set([1, 3]))).toBe(false);
+      expect(deepEqual(new Set([1]), new Set([1, 2]))).toBe(false);
+      expect(deepEqual(new Set([1]), [1])).toBe(false);
+    });
+
+    it('detects a change to a Map nested in state', () => {
+      const before = { files: new Map([['a.ts', 'x']]) };
+      const after = { files: new Map([['a.ts', 'x'], ['b.ts', 'y']]) };
+      expect(deepEqual(before, after)).toBe(false);
+    });
+  });
 });
