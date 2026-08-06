@@ -13,6 +13,7 @@ import { TokenService } from './services/tokenService';
 import { LspAvailability } from './services/lspAvailability';
 import { DrawingServer } from './providers/drawingServer';
 import { registerCustomModels } from './models/registry';
+import { loadMcpServers } from './mcp/config';
 import { SubagentRouter } from './subagents/router';
 import { isImageDescribeAvailable } from './subagents/availability';
 import * as crypto from 'crypto';
@@ -43,11 +44,35 @@ export async function activate(context: vscode.ExtensionContext) {
     for (const err of errors) logger.warn(`[Registry] Custom model rejected — ${err}`);
   };
   reloadCustomModels();
+
+  // MCP servers are read from the GLOBAL scope only — a workspace's
+  // .vscode/settings.json must never register a command we spawn without
+  // approval. Phase 1 only reports what it sees; McpServerManager (Phase 2)
+  // is what will act on it.
+  const reportMcpServers = () => {
+    const { servers, errors, ignoredNonGlobalScope } = loadMcpServers();
+    if (servers.length > 0) {
+      logger.info(`[MCP] ${servers.length} server(s) configured: ${servers.map(s => s.name).join(', ')}`);
+    }
+    for (const err of errors) logger.warn(`[MCP] Server entry rejected — ${err}`);
+    if (ignoredNonGlobalScope) {
+      logger.warn(
+        '[MCP] Ignoring moby.mcpServers entries declared in workspace settings — ' +
+        'MCP servers are read from user settings only, because a configured command ' +
+        'runs without per-call approval.'
+      );
+    }
+  };
+  reportMcpServers();
+
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('moby.customModels')) {
         reloadCustomModels();
         chatProvider?.sendModelList();
+      }
+      if (e.affectsConfiguration('moby.mcpServers')) {
+        reportMcpServers();
       }
       // Phase 4 — re-broadcast the model list when modelOptions changes
       // (per-model reasoningEffort overrides) so the selector's active

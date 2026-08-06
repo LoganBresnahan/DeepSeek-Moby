@@ -126,14 +126,14 @@ One-line change per loop, closes the tracker's known gap, and matters exactly wh
 
 12 slices, 5 phases. Effort/hardness/model/verify assessed per slice against the code, not guessed. Legend: ⚠ = needs an adversarial verify pass after implementation.
 
-### Phase 1 — seams and pure modules (no MCP runtime yet) · opus batch
+### Phase 1 — seams and pure modules (no MCP runtime yet) · opus batch — **DONE 2026-08-06**
 
-- [ ] **build-tools-array-extraction** (low, mechanical) — lift the two byte-identical sites ([requestOrchestrator.ts:3525](../../src/providers/requestOrchestrator.ts#L3525), [:3935](../../src/providers/requestOrchestrator.ts#L3935)) into one `buildToolsArray()`; unit test pins array equality across both call paths. Lands first — unlocks the token-budget slice in the same sitting.
-- [ ] **token-budget-tools-term** (low, mechanical) — add `estimateTokens(JSON.stringify(tools))` to both in-loop soft stops. Wrinkle: `runToolLoop` builds its tools array *after* the budget check — hoist the `buildToolsArray()` call.
-- [ ] **mcp-servers-config-contribution** (low, mechanical, ⚠) — package.json schema + global-scope-only read + collect-errors validation. The verify pass has ONE job: assert `inspect().globalValue` is used and workspace-scope values are ignored with a warning — the merged-`get()` twin compiles, passes every global-config test, and silently reopens the workspace-config attack.
-- [ ] **tool-namespacing-and-name-validation** (low, mechanical) — standalone pure-string module: `mcp__<server>__<tool>` translation + 64-char/`^[a-zA-Z0-9_-]+$` validator, skip-never-truncate, fixture tests. Built here (not inside the manager) to break the assessed manager↔namespacing dependency cycle; the manager *consumes* this module in Phase 2.
+- [x] **build-tools-array-extraction** — [src/tools/buildToolsArray.ts](../../src/tools/buildToolsArray.ts). Both orchestrator sites now call it; the gating (`shellProtocol`, `lspTools` × availability, web-search auto) moved into the builder as explicit inputs, so the two loops read `caps` and `wsState` and nothing else. `extraTools` is the MCP merge point, appended last. Orchestrator's tool-definition imports collapsed to just `executeToolCall`.
+- [x] **token-budget-tools-term** — both soft stops now price `estimateTokens(JSON.stringify(tools))`. The hoist the assessment predicted was needed in **both** loops, not just `runToolLoop`: the streaming loop also built its array after the check. Tools are now built first in both, which is also what makes the term available.
+- [x] **mcp-servers-config-contribution** — [src/mcp/config.ts](../../src/mcp/config.ts) + `moby.mcpServers` in package.json (`scope: "application"`, so the settings UI won't even offer a workspace value). `readMcpServersSetting()` uses `inspect().globalValue`; workspace/folder values are detected only to emit one warning naming why they're ignored. Wired into activation as a report-only load (Phase 2's manager is what will act on it).
+- [x] **tool-namespacing-and-name-validation** — [src/mcp/toolNaming.ts](../../src/mcp/toolNaming.ts). `parseToolName` splits on the **first** `__` after the prefix, which is unambiguous because server names forbid underscores — so a tool whose own name contains `__` round-trips. `inputSchema` → `parameters` is a straight pass-through.
 
-`/shipshape` at the boundary.
+**Gates:** typecheck clean; `test:all` green twice (3,446 — 39 new); webpack clean. 39 unit tests across the three modules. No verify pass needed beyond the ⚠ config one, which is pinned by a test asserting the *mechanism* (`inspect` called, `get` never called), not just the outcome — the merged-`get()` twin would pass an outcome-only test.
 
 ### Phase 2 — MCP core: manager + request-path dispatch · fable batch
 

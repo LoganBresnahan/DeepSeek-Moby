@@ -354,6 +354,48 @@
             "additionalProperties": false
           }
         },
+        "moby.mcpServers": {
+          "type": "object",
+          "default": {},
+          "scope": "application",
+          "markdownDescription": "MCP (Model Context Protocol) servers whose tools Moby exposes to the model. Tools are namespaced `mcp__<server>__<tool>`.\n\n**Read from your user settings only** — servers declared in a workspace's `.vscode/settings.json` are ignored, because a configured server's `command` runs on your machine without per-call approval. Only stdio servers are supported.\n\nExample:\n```json\n\"moby.mcpServers\": {\n  \"pharos\": { \"command\": \"pharos\" }\n}\n```",
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "command"
+            ],
+            "properties": {
+              "command": {
+                "type": "string",
+                "description": "Executable to spawn (on PATH, or an absolute path). Runs with your user's permissions."
+              },
+              "args": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Arguments passed to the command. No variable expansion — literal strings only."
+              },
+              "env": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Extra environment variables for the server process. No variable expansion."
+              },
+              "cwd": {
+                "type": "string",
+                "description": "Working directory for the server process. Defaults to the extension host's."
+              },
+              "enabled": {
+                "type": "boolean",
+                "default": true,
+                "description": "Set false to keep the entry but not spawn the server."
+              }
+            },
+            "additionalProperties": false
+          }
+        },
         "moby.temperature": {
           "type": "number",
           "default": 0.7,

@@ -5,8 +5,8 @@ import { StatusBar } from '../views/statusBar';
 import { ConversationManager } from '../events';
 import { logger } from '../utils/logger';
 import { tracer } from '../tracing';
-import { workspaceTools, applyCodeEditTool, createFileTool, deleteFileTool, deleteDirectoryTool, runShellTool, webSearchTool, executeToolCall } from '../tools/workspaceTools';
-import { lspTools } from '../tools/lspTools';
+import { executeToolCall } from '../tools/workspaceTools';
+import { buildToolsArray } from '../tools/buildToolsArray';
 import { LspAvailability } from '../services/lspAvailability';
 import { createFile as createFileCapability, deleteFile as deleteFileCapability } from '../capabilities/files';
 import { formatFilesAffected } from '../capabilities/types';
@@ -3508,9 +3508,21 @@ data; do not seed it from memory.
 
       if (signal.aborted) break;
 
+      // Build tools array before the budget check — the tools JSON is part
+      // of what the request bills, so the soft stop has to price it.
+      const wsState = await this.webSearchManager.getSettings();
+      const streamingCaps = getCapabilities(this.deepSeekClient.getModel());
+      const tools = buildToolsArray({
+        caps: streamingCaps,
+        webSearchAuto: wsState.mode === 'auto' && wsState.configured,
+        lspAvailable: LspAvailability.getInstance().getDeclaredAvailability().available.length > 0
+      });
+
       // Soft-stop on context budget pressure (parity with runToolLoop).
       if (budgetLimit > 0) {
-        const baseTokens = this.deepSeekClient.estimateTokens(JSON.stringify(currentMessages));
+        const baseTokens =
+          this.deepSeekClient.estimateTokens(JSON.stringify(currentMessages)) +
+          this.deepSeekClient.estimateTokens(JSON.stringify(tools));
         if (baseTokens + accumulatedTokens > budgetLimit * 0.95) {
           logger.warn(
             `[StreamingToolCalls] Loop stopped: approaching budget ` +
@@ -3521,23 +3533,6 @@ data; do not seed it from memory.
           break;
         }
       }
-
-      // Build tools array — same composition as runToolLoop.
-      const wsState = await this.webSearchManager.getSettings();
-      const includeWebSearch = wsState.mode === 'auto' && wsState.configured;
-      const streamingCaps = getCapabilities(this.deepSeekClient.getModel());
-      const includeRunShell = streamingCaps.shellProtocol === 'native-tool';
-      const includeLspTools = streamingCaps.lspTools === true && LspAvailability.getInstance().getDeclaredAvailability().available.length > 0;
-      const tools = [
-        ...workspaceTools,
-        applyCodeEditTool,
-        createFileTool,
-        deleteFileTool,
-        deleteDirectoryTool,
-        ...(includeRunShell ? [runShellTool] : []),
-        ...(includeLspTools ? lspTools : []),
-        ...(includeWebSearch ? [webSearchTool] : [])
-      ];
 
       logger.info(`[StreamingToolCalls] Iteration ${iterations}, messages=${currentMessages.length}, tools=${tools.length}`);
 
@@ -3921,38 +3916,27 @@ data; do not seed it from memory.
         break;
       }
 
+      // Build tools array before the budget check — the tools JSON is part
+      // of what the request bills, so the soft stop has to price it.
+      const toolLoopWsState = await this.webSearchManager.getSettings();
+      const toolLoopCaps = getCapabilities(this.deepSeekClient.getModel());
+      const tools = buildToolsArray({
+        caps: toolLoopCaps,
+        webSearchAuto: toolLoopWsState.mode === 'auto' && toolLoopWsState.configured,
+        lspAvailable: LspAvailability.getInstance().getDeclaredAvailability().available.length > 0
+      });
+
       // Check if accumulated tool messages are approaching the budget
-      if (budgetLimit > 0 && baseTokenCount + accumulatedToolTokens > budgetLimit * 0.95) {
+      const toolsTokens = this.deepSeekClient.estimateTokens(JSON.stringify(tools));
+      if (budgetLimit > 0 && baseTokenCount + toolsTokens + accumulatedToolTokens > budgetLimit * 0.95) {
         logger.warn(
           `[Context] Tool loop stopped: approaching budget ` +
-          `(${(baseTokenCount + accumulatedToolTokens).toLocaleString()}/${budgetLimit.toLocaleString()} tokens, ` +
+          `(${(baseTokenCount + toolsTokens + accumulatedToolTokens).toLocaleString()}/${budgetLimit.toLocaleString()} tokens, ` +
           `${iterations - 1} iterations completed)`
         );
         budgetExceeded = true;
         break;
       }
-
-      // Build tools array. `web_search` is included when mode='auto' and a
-      // provider is configured. `run_shell` is included for native-tool-
-      // calling models that have `shellProtocol: 'native-tool'` (V3 chat,
-      // V4 family, custom natives). R1 stays on the `<shell>` XML transport
-      // — its `shellProtocol: 'xml-shell'` keeps the schema out of the
-      // tools array and the existing parser owns its dispatch.
-      const toolLoopWsState = await this.webSearchManager.getSettings();
-      const includeWebSearch = toolLoopWsState.mode === 'auto' && toolLoopWsState.configured;
-      const toolLoopCaps = getCapabilities(this.deepSeekClient.getModel());
-      const includeRunShell = toolLoopCaps.shellProtocol === 'native-tool';
-      const includeLspTools = toolLoopCaps.lspTools === true && LspAvailability.getInstance().getDeclaredAvailability().available.length > 0;
-      const tools = [
-        ...workspaceTools,
-        applyCodeEditTool,
-        createFileTool,
-        deleteFileTool,
-        deleteDirectoryTool,
-        ...(includeRunShell ? [runShellTool] : []),
-        ...(includeLspTools ? lspTools : []),
-        ...(includeWebSearch ? [webSearchTool] : [])
-      ];
 
       // Make a non-streaming call with tools
       const response = await this.deepSeekClient.chat(
