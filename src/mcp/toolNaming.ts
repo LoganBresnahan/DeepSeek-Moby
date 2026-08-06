@@ -10,7 +10,7 @@
  * construction.
  */
 
-import { Tool, ToolParamSchema } from '../deepseekClient';
+import { Tool } from '../deepseekClient';
 
 export const MCP_TOOL_PREFIX = 'mcp__';
 
@@ -89,10 +89,21 @@ export function namespaceTool(serverName: string, tool: McpToolShape): Namespace
   }
 
   // MCP `inputSchema` and our `parameters` are the same JSON-Schema object
-  // shape; ToolParamSchema is deliberately loose, so this passes through.
-  const schema = tool.inputSchema as
-    | { properties?: Record<string, ToolParamSchema>; required?: string[] }
-    | undefined;
+  // shape. The WHOLE schema passes through — sibling keys like `$defs` are
+  // load-bearing (FastMCP/pydantic servers emit `$ref`s into them; dropping
+  // them would send the model unresolvable references and break every call
+  // to the tool). We only pin `type`/`properties` and drop a malformed
+  // `required`, since those three are the keys our own code relies on.
+  const raw = tool.inputSchema;
+  const schema: Record<string, unknown> =
+    typeof raw === 'object' && raw !== null && !Array.isArray(raw) ? { ...raw } : {};
+  schema.type = 'object';
+  if (typeof schema.properties !== 'object' || schema.properties === null || Array.isArray(schema.properties)) {
+    schema.properties = {};
+  }
+  if (schema.required !== undefined && !Array.isArray(schema.required)) {
+    delete schema.required;
+  }
 
   return {
     ok: true,
@@ -101,11 +112,7 @@ export function namespaceTool(serverName: string, tool: McpToolShape): Namespace
       function: {
         name,
         description: tool.description ?? '',
-        parameters: {
-          type: 'object',
-          properties: schema?.properties ?? {},
-          ...(Array.isArray(schema?.required) ? { required: schema.required } : {})
-        }
+        parameters: schema as Tool['function']['parameters']
       }
     }
   };

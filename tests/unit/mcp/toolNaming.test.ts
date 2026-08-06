@@ -81,6 +81,43 @@ describe('namespaceTool', () => {
     expect(result.tool.type).toBe('function');
   });
 
+  it('carries sibling schema keys like $defs through to the wire', () => {
+    // FastMCP/pydantic servers emit $refs whose $defs targets are SIBLINGS
+    // of properties. Rebuilding parameters from properties/required alone
+    // ships the model an unresolvable $ref — every call to the tool breaks.
+    const result = namespaceTool('pharos', {
+      name: 'configure',
+      inputSchema: {
+        type: 'object',
+        properties: { opts: { $ref: '#/$defs/Opts' } },
+        required: ['opts'],
+        $defs: { Opts: { type: 'object', properties: { depth: { type: 'number' } } } },
+        additionalProperties: false
+      }
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const params = result.tool.function.parameters as Record<string, unknown>;
+    expect(params.$defs).toEqual({
+      Opts: { type: 'object', properties: { depth: { type: 'number' } } }
+    });
+    expect(params.additionalProperties).toBe(false);
+    expect(params.properties).toEqual({ opts: { $ref: '#/$defs/Opts' } });
+    expect(params.required).toEqual(['opts']);
+  });
+
+  it('pins type to object and drops a malformed required', () => {
+    const result = namespaceTool('pharos', {
+      name: 'odd',
+      inputSchema: { type: 'string', required: 'not-an-array', properties: null }
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.tool.function.parameters.type).toBe('object');
+    expect(result.tool.function.parameters.properties).toEqual({});
+    expect('required' in result.tool.function.parameters).toBe(false);
+  });
+
   it('tolerates a missing description and a missing/empty schema', () => {
     const result = namespaceTool('pharos', { name: 'ping' });
     expect(result.ok).toBe(true);

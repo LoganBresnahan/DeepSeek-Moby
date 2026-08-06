@@ -14,6 +14,7 @@ import { LspAvailability } from './services/lspAvailability';
 import { DrawingServer } from './providers/drawingServer';
 import { registerCustomModels } from './models/registry';
 import { loadMcpServers } from './mcp/config';
+import { McpServerManager } from './mcp/McpServerManager';
 import { SubagentRouter } from './subagents/router';
 import { isImageDescribeAvailable } from './subagents/availability';
 import * as crypto from 'crypto';
@@ -47,8 +48,8 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // MCP servers are read from the GLOBAL scope only — a workspace's
   // .vscode/settings.json must never register a command we spawn without
-  // approval. Phase 1 only reports what it sees; McpServerManager (Phase 2)
-  // is what will act on it.
+  // approval. This reporter logs config-level problems; McpServerManager
+  // owns the lifecycle.
   const reportMcpServers = () => {
     const { servers, errors, ignoredNonGlobalScope } = loadMcpServers();
     if (servers.length > 0) {
@@ -73,6 +74,9 @@ export async function activate(context: vscode.ExtensionContext) {
       }
       if (e.affectsConfiguration('moby.mcpServers')) {
         reportMcpServers();
+        // Live reconciliation (stop removed / start added / restart changed)
+        // is Phase 3 — until then a change applies on the next window reload.
+        logger.info('[MCP] moby.mcpServers changed — reload the window to apply');
       }
       // Phase 4 — re-broadcast the model list when modelOptions changes
       // (per-model reasoningEffort overrides) so the selector's active
@@ -130,6 +134,14 @@ export async function activate(context: vscode.ExtensionContext) {
   const lspAvailability = LspAvailability.getInstance();
   context.subscriptions.push(...lspAvailability.registerInvalidators());
   lspAvailability.warmUp();
+
+  // Spawn configured MCP servers after a warmup delay (config is re-read at
+  // fire time). Disposal MUST ride context.subscriptions — deactivate()
+  // never disposes chatProvider, so tying child processes to it would leak
+  // them on every window close.
+  const mcpServerManager = McpServerManager.getInstance();
+  context.subscriptions.push({ dispose: () => mcpServerManager.dispose() });
+  mcpServerManager.warmUp(context.extension.packageJSON.version);
 
   // Initialize conversation manager (event sourcing) with encrypted DB
   const dbEncryptionKey = await getOrCreateEncryptionKey(context);

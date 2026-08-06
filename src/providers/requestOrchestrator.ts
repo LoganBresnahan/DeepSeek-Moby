@@ -7,6 +7,8 @@ import { logger } from '../utils/logger';
 import { tracer } from '../tracing';
 import { executeToolCall } from '../tools/workspaceTools';
 import { buildToolsArray } from '../tools/buildToolsArray';
+import { McpServerManager } from '../mcp/McpServerManager';
+import { isMcpToolName } from '../mcp/toolNaming';
 import { LspAvailability } from '../services/lspAvailability';
 import { createFile as createFileCapability, deleteFile as deleteFileCapability } from '../capabilities/files';
 import { formatFilesAffected } from '../capabilities/types';
@@ -3037,10 +3039,19 @@ data; do not seed it from memory.
     let fileModified = false;
     let closesBatch = false;
 
-    // ── Initial result: web_search routes through WebSearchManager,
-    // everything else flows through workspaceTools.executeToolCall.
+    // ── Initial result: the mcp__ prefix routes to McpServerManager (which
+    // holds the abort signal + 30s timeout the SDK call needs), web_search
+    // routes through WebSearchManager, everything else flows through
+    // workspaceTools.executeToolCall. Prefix collision with native tools is
+    // impossible by construction — no native tool starts with mcp__.
     let result: string;
-    if (toolCall.function.name === 'web_search') {
+    if (isMcpToolName(toolCall.function.name)) {
+      result = await McpServerManager.getInstance().executeTool(
+        toolCall.function.name,
+        toolCall.function.arguments,
+        signal
+      );
+    } else if (toolCall.function.name === 'web_search') {
       try {
         const args = JSON.parse(toolCall.function.arguments);
         result = await this.webSearchManager.searchByQuery(args.query || '');
@@ -3515,7 +3526,8 @@ data; do not seed it from memory.
       const tools = buildToolsArray({
         caps: streamingCaps,
         webSearchAuto: wsState.mode === 'auto' && wsState.configured,
-        lspAvailable: LspAvailability.getInstance().getDeclaredAvailability().available.length > 0
+        lspAvailable: LspAvailability.getInstance().getDeclaredAvailability().available.length > 0,
+        extraTools: McpServerManager.getInstance().getToolsForRequest()
       });
 
       // Soft-stop on context budget pressure (parity with runToolLoop).
@@ -3923,7 +3935,8 @@ data; do not seed it from memory.
       const tools = buildToolsArray({
         caps: toolLoopCaps,
         webSearchAuto: toolLoopWsState.mode === 'auto' && toolLoopWsState.configured,
-        lspAvailable: LspAvailability.getInstance().getDeclaredAvailability().available.length > 0
+        lspAvailable: LspAvailability.getInstance().getDeclaredAvailability().available.length > 0,
+        extraTools: McpServerManager.getInstance().getToolsForRequest()
       });
 
       // Check if accumulated tool messages are approaching the budget

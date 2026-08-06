@@ -958,6 +958,7 @@
     "webpack-cli": "^5.1.4"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@signalapp/sqlcipher": "^3.1.0",
     "deepseek-moby-wasm": "file:packages/moby-wasm/pkg",
     "diff": "^8.0.3",

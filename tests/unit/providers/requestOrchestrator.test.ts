@@ -892,6 +892,66 @@ describe('RequestOrchestrator', () => {
     });
   });
 
+  // ── MCP prefix dispatch (docs/plans/mcp.md Phase 2) ──
+
+  describe('dispatchToolCall - mcp__ prefix routing', () => {
+    let executeTool: ReturnType<typeof vi.fn>;
+
+    beforeEach(async () => {
+      const { McpServerManager } = await import('../../../src/mcp/McpServerManager');
+      executeTool = vi.fn(async () => 'hover text from pharos');
+      (McpServerManager as any).instance = { executeTool };
+    });
+
+    afterEach(async () => {
+      const { McpServerManager } = await import('../../../src/mcp/McpServerManager');
+      (McpServerManager as any).instance = undefined;
+    });
+
+    it('routes mcp__ names to the manager with raw args and the abort signal', async () => {
+      const toolCall = {
+        id: 't1',
+        type: 'function',
+        function: { name: 'mcp__pharos__hover', arguments: '{"uri":"file:///a.ts"}' }
+      };
+      const signal = new AbortController().signal;
+      const dispatch = await (orchestrator as any).dispatchToolCall(toolCall, signal);
+
+      // Args go through as the raw JSON string — the manager owns parsing.
+      expect(executeTool).toHaveBeenCalledWith('mcp__pharos__hover', '{"uri":"file:///a.ts"}', signal);
+      expect(dispatch.result).toBe('hover text from pharos');
+      // Read-only MCP call: no file modification, no batch lifecycle.
+      expect(dispatch.fileModified).toBe(false);
+      expect(dispatch.closesBatch).toBe(false);
+    });
+
+    it('surfaces a manager Error: result as a failed call without native fallthrough', async () => {
+      executeTool.mockResolvedValueOnce('Error: MCP server "pharos" is not connected');
+      const toolCall = {
+        id: 't2',
+        type: 'function',
+        function: { name: 'mcp__pharos__hover', arguments: '{}' }
+      };
+      const dispatch = await (orchestrator as any).dispatchToolCall(
+        toolCall,
+        new AbortController().signal
+      );
+      expect(dispatch.result.startsWith('Error:')).toBe(true);
+    });
+
+    it('does not intercept native tool names', async () => {
+      mockWebSearch.searchByQuery = vi.fn(async () => 'SEARCH');
+      mockWebSearch.renderSearchLedger = vi.fn(() => '');
+      const toolCall = {
+        id: 't3',
+        type: 'function',
+        function: { name: 'web_search', arguments: '{"query":"q"}' }
+      };
+      await (orchestrator as any).dispatchToolCall(toolCall, new AbortController().signal);
+      expect(executeTool).not.toHaveBeenCalled();
+    });
+  });
+
   // ── Message Building ──
 
   describe('handleMessage - message building', () => {

@@ -60,6 +60,9 @@ export interface ToolFunction {
     type: 'object';
     properties: Record<string, ToolParamSchema>;
     required?: string[];
+    /** Any other JSON-Schema keys pass through to the wire untouched —
+     *  MCP servers legitimately send `$defs`, `additionalProperties`, etc. */
+    [key: string]: unknown;
   };
 }
 
