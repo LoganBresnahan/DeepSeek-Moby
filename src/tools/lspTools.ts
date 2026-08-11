@@ -173,13 +173,75 @@ export const findReferencesTool: Tool = {
   }
 };
 
+export const hoverTool: Tool = {
+  type: 'function',
+  function: {
+    name: 'hover',
+    description:
+      'Get the type signature and documentation for a symbol, given a position in a file. ' +
+      'Provide either `line` (1-indexed) or `symbol` (a name in the file). ' +
+      'This is what the editor shows on mouse-over: resolved types, generics, inferred return values, and doc comments. ' +
+      'Use it to learn a function\'s exact signature without reading its file, or to see what a type actually resolves to.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'Relative path to the file from the workspace root.'
+        },
+        line: {
+          type: 'string',
+          description: 'Line number anchoring the symbol (1-indexed). Stringified integer. Provide this OR `symbol`.'
+        },
+        symbol: {
+          type: 'string',
+          description: 'Symbol name to locate inside the file (alternative to `line`).'
+        }
+      },
+      required: ['path']
+    }
+  }
+};
+
+export const diagnosticsTool: Tool = {
+  type: 'function',
+  function: {
+    name: 'get_diagnostics',
+    description:
+      'Get current errors and warnings (compiler, type checker, linter) for one file or the whole workspace. ' +
+      'Omit `path` for every problem VS Code currently knows about; pass `path` to focus one file. ' +
+      'Use this after editing to check your change actually compiles, and before editing to see what is already broken. ' +
+      'Note: a file VS Code has not analyzed yet reports no diagnostics — that is not proof the file is clean.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'Relative path to a single file from the workspace root. Omit for the whole workspace.'
+        },
+        severity: {
+          type: 'string',
+          description: 'Lowest severity to include: "error", "warning" (default), "info", or "hint".'
+        },
+        maxResults: {
+          type: 'string',
+          description: 'Maximum number of diagnostics (default 20). Stringified integer.'
+        }
+      },
+      required: []
+    }
+  }
+};
+
 /** Bundle of LSP tools that get conditionally attached to the request. */
 export const lspTools: Tool[] = [
   outlineTool,
   getSymbolSourceTool,
   findSymbolTool,
   findDefinitionTool,
-  findReferencesTool
+  findReferencesTool,
+  hoverTool,
+  diagnosticsTool
 ];
 
 const DEFAULT_MAX_RESULTS = 20;
@@ -671,6 +733,143 @@ async function findReferences(
   return formatLocationsWithSnippets(items, docLines, 'References', truncated ? raw.length : null);
 }
 
+/** VS Code's Hover: `contents` is markdown strings, plain strings, or
+ *  `{language, value}` code blocks depending on the server. */
+interface HoverLike {
+  contents?: unknown;
+  range?: { start: { line: number; character: number } };
+}
+
+/** Flatten one hover content entry to text. */
+function hoverContentToText(entry: unknown): string {
+  if (typeof entry === 'string') return entry;
+  if (entry && typeof entry === 'object') {
+    const value = (entry as { value?: unknown }).value;
+    if (typeof value === 'string') return value;
+  }
+  return '';
+}
+
+async function hover(
+  workspacePath: string,
+  relPath: string,
+  line: string | undefined,
+  symbolName: string | undefined
+): Promise<string> {
+  const resolved = await resolvePosition(workspacePath, relPath, line, symbolName);
+  if ('error' in resolved) return `Error: ${resolved.error}`;
+
+  let raw: HoverLike[] | undefined;
+  try {
+    raw = await withLspTimeout(
+      vscode.commands.executeCommand<HoverLike[] | undefined>(
+        'vscode.executeHoverProvider',
+        resolved.uri,
+        new vscode.Position(resolved.line, resolved.character)
+      ),
+      LSP_TOOL_TIMEOUT_MS
+    );
+  } catch (e) {
+    if (e instanceof LspTimeoutError) return LSP_TIMEOUT_MESSAGE;
+    const msg = e instanceof Error ? e.message : String(e);
+    return `Error: LSP request failed: ${msg}`;
+  }
+
+  const texts: string[] = [];
+  for (const h of raw ?? []) {
+    const contents = Array.isArray(h?.contents) ? h.contents : [h?.contents];
+    for (const c of contents) {
+      const text = hoverContentToText(c).trim();
+      if (text) texts.push(text);
+    }
+  }
+
+  const langId = await getLanguageId(resolved.uri);
+  if (langId) {
+    LspAvailability.getInstance().reportToolResult(langId, texts.length > 0, resolved.uri.fsPath);
+  }
+
+  if (texts.length === 0) {
+    return `No hover information at ${relPath}:${resolved.line + 1}. The language server may not be installed for this file's language, or the position may not be on a symbol.`;
+  }
+
+  return `Hover at ${relPath}:${resolved.line + 1}\n\n${texts.join('\n\n')}`;
+}
+
+const SEVERITY_LABELS = ['Error', 'Warning', 'Info', 'Hint'];
+const SEVERITY_ORDER: Record<string, number> = { error: 0, warning: 1, info: 2, hint: 3 };
+
+/**
+ * Current problems from VS Code's diagnostic collection.
+ *
+ * Deliberately NOT an LSP round trip — `vscode.languages.getDiagnostics` reads
+ * the collection any extension may have published, so this works for linters
+ * and type checkers that expose no symbol provider, and needs no timeout.
+ *
+ * The honest caveat, surfaced in the tool description: diagnostics for a file
+ * VS Code has never analyzed are simply absent. We open the document first to
+ * prompt analysis, but a cold server may still not have published by the time
+ * we read, so "no diagnostics" is not proof of "no problems".
+ */
+async function getDiagnostics(
+  workspacePath: string,
+  relPath: string | undefined,
+  severity: string | undefined,
+  maxResults: string | undefined
+): Promise<string> {
+  const threshold = SEVERITY_ORDER[(severity ?? 'warning').toLowerCase()] ?? 1;
+
+  let entries: Array<[vscode.Uri, readonly vscode.Diagnostic[]]>;
+  if (relPath) {
+    const abs = resolveWorkspacePath(workspacePath, relPath);
+    if (!abs) return 'Error: Cannot read files outside the workspace';
+    const uri = vscode.Uri.file(abs);
+    try {
+      // Opening prompts the language server to analyze a file the user
+      // never touched; without it a closed file reports nothing.
+      await vscode.workspace.openTextDocument(uri);
+    } catch {
+      return `Error: Cannot open ${relPath}`;
+    }
+    entries = [[uri, vscode.languages.getDiagnostics(uri) ?? []]];
+  } else {
+    entries = (vscode.languages.getDiagnostics() ?? []) as Array<[vscode.Uri, readonly vscode.Diagnostic[]]>;
+  }
+
+  const rows: string[] = [];
+  let total = 0;
+  const limit = parseMaxResults(maxResults);
+  for (const [uri, diags] of entries) {
+    for (const d of diags ?? []) {
+      const sev = typeof d.severity === 'number' ? d.severity : 0;
+      if (sev > threshold) continue;
+      total++;
+      if (rows.length >= limit) continue;
+      const where = `${uri.fsPath}:${d.range.start.line + 1}:${d.range.start.character + 1}`;
+      const source = d.source ? ` [${d.source}]` : '';
+      const code = d.code !== undefined && d.code !== null
+        ? ` (${typeof d.code === 'object' ? String((d.code as { value?: unknown }).value ?? '') : String(d.code)})`
+        : '';
+      rows.push(`  ${SEVERITY_LABELS[sev] ?? 'Error'}${source}${code} ${where}\n    ${d.message}`);
+    }
+  }
+
+  const scope = relPath ? relPath : 'workspace';
+  if (total === 0) {
+    return `No diagnostics at or above "${severity ?? 'warning'}" for ${scope}. ` +
+      `Note this can also mean the file has not been analyzed yet.`;
+  }
+
+  const header = rows.length < total
+    ? `Diagnostics for ${scope} (${rows.length} of ${total}):`
+    : `Diagnostics for ${scope} (${total}):`;
+  const out = [header, ...rows];
+  if (rows.length < total) {
+    out.push(`  ... ${total - rows.length} more truncated. Narrow with path, or raise maxResults.`);
+  }
+  return out.join('\n');
+}
+
 /**
  * Dispatch an LSP tool call. Returns null if the tool name isn't handled
  * here, so the parent dispatcher (workspaceTools.executeToolCall) knows to
@@ -686,7 +885,9 @@ export async function executeLspTool(
     name === 'get_symbol_source' ||
     name === 'find_symbol' ||
     name === 'find_definition' ||
-    name === 'find_references';
+    name === 'find_references' ||
+    name === 'hover' ||
+    name === 'get_diagnostics';
   if (!isLspTool) return null;
 
   let args: Record<string, string>;
@@ -701,6 +902,11 @@ export async function executeLspTool(
     return findSymbol(args.name, args.maxResults);
   }
 
+  // `path` is optional here — no argument means the whole workspace.
+  if (name === 'get_diagnostics') {
+    return getDiagnostics(workspacePath, args.path, args.severity, args.maxResults);
+  }
+
   if (!args.path) return 'Error: Missing required argument "path"';
 
   switch (name) {
@@ -713,6 +919,8 @@ export async function executeLspTool(
       return findDefinition(workspacePath, args.path, args.line, args.symbol, args.maxResults);
     case 'find_references':
       return findReferences(workspacePath, args.path, args.line, args.symbol, args.maxResults);
+    case 'hover':
+      return hover(workspacePath, args.path, args.line, args.symbol);
   }
 
   return null;

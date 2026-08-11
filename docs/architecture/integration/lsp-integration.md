@@ -14,7 +14,7 @@ No index to maintain, no embeddings to compute, no daemon. The LSP is already ru
 
 ## Tool surface
 
-Five tools, all routed through the same dispatcher as workspace tools and gated per-model via `ModelCapabilities.lspTools` ([src/models/registry.ts:133](../../../src/models/registry.ts#L133)).
+Seven tools, all routed through the same dispatcher as workspace tools and gated per-model via `ModelCapabilities.lspTools` ([src/models/registry.ts:133](../../../src/models/registry.ts#L133)).
 
 | Tool | LSP backend | Accepts | Returns |
 |---|---|---|---|
@@ -23,10 +23,14 @@ Five tools, all routed through the same dispatcher as workspace tools and gated 
 | `find_symbol` | `vscode.executeWorkspaceSymbolProvider` | `name`, `maxResults?` | List of `path:line (kind) name [in container]` matches across the workspace |
 | `find_definition` | `vscode.executeDefinitionProvider` | `path`, `line\|symbol`, `maxResults?` | List of `path:line: snippet` definition locations |
 | `find_references` | `vscode.executeReferenceProvider` | `path`, `line\|symbol`, `maxResults?` | List of `path:line: snippet` reference locations |
+| `hover` | `vscode.executeHoverProvider` | `path`, `line\|symbol` | Resolved type signature + docs, flattened from markdown/plain/`{language,value}` content shapes |
+| `get_diagnostics` | `vscode.languages.getDiagnostics` (**not** a command proxy) | `path?`, `severity?`, `maxResults?` | `Severity [source] (code) path:line:col` + message, per problem |
 
 Implementation: [src/tools/lspTools.ts](../../../src/tools/lspTools.ts).
 
-Position-bearing tools (`find_definition`, `find_references`) accept either `(path, line)` — line is 1-indexed, column auto-resolves to the first non-whitespace character — or `(path, symbol)`, in which case Moby calls the document-symbol provider first to anchor the position. Returns absolute paths consistent with [ADR 0004's B-pattern](../decisions/0004-r1-path-semantics-guards.md).
+Position-bearing tools (`find_definition`, `find_references`, `hover`) accept either `(path, line)` — line is 1-indexed, column auto-resolves to the first non-whitespace character — or `(path, symbol)`, in which case Moby calls the document-symbol provider first to anchor the position. Returns absolute paths consistent with [ADR 0004's B-pattern](../decisions/0004-r1-path-semantics-guards.md).
+
+`get_diagnostics` is the odd one out and deliberately so: it reads VS Code's diagnostic collection directly rather than issuing an LSP request, so it needs no timeout wrapper and works for linters and type checkers that expose no symbol provider at all. Omitting `path` returns every problem VS Code currently knows about; passing one opens that document first to prompt analysis. Its honest limitation is stated in the tool description and the empty-result text — diagnostics for a file VS Code has never analyzed are simply absent, so "no diagnostics" is not proof of "no problems". `severity` filters at `error` / `warning` (default) / `info` / `hint`.
 
 `maxResults` defaults to 20, falls back to 20 when non-numeric or non-positive, and is capped at 100 to prevent runaway prompts. Truncated results emit a hint pointing the model at narrowing the query (or raising the cap).
 
@@ -41,7 +45,9 @@ Position-bearing tools (`find_definition`, `find_references`) accept either `(pa
 | `deepseek-reasoner` (R1) | `false` (XML-shell transport only) |
 | Custom models | per-entry, default `false` |
 
-Beyond the per-model flag, the orchestrator also checks `LspAvailability.getInstance().getDeclaredAvailability().available.length > 0` per request. A workspace with no LSP-backed languages installed gets neither the tool definitions nor the prompt declaration — saving ~600 prompt tokens per request the model can't use.
+Beyond the per-model flag, the orchestrator also checks `LspAvailability.getInstance().hasUsableLsp()` per request. A workspace with no LSP-backed languages installed gets neither the tool definitions nor the prompt declaration — saving ~600 prompt tokens per request the model can't use.
+
+`hasUsableLsp()` is true when any language is confirmed available **or** merely inconclusive, and that inclusion is load-bearing rather than lenient. The prompt tells the model to "try LSP first" for untested languages; gating the tools on confirmed-available alone made that instruction a lie, and worse, closed the only loop that could correct the map — with no tools there are no tool results, so `reportToolResult` never fires. A 2026-08-06 session showed the failure end to end: every language was mis-marked unavailable, the tools silently vanished from the array, and nothing could ever flip them back.
 
 Both gates are evaluated in [requestOrchestrator.ts](../../../src/providers/requestOrchestrator.ts):
 - Streaming path: line ~3010
@@ -56,15 +62,17 @@ Both gates are evaluated in [requestOrchestrator.ts](../../../src/providers/requ
 
 ```ts
 interface AvailabilityState {
-  available: boolean;
-  sampledFile: string;       // path of the file probed/observed
+  available: boolean | null; // null = inconclusive (a provider answered, no symbols)
+  sampledFile: string;       // path of the last file probed/observed
   observedAt: number;        // unix-ms timestamp of last update
   source: 'probe' | 'tool-failure' | 'tool-success' | 'extension-event';
   consecutiveEmpties: number; // delays true→false flip past EMPTY_FLIP_THRESHOLD
 }
 ```
 
-Reads go through `getDeclaredAvailability()` which buckets the map into three sorted arrays (`available`, `unavailable`, `untested`). The orchestrator calls this once per request, synchronous, hot path. The `untested` bucket is currently a defined-but-unreachable state: the partition routes an entry there only when `source === 'probe' && observedAt === 0`, but no writer ever stamps `observedAt: 0` (`probeLanguage` always writes `Date.now()`), so discovery only ever yields `available` or `unavailable`.
+Reads go through `getDeclaredAvailability()` which buckets the map into three sorted arrays (`available`, `unavailable`, `untested`). The orchestrator calls this once per request, synchronous, hot path.
+
+**The three-way verdict (fixed 2026-08-11).** Two probe outcomes look identical to a naive symbol count and mean opposite things: an empty **array** is a provider answering "this file has no symbols" — the LSP working correctly on trivial input — while `undefined` is nothing handling the request at all. Collapsing both into `0 symbols` is what let a single comment-only stub mark a whole language dead for a session. So `available` is now tri-state: symbols anywhere → `true`; no symbols but a provider answered somewhere → `null` (rendered as `untested`); nothing answered anywhere → `false`. The `untested` bucket, previously unreachable from the probe path, is now its normal destination for symbol-less samples, and the prompt tells the model to try LSP first and fall back on empty.
 
 ### Probe cadence
 
@@ -72,11 +80,11 @@ Five triggers populate or refresh the map:
 
 | Trigger | What runs |
 |---|---|
-| Activation + 3s warmup | `discoverWorkspace()` enumerates languages via `findFiles`, probes one file per language |
+| Activation + 3s warmup | `discoverWorkspace()` enumerates languages via `findFiles`, probes up to `MAX_PROBE_CANDIDATES` (3) files per language, richest first |
 | `vscode.workspace.onDidChangeWorkspaceFolders` | Invalidate map + re-discover |
 | `vscode.extensions.onDidChange` | Invalidate map + re-discover (catches LSP install/uninstall) |
-| Post-discovery retry (30s) | Per-language single retry for any language that came back unavailable — catches cold rust-analyzer / gopls / ruby-lsp that miss the initial 5s timeout |
-| `vscode.window.onDidChangeActiveTextEditor` | If the focused tab's languageId is in the map AND marked unavailable AND no retry pending, schedule a 1s retry probe |
+| Post-discovery retry (30s) | Per-language single retry for any language not confirmed — catches cold rust-analyzer / gopls / ruby-lsp that miss the initial 5s timeout. Probes a **different** file than the one already sampled; re-probing the same file (the pre-2026-08-11 behaviour) could never change the answer |
+| `vscode.window.onDidChangeActiveTextEditor` | If the focused tab's languageId is in the map AND not confirmed available AND no retry pending, schedule a 1s retry probe against that document — the user just opened real code of that language, a better sample than discovery picked |
 
 Plus inline adaptive correction via `reportToolResult(languageId, hadSymbols, sampledFile)` — every LSP tool call feeds its result back. `false → true` flips immediately on success; `true → false` requires `EMPTY_FLIP_THRESHOLD` (2) consecutive empties so a single stub file with no symbols can't poison the whole language.
 
@@ -87,14 +95,20 @@ discoverWorkspace():
   1. findFiles(PROBE_FILE_GLOB, PROBE_EXCLUDE, DISCOVERY_FILE_LIMIT=100)
      → enumerate workspace files matching ~95 source extensions
   2. group files by languageId via openTextDocument(uri).languageId
-     → one representative sample per language
+     → keep up to MAX_PROBE_CANDIDATES (3) per language, sorted by
+       lineCount desc (free: the doc is already open). A symbol-bearing
+       file is what actually tests whether a provider exists.
   3. probe each language in parallel batches (DISCOVERY_CONCURRENCY=3):
-     - openTextDocument (forces LSP load)
-     - wait PROBE_PRE_DELAY_MS (250ms) for provider registration
-     - executeDocumentSymbolProvider with PROBE_TIMEOUT_MS (5000ms)
-     - record AvailabilityState
-  4. for each language that came back unavailable, scheduleRetry(POST_DISCOVERY_RETRY_MS=30000)
+     for each candidate, until one yields symbols:
+       - openTextDocument (forces LSP load)
+       - wait PROBE_PRE_DELAY_MS (250ms) for provider registration
+       - executeDocumentSymbolProvider with PROBE_TIMEOUT_MS (5000ms)
+     - record AvailabilityState with the three-way verdict above
+  4. for each language not confirmed available,
+     scheduleRetry(POST_DISCOVERY_RETRY_MS=30000) against an UNTRIED file
 ```
+
+Sorting by size is a heuristic, not a guarantee — a large generated bundle can be symbol-less while a small module is not, which is why sampling walks multiple candidates rather than trusting the ordering alone.
 
 Concurrency 3 caps cost — a 9-language polyglot workspace finishes in 3 sequential batches of 3 parallel probes. Higher concurrency would stall the LSP host; lower would slow activation.
 

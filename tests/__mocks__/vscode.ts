@@ -187,6 +187,10 @@ export const languages = {
   registerCompletionItemProvider: vi.fn(),
   registerCodeActionsProvider: vi.fn(),
   registerHoverProvider: vi.fn(),
+  // With a uri → that file's diagnostics; with no arg → [uri, diags][] for
+  // the whole workspace. Defaults to "nothing known", which is also the
+  // real behaviour for a workspace VS Code has not analyzed.
+  getDiagnostics: vi.fn(() => []),
   createDiagnosticCollection: vi.fn(() => ({
     set: vi.fn(),
     delete: vi.fn(),

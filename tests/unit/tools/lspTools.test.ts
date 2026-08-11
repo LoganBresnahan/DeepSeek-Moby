@@ -806,3 +806,161 @@ describe('executeLspTool — find_definition position resolution edge cases', ()
     expect(result).toMatch(/Line 99 exceeds file length/);
   });
 });
+
+describe('executeLspTool — hover', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    LspAvailability.getInstance().invalidate();
+  });
+
+  function mockHover(result: unknown) {
+    (vscode.commands.executeCommand as any).mockImplementation(async (cmd: string) => {
+      if (cmd === 'vscode.executeHoverProvider') return result;
+      return undefined;
+    });
+  }
+
+  it('flattens MarkdownString contents into text', async () => {
+    mockOpenDocument('const x = compute();\n');
+    mockHover([{ contents: [{ value: '```ts\nfunction compute(): number\n```' }, { value: 'Computes it.' }] }]);
+
+    const result = await executeLspTool(
+      WORKSPACE,
+      makeCall('hover', { path: 'src/a.ts', line: '1' })
+    );
+
+    expect(result).toContain('function compute(): number');
+    expect(result).toContain('Computes it.');
+    expect(result).toContain('src/a.ts:1');
+  });
+
+  it('accepts plain-string contents, which some servers return', async () => {
+    mockOpenDocument('const x = 1;\n');
+    mockHover([{ contents: ['let x: number'] }]);
+
+    const result = await executeLspTool(WORKSPACE, makeCall('hover', { path: 'src/a.ts', line: '1' }));
+
+    expect(result).toContain('let x: number');
+  });
+
+  it('names the empty case instead of returning nothing', async () => {
+    mockOpenDocument('\n');
+    mockHover([]);
+
+    const result = await executeLspTool(WORKSPACE, makeCall('hover', { path: 'src/a.ts', line: '1' }));
+
+    expect(result).toContain('No hover information');
+  });
+
+  it('reports a hover hit to LspAvailability so the language self-corrects', async () => {
+    mockOpenDocument('const x = 1;\n');
+    (vscode.workspace.openTextDocument as any).mockImplementation(async () => ({
+      languageId: 'typescript',
+      getText: () => 'const x = 1;\n'
+    }));
+    mockHover([{ contents: [{ value: 'let x: number' }] }]);
+
+    await executeLspTool(WORKSPACE, makeCall('hover', { path: 'src/a.ts', line: '1' }));
+
+    expect(LspAvailability.getInstance().getDeclaredAvailability().available).toContain('typescript');
+  });
+});
+
+describe('executeLspTool — get_diagnostics', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function diag(line: number, message: string, severity: number, source?: string, code?: unknown) {
+    return {
+      range: { start: { line, character: 4 }, end: { line, character: 10 } },
+      message,
+      severity,
+      ...(source ? { source } : {}),
+      ...(code !== undefined ? { code } : {})
+    };
+  }
+
+  it('formats workspace diagnostics with severity, source, and 1-indexed position', async () => {
+    (vscode.languages.getDiagnostics as any).mockReturnValue([
+      [{ fsPath: '/workspace/src/a.ts' }, [diag(9, 'Type mismatch', 0, 'ts', 2322)]]
+    ]);
+
+    const result = await executeLspTool(WORKSPACE, makeCall('get_diagnostics', {}));
+
+    expect(result).toContain('Diagnostics for workspace (1):');
+    expect(result).toContain('Error [ts] (2322) /workspace/src/a.ts:10:5');
+    expect(result).toContain('Type mismatch');
+  });
+
+  it('filters below the severity threshold, defaulting to warning', async () => {
+    (vscode.languages.getDiagnostics as any).mockReturnValue([
+      [{ fsPath: '/workspace/a.ts' }, [
+        diag(0, 'a real error', 0),
+        diag(1, 'just a warning', 1),
+        diag(2, 'merely informational', 2),
+        diag(3, 'a gentle hint', 3)
+      ]]
+    ]);
+
+    const result = await executeLspTool(WORKSPACE, makeCall('get_diagnostics', {}));
+
+    expect(result).toContain('a real error');
+    expect(result).toContain('just a warning');
+    expect(result).not.toContain('merely informational');
+    expect(result).not.toContain('a gentle hint');
+  });
+
+  it('widens to hints when asked', async () => {
+    (vscode.languages.getDiagnostics as any).mockReturnValue([
+      [{ fsPath: '/workspace/a.ts' }, [diag(2, 'merely informational', 2)]]
+    ]);
+
+    const result = await executeLspTool(WORKSPACE, makeCall('get_diagnostics', { severity: 'hint' }));
+
+    expect(result).toContain('merely informational');
+  });
+
+  it('says "not analyzed yet" is possible rather than claiming the file is clean', async () => {
+    // The honest-empty case: absent diagnostics and no problems are
+    // indistinguishable from here, and the model must not read one as the other.
+    (vscode.languages.getDiagnostics as any).mockReturnValue([]);
+
+    const result = await executeLspTool(WORKSPACE, makeCall('get_diagnostics', {}));
+
+    expect(result).toContain('No diagnostics');
+    expect(result).toContain('not been analyzed');
+  });
+
+  it('scopes to a single file and opens it to prompt analysis', async () => {
+    (vscode.workspace.openTextDocument as any).mockImplementation(async () => ({
+      languageId: 'typescript',
+      getText: () => ''
+    }));
+    (vscode.languages.getDiagnostics as any).mockReturnValue([diag(0, 'scoped problem', 0)]);
+
+    const result = await executeLspTool(WORKSPACE, makeCall('get_diagnostics', { path: 'src/a.ts' }));
+
+    expect(vscode.workspace.openTextDocument).toHaveBeenCalled();
+    expect(result).toContain('Diagnostics for src/a.ts (1):');
+    expect(result).toContain('scoped problem');
+  });
+
+  it('truncates with a named marker and a total count', async () => {
+    const many = Array.from({ length: 30 }, (_, i) => diag(i, `problem ${i}`, 0));
+    (vscode.languages.getDiagnostics as any).mockReturnValue([[{ fsPath: '/workspace/a.ts' }, many]]);
+
+    const result = await executeLspTool(WORKSPACE, makeCall('get_diagnostics', {}));
+
+    expect(result).toContain('(20 of 30)');
+    expect(result).toContain('10 more truncated');
+  });
+
+  it('refuses a path outside the workspace', async () => {
+    const result = await executeLspTool(
+      WORKSPACE,
+      makeCall('get_diagnostics', { path: '../../etc/passwd' })
+    );
+    expect(result).toBe('Error: Cannot read files outside the workspace');
+  });
+});

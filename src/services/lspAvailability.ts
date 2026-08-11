@@ -38,8 +38,12 @@ interface DocumentSymbolLike {
 export type AvailabilitySource = 'probe' | 'tool-failure' | 'tool-success' | 'extension-event';
 
 export interface AvailabilityState {
-  /** Whether LSP responds with symbols for this language. */
-  available: boolean;
+  /** Whether LSP responds with symbols for this language. `null` means
+   *  *inconclusive*: a provider answered but every sampled file was
+   *  genuinely symbol-less, which is the LSP working correctly on trivial
+   *  input — not evidence the language lacks a server. Rendered as
+   *  "untested" so the model tries and a real tool call settles it. */
+  available: boolean | null;
   /** Path of the file we last probed/observed. For debugging. */
   sampledFile: string;
   /** Unix-ms timestamp of last update. */
@@ -57,7 +61,8 @@ export interface DeclaredAvailability {
   available: string[];
   /** Languages confirmed unavailable. */
   unavailable: string[];
-  /** Languages observed in the workspace but not yet probed. */
+  /** Languages we could not reach a verdict on — never probed, or probed
+   *  against files that legitimately contain no symbols. */
   untested: string[];
 }
 
@@ -71,6 +76,12 @@ const DISCOVERY_FILE_LIMIT = 100;
 /** Empties before a confirmed-available language flips to unavailable.
  *  Prevents single empty/stub files from poisoning the whole language. */
 const EMPTY_FLIP_THRESHOLD = 2;
+/** Files sampled per language before giving up. One sample was the
+ *  original defect: a language whose first file happened to be a 4-line
+ *  comment-only stub was condemned for the whole session. `reportToolResult`
+ *  has always refused to convict on one empty result; the probe now applies
+ *  the same rule. */
+const MAX_PROBE_CANDIDATES = 3;
 /** Delay before re-probing a language that came back unavailable from
  *  the initial discovery. Catches cold-LSP startup (rust-analyzer,
  *  gopls, etc.) that exceeds the per-probe timeout on first launch. */
@@ -108,6 +119,10 @@ export class LspAvailability {
   private static instance: LspAvailability | undefined;
 
   private map = new Map<string, AvailabilityState>();
+  /** Sampled files per language, richest first — kept so a retry can probe
+   *  a DIFFERENT file. Re-probing the same file (the original behaviour)
+   *  can never change the answer. */
+  private candidates = new Map<string, vscode.Uri[]>();
   private discoveryInFlight: Promise<void> | null = null;
   private warmupTimer: ReturnType<typeof setTimeout> | null = null;
   /** Per-language retry timers so we don't double-schedule. Cleared on
@@ -162,8 +177,11 @@ export class LspAvailability {
         const state = this.map.get(lang);
         if (!state || state.available) return;
         if (this.retryTimers.has(lang)) return;
-        logger.debug(`[LspAvailability] ${lang} marked unavailable; editor focus triggers retry probe`);
-        this.scheduleRetry(lang, doc.uri, FILE_OPEN_RETRY_MS);
+        logger.debug(`[LspAvailability] ${lang} not confirmed; editor focus triggers retry probe`);
+        // The focused document specifically — the user just opened real
+        // code of this language, which is a better sample than anything
+        // discovery picked.
+        this.scheduleRetry(lang, [doc.uri], FILE_OPEN_RETRY_MS);
       })
     );
 
@@ -174,6 +192,7 @@ export class LspAvailability {
    *  until discovery repopulates. */
   invalidate(): void {
     this.map.clear();
+    this.candidates.clear();
     this.discoveryInFlight = null;
     for (const timer of this.retryTimers.values()) clearTimeout(timer);
     this.retryTimers.clear();
@@ -211,7 +230,7 @@ export class LspAvailability {
     const unavailable: string[] = [];
     const untested: string[] = [];
     for (const [lang, state] of this.map.entries()) {
-      if (state.source === 'probe' && state.observedAt === 0) {
+      if (state.available === null || (state.source === 'probe' && state.observedAt === 0)) {
         untested.push(lang);
       } else if (state.available) {
         available.push(lang);
@@ -223,6 +242,22 @@ export class LspAvailability {
     unavailable.sort();
     untested.sort();
     return { available, unavailable, untested };
+  }
+
+  /**
+   * Should the LSP tools be offered to the model at all?
+   *
+   * True when any language is confirmed available **or** merely
+   * inconclusive. Including `untested` is load-bearing: the prompt tells
+   * the model to "try LSP first" for those, and gating the tools on
+   * confirmed-available only would have made that instruction a lie —
+   * which is exactly what happened in a workspace whose only samples were
+   * symbol-less, where the declaration said "no LSP" and the tools
+   * silently vanished with no way for a real call to ever correct it.
+   */
+  hasUsableLsp(): boolean {
+    const decl = this.getDeclaredAvailability();
+    return decl.available.length > 0 || decl.untested.length > 0;
   }
 
   /**
@@ -293,20 +328,32 @@ export class LspAvailability {
     }
 
     // Group by languageId — open each file once to read its languageId
-    // (cheap because openTextDocument is cached). Take the first file per
-    // language as the probe sample.
-    const byLanguage = new Map<string, vscode.Uri>();
+    // (cheap because openTextDocument is cached). We keep SEVERAL samples
+    // per language, richest first: `lineCount` is free here since the doc
+    // is already open, and a symbol-bearing file is what actually tests
+    // whether a provider exists. Taking the first file, as this once did,
+    // let one comment-only stub condemn a whole language.
+    const seen = new Map<string, Array<{ uri: vscode.Uri; lines: number }>>();
     for (const uri of files) {
       try {
         const doc = await vscode.workspace.openTextDocument(uri);
         const lang = doc.languageId;
         if (!lang || lang === 'plaintext') continue;
-        if (!byLanguage.has(lang)) byLanguage.set(lang, uri);
+        const list = seen.get(lang);
+        if (list) list.push({ uri, lines: doc.lineCount });
+        else seen.set(lang, [{ uri, lines: doc.lineCount }]);
       } catch {
         // Skip files we can't open. Probably permissions or weird
         // encoding — they don't help us probe anyway.
       }
     }
+
+    const byLanguage = new Map<string, vscode.Uri[]>();
+    for (const [lang, list] of seen.entries()) {
+      list.sort((a, b) => b.lines - a.lines);
+      byLanguage.set(lang, list.slice(0, MAX_PROBE_CANDIDATES).map(e => e.uri));
+    }
+    this.candidates = byLanguage;
 
     if (byLanguage.size === 0) {
       logger.info(`[LspAvailability] Found ${files.length} files but no resolvable languageIds`);
@@ -321,7 +368,7 @@ export class LspAvailability {
     const entries = [...byLanguage.entries()];
     for (let i = 0; i < entries.length; i += DISCOVERY_CONCURRENCY) {
       const batch = entries.slice(i, i + DISCOVERY_CONCURRENCY);
-      await Promise.all(batch.map(([lang, uri]) => this.probeLanguage(lang, uri)));
+      await Promise.all(batch.map(([lang, uris]) => this.probeLanguage(lang, uris)));
     }
 
     const elapsed = Date.now() - start;
@@ -341,7 +388,9 @@ export class LspAvailability {
     const retried: string[] = [];
     for (const [lang, state] of this.map.entries()) {
       if (state.source === 'probe' && !state.available && state.sampledFile) {
-        this.scheduleRetry(lang, vscode.Uri.file(state.sampledFile), POST_DISCOVERY_RETRY_MS);
+        // Deliberately NOT state.sampledFile: re-probing the file that just
+        // failed is what made the old retry incapable of ever recovering.
+        this.scheduleRetry(lang, this.retryCandidates(lang, state.sampledFile), POST_DISCOVERY_RETRY_MS);
         retried.push(lang);
       }
     }
@@ -353,21 +402,37 @@ export class LspAvailability {
   }
 
   /**
-   * Schedule a single re-probe for one language after `delayMs`. Uses
-   * `uri` as the sample file. No-op if a retry is already pending for
-   * this language. Cleared on `invalidate()`.
+   * Files worth re-probing for `languageId`, excluding the one that just
+   * failed. Falls back to the excluded file only when it is the sole
+   * sample we have — a retry against one trivial file is useless, but so
+   * is no retry at all.
    */
-  private scheduleRetry(languageId: string, uri: vscode.Uri, delayMs: number): void {
+  private retryCandidates(languageId: string, exclude: string): vscode.Uri[] {
+    const all = this.candidates.get(languageId) ?? [];
+    const fresh = all.filter(u => u.fsPath !== exclude);
+    if (fresh.length > 0) return fresh;
+    return exclude ? [vscode.Uri.file(exclude)] : all;
+  }
+
+  /**
+   * Schedule a single re-probe for one language after `delayMs`, against
+   * `uris`. No-op if a retry is already pending for this language.
+   * Cleared on `invalidate()`.
+   */
+  private scheduleRetry(languageId: string, uris: vscode.Uri[], delayMs: number): void {
     if (this.retryTimers.has(languageId)) return;
+    if (uris.length === 0) return;
     const timer = setTimeout(async () => {
       this.retryTimers.delete(languageId);
       // Bail if the language has been marked available since the timer
       // was set (e.g. via tool-success).
       const current = this.map.get(languageId);
       if (current?.available) return;
-      logger.debug(`[LspAvailability] Retrying probe for ${languageId} (${uri.fsPath})`);
+      logger.debug(
+        `[LspAvailability] Retrying probe for ${languageId} (${uris.map(u => u.fsPath).join(', ')})`
+      );
       const before = current?.available ?? false;
-      await this.probeLanguage(languageId, uri);
+      await this.probeLanguage(languageId, uris);
       const after = this.map.get(languageId)?.available ?? false;
       if (after && !before) {
         // State transition — the recovery actually worked. Worth INFO.
@@ -381,56 +446,97 @@ export class LspAvailability {
     this.retryTimers.set(languageId, timer);
   }
 
-  private async probeLanguage(languageId: string, uri: vscode.Uri): Promise<void> {
+  /**
+   * Probe `languageId` against each candidate until one yields symbols.
+   *
+   * The verdict is three-way, because two outcomes that look identical to
+   * a naive count mean opposite things:
+   *   - an empty ARRAY is a provider answering "this file has no symbols",
+   *     which is the LSP working correctly on a trivial file;
+   *   - `undefined` is nothing handling the request at all.
+   * Collapsing both to `0 symbols` is what marked whole languages dead on
+   * a comment-only stub. So: symbols anywhere → available; otherwise a
+   * provider answered somewhere → inconclusive (`null`); nothing answered
+   * anywhere → unavailable.
+   */
+  private async probeLanguage(languageId: string, candidates: vscode.Uri[]): Promise<void> {
     const start = Date.now();
-    try {
-      // openTextDocument is idempotent + cheap — already loaded during
-      // language enumeration above. This call is mostly a no-op but
-      // ensures the LSP has the doc registered.
-      await vscode.workspace.openTextDocument(uri);
-    } catch {
-      // Treat open failure as "unavailable for now" without poisoning the map.
-      // Skip recording an entry; the language will just stay untested until a
-      // tool call observes a real result.
-      return;
-    }
+    let providerAnswered = false;
+    let attempted = 0;
+    let lastTried = '';
 
-    await new Promise(resolve => setTimeout(resolve, PROBE_PRE_DELAY_MS));
-
-    let symbols: DocumentSymbolLike[] | undefined;
-    try {
-      symbols = await withLspTimeout(
-        vscode.commands.executeCommand<DocumentSymbolLike[] | undefined>(
-          'vscode.executeDocumentSymbolProvider',
-          uri
-        ),
-        PROBE_TIMEOUT_MS
-      );
-    } catch (e) {
-      // Timeout and other errors both treated as "no symbols" — probe is
-      // non-critical and post-discovery retry covers cold-start cases.
-      if (e instanceof LspTimeoutError) {
-        logger.debug(`[LspAvailability] probe timeout for ${languageId} after ${PROBE_TIMEOUT_MS}ms`);
-      } else {
-        const msg = e instanceof Error ? e.message : String(e);
-        logger.debug(`[LspAvailability] probe error for ${languageId}: ${msg}`);
+    for (const uri of candidates) {
+      try {
+        // openTextDocument is idempotent + cheap — already loaded during
+        // language enumeration above. This call is mostly a no-op but
+        // ensures the LSP has the doc registered.
+        await vscode.workspace.openTextDocument(uri);
+      } catch {
+        // Skip files we can't open — permissions or encoding. They tell us
+        // nothing about the language server.
+        continue;
       }
-      symbols = undefined;
+      attempted++;
+      lastTried = uri.fsPath;
+
+      await new Promise(resolve => setTimeout(resolve, PROBE_PRE_DELAY_MS));
+
+      let symbols: DocumentSymbolLike[] | undefined;
+      let errored = false;
+      try {
+        symbols = await withLspTimeout(
+          vscode.commands.executeCommand<DocumentSymbolLike[] | undefined>(
+            'vscode.executeDocumentSymbolProvider',
+            uri
+          ),
+          PROBE_TIMEOUT_MS
+        );
+      } catch (e) {
+        // Timeout and other errors are NOT a provider answering — a cold
+        // server looks exactly like this, which is what the retry exists for.
+        errored = true;
+        if (e instanceof LspTimeoutError) {
+          logger.debug(`[LspAvailability] probe timeout for ${languageId} after ${PROBE_TIMEOUT_MS}ms`);
+        } else {
+          const msg = e instanceof Error ? e.message : String(e);
+          logger.debug(`[LspAvailability] probe error for ${languageId}: ${msg}`);
+        }
+        symbols = undefined;
+      }
+
+      if (Array.isArray(symbols) && symbols.length > 0) {
+        this.map.set(languageId, {
+          available: true,
+          sampledFile: uri.fsPath,
+          observedAt: Date.now(),
+          source: 'probe',
+          consecutiveEmpties: 0
+        });
+        logger.debug(
+          `[LspAvailability] ${languageId}: available ` +
+          `(${symbols.length} symbols in ${Date.now() - start}ms, ${uri.fsPath})`
+        );
+        return;
+      }
+      if (!errored && Array.isArray(symbols)) providerAnswered = true;
     }
 
-    const elapsed = Date.now() - start;
-    const symbolCount = Array.isArray(symbols) ? symbols.length : 0;
-    const available = symbolCount > 0;
+    // Every candidate failed to open — record nothing rather than convict
+    // a language on files we never actually read.
+    if (attempted === 0) return;
+
+    const available = providerAnswered ? null : false;
     this.map.set(languageId, {
       available,
-      sampledFile: uri.fsPath,
+      sampledFile: lastTried,
       observedAt: Date.now(),
       source: 'probe',
-      consecutiveEmpties: available ? 0 : 1
+      consecutiveEmpties: available === null ? 0 : 1
     });
     logger.debug(
-      `[LspAvailability] ${languageId}: ${available ? 'available' : 'unavailable'} ` +
-      `(${symbolCount} symbols in ${elapsed}ms, ${uri.fsPath})`
+      `[LspAvailability] ${languageId}: ${available === null ? 'inconclusive' : 'unavailable'} ` +
+      `(${attempted} file(s) sampled, 0 symbols in ${Date.now() - start}ms` +
+      `${available === null ? ', a provider answered — treating as untested' : ', no provider answered'})`
     );
   }
 }

@@ -1626,7 +1626,8 @@ export class RequestOrchestrator {
     // the prompt declaration. Non-empty arrays drive a declaration line
     // in the prompt.
     const lspDecl = LspAvailability.getInstance().getDeclaredAvailability();
-    const lspToolsAvailable = promptCaps.lspTools === true && lspDecl.available.length > 0;
+    const lspToolsAvailable =
+      promptCaps.lspTools === true && LspAvailability.getInstance().hasUsableLsp();
     if (isReasonerModel) {
       systemPrompt += getReasonerShellPrompt({ webSearchAvailable: webSearchAutoAvailable });
     } else {
@@ -3533,7 +3534,7 @@ data; do not seed it from memory.
       const tools = buildToolsArray({
         caps: streamingCaps,
         webSearchAuto: wsState.mode === 'auto' && wsState.configured,
-        lspAvailable: LspAvailability.getInstance().getDeclaredAvailability().available.length > 0,
+        lspAvailable: LspAvailability.getInstance().hasUsableLsp(),
         extraTools: McpServerManager.getInstance().getToolsForRequest()
       });
 
@@ -3942,7 +3943,7 @@ data; do not seed it from memory.
       const tools = buildToolsArray({
         caps: toolLoopCaps,
         webSearchAuto: toolLoopWsState.mode === 'auto' && toolLoopWsState.configured,
-        lspAvailable: LspAvailability.getInstance().getDeclaredAvailability().available.length > 0,
+        lspAvailable: LspAvailability.getInstance().hasUsableLsp(),
         extraTools: McpServerManager.getInstance().getToolsForRequest()
       });
 
@@ -4254,7 +4255,9 @@ function buildToolGuidance(
       '- get_symbol_source: Read just one symbol\'s body from a file when you only need that part.\n' +
       '- find_symbol: Workspace-wide search for a symbol by name. Use when you know the name but not the file.\n' +
       '- find_definition: Jump from a symbol reference to its declaration. Provide a file + line, or file + symbol name.\n' +
-      '- find_references: List every place a symbol is used. More accurate than grep — handles dynamic dispatch and ignores comments.\n'
+      '- find_references: List every place a symbol is used. More accurate than grep — handles dynamic dispatch and ignores comments.\n' +
+      '- hover: Get a symbol\'s resolved type signature and docs, as the editor shows on mouse-over.\n' +
+      '- get_diagnostics: Current errors and warnings for a file or the whole workspace. Use it to check an edit compiled.\n'
     : '';
   const lspDeclarationLine = lspToolsAvailable && lspDecl
     ? renderLspDeclaration(lspDecl)
@@ -4306,7 +4309,7 @@ function renderMinimalToolGuidance(webSearchLine: string, runShellLine: string, 
   // When LSP is available, add a one-line directive so the model reaches for
   // symbol-aware tools instead of grep on "where is X?" / "what calls Y?".
   const lspRule = lspToolsLines
-    ? '3. For symbol questions ("where is X?", "what calls Y?", "what does Z do?"), prefer find_symbol / find_definition / find_references / get_symbol_source over grep + read_file. They understand declarations vs references and skip comments.\n'
+    ? '3. For symbol questions ("where is X?", "what calls Y?", "what does Z do?"), prefer find_symbol / find_definition / find_references / hover / get_symbol_source over grep + read_file. They understand declarations vs references and skip comments. After an edit, get_diagnostics reports whether it compiled.\n'
     : '';
   // Phase 4 — per-language declaration sits right under the LSP tool list
   // so the model sees both the menu and which languages will respond.
@@ -4356,7 +4359,7 @@ function renderStandardToolGuidance(webSearchLine: string, runShellLine: string,
   // model toward symbol-aware navigation instead of grep + read for
   // questions like "where is X used?" / "what does Y do?".
   const lspRule = lspToolsLines
-    ? '7. For symbol questions, prefer the LSP tools: `find_symbol` for "where does X exist?", `find_definition` to follow a reference to its declaration, `find_references` for "what uses Y?", `get_symbol_source` to read one function without reading the whole file, `outline` before reading any file >300 lines. They\'re more accurate than grep on names and cheaper than reading whole files.\n'
+    ? '7. For symbol questions, prefer the LSP tools: `find_symbol` for "where does X exist?", `find_definition` to follow a reference to its declaration, `find_references` for "what uses Y?", `hover` for a symbol\'s exact type signature, `get_symbol_source` to read one function without reading the whole file, `outline` before reading any file >300 lines. They\'re more accurate than grep on names and cheaper than reading whole files. After editing, `get_diagnostics` tells you whether it compiled.\n'
     : '';
   // Phase 4 — per-language declaration sits right under the LSP tool list
   // so the model sees both the menu and which languages will respond.
