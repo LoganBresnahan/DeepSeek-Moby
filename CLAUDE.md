@@ -20,21 +20,27 @@ The development loop: orient → (design doc/ADR → design-plan) → implement 
 - `/verify` — runtime verification recipe: headless webview harness (~5s) or full extension in real VS Code via WSLg (~60s), no real API key needed. This is Moby's deploy-gate analog — `/shipshape` green does not discharge manual-test-backlog items; `/verify` (or hand-testing in the dev host) does.
 - `design-plan` workflow ([.claude/workflows/design-plan.js](.claude/workflows/design-plan.js)) — decompose an accepted design doc or ADR into an effort-ranked, dependency-ordered, model-batched build checklist before implementing. Skip it for small changes where the decomposition would just restate the doc. Write the output into the plan doc (phases + verification roster).
 
-## Release 0.8.0 — IN PREP (version bumped 2026-08-11, not yet tagged)
+## Release 0.8.0 — SHIPPED 2026-08-11
 
-The extensibility release: **MCP client** ([ADR 0016](docs/architecture/decisions/0016-mcp-client-integration.md)), **composer autocomplete** ([ADR 0015](docs/architecture/decisions/0015-composer-autocomplete-typed-invocation.md)), the **LSP probe fix + `hover`/`get_diagnostics`**, and the **`deepClone`/`deepEqual` Map fix**. 19 commits since `v0.7.0`. `package.json` is at 0.8.0 and [CHANGELOG.md](CHANGELOG.md) carries the entry; the tag has NOT been cut.
+**`v0.8.0` published to the Marketplace, all six platforms, 2026-08-11 21:43 UTC** ([release run](https://github.com/LoganBresnahan/DeepSeek-Moby/releases/tag/v0.8.0) — 8/8 jobs green: `test`, 6× `vsce publish`, GitHub Release carrying all six VSIXes). Tagged from `b82a7c4` on main; lightweight tag, matching v0.6.x/v0.7.0 (`release.yml` fires on `push: tags: v*`, so the type is irrelevant).
 
-Gates so far:
+The extensibility release: **MCP client** ([ADR 0016](docs/architecture/decisions/0016-mcp-client-integration.md)), **composer autocomplete** ([ADR 0015](docs/architecture/decisions/0015-composer-autocomplete-typed-invocation.md)), the **LSP probe fix + `hover`/`get_diagnostics`**, and the **`deepClone`/`deepEqual` Map fix**. 20 commits since `v0.7.0`.
+
+Gates run before the tag, for the record:
 
 - `npm run typecheck` clean; `npm run compile` clean; `npm run test:all` green **twice** (3,586 tests)
 - **`npm run test:e2e` (full tier, real DeepSeek tokens) at `c7a6a23`: 153 tests, 152 passed + 1 flaky, 0 failed, 0 skipped, 11.7m.** The flake was W9 (accept → `all-applied`), which passed on retry — it lives in the `retries: 2` serial block. Suspected test-side race, not product: the accept click is a `frame.evaluate` that silently no-ops when the button hasn't rendered, guaranteeing the 60s timeout. Worth hardening before the next release gate.
-- **This e2e run stays valid only while no source changes.** Doc and version edits are safe; any code fix means re-running it before the tag.
+- `/shipshape` green after the doc work: command parity 29/29, bundle isolation clean, no scope notes leaked into prompt strings. It found two manual-test gaps, both closed before the tag (M44 S7, M45).
+- CI green on `b82a7c4` before tagging.
 
-Still owed before tagging:
+**Shipped with eyes open (user call, 2026-08-11).** The dev-host walk was deliberately deferred *again*, and this time it covers surfaces with zero real-world exposure — worth walking against the published build, since anything found is 0.8.1 material:
 
-1. `/shipshape` after the doc work (it audits docs + command parity, so it must run *after*, not before)
-2. Dev-host `/verify`: **M43 S1/S5** (real IME, files-popup cross-talk — the two P0s the autocomplete design flagged), **M44's minimum** (workspace-scope boundary, double-save reconcile, one `beam.smp` kill, **S7** the settings-writing picker), and **M45** (the LSP probe rewrite + the two new tools — all of it mock-tested only)
-3. A call on the 0.7.0 leftovers below, which would roll a second time
+- **[M44](docs/plans/manual-test-backlog.md) S7 — the `Moby: MCP Servers` picker.** The only command that *writes settings*, so a defect corrupts `moby.mcpServers` rather than misreporting. 17 unit tests, never clicked.
+- **M45 — the LSP probe rewrite + `hover`/`get_diagnostics`.** Changes what tools every request advertises; tested only against the vscode mock plus one dogfood session that predates the pre-delay change.
+- **M43 S1/S5** — real IME and files-popup cross-talk, the two P0s ADR 0015 flagged itself.
+- The 0.7.0 leftovers below, now rolling a second time.
+
+Two known bugs ship with it, both in Active Bugs: extension-host commands are unresponsive mid-generation (pre-existing, now diagnosed as far as reading can take it), and the intermittent `TraceCollector` eviction flake (surfaced once during the gates, cleared on re-run).
 
 ## Release 0.7.0 — SHIPPED 2026-08-04
 
