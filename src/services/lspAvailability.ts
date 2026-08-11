@@ -479,7 +479,16 @@ export class LspAvailability {
       attempted++;
       lastTried = uri.fsPath;
 
-      await new Promise(resolve => setTimeout(resolve, PROBE_PRE_DELAY_MS));
+      // Only the first candidate waits. The delay buys provider
+      // REGISTRATION time, and by the second candidate the provider either
+      // registered during that wait or it never will — so paying it per
+      // candidate just sleeps. Measured: an unavailable language spent
+      // ~750ms across three candidates, essentially all of it here, since
+      // a missing provider returns `undefined` instantly. A server still
+      // cold after the first wait is what the 30s retry is for.
+      if (attempted === 1) {
+        await new Promise(resolve => setTimeout(resolve, PROBE_PRE_DELAY_MS));
+      }
 
       let symbols: DocumentSymbolLike[] | undefined;
       let errored = false;

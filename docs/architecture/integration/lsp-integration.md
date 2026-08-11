@@ -101,7 +101,8 @@ discoverWorkspace():
   3. probe each language in parallel batches (DISCOVERY_CONCURRENCY=3):
      for each candidate, until one yields symbols:
        - openTextDocument (forces LSP load)
-       - wait PROBE_PRE_DELAY_MS (250ms) for provider registration
+       - FIRST candidate only: wait PROBE_PRE_DELAY_MS (250ms) for
+         provider registration
        - executeDocumentSymbolProvider with PROBE_TIMEOUT_MS (5000ms)
      - record AvailabilityState with the three-way verdict above
   4. for each language not confirmed available,
@@ -109,6 +110,8 @@ discoverWorkspace():
 ```
 
 Sorting by size is a heuristic, not a guarantee — a large generated bundle can be symbol-less while a small module is not, which is why sampling walks multiple candidates rather than trusting the ordering alone.
+
+Only the first candidate pays `PROBE_PRE_DELAY_MS`. That delay buys provider *registration* time, and by the second candidate the provider either registered during the first wait or it never will, so charging it per candidate is pure sleeping — a dev-host run showed an unavailable language spending ~750ms across three candidates, nearly all of it there, because a missing provider returns `undefined` immediately. A server still cold after the first wait is what the 30s retry exists for. A unit test counts the 250ms sleeps (expecting exactly one) rather than timing the probe, so the property can't regress silently and the test can't flake on wall-clock.
 
 Concurrency 3 caps cost — a 9-language polyglot workspace finishes in 3 sequential batches of 3 parallel probes. Higher concurrency would stall the LSP host; lower would slow activation.
 

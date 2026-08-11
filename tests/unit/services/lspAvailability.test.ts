@@ -278,6 +278,37 @@ describe('LspAvailability', () => {
     });
   });
 
+  describe('probe cost', () => {
+    it('pays the provider-registration delay once, not once per candidate', async () => {
+      // Observed in a dev host before this: an unavailable language burned
+      // ~750ms across three candidates, essentially all of it sleeping,
+      // because a missing provider returns `undefined` instantly. Counting
+      // the sleeps beats timing the probe — no wall-clock flake.
+      (vscode.workspace.findFiles as any).mockResolvedValue([
+        makeUri('/proj/a.sh'),
+        makeUri('/proj/b.sh'),
+        makeUri('/proj/c.sh')
+      ]);
+      mockOpenDocument({
+        '/proj/a.sh': 'shellscript',
+        '/proj/b.sh': 'shellscript',
+        '/proj/c.sh': 'shellscript'
+      });
+      mockSymbols({ '/proj/a.sh': null, '/proj/b.sh': null, '/proj/c.sh': null });
+
+      const timeoutSpy = vi.spyOn(global, 'setTimeout');
+      await service.discoverWorkspace();
+
+      // 250ms is PROBE_PRE_DELAY_MS; the 30s retry timer is filtered out.
+      const preDelays = timeoutSpy.mock.calls.filter(c => c[1] === 250).length;
+      expect(preDelays).toBe(1);
+      // All three candidates were still genuinely walked.
+      expect(service.getDeclaredAvailability().unavailable).toContain('shellscript');
+      timeoutSpy.mockRestore();
+      service.invalidate();
+    });
+  });
+
   describe('hasUsableLsp', () => {
     it('is false when nothing is known', () => {
       expect(service.hasUsableLsp()).toBe(false);
