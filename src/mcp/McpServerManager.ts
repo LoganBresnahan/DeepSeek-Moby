@@ -49,7 +49,7 @@ interface ManagedServer {
   client: Client | null;
   /** Held from spawn so dispose() can kill a child whose handshake hasn't
    *  finished — `client` is only published post-handshake. */
-  transport: StdioClientTransport | null;
+  transport: McpTransport | null;
   /** Already namespaced + validated — concat-ready for the request array. */
   tools: Tool[];
   instructions?: string;
@@ -84,10 +84,9 @@ const MAX_TOOL_PAGES = 16;
 /** A runaway result would blow the context long before the budget soft stop
  *  sees it next iteration. Truncation is named, mirroring ADR 0014's cap. */
 const MAX_RESULT_CHARS = 100_000;
-/** Restarts after a post-handshake crash, then stay `failed` until a config
- *  change or `moby.refreshMcpServers`. */
-const MAX_RESTART_ATTEMPTS = 2;
-/** Backoff per attempt, indexed by attempt-1. */
+/** Backoff per attempt, indexed by attempt-1. Its LENGTH is the restart
+ *  budget — after that the server stays `failed` until a config change or
+ *  `moby.refreshMcpServers`. One array so the two can't disagree. */
 const RESTART_BACKOFF_MS = [2_000, 10_000];
 /** Uptime a server must clear before its restart budget resets. Without
  *  this, a handshake-then-exit crash loop resets the counter every cycle
@@ -96,6 +95,19 @@ const STABLE_UPTIME_MS = 60_000;
 /** Per-server cap on the instructions text injected into the system prompt —
  *  server-authored text, so a verbose server must not flood the prompt. */
 const MAX_INSTRUCTIONS_CHARS = 2_000;
+
+/** Spawn a real stdio child — the production transport. */
+function defaultCreateTransport(config: McpServerConfig): StdioClientTransport {
+  return new StdioClientTransport({
+    command: config.command,
+    args: config.args,
+    // Merge over the SDK's safe default set (HOME, PATH, …) — passing
+    // `env` alone would REPLACE it and break most commands.
+    env: { ...getDefaultEnvironment(), ...config.env },
+    ...(config.cwd ? { cwd: config.cwd } : {}),
+    stderr: 'pipe'
+  });
+}
 
 /**
  * Neutralize section delimiters in server-authored instructions.
@@ -116,6 +128,28 @@ function sanitizeInstructions(text: string | undefined): string {
     .trim();
 }
 
+/**
+ * Injection seam. The singleton passes nothing; tests substitute an
+ * in-memory transport and millisecond timings so specs for the 30s call
+ * timeout and the [2s, 10s] restart backoff don't sleep for real.
+ */
+export interface McpServerManagerDeps {
+  /** Build the transport for one server. Defaults to a spawned stdio child. */
+  createTransport?: (config: McpServerConfig) => McpTransport;
+  callTimeoutMs?: number;
+  handshakeTimeoutMs?: number;
+  restartBackoffMs?: number[];
+  /** Uptime before a restart budget resets. */
+  stableUptimeMs?: number;
+}
+
+/** The slice of a transport this manager touches — lets a test pass an
+ *  InMemoryTransport, which has no stderr and no child process. */
+export interface McpTransport {
+  close(): Promise<void>;
+  stderr?: { on(event: 'data', cb: (chunk: Buffer) => void): unknown } | null;
+}
+
 export class McpServerManager {
   private static instance: McpServerManager | undefined;
 
@@ -124,19 +158,35 @@ export class McpServerManager {
   private started = false;
   private disposed = false;
   private clientVersion = '0.0.0';
-  /** Injectable so the slow-tool spec doesn't inherit a 30s sleep. */
-  private callTimeoutMs = CALL_TIMEOUT_MS;
   /** Per-server chains serializing EVERY tools/list — the startup list and
    *  list_changed re-lists share one lane, so a notification arriving
    *  mid-startup can't have its fresh result overwritten by the slower
    *  startup response (same generation, so the gen guard can't catch it). */
   private refreshChains = new Map<string, Promise<void>>();
 
-  private constructor() {}
+  private readonly createTransport: (config: McpServerConfig) => McpTransport;
+  private readonly callTimeoutMs: number;
+  private readonly handshakeTimeoutMs: number;
+  private readonly restartBackoffMs: number[];
+  private readonly stableUptimeMs: number;
+
+  private constructor(deps: McpServerManagerDeps = {}) {
+    this.createTransport = deps.createTransport ?? defaultCreateTransport;
+    this.callTimeoutMs = deps.callTimeoutMs ?? CALL_TIMEOUT_MS;
+    this.handshakeTimeoutMs = deps.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
+    this.restartBackoffMs = deps.restartBackoffMs ?? RESTART_BACKOFF_MS;
+    this.stableUptimeMs = deps.stableUptimeMs ?? STABLE_UPTIME_MS;
+  }
 
   static getInstance(): McpServerManager {
     if (!McpServerManager.instance) McpServerManager.instance = new McpServerManager();
     return McpServerManager.instance;
+  }
+
+  /** Build an isolated instance with substituted dependencies. Tests only —
+   *  the extension always uses the singleton. */
+  static createForTest(deps: McpServerManagerDeps): McpServerManager {
+    return new McpServerManager(deps);
   }
 
   /**
@@ -418,7 +468,7 @@ export class McpServerManager {
    *  - A server that never handshaked is not restarted at all. `spawn
    *    ENOENT` on a typo'd command would otherwise retry forever without
    *    ever being able to succeed.
-   *  - The restart budget only resets after STABLE_UPTIME_MS of ready, so a
+   *  - The restart budget only resets after `stableUptimeMs` of ready, so a
    *    server that handshakes then exits immediately still exhausts it.
    */
   private scheduleRestart(entry: ManagedServer): void {
@@ -429,18 +479,19 @@ export class McpServerManager {
       logger.warn(`[MCP] ${name}: died before completing a handshake — not restarting`);
       return;
     }
-    if (entry.restartAttempts >= MAX_RESTART_ATTEMPTS) {
+    const budget = this.restartBackoffMs.length;
+    if (entry.restartAttempts >= budget) {
       logger.warn(
-        `[MCP] ${name}: exhausted ${MAX_RESTART_ATTEMPTS} restart attempts — staying down ` +
+        `[MCP] ${name}: exhausted ${budget} restart attempts — staying down ` +
         `until settings change or "Moby: Refresh MCP Servers"`
       );
       return;
     }
 
     const attempt = ++entry.restartAttempts;
-    const delay = RESTART_BACKOFF_MS[attempt - 1] ?? RESTART_BACKOFF_MS[RESTART_BACKOFF_MS.length - 1];
+    const delay = this.restartBackoffMs[attempt - 1];
     const gen = entry.generation;
-    logger.info(`[MCP] ${name}: restart ${attempt}/${MAX_RESTART_ATTEMPTS} in ${delay}ms`);
+    logger.info(`[MCP] ${name}: restart ${attempt}/${budget} in ${delay}ms`);
 
     entry.restartTimer = setTimeout(() => {
       entry.restartTimer = null;
@@ -461,15 +512,7 @@ export class McpServerManager {
     const cfg = entry.config;
     let client: Client | null = null;
     try {
-      const transport = new StdioClientTransport({
-        command: cfg.command,
-        args: cfg.args,
-        // Merge over the SDK's safe default set (HOME, PATH, …) — passing
-        // `env` alone would REPLACE it and break most commands.
-        env: { ...getDefaultEnvironment(), ...cfg.env },
-        ...(cfg.cwd ? { cwd: cfg.cwd } : {}),
-        stderr: 'pipe'
-      });
+      const transport = this.createTransport(cfg);
       transport.stderr?.on('data', (chunk: Buffer) => {
         const line = chunk.toString('utf8').trim();
         if (line) logger.debug(`[MCP] ${cfg.name} stderr: ${line.slice(0, 500)}`);
@@ -500,7 +543,7 @@ export class McpServerManager {
         const wasReady = entry.status === 'ready';
         // A server that stayed up long enough to be useful gets its restart
         // budget back; a handshake-then-exit loop does not.
-        if (wasReady && entry.readyAt > 0 && Date.now() - entry.readyAt >= STABLE_UPTIME_MS) {
+        if (wasReady && entry.readyAt > 0 && Date.now() - entry.readyAt >= this.stableUptimeMs) {
           entry.restartAttempts = 0;
         }
         entry.status = 'failed';
@@ -515,7 +558,7 @@ export class McpServerManager {
         this.scheduleRestart(entry);
       };
 
-      await client.connect(transport, { timeout: HANDSHAKE_TIMEOUT_MS });
+      await client.connect(transport as never, { timeout: this.handshakeTimeoutMs });
       if (gen !== entry.generation) {
         void client.close().catch(() => {});
         return;
