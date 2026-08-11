@@ -1637,6 +1637,13 @@ export class RequestOrchestrator {
         lspToolsAvailable,
         lspDecl
       );
+      // MCP server roster + their own instructions. Gated on native tool
+      // calling like the MCP tools themselves — the wire drops `tools` for
+      // everything else, so a model that can't call them shouldn't read
+      // about them. Empty string when no server is ready.
+      if (promptCaps.toolCalling === 'native') {
+        systemPrompt += McpServerManager.getInstance().getInstructionsBlock();
+      }
     }
 
     // ── 3. Edit format (compact) ──

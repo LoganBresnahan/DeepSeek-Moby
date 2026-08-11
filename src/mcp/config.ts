@@ -8,6 +8,12 @@
  * A cloned repo's `.vscode/settings.json` would otherwise be arbitrary code
  * execution on folder-open.
  *
+ * This read IS the whole boundary. The contribution is window-scoped so each
+ * VS Code profile carries its own server list (application scope forced the
+ * value into the Default profile's settings.json), which means the settings
+ * UI will happily *offer* a workspace field — it just never takes effect,
+ * and `ignoredNonGlobalScope` is how the user finds out.
+ *
  * Validation mirrors `registerCustomModels`: collect descriptive errors and
  * skip bad entries, never throw.
  */

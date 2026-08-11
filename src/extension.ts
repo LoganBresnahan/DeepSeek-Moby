@@ -74,9 +74,7 @@ export async function activate(context: vscode.ExtensionContext) {
       }
       if (e.affectsConfiguration('moby.mcpServers')) {
         reportMcpServers();
-        // Live reconciliation (stop removed / start added / restart changed)
-        // is Phase 3 — until then a change applies on the next window reload.
-        logger.info('[MCP] moby.mcpServers changed — reload the window to apply');
+        void McpServerManager.getInstance().reconcile();
       }
       // Phase 4 — re-broadcast the model list when modelOptions changes
       // (per-model reasoningEffort overrides) so the selector's active
@@ -141,6 +139,12 @@ export async function activate(context: vscode.ExtensionContext) {
   // them on every window close.
   const mcpServerManager = McpServerManager.getInstance();
   context.subscriptions.push({ dispose: () => mcpServerManager.dispose() });
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      // We declare the roots capability, so servers expect to be told.
+      mcpServerManager.notifyRootsChanged();
+    })
+  );
   mcpServerManager.warmUp(context.extension.packageJSON.version);
 
   // Initialize conversation manager (event sourcing) with encrypted DB
@@ -278,6 +282,32 @@ function registerCommands(context: vscode.ExtensionContext) {
         `LSP available: ${decl.available.length ? decl.available.join(', ') : '(none)'}\n` +
         `Unavailable: ${decl.unavailable.length ? decl.unavailable.join(', ') : '(none)'}`;
       vscode.window.showInformationMessage(`Moby LSP refreshed.\n${summary}`);
+    }},
+
+    // MCP servers — tear down and restart every configured server from
+    // current settings. The escape hatch for a server that exhausted its
+    // restart budget, or died on a command the user has since fixed outside
+    // VS Code (installed the binary, corrected PATH). Config *edits* don't
+    // need this — they reconcile automatically.
+    { name: 'refreshMcpServers', handler: async () => {
+      const manager = McpServerManager.getInstance();
+      await manager.restartAll();
+      const status = manager.getStatus();
+      if (status.length === 0) {
+        // Distinguish "none configured" from "all disabled" — telling a user
+        // with three disabled servers to go add some is just wrong.
+        const disabled = loadMcpServers().servers.filter(s => !s.enabled).map(s => s.name);
+        vscode.window.showInformationMessage(
+          disabled.length > 0
+            ? `Moby: no MCP servers running — ${disabled.join(', ')} ${disabled.length === 1 ? 'is' : 'are'} disabled in settings.`
+            : 'Moby: no MCP servers configured. Add them under "moby.mcpServers" in your user settings.'
+        );
+        return;
+      }
+      const summary = status
+        .map(s => `${s.name}: ${s.status}${s.status === 'ready' ? ` (${s.toolCount} tools)` : ''}`)
+        .join('\n');
+      vscode.window.showInformationMessage(`Moby MCP servers refreshed.\n${summary}`);
     }},
 
     // Diff editor toolbar actions. The editor/title menu passes the resource

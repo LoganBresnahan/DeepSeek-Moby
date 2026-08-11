@@ -19,6 +19,10 @@ const entry = (over: Partial<Record<string, unknown>> = {}) => ({
   transport: null,
   tools: [],
   generation: 0,
+  everReady: true,
+  restartAttempts: 0,
+  restartTimer: null,
+  readyAt: 0,
   ...over
 });
 

@@ -357,8 +357,8 @@
         "moby.mcpServers": {
           "type": "object",
           "default": {},
-          "scope": "application",
-          "markdownDescription": "MCP (Model Context Protocol) servers whose tools Moby exposes to the model. Tools are namespaced `mcp__<server>__<tool>`.\n\n**Read from your user settings only** — servers declared in a workspace's `.vscode/settings.json` are ignored, because a configured server's `command` runs on your machine without per-call approval. Only stdio servers are supported.\n\nExample:\n```json\n\"moby.mcpServers\": {\n  \"pharos\": { \"command\": \"pharos\" }\n}\n```",
+          "scope": "window",
+          "markdownDescription": "MCP (Model Context Protocol) servers whose tools Moby exposes to the model. Tools are namespaced `mcp__<server>__<tool>`.\n\n**Read from your user settings only** — servers declared in a workspace's `.vscode/settings.json` are ignored (with a warning in the log), because a configured server's `command` runs on your machine without per-call approval. Each VS Code profile carries its own server list. Only stdio servers are supported.\n\nExample:\n```json\n\"moby.mcpServers\": {\n  \"pharos\": { \"command\": \"pharos\" }\n}\n```",
           "additionalProperties": {
             "type": "object",
             "required": [
@@ -805,6 +805,11 @@
       {
         "command": "moby.refreshLspAvailability",
         "title": "Refresh LSP Availability",
+        "category": "Moby"
+      },
+      {
+        "command": "moby.refreshMcpServers",
+        "title": "Refresh MCP Servers",
         "category": "Moby"
       },
       {

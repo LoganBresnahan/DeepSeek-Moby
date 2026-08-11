@@ -772,6 +772,53 @@ describe('RequestOrchestrator', () => {
       expect(systemPromptArg).toContain('shell');
     });
 
+    // ── MCP server instructions block (docs/plans/mcp.md Phase 3) ──
+
+    describe('MCP instructions block', () => {
+      let getInstructionsBlock: ReturnType<typeof vi.fn>;
+
+      beforeEach(async () => {
+        const { McpServerManager } = await import('../../../src/mcp/McpServerManager');
+        getInstructionsBlock = vi.fn(() => '\n--- MCP SERVERS ---\nConnected: pharos (3 tools).\n--- END MCP SERVERS ---\n');
+        (McpServerManager as any).instance = {
+          getInstructionsBlock,
+          getToolsForRequest: () => []
+        };
+      });
+
+      afterEach(async () => {
+        const { McpServerManager } = await import('../../../src/mcp/McpServerManager');
+        (McpServerManager as any).instance = undefined;
+      });
+
+      it('injects the block for a native tool-calling model', async () => {
+        await orchestrator.handleMessage('Hello', null, async () => '', undefined);
+
+        const sp = mockClient.streamChat.mock.calls[0][2];
+        expect(sp).toContain('--- MCP SERVERS ---');
+        expect(sp).toContain('pharos (3 tools)');
+      });
+
+      it('omits the block on the reasoner path — R1 never receives MCP tools', async () => {
+        mockClient.isReasonerModel.mockReturnValue(true);
+
+        await orchestrator.handleMessage('Hello', null, async () => '', undefined);
+
+        const sp = mockClient.streamChat.mock.calls[0][2];
+        expect(sp).not.toContain('MCP SERVERS');
+        expect(getInstructionsBlock).not.toHaveBeenCalled();
+      });
+
+      it('costs zero prompt bytes when no server is ready', async () => {
+        getInstructionsBlock.mockReturnValue('');
+
+        await orchestrator.handleMessage('Hello', null, async () => '', undefined);
+
+        const sp = mockClient.streamChat.mock.calls[0][2];
+        expect(sp).not.toContain('MCP SERVERS');
+      });
+    });
+
     // ── Temporal grounding (ADR 0007) ──
     // The standing date + staleness directive must be present on EVERY turn,
     // not only when a manual-mode web search pre-fetched results. These pin the
