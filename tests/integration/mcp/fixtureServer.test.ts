@@ -237,6 +237,29 @@ describe('restart policy against real process death', () => {
     expect(entry.restartAttempts).toBeGreaterThanOrEqual(1);
   }, 30_000);
 
+  it('a server dying mid-call resolves that call to a named Error and follows the crash policy', async () => {
+    // The Phase 5 lifecycle edge: the model called a tool and the child died
+    // before answering. The turn must get a conforming Error: string (never
+    // a hang, never a rejection), and the crash policy must then treat this
+    // as a post-ready death — evict the tools and schedule a restart.
+    const manager = makeManager({ restartBackoffMs: [5_000], stableUptimeMs: 60_000 });
+    await manager.startAll();
+    expect(manager.getStatus()[0].status).toBe('ready');
+
+    const result = await manager.executeTool(
+      'mcp__fixture__die', '{}', new AbortController().signal
+    );
+    expect(result.startsWith('Error: MCP server "fixture" —')).toBe(true);
+
+    await until(() => manager.getStatus()[0].status === 'failed');
+    expect(manager.getToolsForRequest()).toEqual([]);
+
+    const entry = (manager as any).servers.get('fixture');
+    expect(entry.everReady).toBe(true);
+    // Died after being ready → a restart is pending, not written off.
+    expect(entry.restartTimer).not.toBeNull();
+  }, 30_000);
+
   it('evicts a dead server tools from the request array', async () => {
     setConfig(serverConfig({ FIXTURE_MODE: 'crash-after-handshake', FIXTURE_CRASH_DELAY_MS: '150' }));
     const manager = makeManager({ restartBackoffMs: [5_000], stableUptimeMs: 60_000 });

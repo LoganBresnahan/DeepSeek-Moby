@@ -851,6 +851,32 @@ Two of these matter more than the rest. **S1 (IME)** is the one with a known rev
 
 ---
 
+## M44. MCP client integration — pharos in a real dev host (P0)
+
+**Why this matters:** all five MCP phases shipped with 66 automated tests across two tiers, but every one of them runs against the in-memory transport or the fixture child. What no tier reaches: a real VS Code settings UI driving reconciliation, a real long-lived server (pharos) across a real session, the prompt block inside an actual model turn, and the built-in-LSP comparison that [ADR 0016](../architecture/decisions/0016-mcp-client-integration.md) leaves gated on this walk. **Known trap from the Phase 2 smoke:** `pharos` on PATH is a Node *launcher* whose BEAM grandchild holds the stdio pipes — killing the launcher kills nothing and no close fires. Kill the `beam.smp` process to exercise crash paths. And never assert pharos's tool count — it's behind a config-driven allowlist and varies.
+
+**Partially discharged by an organic dogfood session, 2026-08-11 (unified log export reviewed):** pharos + V4 Flash Thinking on a real Haskell workspace, 12 iterations, heavy `mcp__pharos__*` use (hover / goto_definition / find_references / diagnostics / symbols / inlay_hints), pharos spawning HLS on demand. Discharged: **S0** (boot → `ready — 37 tool(s), instructions declared`), **most of S2** (`tools=47` in every request, calls round-tripped, `semantic_tokens` failure came back as a named error and the turn continued — prompt-block presence and the R1-absence check still unverified), and one edge no scripted step even asked for: **the 30s call timeout fired live** (`get_diagnostics`, HLS never published) and pharos's *late* response ~100ms after the SDK forgot the request id produced `onerror: unknown message ID` — logged, **no eviction, connection kept serving**. Also produced the first S6 data point: in the same session the built-in `LspAvailability` declared javascript/csharp/yaml all unavailable (the known probe false-negative) while pharos delivered real navigation throughout. **Still to walk deliberately:** S1 (scope boundary), S2's prompt-block checks, S3 (incl. the double-save case), S4 (beam.smp kill), S5, and the S6 side-by-side ledger.
+
+**Setup:** dev host via `/verify`'s WSLg recipe, `--profile=moby-dev`. Add pharos under `moby.mcpServers` in the **profile's user settings** (not workspace — workspace entries must be ignored with a warning, which is itself S1's first check). A native-tool-calling model (V3/V4) selected.
+
+**S0. Boot and roster.** ~~Reload the window. Within a few seconds of activation (+3s warmup) the log shows `[MCP] pharos: ready — … tool(s), instructions declared`.~~ *Observed live 2026-08-11.* `Moby: Refresh MCP Servers` reporting it is still unchecked. **Fail:** stuck `starting`, or ENOENT (PATH differs inside the dev host — record what PATH was).
+
+**S1. Scope boundary.** Put an `moby.mcpServers` entry in the *workspace* `.vscode/settings.json`. **Pass:** one warning log naming the setting, server never spawns. Remove it. Then confirm the window-scope behavior: the profile's own user settings are what's read (this is the per-profile decision from Phase 3).
+
+**S2. Tools reach a real turn.** ~~Ask the model something navigation-shaped ("find the definition of X using pharos"). **Pass:** the request log shows `mcp__pharos__*` in the tools array, the call round-trips, and the result renders as a normal tool result.~~ *Observed live 2026-08-11 — dozens of calls across 12 iterations, tool failures named, turn survived a 30s call timeout.* Still unchecked: the system prompt export shows the `--- MCP SERVERS ---` block with pharos's instructions, and it's absent when you switch to R1.
+
+**S3. Live reconciliation.** With pharos ready, edit its entry (add a harmless arg) and save. **Pass:** log shows `settings changed — restarting`, brief `starting`, then `ready` again — one child throughout (watch `pgrep -f beam.smp`). Then the Phase 5 case: make **two quick saves** (change the arg, save, change again, save within ~2s). **Pass:** exactly one replacement child, running the last config. **Fail signature:** a `failed to start` from a port/lock conflict, or two beam.smp pids.
+
+**S4. Crash → policy → refresh.** `kill <beam.smp pid>`. **Pass:** log shows connection closed + tools removed, restart attempts fire with backoff; if it keeps dying (hold the binary hostage), it exhausts the budget and stays `failed`. Mid-turn variant: kill it while a `mcp__pharos__*` call is in flight — the turn must get `Error: MCP server "pharos" — …` and continue, not hang. Then `Moby: Refresh MCP Servers` revives it.
+
+**S5. Roots.** Open a multi-folder workspace, confirm pharos still handshakes (declaring roots must not disturb a server that never asks). Add/remove a folder; no errors in the log (the notify-failure catch is debug-level).
+
+**S6. The LSP deprecation comparison (the ADR 0016 gate — record results).** Run the same workflows through both surfaces: outline a file, find a symbol's definition, find references, get symbol source — once with the built-in LSP tools (a model with `lspTools` on), once steering the model to `mcp__pharos__*`. **Record per workflow:** did it complete, latency feel, result quality. This is the input to retiring `lspTools`/`LspAvailability` vs keeping both — the Active-Bugs probe fix is explicitly blocked on this answer.
+
+**Pass criteria:** pharos survives a real session end to end (boot → turns → edit → crash → refresh) with one child at a time and named errors on every failure; the prompt block appears for native-tool models only; workspace-scope config never spawns; and S6's ledger is written down (in the tracker or the ADR), whatever the answer is.
+
+---
+
 ## Removing items from this backlog
 
 When a scenario has been verified in a dev host:

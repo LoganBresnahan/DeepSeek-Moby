@@ -70,6 +70,15 @@ interface ManagedServer {
   restartTimer: ReturnType<typeof setTimeout> | null;
   /** Unix-ms of the last transition to `ready`. */
   readyAt: number;
+  /** Resolves when whatever previously occupied this server's slot has fully
+   *  closed. A replacement created while the old child is still in its ≤4s
+   *  graceful close must not spawn yet — and if the replacement is itself
+   *  replaced before spawning (a second settings save), the successor
+   *  inherits the wait through stopServer. Without this, the second edit
+   *  spawns against the still-live original child, and a single-instance
+   *  server fails pre-handshake — which the restart policy rightly refuses
+   *  to retry. */
+  spawnGate: Promise<void>;
 }
 
 /** Same idea as LspAvailability's warmup: don't compete with activation. */
@@ -220,6 +229,26 @@ export class McpServerManager {
    * budget — the edit is the user saying "try again".
    */
   async reconcile(): Promise<void> {
+    return this.applyConfig(false);
+  }
+
+  /**
+   * Manual escape hatch (`moby.refreshMcpServers`): replace every configured
+   * server with a fresh entry from current settings. This is what clears a
+   * server that exhausted its restart budget or died on a bad command the
+   * user has since fixed outside VS Code (installed the binary, fixed PATH).
+   *
+   * Implemented as a forced reconcile rather than clear-map-then-startAll:
+   * the map stays authoritative throughout, so a settings edit landing while
+   * the old children are still closing diffs against the pending
+   * replacements instead of an empty map — the empty-map version double-
+   * spawned every server in that window.
+   */
+  async restartAll(): Promise<void> {
+    return this.applyConfig(true);
+  }
+
+  private async applyConfig(forceRestart: boolean): Promise<void> {
     if (this.disposed) return;
     // A reconcile before warmup fired IS the start — otherwise the warmup
     // timer would later run startAll() against servers already running.
@@ -238,15 +267,19 @@ export class McpServerManager {
         this.refreshChains.delete(name);
         continue;
       }
-      if (serverConfigChanged(entry.config, next)) {
-        logger.info(`[MCP] ${name}: settings changed — restarting`);
+      if (forceRestart || serverConfigChanged(entry.config, next)) {
+        logger.info(
+          `[MCP] ${name}: ${forceRestart ? 'refresh requested' : 'settings changed'} — restarting`
+        );
         const stopped = this.stopServer(entry);
         this.refreshChains.delete(name);
         // The replacement is registered synchronously so the map stays
         // authoritative for any reconcile that lands while the old child is
-        // still shutting down — but it doesn't SPAWN until that child is
-        // actually gone (see stopServer).
-        const replacement = this.createEntry(next);
+        // still shutting down — but it doesn't SPAWN until that slot is
+        // actually free. `stopped` carries the predecessor's own spawn gate
+        // (see stopServer), so even a replacement-of-a-replacement waits for
+        // the original child.
+        const replacement = this.createEntry(next, stopped);
         work.push(
           stopped.then(() => {
             if (this.disposed) return;
@@ -264,26 +297,6 @@ export class McpServerManager {
     }
 
     await Promise.all(work);
-  }
-
-  /**
-   * Manual escape hatch (`moby.refreshMcpServers`): tear everything down and
-   * start clean from current settings. This is what clears a server that
-   * exhausted its restart budget or died on a bad command the user has since
-   * fixed outside VS Code (installed the binary, fixed PATH).
-   */
-  async restartAll(): Promise<void> {
-    if (this.disposed) return;
-    // Wait for the children to actually exit before respawning — otherwise
-    // the escape hatch re-breaks exactly the single-instance servers it
-    // exists to rescue (see stopServer).
-    const stops = [...this.servers.values()].map(entry => this.stopServer(entry));
-    this.servers.clear();
-    this.refreshChains.clear();
-    await Promise.all(stops);
-    if (this.disposed) return;
-    this.started = false;
-    await this.startAll();
   }
 
   /** Synchronous read for the request hot path — ready servers only. */
@@ -415,7 +428,10 @@ export class McpServerManager {
 
   // ── private ─────────────────────────────────────────────────────────
 
-  private createEntry(config: McpServerConfig): ManagedServer {
+  private createEntry(
+    config: McpServerConfig,
+    spawnGate: Promise<void> = Promise.resolve()
+  ): ManagedServer {
     const entry: ManagedServer = {
       config,
       status: 'starting',
@@ -426,7 +442,8 @@ export class McpServerManager {
       everReady: false,
       restartAttempts: 0,
       restartTimer: null,
-      readyAt: 0
+      readyAt: 0,
+      spawnGate
     };
     this.servers.set(config.name, entry);
     return entry;
@@ -437,13 +454,16 @@ export class McpServerManager {
    * in-flight await (handshake, tools/list) and any pending restart timer
    * discard itself instead of resurrecting a server the user removed.
    *
-   * Returns the close promise, and **callers that respawn must await it**.
-   * The SDK closes gracefully — `stdin.end()`, 2s, SIGTERM, 2s, SIGKILL — so
-   * the child can still be alive for up to 4s. Respawning inside that window
-   * runs two copies at once, and a server holding an exclusive resource (a
-   * port, a lockfile) fails to start; because that failure happens before a
-   * handshake, the restart policy correctly refuses to retry it and the
-   * server stays dead until the next config edit.
+   * Returns a "slot is free" promise, and **callers that respawn must await
+   * it**. The SDK closes gracefully — `stdin.end()`, 2s, SIGTERM, 2s,
+   * SIGKILL — so the child can still be alive for up to 4s. Respawning
+   * inside that window runs two copies at once, and a server holding an
+   * exclusive resource (a port, a lockfile) fails to start; because that
+   * failure happens before a handshake, the restart policy correctly
+   * refuses to retry it and the server stays dead until the next config
+   * edit. The returned promise joins this entry's own close with its
+   * `spawnGate`, so stopping a replacement that never spawned still waits
+   * for the predecessor child it was itself waiting on.
    */
   private stopServer(entry: ManagedServer): Promise<void> {
     entry.generation++;
@@ -458,9 +478,12 @@ export class McpServerManager {
     entry.client = null;
     entry.transport = null;
     // A server still mid-handshake has no client yet — close its transport.
-    if (client) return client.close().catch(() => {});
-    if (transport) return transport.close().catch(() => {});
-    return Promise.resolve();
+    const closed = client
+      ? client.close().catch(() => {})
+      : transport
+        ? transport.close().catch(() => {})
+        : Promise.resolve();
+    return Promise.all([closed, entry.spawnGate]).then(() => undefined);
   }
 
   /**

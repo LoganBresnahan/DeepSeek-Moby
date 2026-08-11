@@ -78,6 +78,11 @@ const BASE_TOOLS = [
     inputSchema: { type: 'object', properties: {} }
   },
   {
+    name: 'die',
+    description: 'Exit mid-call without responding',
+    inputSchema: { type: 'object', properties: {} }
+  },
+  {
     // Pydantic/FastMCP shape: a $ref pointing at a SIBLING $defs. Pins that
     // the whole inputSchema reaches the wire, not just properties/required.
     name: 'nested',
@@ -136,6 +141,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     case 'huge':
       return { content: [{ type: 'text', text: 'x'.repeat(Number(args.chars) || 0) }] };
+
+    case 'die':
+      // The response is never sent — the client's pending request must be
+      // rejected by the connection dropping, not answered.
+      process.exit(9);
 
     case 'add_tool': {
       extraTools = [

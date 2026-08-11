@@ -1,6 +1,6 @@
 # MCP Client Integration — Design
 
-**Status: design accepted 2026-08-05 — not yet decomposed (run the design-plan workflow before implementing).**
+**Status: implemented — all 5 phases landed 2026-08-06 → 2026-08-11 ([ADR 0016](../architecture/decisions/0016-mcp-client-integration.md) Accepted). Remaining: the [M44](manual-test-backlog.md) dev-host walk, which also carries the LSP-deprecation gate.**
 Scope decisions were made 2026-08-04 (recorded in the tracker); this doc grounds them in the code as it stands at `e256fba`.
 
 ## Goal
@@ -177,9 +177,16 @@ Also fixed from the reviewer's minor list: the refresh command told a user with 
 
   **Three falsification passes, and one caught a vacuous test.** Reverting the Phase 3 `everReady` fix correctly failed the crash-during-list spec. But the first `list_changed` generation-guard test passed *with the guard removed* — it was being satisfied by the `client === null` check instead. The guard's real window belongs to the stdio transport (the SDK keeps the child's stdout listener attached through the ≤4s graceful close, and `Protocol._onclose()` does **not** clear `_notificationHandlers`, so a late notification genuinely does reach our closure), and `InMemoryTransport` severs instantly, so no transport-level test can produce it. Replaced with one that drives the registered handler directly across a generation bump — it now fails when the guard is removed.
 
-### Phase 5 — adversarial hardening + ADR + M44 · fable
+### Phase 5 — adversarial hardening + ADR + M44 · fable — **DONE 2026-08-11**
 
-- [ ] **hardening-adr-and-backlog** (high, hard-reasoning) — lifecycle-edge pass (server dies mid-call, config change mid-turn, `list_changed` mid-turn — teardown/abort-race territory per ADR 0008 experience), then the ADR (trust model, global-scope-only, namespacing, decline-sampling, 30s timeout, LSP decision gate), M44 backlog entry, tracker updates. This slice IS the verify pass — no second one layered on it.
+- [x] **hardening-adr-and-backlog** — the lifecycle-edge pass found **one real defect and one structural window**, both fixed:
+
+  1. **Double-edit double-spawn.** `reconcile` deferred a replacement's spawn behind its *own* predecessor's close — but a replacement that never spawned stops instantly, so two settings saves inside the ≤4s graceful-close window let the second replacement spawn against the still-live **original** child. Two copies at once → a single-instance server fails **pre-handshake** → the restart policy rightly refuses to retry → permanently dead. The Phase 3 headline bug, resurrected one edit deeper. Fix: each entry carries a transitive `spawnGate` and `stopServer` now returns "the slot is free" (own close ∧ gate), so a replacement-of-a-replacement still waits for the original child.
+  2. **`restartAll`'s cleared-map window.** Clear map → await stops → `startAll` meant a reconcile landing during the await saw an *empty* map and spawned everything as "added" while the old children were closing — after which restartAll spawned second copies over them. Fix: `restartAll` is now a **forced reconcile** (`applyConfig(true)`); the map stays authoritative throughout and the window structurally ceases to exist.
+
+  The three named mid-turn edges were verified conforming and are now pinned: **die mid-call** (new fixture `die` tool — `process.exit` before responding; the call resolves to `Error: MCP server "fixture" — …`, tools evict, restart scheduled), **removal mid-call** (in-flight call resolves to a named error when a settings edit deletes the server), and **stale tool after `list_changed`** (dispatch deliberately doesn't gate on the cache — the server's refusal comes back named; the replacement tool works). A manager-wide mutex was considered and rejected for the fix — it would queue the user's *corrective* edit behind a hung 30s handshake (recorded in the ADR). 5 new tests (4 in-memory + 1 fixture, 130 MCP tests total); **both race specs falsified** — each fails against its pre-fix implementation (gate dropped / clear-map restored).
+
+  ADR 0016 completed (status Accepted; decision 14, mid-turn-edges section, alternatives, consequences, revisit triggers) and its missing README index row added. The LSP deprecation decision stays **open behind M44 S6** — the comparison needs a dev host. [M44](manual-test-backlog.md) written: boot/scope/turn/reconcile/crash/roots plus the deprecation ledger, with the beam.smp trap called out.
 
 **Critical path:** config-contribution → manager-core → dispatch → test-harness → hardening.
 

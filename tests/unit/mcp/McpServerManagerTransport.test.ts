@@ -405,6 +405,167 @@ describe('executeTool over a real transport', () => {
   });
 });
 
+describe('lifecycle edges mid-turn', () => {
+  it('an in-flight call resolves to a named Error when a settings edit removes the server', async () => {
+    // Config change mid-turn: the model called a tool, and before the server
+    // answered the user deleted its entry. The pending call must come back
+    // as a conforming Error: string — never a hang, never a rejection.
+    let releaseTool!: () => void;
+    const toolGate = new Promise<void>(r => { releaseTool = r; });
+    const harness = await makeServer({
+      onCall: async () => {
+        await toolGate;
+        return { content: [{ type: 'text', text: 'too late' }] };
+      }
+    });
+    const manager = track(managerFor(harness));
+    await manager.startAll();
+
+    const inFlight = manager.executeTool('mcp__inmem__echo', '{}', new AbortController().signal);
+    setConfig({});
+    await manager.reconcile();
+
+    const result = await inFlight;
+    expect(result.startsWith('Error: MCP server "inmem" —')).toBe(true);
+    expect(manager.getStatus()).toEqual([]);
+    expect(manager.getToolsForRequest()).toEqual([]);
+    releaseTool();
+  });
+
+  it('a call to a tool that list_changed removed is answered by the server, not the stale cache', async () => {
+    // list_changed mid-turn: the array the model saw was built at iteration
+    // start; by the time it calls, the tool is gone. The manager deliberately
+    // does not gate dispatch on its own cache — the server is the authority,
+    // and its refusal comes back as a named Error the model can react to on
+    // the next iteration (whose array is already fresh).
+    const harness = await makeServer({
+      tools: [{ name: 'old_tool', inputSchema: { type: 'object', properties: {} } }],
+      onCall: async (name) => {
+        if (name === 'old_tool') throw new Error('Unknown tool: old_tool');
+        return { content: [{ type: 'text', text: `ran ${name}` }] };
+      }
+    });
+    const manager = track(managerFor(harness));
+    await manager.startAll();
+
+    harness.setTools([{ name: 'new_tool', inputSchema: { type: 'object', properties: {} } }]);
+    await harness.notifyListChanged();
+    await (manager as any).refreshChains.get('inmem');
+    expect(manager.getToolsForRequest().map(t => t.function.name)).toEqual(['mcp__inmem__new_tool']);
+
+    const stale = await manager.executeTool('mcp__inmem__old_tool', '{}', new AbortController().signal);
+    expect(stale.startsWith('Error: MCP server "inmem" —')).toBe(true);
+    expect(stale).toContain('Unknown tool');
+
+    expect(await manager.executeTool('mcp__inmem__new_tool', '{}', new AbortController().signal))
+      .toBe('ran new_tool');
+  });
+
+  it('a second settings edit during the graceful-close window still waits for the original child', async () => {
+    // Two settings saves within the ≤4s graceful close. The first edit's
+    // replacement never spawned, so stopping it is instant — but its SLOT is
+    // still occupied by the original child. The second edit's replacement
+    // must inherit that wait (the transitive spawnGate), or it spawns a
+    // second copy and a single-instance server dies pre-handshake, which the
+    // restart policy rightly refuses to retry.
+    const first = await makeServer({
+      tools: [{ name: 'v1_tool', inputSchema: { type: 'object', properties: {} } }]
+    });
+    const third = await makeServer({
+      tools: [{ name: 'v3_tool', inputSchema: { type: 'object', properties: {} } }]
+    });
+
+    let releaseClose!: () => void;
+    const closeHeld = new Promise<void>(r => { releaseClose = r; });
+    const realClose = first.clientTransport.close.bind(first.clientTransport);
+    (first.clientTransport as any).close = async () => { await closeHeld; await realClose(); };
+
+    const spawns: string[] = [];
+    const queue = [first.clientTransport, third.clientTransport];
+    const manager = track(McpServerManager.createForTest({
+      createTransport: (cfg) => {
+        spawns.push(cfg.args?.join(' ') ?? 'initial');
+        return queue.shift() as never;
+      },
+      callTimeoutMs: 2_000,
+      handshakeTimeoutMs: 2_000,
+      restartBackoffMs: [5, 10],
+      stableUptimeMs: 50
+    }));
+    await manager.startAll();
+    expect(spawns).toHaveLength(1);
+
+    setConfig({ inmem: { command: 'unused-in-memory', args: ['--v2'] } });
+    const firstEdit = manager.reconcile();
+    setConfig({ inmem: { command: 'unused-in-memory', args: ['--v3'] } });
+    const secondEdit = manager.reconcile();
+
+    // Nothing may spawn while the original child still holds the slot.
+    await new Promise(r => setTimeout(r, 30));
+    expect(spawns).toHaveLength(1);
+
+    releaseClose();
+    await Promise.all([firstEdit, secondEdit]);
+
+    // Exactly one replacement spawned, running the LAST config.
+    expect(spawns).toHaveLength(2);
+    expect(spawns[1]).toBe('--v3');
+    expect(manager.getStatus()).toEqual([
+      expect.objectContaining({ name: 'inmem', status: 'ready' })
+    ]);
+    expect(manager.getToolsForRequest().map(t => t.function.name)).toEqual(['mcp__inmem__v3_tool']);
+  });
+
+  it('a settings edit landing during a refresh does not spawn a second copy', async () => {
+    // restartAll used to clear the map, await the stops, then startAll — so a
+    // reconcile in that window saw an empty map and spawned everything as
+    // "added" while the old children were still closing, after which
+    // restartAll spawned copies over them. As a forced reconcile the map
+    // stays authoritative and the edit diffs against the pending replacement.
+    const before = await makeServer({
+      tools: [{ name: 'v1_tool', inputSchema: { type: 'object', properties: {} } }]
+    });
+    const after = await makeServer({
+      tools: [{ name: 'v2_tool', inputSchema: { type: 'object', properties: {} } }]
+    });
+
+    let releaseClose!: () => void;
+    const closeHeld = new Promise<void>(r => { releaseClose = r; });
+    const realClose = before.clientTransport.close.bind(before.clientTransport);
+    (before.clientTransport as any).close = async () => { await closeHeld; await realClose(); };
+
+    const spawns: string[] = [];
+    const queue = [before.clientTransport, after.clientTransport];
+    const manager = track(McpServerManager.createForTest({
+      createTransport: () => {
+        spawns.push('spawn');
+        return queue.shift() as never;
+      },
+      callTimeoutMs: 2_000,
+      handshakeTimeoutMs: 2_000,
+      restartBackoffMs: [5, 10],
+      stableUptimeMs: 50
+    }));
+    await manager.startAll();
+    expect(spawns).toHaveLength(1);
+
+    const refresh = manager.restartAll();
+    const edit = manager.reconcile();
+
+    await new Promise(r => setTimeout(r, 30));
+    expect(spawns).toHaveLength(1);
+
+    releaseClose();
+    await Promise.all([refresh, edit]);
+
+    expect(spawns).toHaveLength(2);
+    expect(manager.getStatus()).toEqual([
+      expect.objectContaining({ name: 'inmem', status: 'ready' })
+    ]);
+    expect(manager.getToolsForRequest().map(t => t.function.name)).toEqual(['mcp__inmem__v2_tool']);
+  });
+});
+
 describe('roots served over a real transport', () => {
   it('answers roots/list with the workspace folders', async () => {
     const harness = await makeServer();
