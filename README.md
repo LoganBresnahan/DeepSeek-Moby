@@ -83,7 +83,8 @@ The model doesn't just answer — it reads your files, searches your workspace, 
 
 - Reasoning streams live in expandable **Thinking** dropdowns; tool calls dispatch inline as the model emits them
 - **Every shell command needs your approval** before it runs — allow/block once or permanently, with an editable rule list. (An "Allow All Commands" override exists for the brave.)
-- **LSP-backed navigation** — where VS Code's "Go to Definition" works, the model gets symbol-level tools (`outline`, `find_references`, and friends) instead of grepping blind. Availability is probed per language and declared to the model up front
+- **LSP-backed navigation** — where VS Code's "Go to Definition" works, the model gets symbol-level tools instead of grepping blind: `outline`, `find_symbol`, `find_definition`, `find_references`, `get_symbol_source`, `hover` for a resolved type signature, and `get_diagnostics` to check whether an edit actually compiled. Availability is probed per language and declared to the model up front, and it uses your installed language extensions — nothing extra to install
+- **Extensible via [MCP](#mcp-servers)** — point Moby at an MCP server and its tools join the same toolset
 - **File context picker** — hand the model specific files yourself, independent of what it reads on its own
 - Switching models starts a fresh session — no mixed-model conversations
 
@@ -149,6 +150,36 @@ Any OpenAI-compatible endpoint registers as a first-class model next to the buil
 
 Templates for common setups ship in the **Add Custom Model** picker; end-to-end examples in [docs/guides/custom-models.md](docs/guides/custom-models.md).
 
+### MCP servers
+
+Moby is an [MCP](https://modelcontextprotocol.io) client. Declare stdio servers under `moby.mcpServers` and their tools merge into the model's toolset alongside the built-ins:
+
+```jsonc
+// User settings (not workspace — see below)
+"moby.mcpServers": {
+  "pharos": { "command": "pharos", "args": ["mcp"] }
+}
+```
+
+- Tools are namespaced `mcp__<server>__<tool>`, so they can never collide with a built-in. A server's own `instructions` are passed to the model, and workspace folders are offered as `roots` for servers that ask
+- **Moby: MCP Servers** shows what each server is doing — ready with a tool count, failed with the reason, disabled — and its checkboxes turn servers on and off. **Moby: Refresh MCP Servers** restarts everything, for a server you fixed outside VS Code
+- A crashed server's tools leave the request immediately and it is restarted twice with backoff; a server that never started successfully isn't retried, because a wrong command can't become right by repeating it
+- Edits to the setting take effect live — no reload
+- **Read from your user settings only, deliberately.** A server entry is a command Moby will execute, so honouring a workspace `.vscode/settings.json` would make opening a cloned repo enough to run arbitrary code. Workspace entries are ignored with a warning. Each VS Code profile keeps its own list
+- Servers run without per-call approval — the trust boundary is you adding it to your own settings. Moby declines the MCP `sampling` and `elicitation` capabilities, so a server can never drive the model
+
+Tools only; MCP prompts and resources are not wired up yet. stdio only — no HTTP/SSE transports.
+
+### Typing `/`, `@`, and `:` in the composer
+
+Type a trigger character and an overlay offers completions inline:
+
+- **`/`** — any Moby command, the same list the commands popup shows
+- **`@`** — workspace files; accepting one attaches it as a context chip
+- **`:`** — emoji by shortcode (1,913 of them, GitHub's set)
+
+Escape or a space dismisses it, and with the overlay closed the composer behaves exactly as it always did. Queries are a single token, so a filename with spaces is found by its first token.
+
 ---
 
 ## Configuration
@@ -162,10 +193,11 @@ The settings most people touch:
 | `moby.webSearchMode` | `auto` | `off`, `manual`, or `auto` (the model decides). |
 | `moby.customModels` | `[]` | Your registered OpenAI-compatible models. |
 | `moby.subagents` | `{}` | Per-role model routing, e.g. `{"image-describe": "kimi-vision"}`. |
+| `moby.mcpServers` | `{}` | MCP servers to spawn, e.g. `{"pharos": {"command": "pharos", "args": ["mcp"]}}`. **User settings only** — workspace values are ignored. |
 | `moby.requestTimeoutMs` | `60000` | Abort an API request after this long. Raise for slow providers — reasoning and vision models routinely take 30s+. |
 
 <details>
-<summary><strong>Full settings reference (all 34)</strong></summary>
+<summary><strong>Full settings reference (all 35)</strong></summary>
 
 **Model selection**
 
@@ -209,6 +241,12 @@ The settings most people touch:
 | `moby.subagents.webSearchDigest.maxResults` | `5` | Output cap for the web-search digest subagent (1–20). Also exposed as a slider in the web-search popup. |
 | `moby.requestTimeoutMs` | `60000` | Milliseconds before an API request is aborted. Raise for slow providers — reasoning models and vision backends routinely take 30s or more. Applies to every endpoint, custom models included. |
 
+**MCP**
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `moby.mcpServers` | `{}` | Stdio MCP servers to spawn, keyed by name (`[a-zA-Z0-9-]`, max 32 chars). Each entry takes `command` (required), `args`, `env`, `cwd`, and `enabled`. **Read from user settings only** — a workspace value is ignored with a warning, because an entry is a command Moby executes. Per VS Code profile. See [MCP servers](#mcp-servers). |
+
 **Web search**
 
 | Setting | Default | Description |
@@ -247,7 +285,11 @@ Open the Command Palette (`Ctrl+Shift+P`) and search "Moby".
 
 **Drawing** — Start Drawing Server · Stop Drawing Server
 
+**MCP** — MCP Servers (status + enable/disable) · Refresh MCP Servers
+
 **Diagnostics & maintenance** — Statistics · Show Log · Export Logs · Manage Database Encryption Key · Refresh LSP Availability · Export Turn as JSON (Debug) · Export Session (Test Fixture)
+
+Commands are also reachable from the commands popup in the chat panel, or by typing `/` in the composer.
 
 ---
 
@@ -321,7 +363,7 @@ For the curious and for contributors. Full documentation lives in [docs/architec
 ## Roadmap
 
 - **Expanded sub-agent routing** — web-search digestion and [image description](#images) already offload to a model of your choice; a file-digest role and broader concurrent fan-out are planned
-- **MCP client** — spawn external MCP servers declared in settings and register their tools alongside the built-ins, using the same config shape as Claude Desktop
+- **MCP prompts and resources** — the [client](#mcp-servers) ships with tools support; server-provided prompts would appear under `/` and resources under `@`, reusing the composer surface
 - **Plugin system** — extensible tool definitions for domain-specific workflows
 - **Per-turn lazy event load** — on-demand hydration of very large session histories
 

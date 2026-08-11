@@ -2,6 +2,49 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-11
+
+The extensibility release. Moby becomes an **MCP client**, so the tools available to the model are no longer a closed set the extension ships — you declare servers in your settings and their tools merge into every request. Alongside it: typed invocation in the composer (`/` commands, `@` files, `:` emoji), a rebuilt LSP availability probe that stops declaring working language servers dead, and two new navigation tools.
+
+Minor, not patch: new features, a new setting, new tools. No breaking changes, and no database migration this time.
+
+### MCP client — your servers' tools, dispatched like built-ins (ADR 0016)
+
+Declare stdio MCP servers under `moby.mcpServers` and their tools join the model's tool array, namespaced `mcp__<server>__<tool>`. Server-declared `instructions` reach the system prompt, workspace folders are served as `roots`, and `tools/list_changed` refreshes the cache live.
+
+The decisions that shape it, since several look arbitrary without the reasoning:
+
+- **Config is read from user scope only** — `inspect().globalValue`, never the merged view. That single read is the entire security boundary: the trust model is "you typed this command into your own settings, so no per-call approval," which only holds if a cloned repo's `.vscode/settings.json` can't register a spawnable command. A workspace-scope value is detected and ignored with one warning naming why. The contribution is window-scoped, so each VS Code profile carries its own server list.
+- **Sampling and elicitation are declined.** Server-initiated model calls invert the trust model; we declare no such capabilities.
+- **Failures are always a named `Error:` string, never silence.** A crash mid-call, a settings edit that removes a server mid-turn, a tool name that vanished after a `list_changed` — each comes back as text the model can react to on its next iteration. Non-text content blocks become named placeholders; results cap at 100K chars with a marker.
+- **Restart policy is asymmetric by failure kind.** A server that never completed a handshake is never restarted — a wrong `command` cannot become right by retrying. One that crashes *after* being ready gets 2 restarts with `[2s, 10s]` backoff, and the budget resets only after 60s of stable uptime, because resetting on every `ready` would let a handshake-then-exit loop restart forever.
+- **A respawn always waits for the previous child to exit.** The SDK closes gracefully (up to 4s), so restarting inside that window runs two copies — and a server holding a port or lockfile then fails to start *before* a handshake, which the restart policy correctly refuses to retry. That would leave it dead until the next config edit.
+- **Server-authored instructions are untrusted prompt input.** Injected verbatim except that delimiter-shaped lines are defanged, so a server can't close the `--- MCP SERVERS ---` block early and have its text read as a first-class Moby prompt section. Installing a binary is not the same as trusting its runtime output.
+
+**Moby: MCP Servers** shows what every configured server is doing — ready with a tool count, failed with the reason, disabled — and its checkboxes turn servers on and off by writing `enabled` to settings, so the existing config reconciliation does the starting and stopping. **Moby: Refresh MCP Servers** restarts everything, for a server you fixed outside VS Code.
+
+Not in this release: HTTP/SSE transports, and MCP prompts/resources (they ride the composer autocomplete surface below, in a later phase).
+
+### Typed invocation in the composer (ADR 0015)
+
+Type `/` for commands, `@` for workspace files, `:` for emoji (1,913 shortcodes). One overlay, one provider registry, and the textarea stays a plain textarea — accepting converts to a chip, a command, or inserted text, never an inline token. The overlay opens only on *keyed* input, and its keyboard arbitration is a document-capture listener attached only while it's visible, so a closed overlay leaves the composer byte-for-byte unchanged.
+
+Known limitation: queries are single-token — whitespace ends a span, so `/export logs` isn't expressible.
+
+### LSP: the probe stops condemning working languages, plus `hover` and `get_diagnostics`
+
+A language whose sampled file happened to be a four-line comment-only stub was marked "no LSP" for the whole session, and the retry re-probed *the same file*, so it could never recover. Two outcomes had been collapsed into one: an empty **array** is a provider answering "this file has no symbols", while `undefined` is nothing handling the request at all. They now mean different things — discovery also samples up to three files per language, richest first, and the retry deliberately picks one it hasn't tried.
+
+The more damaging half was invisible: the availability check gated the LSP **tools themselves**, so a mis-marked workspace lost them entirely — and with no tools there are no tool results, so the feedback loop that exists to correct the map could never fire.
+
+Two tools added. `hover` gives a symbol's resolved type signature and docs. `get_diagnostics` reports current errors and warnings for a file or the whole workspace — useful for checking an edit actually compiled. It reads VS Code's diagnostic collection directly rather than issuing an LSP request, so it also works for linters that expose no symbol provider; a file VS Code hasn't analyzed yet reports nothing, which the tool says plainly rather than implying the file is clean.
+
+### Fixed
+
+- **`Map` values never survived the webview state manager.** `deepClone` had no `Map`/`Set` branch, so a Map fell through the plain-object path and came out `{}`; `deepEqual` had the same gap, which meant **any two Maps compared equal** and a state change carrying one never notified subscribers. Found by dogfooding `@`-autocomplete: accepting a file attached it silently, with no chip. The composer's context-file chip row was also dead UI — its render method had zero callers repo-wide.
+- Custom models without native tool calling no longer pay for every turn twice (the legacy pipeline ran a probe that could never return a tool call, then discarded the answer).
+- A multi-file drop attached in encode-completion order, so a small image could overtake a large one — and the vision calls and digests followed that scrambled order into the model's context. Both ingest paths are now sequential.
+
 ## [0.7.0] - 2026-08-04
 
 The images release. You can attach a screenshot and ask about it, and the model answers — despite DeepSeek's API being text-only, which it still is. Getting there took a persistence layer for attachments, a second model in the loop, and a database migration. Alongside it: the freeform drawing pad comes back after being parked since before vision existed, custom-model entries can now describe three provider quirks they previously couldn't, and five bugs found while exercising all of the above are fixed.

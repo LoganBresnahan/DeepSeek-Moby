@@ -873,7 +873,37 @@ Two of these matter more than the rest. **S1 (IME)** is the one with a known rev
 
 **S6. Built-in-vs-pharos quality comparison (no longer a survival gate).** The deprecation question was **decided 2026-08-11 — keep both** ([ADR 0016](../architecture/decisions/0016-mcp-client-integration.md) § "Built-in LSP deprecation"), and the probe bug is fixed, so this is now a quality read rather than a life-or-death verdict. Run the same workflows through both surfaces: outline a file, find a symbol's definition, find references, hover a symbol, get diagnostics — once with the built-in LSP tools, once steering the model to `mcp__pharos__*`. **Record per workflow:** did it complete, latency feel, result quality. Two things specifically worth watching now that both can be present at once: whether the model picks sensibly between two overlapping tool sets, and whether the built-in tools are actually **offered** (before the fix, an all-unavailable verdict silently removed them from the array — confirm the prompt's LSP declaration and the tool list agree).
 
-**Pass criteria:** pharos survives a real session end to end (boot → turns → edit → crash → refresh) with one child at a time and named errors on every failure; the prompt block appears for native-tool models only; workspace-scope config never spawns; and S6's ledger is written down (in the tracker or the ADR), whatever the answer is.
+**S7. The `Moby: MCP Servers` picker (added 2026-08-11 — highest-consequence untested surface in the release).** This is the only command that **writes your settings**, so a bug here corrupts `moby.mcpServers` rather than merely misreporting.
+1. Run it with pharos ready. **Pass:** one row per *configured* server showing `ready · N tools (pharos 0.1.2)`. A **disabled** server must still be listed (unchecked) — if disabled servers are hidden there is no way to switch one back on.
+2. Uncheck pharos, confirm. **Pass:** log shows it stopping, `getToolsForRequest` drops its tools, and the next turn's request has no `mcp__pharos__*`. Check `settings.json`: the entry gained `"enabled": false` and **`command`, `args`, `env`, and `cwd` are all still intact** — the write clones and patches rather than rebuilding, and this is the step that proves it.
+3. Re-check it, confirm. **Pass:** it starts and reaches `ready` (a re-enabled entry gets a fresh restart budget by design).
+4. Open the picker, then press **Escape**. **Pass:** nothing changes. Escape and "unchecked everything" are different intents and must not be conflated — conflating them would silently disable every server.
+5. With a deliberately broken server (bad `command`), open the picker. **Pass:** the row reads `failed — spawn ENOENT` and the detail line shows the command. This reason is otherwise only in the output channel.
+6. Run the command with no servers configured. **Pass:** an informational message pointing at the setting — no empty picker.
+
+**Pass criteria:** pharos survives a real session end to end (boot → turns → edit → crash → refresh) with one child at a time and named errors on every failure; the prompt block appears for native-tool models only; workspace-scope config never spawns; the picker's writes never damage an entry; and S6's ledger is written down (in the tracker or the ADR), whatever the answer is.
+
+---
+
+## M45. LSP probe rewrite + `hover` / `get_diagnostics` (P0)
+
+**Why this matters:** the availability probe used to mark a whole language dead when its sampled file legitimately had no symbols, and the retry re-probed the same file so it could never recover. Worse, the availability check gated the **tools themselves** — a mis-marked workspace silently lost all LSP tools, and with no tools there were no tool results, so the feedback loop that exists to fix the map could never fire. That is now three-way (available / unavailable / untested), samples up to three files per language, and retries a *different* one. All of it is unit-tested against a mocked VS Code; **none of it has run against real language servers except one dogfood session.** Related: [M30](#m30-lsp-per-language-availability--reactive-recovery-p0) is the older availability entry and has never been walked — this supersedes its probe half.
+
+**Setup:** dev host on a **polyglot** workspace — ideally one containing a language whose only files are trivial (a lone 4-line `.js`, a `.yaml`), since that is the exact case that used to fail. Debug logging on.
+
+**S1. The verdict is right.** Reload and read `[LspAvailability] Discovery complete` — check `available` / `unavailable` / `untested` against what you actually have installed. **Pass:** languages with a working extension appear in `available`; ones with no server in `unavailable`; a language whose files are genuinely symbol-less in `untested`, *not* `unavailable`. Each unavailable line should read `N file(s) sampled` with N > 1 where more than one file of that language exists.
+
+**S2. The tools are actually offered.** With at least one language `available` or `untested`, start a turn and export the system prompt. **Pass:** the `LSP works for: …` / `Untested: …` declaration is present **and** the LSP tools are in the request. The old bug was these disagreeing — a declaration promising LSP with no tools behind it.
+
+**S3. Recovery.** For a language reported `untested` or `unavailable`, open a *substantial* real file of that language and wait ~30s. **Pass:** the editor-focus retry probes **that file** (visible in the debug log) and flips the language to available if a server answers. **Fail:** the log names the same file discovery already tried.
+
+**S4. `hover`.** Ask the model for a function's exact signature. **Pass:** it calls `hover` and reports the resolved type, generics and all — not a guess reconstructed from the source text.
+
+**S5. `get_diagnostics`.** Ask it to check whether the workspace has errors (no `path`), then introduce a deliberate type error, save, and ask again scoped to that file. **Pass:** the workspace call lists real problems; the scoped call finds the new one with the right line and message. Note the honest limit — a file VS Code has not analyzed reports nothing, and the tool says so rather than claiming the file is clean.
+
+**S6. Probe cost.** Compare `Discovery complete in …ms` against the pre-fix baseline of ~7000ms on the same workspace. **Pass:** noticeably lower — only the first candidate per language now pays the 250ms registration delay.
+
+**Pass criteria:** the probe's verdicts match reality on a polyglot workspace, symbol-less files no longer condemn a language, the prompt declaration and the offered tools agree, retries pick fresh files, and both new tools return real language-server data.
 
 ---
 
