@@ -66,7 +66,7 @@ MCP makes pharos's ~34 navigation tools available where Moby's 5 built-in LSP to
 
 - First server that genuinely needs variable expansion in config (`${env:…}`, `${workspaceFolder}`)
 - First server that needs a per-server timeout knob — *first near-miss observed 2026-08-11: pharos's `get_diagnostics` waits internally ~30s for `publishDiagnostics`, tying with our 30s call timeout; ours fired 100ms early, turning pharos's named "no diagnostics received" answer into an abort. Benign (the late response only produced a logged `unknown message ID` transport error, no eviction), but a second occurrence on a different tool is the trigger.*
-- Prompts/resources phase riding composer autocomplete (ADR 0015)
+- Prompts/resources phase riding composer autocomplete (ADR 0015) — trigger: the first configured server declaring a prompts capability. Decisions already pinned in the plan's "Later" section: tools never surface in `/`, prompts do (namespaced), and prompt *arguments* collide with ADR 0015's single-token queries — that collision is the phase's real cost.
 - User demand for workspace-scoped servers (would need a real trust-prompt flow, not just a scope change)
 - A server whose tool count makes the per-request schema cost unacceptable → Moby-side per-tool allowlist
 - Image content blocks in results could ride digest routing (ADR 0014's pipeline) instead of the named placeholder

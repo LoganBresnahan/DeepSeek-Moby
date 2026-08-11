@@ -192,7 +192,11 @@ Also fixed from the reviewer's minor list: the refresh command told a user with 
 
 **Do NOT over-verify** (failures are loud, shipshape suffices): extraction, namespacing, token-budget, instructions block, roots, test harness.
 
-**Later (separate effort)** — prompts (`/` provider) + resources (`@` provider riding `droppedFileContents`). Not in this doc's scope.
+**Later (separate effort)** — prompts (`/` provider) + resources (`@` provider riding `droppedFileContents`). Not in this doc's scope. **Decisions pinned 2026-08-11** (user asked why pharos contributed nothing to `/`; answer: correct twice — v1 is tools-only *and* pharos declares no prompts capability):
+
+- **Tools never surface in `/`.** They are model-facing, called mid-turn with JSON arguments; a user-invokable tool row would be a debug console, not a command. Only MCP **prompts** (the protocol's user-facing template type) belong there, namespaced so a server can't shadow a built-in command. Resources go to `@`, not `/`.
+- **Build trigger: the first configured server that declares a prompts capability.** Until then the phase would ship invisible — testable only against the fixture server. Don't build on spec.
+- **The real cost is already known:** MCP prompts take arguments, and ADR 0015 queries are single-token (whitespace ends the span). A prompt with required args forces either ADR 0015's multi-token revisit or an accept-then-fill-arguments UX. That collision is the bulk of the phase, not the `prompts/list` plumbing.
 
 ## Testing
 
