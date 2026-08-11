@@ -808,6 +808,11 @@
         "category": "Moby"
       },
       {
+        "command": "moby.manageMcpServers",
+        "title": "MCP Servers",
+        "category": "Moby"
+      },
+      {
         "command": "moby.refreshMcpServers",
         "title": "Refresh MCP Servers",
         "category": "Moby"

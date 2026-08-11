@@ -297,15 +297,20 @@ describe('LspAvailability', () => {
       mockSymbols({ '/proj/a.sh': null, '/proj/b.sh': null, '/proj/c.sh': null });
 
       const timeoutSpy = vi.spyOn(global, 'setTimeout');
-      await service.discoverWorkspace();
+      try {
+        await service.discoverWorkspace();
 
-      // 250ms is PROBE_PRE_DELAY_MS; the 30s retry timer is filtered out.
-      const preDelays = timeoutSpy.mock.calls.filter(c => c[1] === 250).length;
-      expect(preDelays).toBe(1);
-      // All three candidates were still genuinely walked.
-      expect(service.getDeclaredAvailability().unavailable).toContain('shellscript');
-      timeoutSpy.mockRestore();
-      service.invalidate();
+        // 250ms is PROBE_PRE_DELAY_MS; the 30s retry timer is filtered out.
+        const preDelays = timeoutSpy.mock.calls.filter(c => c[1] === 250).length;
+        expect(preDelays).toBe(1);
+        // All three candidates were still genuinely walked.
+        expect(service.getDeclaredAvailability().unavailable).toContain('shellscript');
+      } finally {
+        // A global-timer spy that outlives its test would be a cross-file
+        // hazard — this suite already has one timer-leak bug on record.
+        timeoutSpy.mockRestore();
+        service.invalidate();
+      }
     });
   });
 

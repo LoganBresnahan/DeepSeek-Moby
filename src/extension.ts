@@ -15,6 +15,7 @@ import { DrawingServer } from './providers/drawingServer';
 import { registerCustomModels } from './models/registry';
 import { loadMcpServers } from './mcp/config';
 import { McpServerManager } from './mcp/McpServerManager';
+import { manageMcpServers } from './mcp/manageServers';
 import { SubagentRouter } from './subagents/router';
 import { isImageDescribeAvailable } from './subagents/availability';
 import * as crypto from 'crypto';
@@ -283,6 +284,14 @@ function registerCommands(context: vscode.ExtensionContext) {
         `Unavailable: ${decl.unavailable.length ? decl.unavailable.join(', ') : '(none)'}`;
       vscode.window.showInformationMessage(`Moby LSP refreshed.\n${summary}`);
     }},
+
+    // MCP servers — status + enable/disable. Read-only about state; the only
+    // write is the user's own toggle, which goes to settings so the config
+    // listener reconciles (ADR 0016 decision 14). Distinct from the refresh
+    // command below, which restarts everything.
+    { name: 'manageMcpServers', handler: () =>
+      manageMcpServers(() => McpServerManager.getInstance().getStatus())
+    },
 
     // MCP servers — tear down and restart every configured server from
     // current settings. The escape hatch for a server that exhausted its

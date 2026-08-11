@@ -132,6 +132,42 @@ export function loadMcpServers(): McpConfigLoadResult {
 }
 
 /**
+ * Flip `enabled` on one or more entries and persist to **global** scope —
+ * the same scope `readMcpServersSetting` reads, so the security boundary is
+ * unchanged (see the module note).
+ *
+ * Writing settings rather than holding a runtime flag is deliberate (ADR 0016
+ * decision 14): the manager reconciles to this object, and `serverConfigChanged`
+ * ignores `enabled`, so a runtime-only toggle would be silently undone by the
+ * next unrelated config edit. The config-change listener picks this write up
+ * and reconciles — the caller does not start or stop anything itself.
+ *
+ * The raw object is cloned and patched, never rebuilt from validated entries,
+ * so keys we don't model (or don't model yet) survive a toggle.
+ *
+ * Unknown names are ignored rather than created: this toggles what the user
+ * already declared, it does not invent server entries.
+ */
+export async function setMcpServersEnabled(changes: Map<string, boolean>): Promise<void> {
+  if (changes.size === 0) return;
+  const { raw } = readMcpServersSetting();
+  if (!isPlainObject(raw)) return;
+
+  const next: Record<string, unknown> = {};
+  for (const [name, entry] of Object.entries(raw)) {
+    if (!isPlainObject(entry) || !changes.has(name)) {
+      next[name] = entry;
+      continue;
+    }
+    next[name] = { ...entry, enabled: changes.get(name) };
+  }
+
+  await vscode.workspace
+    .getConfiguration('moby')
+    .update('mcpServers', next, vscode.ConfigurationTarget.Global);
+}
+
+/**
  * True when two entries differ in any way that requires a server restart.
  * `enabled` is excluded — the caller starts or stops rather than restarts.
  */
