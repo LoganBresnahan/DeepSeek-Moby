@@ -301,8 +301,96 @@ throws in vitest. No silent-pass path here.
 
 ## Phase 4 — `vitest ^2.1.9 → 3.2.6` + `@vitest/ui` + `@vitest/coverage-v8` (M — the big one)
 
-Closes **#30** (critical), and **#23 / #31 / #32** (vite) as a side effect.
-Completes **#1** (esbuild) via vite 7. Test only.
+> **⛔ ATTEMPTED 2026-08-12 — REVERTED, NOT SHIPPED.** The bump is structurally
+> sound; it degrades **suite reliability**. Blocked on the test-hardening
+> prerequisite below (user call, 2026-08-12). Do not re-attempt until that
+> lands — the same wall-clock tests will detonate again.
+
+### What the attempt established
+
+**Everything structural passed, and the plan's headline risks were all
+false alarms:**
+
+- **Collection is identical** — not just 3605 tests but the *same set of test
+  names*, set-diff **0 lines** across all four suites. The silent-drift risk
+  this whole plan was designed around is cleanly answered. (Method worth
+  reusing: `npx vitest list --run tests/<suite>` per suite, sorted, diffed —
+  it catches a changed *set* at identical count, which a count check can't.)
+- **`cssRawPlugin` survived vite 5 → 7.** The single item rated most likely to
+  break loaded and worked unchanged across two plugin-API majors.
+- `typecheck` clean (the `Plugin` type still resolves), `compile` clean, no
+  peer conflicts. Resolved chain: vitest 3.2.7, vite 7.3.6, nested
+  esbuild 0.28.2 — which is what would have closed **#1**.
+
+### Why it was reverted
+
+Every failure was **wall-clock, never semantic** — `Test timed out in 5000ms`,
+or `expected 88134 to be less than 10000` at
+[WebviewTracer.test.ts:357](../../tests/unit/tracing/WebviewTracer.test.ts#L357)
+(88 *seconds* of relative time). **Never the same test twice**, zero assertion
+mismatches of the kind a real behavior change produces.
+
+Controlled A/B, same protocol, back-to-back, 5× `test:unit` each:
+
+| Arm | failed runs | load at end |
+| --- | --- | --- |
+| vitest 3.2.7 | **2 / 5** | 6.41 |
+| vitest 2.1.9 | **0 / 5** | 7.26 |
+
+Across the whole session: v3 failed **~6 of 14** runs (~43%), v2 **~1 of 8**
+(~12%). **Honest statistics:** 2/5 vs 0/5 alone is *not* significant; the
+persuasive part is the aggregate plus v2 staying clean at *higher* load.
+`--maxWorkers=4` did **not** help (still 1/3), so it isn't raw worker count.
+
+### The actual conclusion — this is a test problem, not a vitest problem
+
+**vitest 3 is not broken. It is a more demanding runner that exposes tests
+which were already marginal.** The casualties are exactly the population
+CLAUDE.md already tracks as flaky, plus their neighbours — wall-clock
+assertions with 5s/10s budgets. vitest 2 left enough headroom that they
+usually passed; vitest 3 does not.
+
+That reframes the blocker: *any* future change to runner performance will keep
+detonating these. Fixing them is worth doing on its own merits, independent of
+this bump.
+
+### Prerequisite — the marginal-test inventory (harden these first)
+
+Everything observed failing under load during this attempt. All are
+timing/wall-clock shaped; none failed for a semantic reason:
+
+| Test | Shape |
+| --- | --- |
+| [WebviewTracer.test.ts:357](../../tests/unit/tracing/WebviewTracer.test.ts#L357) | `webviewRelativeTime` < 10000ms — **explicit wall-clock bound** |
+| `hydration-perf` → *50 turns × 200 events under 2s* | explicit wall-clock bound |
+| `lspTimeout` → *LspTimeoutError carries the configured timeout* | real `setTimeout`, 5s test budget |
+| `lspAvailability` → *coalesces concurrent calls into a single in-flight discovery* | concurrency timing |
+| `McpServerManagerTransport` → *honours the injected call timeout on a hanging tool* | real timers |
+| `McpServerManagerLifecycle` → *does NOT restart a server that never handshaked* | real timers |
+| `requestOrchestrator` → *marks status=interrupted on abort path* | async teardown race |
+| `requestOrchestrator` → *fade backstop re-pins after N unchanged iterations* | async |
+| `ConversationManager` → *forks at user_message boundary* | async/DB |
+| `dbRecovery` → *opens an existing valid database with the correct key* | real SQLCipher I/O |
+| `TraceCollector` → *time-based eviction* | known flake (CLAUDE.md) |
+| `fixtureServer` → *restart policy* block | known flake (CLAUDE.md) |
+
+**Direction, not prescription:** prefer fake timers or wait-for-state over
+wait-for-time; replace absolute wall-clock bounds with either a generous
+ceiling or a non-timing assertion of the same property. The two CLAUDE.md
+flakes are the same class and should be folded into this work rather than
+chased separately — that is now the third independent session they've cost.
+
+**Explicitly rejected:** raising the global `testTimeout` to absorb it. That
+masks a real performance regression and violates this plan's own rule about
+absorbing dependency behavior changes.
+
+### When re-attempted
+
+Steps below are still correct. Re-run the collection set-diff (it was the
+highest-value check), and require the standard gate on a **quiet machine** —
+this attempt was badly confounded by hours of back-to-back suite runs pushing
+load average to 7+ on 8 cores, and no reliability judgment is trustworthy
+under that.
 
 **Established:** vitest 3.2.6 declares `vite: ^5.0.0 || ^6.0.0 || ^7.0.0-0`, so
 a fresh install resolves **vite 7** — past the 6.4.3 patch line, closing all
@@ -347,6 +435,23 @@ OOM knobs are historically load-bearing. Budget a session, not a slot.
 **Rollback:** revert; all three packages move together in the one commit.
 
 ---
+
+## Status (2026-08-12)
+
+**35 → 5 open alerts.** Phases 1–3 shipped clean; Phase 4 attempted and
+reverted, blocked on test hardening.
+
+| Phase | Package | Commit | Alerts closed |
+| --- | --- | --- | --- |
+| — | safe tier (`npm audit fix` + cargo) | `a5925d0` | 25 |
+| 1 | copy-webpack-plugin 13→14 | `93f4930` | #12, #29 |
+| 2 | esbuild 0.19.12→0.25.12 | `5020a3d` | none (as predicted) |
+| 3 | happy-dom 15.11.7→20.11.2 | `4bedd2f` | #2, #19, #22 |
+| 4 | vitest 2→3 chain | **reverted** | would close #1, #23, #30, #31, #32 |
+
+The remaining 5 alerts are all dev-scope and **none is exploitable in our
+usage** (see the tier table at the top) — which is precisely why waiting for a
+proper test-hardening pass costs nothing.
 
 ## Done when
 
