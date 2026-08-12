@@ -548,18 +548,43 @@ describe('workspaceTools', () => {
   // ── grepContent ──────────────────────────────────────────────────
 
   describe('grep', () => {
-    it('calls ripgrep with correct arguments', async () => {
-      mockCp.spawnSync.mockReturnValue({
-        stdout: 'src/index.ts:5:const foo = "bar";\n',
-        stderr: '',
-        status: 0
+    /**
+     * Route by binary rather than by call order — `resolveRipgrep` caches its
+     * answer for the module's lifetime, so which call is first depends on
+     * test order.
+     */
+    function mockSearchers(handlers: {
+      rgVersion?: any;
+      rg?: any;
+      grep?: any;
+    }): void {
+      mockCp.spawnSync.mockImplementation((bin: string, args: string[]) => {
+        if (args.includes('--version')) {
+          return handlers.rgVersion ?? { stdout: 'ripgrep 14.1.1\n', stderr: '', status: 0 };
+        }
+        if (bin === 'rg' || bin.endsWith('/rg')) {
+          return handlers.rg ?? { stdout: '', stderr: '', status: 1 };
+        }
+        return handlers.grep ?? { stdout: '', stderr: '', status: 1 };
       });
+    }
+
+    /** The args of the last call to a given binary, ignoring the version probe. */
+    function argsFor(bin: string): string[] {
+      const calls = mockCp.spawnSync.mock.calls.filter(
+        (c: any[]) => c[0] === bin && !c[1].includes('--version')
+      );
+      return calls[calls.length - 1]?.[1] ?? [];
+    }
+
+    it('calls ripgrep with correct arguments', async () => {
+      mockSearchers({ rg: { stdout: 'src/index.ts:5:const foo = "bar";\n', stderr: '', status: 0 } });
 
       const result = await executeToolCall(makeToolCall('grep', { query: 'foo' }));
 
       expect(mockCp.spawnSync).toHaveBeenCalledWith(
         'rg',
-        expect.arrayContaining(['-n', 'foo']),
+        expect.arrayContaining(['-n', '-e', 'foo']),
         expect.objectContaining({
           cwd: '/workspace',
           encoding: 'utf-8',
@@ -569,24 +594,86 @@ describe('workspaceTools', () => {
       expect(result).toContain('Search results for "foo"');
     });
 
-    it('returns "No matches found" when no results', async () => {
-      mockCp.spawnSync.mockReturnValue({ stdout: '', stderr: '', status: 1 });
+    it('does not pass "--type-not binary" — ripgrep has no such type and exits 2', async () => {
+      mockSearchers({ rg: { stdout: 'hit\n', stderr: '', status: 0 } });
+
+      await executeToolCall(makeToolCall('grep', { query: 'foo' }));
+
+      expect(argsFor('rg')).not.toContain('--type-not');
+    });
+
+    it('returns "No matches found" when a searcher ran and matched nothing', async () => {
+      mockSearchers({ rg: { stdout: '', stderr: '', status: 1 } });
 
       const result = await executeToolCall(makeToolCall('grep', { query: 'nonexistent' }));
       expect(result).toContain('No matches found');
     });
 
+    it('falls back to grep when ripgrep exits with an error status', async () => {
+      mockSearchers({
+        rg: { stdout: '', stderr: 'rg: unrecognized file type: binary\n', status: 2 },
+        grep: { stdout: './src/index.ts:5:const foo = "bar";\n', stderr: '', status: 0 }
+      });
+
+      const result = await executeToolCall(makeToolCall('grep', { query: 'foo' }));
+
+      expect(argsFor('grep')).toContain('-rnE');
+      expect(result).toContain('Search results for "foo"');
+      expect(result).toContain('src/index.ts');
+    });
+
+    it('reaches the grep fallback when ripgrep is missing (spawnSync reports ENOENT, never throws)', async () => {
+      const enoent = Object.assign(new Error('spawnSync rg ENOENT'), { code: 'ENOENT' });
+      mockSearchers({
+        rgVersion: { error: enoent, stdout: undefined, stderr: undefined, status: null },
+        rg: { error: enoent, stdout: undefined, stderr: undefined, status: null },
+        grep: { stdout: './src/index.ts:5:const foo = "bar";\n', stderr: '', status: 0 }
+      });
+
+      const result = await executeToolCall(makeToolCall('grep', { query: 'foo' }));
+
+      expect(result).toContain('Search results for "foo"');
+      expect(result).not.toContain('No matches found');
+    });
+
+    it('reports an error — not "No matches found" — when no searcher can run', async () => {
+      const enoent = Object.assign(new Error('spawnSync ENOENT'), { code: 'ENOENT' });
+      mockSearchers({
+        rgVersion: { error: enoent, stdout: undefined, stderr: undefined, status: null },
+        rg: { error: enoent, stdout: undefined, stderr: undefined, status: null },
+        grep: { error: enoent, stdout: undefined, stderr: undefined, status: null }
+      });
+
+      const result = await executeToolCall(makeToolCall('grep', { query: 'foo' }));
+
+      expect(result).toContain('Error: Could not search file contents');
+      expect(result).not.toContain('No matches found');
+    });
+
     it('passes filePattern as glob filter', async () => {
-      mockCp.spawnSync.mockReturnValue({ stdout: 'match\n', stderr: '', status: 0 });
+      mockSearchers({ rg: { stdout: 'match\n', stderr: '', status: 0 } });
 
       await executeToolCall(makeToolCall('grep', {
         query: 'test',
         filePattern: '*.ts'
       }));
 
-      const args = mockCp.spawnSync.mock.calls[0][1];
+      const args = argsFor('rg');
       expect(args).toContain('-g');
       expect(args).toContain('*.ts');
+    });
+
+    it('treats a non-numeric maxResults as the default rather than truncating to nothing', async () => {
+      const lines = Array.from({ length: 60 }, (_, i) => `src/a.ts:${i + 1}:hit`).join('\n');
+      mockSearchers({ rg: { stdout: lines + '\n', stderr: '', status: 0 } });
+
+      const result = await executeToolCall(makeToolCall('grep', {
+        query: 'hit',
+        maxResults: 'all'
+      }));
+
+      expect(result).toContain('src/a.ts:1:hit');
+      expect(result).toContain('and 10 more matches');
     });
   });
 

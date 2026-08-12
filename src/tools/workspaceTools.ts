@@ -66,7 +66,7 @@ export const workspaceTools: Tool[] = [
         properties: {
           pattern: {
             type: 'string',
-            description: 'Glob pattern to match files (e.g., "*.ts", "src/**/*.js", "**/test*.py")'
+            description: 'Glob pattern to match files, anchored at the workspace root — a leading "**/" is required to search subdirectories (e.g., "**/*.ts", "src/**/*.js", "**/test*.py"). A bare "*.ts" matches only files sitting at the workspace root.'
           },
           maxResults: {
             type: 'string',
@@ -480,65 +480,122 @@ async function searchFiles(
   return result;
 }
 
+/** Directories and files never worth searching. */
+const SEARCH_EXCLUDE_DIRS = ['node_modules', '.git'];
+const SEARCH_EXCLUDE_FILES = ['*.min.js', '*.min.css', 'package-lock.json', 'yarn.lock'];
+
+const SEARCH_TIMEOUT_MS = 10000;
+const SEARCH_MAX_BUFFER = 4 * 1024 * 1024;
+
+/**
+ * Resolved ripgrep binary: `undefined` = not looked yet, `null` = looked and
+ * found nothing. The extension host inherits VS Code's PATH, not the user's
+ * login-shell PATH, so a bare `rg` is the *last* resort — VS Code ships its
+ * own ripgrep under appRoot and that copy is always present.
+ */
+let _rgPath: string | null | undefined;
+
+function resolveRipgrep(): string | null {
+  if (_rgPath !== undefined) return _rgPath;
+  _rgPath = null;
+
+  const exe = process.platform === 'win32' ? 'rg.exe' : 'rg';
+  const appRoot = (vscode.env as { appRoot?: string } | undefined)?.appRoot;
+  if (appRoot) {
+    const arch = `${process.platform}-${process.arch}`;
+    const bundled = [
+      path.join(appRoot, 'node_modules', '@vscode', 'ripgrep-universal', 'bin', arch, exe),
+      path.join(appRoot, 'node_modules', '@vscode', 'ripgrep', 'bin', exe),
+      path.join(appRoot, 'node_modules.asar.unpacked', '@vscode', 'ripgrep', 'bin', exe)
+    ];
+    for (const candidate of bundled) {
+      try {
+        fs.accessSync(candidate, fs.constants.X_OK);
+        _rgPath = candidate;
+        return _rgPath;
+      } catch {
+        continue;
+      }
+    }
+  }
+
+  const probe = cp.spawnSync(exe, ['--version'], { encoding: 'utf-8', timeout: 3000 });
+  if (!probe.error && probe.status === 0) _rgPath = exe;
+  return _rgPath;
+}
+
+/** Either the searcher ran (possibly matching nothing) or it did not run at all. */
+type SearchRun = { output: string } | { failure: string };
+
+function runSearch(bin: string, args: string[], cwd: string): SearchRun {
+  const r = cp.spawnSync(bin, args, {
+    cwd,
+    encoding: 'utf-8',
+    timeout: SEARCH_TIMEOUT_MS,
+    maxBuffer: SEARCH_MAX_BUFFER
+  });
+
+  // spawnSync reports a missing binary through `error` instead of throwing —
+  // the check that must never be dropped again. ENOBUFS and timeouts land
+  // here too, but leave usable partial output behind.
+  if (r.error) {
+    return r.stdout ? { output: r.stdout } : { failure: r.error.message };
+  }
+  // Both tools exit 1 for "ran fine, matched nothing"; 2+ is a real error.
+  if (r.status === 0 || r.status === 1) return { output: r.stdout || '' };
+
+  const detail = (r.stderr || '').trim().split('\n')[0];
+  return { failure: detail || `exited with status ${r.status}` };
+}
+
 async function grepContent(
   workspacePath: string,
   query: string,
   filePattern?: string,
   maxResults?: string
 ): Promise<string> {
-  const limit = maxResults ? parseInt(maxResults, 10) : 50;
+  const requested = maxResults ? parseInt(maxResults, 10) : NaN;
+  const limit = Number.isFinite(requested) && requested > 0 ? requested : 50;
 
-  // Try ripgrep first, fall back to grep
-  let result = '';
+  let result: string | null = null;
+  const failures: string[] = [];
 
-  try {
-    const rgArgs = [
-      '-n', // line numbers
-      '--max-count', '3', // max matches per file
-      '-C', '1', // 1 line of context
-      query,
-      '--type-not', 'binary',
-      '-g', '!node_modules',
-      '-g', '!.git',
-      '-g', '!*.min.js',
-      '-g', '!*.min.css',
-      '-g', '!package-lock.json',
-      '-g', '!yarn.lock'
-    ];
+  const rg = resolveRipgrep();
+  if (rg) {
+    const rgArgs = ['-n', '--max-count', '3', '-C', '1'];
+    for (const d of SEARCH_EXCLUDE_DIRS) rgArgs.push('-g', `!${d}`);
+    for (const f of SEARCH_EXCLUDE_FILES) rgArgs.push('-g', `!${f}`);
+    if (filePattern) rgArgs.push('-g', filePattern);
+    // `-e` so a query starting with `-` is a pattern, not a flag.
+    rgArgs.push('-e', query, '.');
 
-    if (filePattern) {
-      rgArgs.push('-g', filePattern);
+    const run = runSearch(rg, rgArgs, workspacePath);
+    if ('failure' in run) failures.push(`ripgrep: ${run.failure}`);
+    else result = run.output;
+  } else {
+    failures.push('ripgrep: not found in VS Code or on PATH');
+  }
+
+  if (result === null) {
+    // POSIX ERE (`-E`) is the closest grep gets to ripgrep's syntax; plain
+    // BRE silently matches nothing for any alternation or `+` the model writes.
+    const grepArgs = ['-rnE', '-C', '1'];
+    // `--include` must precede the `--exclude` globs: ugrep (a common drop-in
+    // for GNU grep) resolves the two in order, so a leading exclude silently
+    // voids the include. GNU grep is order-insensitive, so this suits both.
+    if (filePattern) grepArgs.push(`--include=${filePattern}`);
+    for (const d of SEARCH_EXCLUDE_DIRS) grepArgs.push(`--exclude-dir=${d}`);
+    for (const f of SEARCH_EXCLUDE_FILES) grepArgs.push(`--exclude=${f}`);
+    grepArgs.push('-e', query, '.');
+
+    const run = runSearch('grep', grepArgs, workspacePath);
+    if ('failure' in run) {
+      failures.push(`grep: ${run.failure}`);
+      // A searcher that could not run must never render as "no matches".
+      return `Error: Could not search file contents (${failures.join('; ')}). ` +
+        `Install ripgrep, or use run_shell to search directly.`;
     }
-
-    const rgResult = cp.spawnSync('rg', rgArgs, {
-      cwd: workspacePath,
-      encoding: 'utf-8',
-      timeout: 10000,
-      maxBuffer: 1024 * 1024 // 1MB
-    });
-
-    if (rgResult.stdout) {
-      result = rgResult.stdout;
-    } else if (rgResult.stderr && !rgResult.stderr.includes('No files were searched')) {
-      // Try grep as fallback
-      throw new Error('ripgrep failed');
-    }
-  } catch (e) {
-    // Fallback to grep
-    try {
-      const grepArgs = ['-rn', '--include', filePattern || '*', query, '.'];
-      const grepResult = cp.spawnSync('grep', grepArgs, {
-        cwd: workspacePath,
-        encoding: 'utf-8',
-        timeout: 10000
-      });
-
-      if (grepResult.stdout) {
-        result = grepResult.stdout;
-      }
-    } catch (e2) {
-      return `Error: Could not search files (neither ripgrep nor grep available)`;
-    }
+    result = run.output;
   }
 
   if (!result.trim()) {
