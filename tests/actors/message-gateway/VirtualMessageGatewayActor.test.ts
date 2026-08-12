@@ -555,6 +555,43 @@ describe('VirtualMessageGatewayActor', () => {
 
       expect(mockActors.streaming.endStream).toHaveBeenCalled();
     });
+
+    // The status-panel activity label has no auto-clear timer, and endResponse
+    // — the only other thing that clears it — does not reach every abort path.
+    // Stop is the one signal guaranteed to fire, so it owns the teardown.
+    it('clears the status-panel activity label', () => {
+      dispatchMessage({ type: 'startResponse', messageId: 'msg-1' });
+      dispatchMessage({ type: 'streamToken', token: 'Partial...' });
+      manager.publishDirect('activity.label', 'Waiting for approval');
+      manager.publishDirect('activity.streaming', true);
+
+      dispatchMessage({ type: 'generationStopped' });
+
+      expect(manager.getState('activity.label')).toBeNull();
+      expect(manager.getState('activity.streaming')).toBe(false);
+    });
+
+    it('ends the turn so a late activity push cannot republish a label', () => {
+      dispatchMessage({ type: 'startResponse', messageId: 'msg-1' });
+      dispatchMessage({ type: 'generationStopped' });
+
+      expect(mockActors.virtualList.endStreamingTurn).toHaveBeenCalled();
+    });
+
+    it('clears the transient info message with a fresh token each stop', () => {
+      dispatchMessage({ type: 'startResponse', messageId: 'msg-1' });
+      dispatchMessage({ type: 'generationStopped' });
+      const first = manager.getState('status.clearMessage');
+
+      dispatchMessage({ type: 'startResponse', messageId: 'msg-2' });
+      dispatchMessage({ type: 'generationStopped' });
+      const second = manager.getState('status.clearMessage');
+
+      // Equal tokens would be swallowed by EventStateManager's deepEqual dedup,
+      // so the second stop would silently leave the message on screen.
+      expect(first).toBeTruthy();
+      expect(second).not.toBe(first);
+    });
   });
 
   // ADR 0003 Phase 3: history restore is driven by the structural

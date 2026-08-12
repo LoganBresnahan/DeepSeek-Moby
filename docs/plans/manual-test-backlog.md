@@ -907,6 +907,28 @@ Two of these matter more than the rest. **S1 (IME)** is the one with a known rev
 
 ---
 
+## M46. Stop clears the moby status panel (P1)
+
+**Why this matters:** reported from dogfooding 2026-08-12 — after hitting Stop, whatever the status panel was showing (`Thinking...`, `Running npm test`, `Waiting for approval`) stayed pinned until the next message was sent. The activity label is the only status slot with **no auto-clear timer**, and until now the only thing that cleared it was `endResponse` → `endStreamingTurn()` → the turn's own `endStreaming()`. `handleGenerationStopped` just flipped the stop button back. Stop now owns the teardown directly.
+
+**The honest caveat, and the reason this entry exists:** the headless harness **could not reproduce the stuck label**. Pre-fix it cleared anyway, ~50ms after `generationStopped` — asynchronously, and *not* from anything in `handleGenerationStopped`, which does nothing to the activity slot. The most likely mechanism is that the harness's tiny viewport lets `VirtualListActor` recycle the streaming turn's bound actor, and the fresh actor republishes `activity.label: null` as a side effect. In a real dev host the streaming turn stays on screen and stays bound, so its `_isStreaming` stays true and `renderActivity()` keeps republishing the label — which is what the user sees. **That mechanism is inferred, not observed.** These steps are what confirm it.
+
+**Setup:** dev host, any model. Debug logging on.
+
+**S1. Stop during reasoning.** Send a prompt to a reasoning model, wait for `Thinking...` in the status panel, hit Stop. **Pass:** the label clears immediately, the whale stops spurting, and the panel is idle. **Fail:** the label survives until the next send — the original report, meaning the fix missed the real path.
+
+**S2. Stop during a shell command.** Trigger a long shell command, wait for `Running …`, hit Stop. **Pass:** as S1. This is the case most likely to leave a stale label, since the shell activity sits on the activity *stack* rather than being the pre-first-token default.
+
+**S3. Stop while an approval is pending.** Get a command-approval prompt (`Waiting for approval`) and hit Stop instead of answering. **Pass:** label clears. This path is the strongest candidate for never firing an `endResponse` at all, so it is the one that most needs a stop-owned teardown.
+
+**S4. Warnings and errors survive.** Trigger a warning or error in the status panel (right side), then start a turn and hit Stop. **Pass:** the activity label and any left-side info message clear, but the warning/error stays — that was the explicit scope call, since an error raised just before a stop is still worth reading.
+
+**S5. Two stops in a row.** Stop a turn, send another, stop again. **Pass:** the panel clears both times. The `status.clearMessage` signal is a monotonic token precisely because `EventStateManager` dedupes by `deepEqual` — a constant would fire once and then silently never again.
+
+**Pass criteria:** every stop leaves the status panel idle apart from warnings/errors, in all three activity shapes (reasoning, shell, approval), repeatably.
+
+---
+
 ## Removing items from this backlog
 
 When a scenario has been verified in a dev host:

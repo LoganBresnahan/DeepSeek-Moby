@@ -238,6 +238,37 @@ describe('StatusPanelShadowActor', () => {
       expect(messages?.classList.contains('suppressed')).toBe(false);
     });
 
+    // Stop must leave the panel idle. The activity label has no auto-clear
+    // timer, so anything left pinned here stays until the next turn starts.
+    describe('status.clearMessage (Stop teardown)', () => {
+      it('clears the info message slot', () => {
+        manager.publishDirect('status.message', { type: 'info', message: 'Web search complete' });
+        manager.publishDirect('status.clearMessage', 1);
+
+        const messages = element.shadowRoot?.querySelector('.messages');
+        expect(messages?.textContent).toBe('');
+      });
+
+      it('leaves warnings and errors alone — they outlive the stop', () => {
+        manager.publishDirect('status.message', { type: 'warning', message: 'Rate limited' });
+        manager.publishDirect('status.clearMessage', 1);
+
+        const warnings = element.shadowRoot?.querySelector('.warnings');
+        expect(warnings?.textContent).toContain('Rate limited');
+      });
+
+      it('fires again on a second stop — the token changes, so dedup cannot swallow it', () => {
+        manager.publishDirect('status.message', { type: 'info', message: 'First' });
+        manager.publishDirect('status.clearMessage', 1);
+
+        manager.publishDirect('status.message', { type: 'info', message: 'Second' });
+        manager.publishDirect('status.clearMessage', 2);
+
+        const messages = element.shadowRoot?.querySelector('.messages');
+        expect(messages?.textContent).toBe('');
+      });
+    });
+
     it('adds activity-active + spurt-blue when streaming flag is set true', () => {
       manager.publishDirect('activity.streaming', true);
       const moby = element.shadowRoot?.querySelector('.moby');

@@ -106,6 +106,13 @@ export class StatusPanelShadowActor extends ShadowActor {
             this.showMessage(msg.message);
           }
         },
+        // One-shot clear of the info slot only — warnings/errors survive,
+        // since those are still worth reading after whatever triggered this.
+        // The value is a change token, not data: EventStateManager dedupes by
+        // deepEqual, so a constant would only ever fire once.
+        'status.clearMessage': () => {
+          this.clearMessage();
+        },
         'activity.label': (value: unknown) => {
           this.setActivity(value as string | null);
         },

@@ -81,6 +81,9 @@ export class VirtualMessageGatewayActor extends EventStateActor {
   /** Last streaming turn ID - used for late-arriving messages like diffListChanged */
   private _lastStreamingTurnId: string | null = null;
 
+  /** Monotonic change token for the one-shot `status.clearMessage` signal. */
+  private _statusClearToken = 0;
+
   /** Message counter for generating turn IDs */
   private _messageCounter = 0;
 
@@ -1687,13 +1690,25 @@ export class VirtualMessageGatewayActor extends EventStateActor {
   }
 
   private handleGenerationStopped(_userStopped: boolean): void {
-    const { streaming } = this._actors;
+    const { streaming, virtualList } = this._actors;
 
     // Update streaming UI state (toggles stop button → send button) so the user
     // immediately sees the stop took effect. The marker text and turn finalization
     // come through the normal streamToken/endResponse flow from the extension —
     // see RequestOrchestrator's abort handler for the single source of truth.
     streaming.endStream();
+
+    // Stop owns the status-panel teardown. The activity label has no auto-clear
+    // timer and is otherwise only cleared by endResponse, which does not reach
+    // every abort path — so a stopped turn could leave "Waiting for approval"
+    // pinned until the next turn's startResponse overwrote it. Ending the turn's
+    // streaming state first matters: it flips the turn's own `_isStreaming` and
+    // drops its activity stack, so a late push/pop can't republish a label.
+    virtualList.endStreamingTurn();
+    this._manager.publishDirect('activity.label', null);
+    this._manager.publishDirect('activity.streaming', false);
+    this._manager.publishDirect('status.clearMessage', ++this._statusClearToken);
+
     this.publishCoordinationState();
   }
 
