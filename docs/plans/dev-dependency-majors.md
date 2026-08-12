@@ -127,9 +127,61 @@ already satisfied**, verified. Peer stays `webpack ^5.1.0`.
 
 ---
 
-## Phase 2 — `esbuild ^0.19.12 → 0.25` (S, but the one to verify hardest)
+## Phase 2 — `esbuild ^0.19.12 → 0.25` (S, but the one to verify hardest) — ✅ DONE 2026-08-12
 
 Contributes to **#1**. Build path — this bundles the entire webview.
+
+**Outcome: shipped at 0.25.12. The artifact is effectively unchanged, and the
+one scare was a pre-existing flake, not the bump.**
+
+Artifact verification (the reason this phase existed):
+
+| Build | `chat.js` | `dev.js` |
+| --- | --- | --- |
+| dev | 1,024,960 → 1,022,330 (**−0.26%**) | 118,441 → 117,785 (−0.55%) |
+| **production** | 635,257 → 635,254 (**−3 bytes**) | 73,387 → 73,387 (**identical**) |
+
+The dev-build shrink is **fully explained and benign**: esbuild 0.25 collapses
+single-statement `if` bodies onto one line where 0.19 broke them (405 fewer
+lines). Pure pretty-printer change in non-minified output — the whitespace is
+the entire delta. Production, where minification erases formatting, is
+byte-identical but for 3 bytes, which is the strongest possible evidence that
+codegen is semantically unchanged. Identical `dist/` file list. `e2e:harness`
+82/82 against the rebuilt bundle. Production `pure` stripping still correct:
+0 `console.debug`/`console.info`, 11 `console.warn`/`console.error` retained.
+
+**#1 stays open, as predicted** — vite's nested `esbuild@0.21.5` is still in
+the tree and the advisory covers it. It closes with Phase 4.
+
+### The false alarm — worth reading before Phase 3
+
+`fixtureServer.test.ts` → *"exhausts the budget on a handshake-then-exit crash
+loop"* failed **four times running** right after the bump, including in
+isolation. That looks exactly like "the bump broke a test," and the plan's own
+rule says a deterministic break means the bump is not safe.
+
+It was not the bump. A 5-run A/B settled it:
+
+| esbuild | isolated runs |
+| --- | --- |
+| 0.19.12 (pre-bump baseline) | **2 failed / 5** |
+| 0.25.12 (bumped) | 0 failed / 5 |
+
+It fails on the *old* version too. The initial 1-sample-each read
+("0.25 fails, 0.19 passes") was coincidence — exactly the trap a known-flaky
+test sets for an upgrade. **Lesson for Phase 3/4: when a bump appears to break
+a flaky test, A/B it with ≥5 runs per arm before believing either direction.**
+One re-run, which is all the standard gate calls for, is not enough to
+attribute anything.
+
+Two findings about that flake fell out and are now in CLAUDE.md Active Bugs:
+it **does** fail in isolation (the tracker previously said it passed 16/16
+alone), and the failures **cluster** right after heavy `test:all` runs, which
+points at leftover child-process/resource state rather than pure in-run timing.
+
+Note: `dist/media/*.map` files survive a production `package` because the build
+doesn't clean `dist/` — they are stale dev artifacts. Pre-existing, and they
+never ship ([.vscodeignore:44](../../.vscodeignore#L44) excludes them).
 
 **Established:** [scripts/build-media.js](../../scripts/build-media.js) uses
 `esbuild.buildSync` with `entryPoints`, `outfile`, `bundle`, `platform`,
