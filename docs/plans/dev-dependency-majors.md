@@ -63,6 +63,11 @@ test:integration     41 passed             ( 4 files)
 e2e:harness          82 passed
 ```
 
+**Updated 2026-08-12 (post-Phase 3):** `test:unit` is now **2398 passed + 27 todo**
+(3611 / 3638 total), file counts unchanged. The +6 are the `ripgrep resolution`
+tests added by a `/shipshape` gate, not a dependency bump — compare the vitest
+re-attempt against *these* numbers.
+
 **Any bump that changes a count is failed until explained**, even if green.
 Record file counts too — a dropped *file* is the likeliest silent regression.
 

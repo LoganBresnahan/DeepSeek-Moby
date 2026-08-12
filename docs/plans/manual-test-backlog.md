@@ -1,6 +1,6 @@
 # Manual Test Backlog
 
-_Last reconciled with code 2026-08-04._
+_Last reconciled with code 2026-08-12._
 
 ## The 2026-08-04 driver pass — what it discharged, and what it can't
 
