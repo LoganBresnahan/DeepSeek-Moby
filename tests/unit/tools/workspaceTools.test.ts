@@ -672,6 +672,62 @@ describe('workspaceTools', () => {
       expect(args).toContain('*.ts');
     });
 
+    // A search we never ran must not answer like a search that found nothing —
+    // the exclusions are our policy, not a fact about the user's code.
+    describe('excluded paths', () => {
+      it.each([
+        ['node_modules/@types/react/index.d.ts', 'node_modules'],
+        ['**/node_modules/**/*.d.ts', 'node_modules'],
+        ['.git/config', '.git'],
+        ['package-lock.json', 'package-lock.json'],
+        ['src/vendor/app.min.js', '*.min.js']
+      ])('refuses "%s" by name instead of reporting no matches', async (pattern, named) => {
+        mockSearchers({ rg: { stdout: '', stderr: '', status: 1 } });
+
+        const result = await executeToolCall(makeToolCall('grep', {
+          query: 'useState',
+          filePattern: pattern
+        }));
+
+        expect(result).toContain('Error:');
+        expect(result).toContain(named);
+        expect(result).not.toContain('No matches found');
+      });
+
+      it('does not run a searcher for an excluded pattern', async () => {
+        mockSearchers({ rg: { stdout: 'should never be read\n', stderr: '', status: 0 } });
+
+        const result = await executeToolCall(makeToolCall('grep', {
+          query: 'useState',
+          filePattern: 'node_modules/**'
+        }));
+
+        expect(argsFor('rg')).toEqual([]);
+        expect(result).not.toContain('should never be read');
+      });
+
+      it('still searches a pattern that merely contains an excluded name as a substring', async () => {
+        mockSearchers({ rg: { stdout: 'src/node_modules_shim.ts:1:hit\n', stderr: '', status: 0 } });
+
+        const result = await executeToolCall(makeToolCall('grep', {
+          query: 'hit',
+          filePattern: 'src/node_modules_shim.ts'
+        }));
+
+        expect(result).toContain('Search results for "hit"');
+      });
+
+      it('names the unsearched paths on a genuine miss', async () => {
+        mockSearchers({ rg: { stdout: '', stderr: '', status: 1 } });
+
+        const result = await executeToolCall(makeToolCall('grep', { query: 'nonexistent' }));
+
+        expect(result).toContain('No matches found');
+        expect(result).toContain('not searched:');
+        expect(result).toContain('node_modules');
+      });
+    });
+
     it('treats a non-numeric maxResults as the default rather than truncating to nothing', async () => {
       const lines = Array.from({ length: 60 }, (_, i) => `src/a.ts:${i + 1}:hit`).join('\n');
       mockSearchers({ rg: { stdout: lines + '\n', stderr: '', status: 0 } });

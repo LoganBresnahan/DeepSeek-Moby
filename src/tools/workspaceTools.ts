@@ -81,7 +81,7 @@ export const workspaceTools: Tool[] = [
     type: 'function',
     function: {
       name: 'grep',
-      description: 'Search for text or patterns within file contents. Similar to grep/ripgrep. Returns matching lines with file paths and line numbers. To search file *names* (not contents), use `find_files`.',
+      description: 'Search for text or patterns within file contents. Similar to grep/ripgrep. Returns matching lines with file paths and line numbers. Never searches node_modules, .git, lockfiles, or minified bundles — a miss is not proof those are clean; use run_shell to search inside them. To search file *names* (not contents), use `find_files`.',
       parameters: {
         type: 'object',
         properties: {
@@ -487,6 +487,28 @@ const SEARCH_EXCLUDE_FILES = ['*.min.js', '*.min.css', 'package-lock.json', 'yar
 const SEARCH_TIMEOUT_MS = 10000;
 const SEARCH_MAX_BUFFER = 4 * 1024 * 1024;
 
+/** Every path the searchers refuse, named once so results can state the scope. */
+const SEARCH_EXCLUSIONS = [...SEARCH_EXCLUDE_DIRS, ...SEARCH_EXCLUDE_FILES].join(', ');
+
+/**
+ * Names the exclusion a `filePattern` lands in, if any. A pattern scoped
+ * entirely inside an excluded path can never match, and answering "no matches"
+ * would report our own policy as a fact about the user's code.
+ */
+function excludedByPolicy(filePattern: string): string | null {
+  const segments = filePattern.split(/[\\/]/).filter(s => s && s !== '**' && s !== '.');
+
+  const dir = segments.find(s => SEARCH_EXCLUDE_DIRS.includes(s));
+  if (dir) return dir;
+
+  const base = segments[segments.length - 1];
+  if (!base) return null;
+  return SEARCH_EXCLUDE_FILES.find(glob => {
+    const re = glob.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+    return new RegExp(`^${re}$`).test(base);
+  }) ?? null;
+}
+
 /**
  * Resolved ripgrep binary: `undefined` = not looked yet, `null` = looked and
  * found nothing. The extension host inherits VS Code's PATH, not the user's
@@ -557,6 +579,13 @@ async function grepContent(
   const requested = maxResults ? parseInt(maxResults, 10) : NaN;
   const limit = Number.isFinite(requested) && requested > 0 ? requested : 50;
 
+  const excluded = filePattern ? excludedByPolicy(filePattern) : null;
+  if (excluded) {
+    return `Error: grep cannot search "${filePattern}" — "${excluded}" is excluded from search, ` +
+      `so this query was never run. Never searched: ${SEARCH_EXCLUSIONS}. ` +
+      `Use read_file for a known path, or run_shell to search there directly.`;
+  }
+
   let result: string | null = null;
   const failures: string[] = [];
 
@@ -599,7 +628,9 @@ async function grepContent(
   }
 
   if (!result.trim()) {
-    return `No matches found for: "${query}"${filePattern ? ` in ${filePattern}` : ''}`;
+    // State the scope: an unqualified "no matches" reads as proof of absence.
+    return `No matches found for: "${query}"${filePattern ? ` in ${filePattern}` : ''} ` +
+      `(not searched: ${SEARCH_EXCLUSIONS})`;
   }
 
   // Limit output
