@@ -960,7 +960,7 @@
     "esbuild": "^0.25.12",
     "eslint": "^8.54.0",
     "glob": "^10.3.10",
-    "happy-dom": "^15.0.0",
+    "happy-dom": "^20.11.2",
     "ts-loader": "^9.5.7",
     "typescript": "^6.0.3",
     "vitest": "^2.0.0",

@@ -219,9 +219,39 @@ users run. **Rollback:** revert; `npm run compile` restores the old bundle.
 
 ---
 
-## Phase 3 — `happy-dom ^15.11.7 → 20.8.9` (S–M)
+## Phase 3 — `happy-dom ^15.11.7 → 20.8.9` (S–M) — ✅ DONE 2026-08-12
 
 Closes **#2** (critical), **#19**, **#22**. Test only.
+
+**Outcome: shipped at 20.11.2. Zero test changes — the riskiest-looking bump
+in the plan was the least eventful.** `test:actors` (the concentrated blast
+radius) came back **36 files / 1055 tests, exact baseline, first try**. Five
+majors of DOM-engine change and not one assertion moved.
+
+The risk table below turned out to overestimate: constructable stylesheets,
+`adoptedStyleSheets`, `attachShadow`, and the observer APIs all behave
+compatibly between 15.11.7 and 20.11.2 for how we use them. `new
+CSSStyleSheet()` in [EventStateManager.ts:154](../../media/state/EventStateManager.ts#L154)
+works unchanged. **Nothing in the "if failures appear" triage was needed.**
+
+Also confirmed the plan's peer read: happy-dom 20 **deduped under vitest
+2.1.9** with no peer warning, which is the practical proof that the optional
+`'*'` peer imposes no ordering. Doing this before vitest was safe.
+
+**Two flakes fired during the gate; both exonerated by isolated runs**, using
+the ≥5-run rule Phase 2 established:
+
+| Test | Isolated at happy-dom 20 | Verdict |
+| --- | --- | --- |
+| `fixtureServer` → *refresh command revives a server* | **5/5 pass** | pre-existing; baseline arm failed 2/5 earlier today |
+| `hydration-perf` → *50 turns × 200 events under 2s* | **5/5 pass** | wall-clock assertion; **0** DOM references in the file, so happy-dom cannot reach it; also failed pre-bump this morning |
+
+Note the `fixtureServer` failure hit a *different* test in the same
+restart-policy block than Phase 2's did — which supports the
+shared-resource-state theory in the Active Bug over a specific-assertion
+regression. Both failures appeared only under full-suite load, never in
+isolation, matching the documented signature. The gate then went green twice
+consecutively at exact baseline.
 
 **Established — no ordering constraint exists.** vitest declares
 `happy-dom: '*'` as an *optional* peer in **both** 2.1.9 and 3.2.6, so nothing
