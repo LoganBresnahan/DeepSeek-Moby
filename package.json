@@ -956,7 +956,7 @@
     "@vitest/coverage-v8": "^2.0.0",
     "@vitest/ui": "^2.0.0",
     "@vscode/test-electron": "^2.5.2",
-    "copy-webpack-plugin": "^13.0.1",
+    "copy-webpack-plugin": "^14.0.0",
     "esbuild": "^0.19.12",
     "eslint": "^8.54.0",
     "glob": "^10.3.10",

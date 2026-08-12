@@ -85,9 +85,25 @@ Record file counts too — a dropped *file* is the likeliest silent regression.
 
 ---
 
-## Phase 1 — `copy-webpack-plugin ^13.0.1 → 14` (XS)
+## Phase 1 — `copy-webpack-plugin ^13.0.1 → 14` (XS) — ✅ DONE 2026-08-12
 
 Closes **#12** (high), **#29**. Build path.
+
+**Outcome: clean, zero surprises.** Installed 14.0.0, which pulled
+`serialize-javascript@7.1.0` (past both the 7.0.3 and 7.0.5 patch lines).
+Gate green first try — typecheck + compile clean, `test:all` twice at exactly
+the baseline (2392+27 / 1055 / 117 / 41, files 94/36/3/4), `e2e:harness`
+82/82. No flake re-runs needed.
+
+**The extra check paid off in the strongest way available:** `dist/` came out
+**byte-identical** — same 18 files, every file the same size. So `CopyPlugin`
+14 does exactly what 13 did to the shipped artifact, which is the claim that
+actually mattered for a build-path bump. Predicted risk (very low) matched
+observed risk; the node ≥20.9 floor was a non-event as expected.
+
+The lockfile diff is exactly two version lines — `copy-webpack-plugin@14.0.0`
+and `serialize-javascript@7.1.0` — and `package.json` moved one range. Nothing
+else drifted, which is the cleanest possible attribution for a bump commit.
 
 **Why it's first:** it is the smallest real change in the set and it proves
 the whole loop — bump, gate, verify alert closure, commit — on something that
