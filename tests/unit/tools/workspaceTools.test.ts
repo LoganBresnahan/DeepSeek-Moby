@@ -6,7 +6,7 @@
  * Mocks fs, child_process, and vscode workspace APIs.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ── Hoisted mock state ──────────────────────────────────────────────
 
@@ -20,7 +20,13 @@ const { mockFs, mockCp } = vi.hoisted(() => ({
       mtime: new Date('2026-01-15T00:00:00Z')
     })),
     readFileSync: vi.fn(() => 'line1\nline2\nline3\nline4\nline5'),
-    readdirSync: vi.fn(() => [])
+    readdirSync: vi.fn(() => []),
+    accessSync: vi.fn(() => {
+      throw new Error('ENOENT');
+    }),
+    // `constants` is load-bearing: resolveRipgrep passes fs.constants.X_OK, and
+    // without it the whole bundled-ripgrep branch throws into its own catch.
+    constants: { X_OK: 1 }
   },
   mockCp: {
     spawnSync: vi.fn(() => ({
@@ -113,6 +119,9 @@ describe('workspaceTools', () => {
     });
     mockFs.readFileSync.mockReturnValue('line1\nline2\nline3\nline4\nline5');
     mockFs.readdirSync.mockReturnValue([]);
+    mockFs.accessSync.mockImplementation(() => {
+      throw new Error('ENOENT');
+    });
   });
 
   // ── Tool definitions ─────────────────────────────────────────────
@@ -693,6 +702,121 @@ describe('workspaceTools', () => {
     it('file_metadata blocks workspace escape via ../', async () => {
       const result = await executeToolCall(makeToolCall('file_metadata', { path: '../../../etc/shadow' }));
       expect(result).toContain('Error: Cannot access files outside the workspace');
+    });
+  });
+
+  // ── resolveRipgrep: the bundled-binary lookup ─────────────────────
+
+  /**
+   * The extension host inherits VS Code's PATH, not the user's login shell,
+   * so the appRoot copy is the path that actually runs for a real user — and
+   * `vscode.env.appRoot` is undefined everywhere else in the suite.
+   */
+  describe('ripgrep resolution', () => {
+    const APP_ROOT = '/vscode/app';
+    const EXE = process.platform === 'win32' ? 'rg.exe' : 'rg';
+    const ARCH = `${process.platform}-${process.arch}`;
+    const UNIVERSAL = `${APP_ROOT}/node_modules/@vscode/ripgrep-universal/bin/${ARCH}/${EXE}`;
+    const PLAIN = `${APP_ROOT}/node_modules/@vscode/ripgrep/bin/${EXE}`;
+    const UNPACKED = `${APP_ROOT}/node_modules.asar.unpacked/@vscode/ripgrep/bin/${EXE}`;
+
+    /** `_rgPath` is memoized for the module's lifetime, so each case needs a fresh instance. */
+    async function freshExecuteToolCall() {
+      vi.resetModules();
+      return (await import('../../../src/tools/workspaceTools')).executeToolCall;
+    }
+
+    /** Only `executable` passes the X_OK check; every other candidate is absent. */
+    function onlyExecutable(executable: string | null): void {
+      mockFs.accessSync.mockImplementation((p: string) => {
+        if (p !== executable) throw new Error('ENOENT');
+      });
+    }
+
+    function searchersRespond(): void {
+      mockCp.spawnSync.mockImplementation((_bin: string, args: string[]) => {
+        if (args.includes('--version')) return { stdout: 'ripgrep 14.1.1\n', stderr: '', status: 0 };
+        return { stdout: 'src/index.ts:5:const foo = "bar";\n', stderr: '', status: 0 };
+      });
+    }
+
+    /** Binaries actually searched with, ignoring the PATH version probe. */
+    function searchBinaries(): string[] {
+      return mockCp.spawnSync.mock.calls
+        .filter((c: any[]) => !c[1].includes('--version'))
+        .map((c: any[]) => c[0]);
+    }
+
+    function probedPath(): boolean {
+      return mockCp.spawnSync.mock.calls.some((c: any[]) => c[1].includes('--version'));
+    }
+
+    beforeEach(() => {
+      (vscode.env as any).appRoot = APP_ROOT;
+      searchersRespond();
+    });
+
+    afterEach(() => {
+      (vscode.env as any).appRoot = undefined;
+    });
+
+    it('searches with the bundled ripgrep rather than a bare "rg"', async () => {
+      onlyExecutable(UNIVERSAL);
+
+      const executeToolCall = await freshExecuteToolCall();
+      const result = await executeToolCall(makeToolCall('grep', { query: 'foo' }));
+
+      expect(searchBinaries()).toEqual([UNIVERSAL]);
+      expect(result).toContain('const foo');
+    });
+
+    it('does not probe PATH at all once a bundled copy is found', async () => {
+      onlyExecutable(UNIVERSAL);
+
+      const executeToolCall = await freshExecuteToolCall();
+      await executeToolCall(makeToolCall('grep', { query: 'foo' }));
+
+      expect(probedPath()).toBe(false);
+    });
+
+    it('falls through to @vscode/ripgrep when the universal build is absent', async () => {
+      onlyExecutable(PLAIN);
+
+      const executeToolCall = await freshExecuteToolCall();
+      await executeToolCall(makeToolCall('grep', { query: 'foo' }));
+
+      expect(searchBinaries()).toEqual([PLAIN]);
+    });
+
+    it('falls through to the asar-unpacked copy when neither node_modules copy exists', async () => {
+      onlyExecutable(UNPACKED);
+
+      const executeToolCall = await freshExecuteToolCall();
+      await executeToolCall(makeToolCall('grep', { query: 'foo' }));
+
+      expect(searchBinaries()).toEqual([UNPACKED]);
+    });
+
+    it('falls back to a PATH rg when no bundled candidate is executable', async () => {
+      onlyExecutable(null);
+
+      const executeToolCall = await freshExecuteToolCall();
+      await executeToolCall(makeToolCall('grep', { query: 'foo' }));
+
+      expect(probedPath()).toBe(true);
+      expect(searchBinaries()).toEqual([EXE]);
+    });
+
+    it('resolves once and reuses the answer — a wrong lookup would be sticky for the session', async () => {
+      onlyExecutable(UNIVERSAL);
+
+      const executeToolCall = await freshExecuteToolCall();
+      await executeToolCall(makeToolCall('grep', { query: 'foo' }));
+      const afterFirst = mockFs.accessSync.mock.calls.length;
+      await executeToolCall(makeToolCall('grep', { query: 'bar' }));
+
+      expect(mockFs.accessSync.mock.calls.length).toBe(afterFirst);
+      expect(searchBinaries()).toEqual([UNIVERSAL, UNIVERSAL]);
     });
   });
 });

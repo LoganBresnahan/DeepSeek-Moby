@@ -217,7 +217,10 @@ export const env = {
     writeText: vi.fn()
   },
   openExternal: vi.fn(),
-  machineId: 'test-machine-id'
+  machineId: 'test-machine-id',
+  // Undefined by default so PATH-resolution paths stay the default; tests that
+  // exercise VS Code's bundled binaries (see workspaceTools' ripgrep lookup) set it.
+  appRoot: undefined as string | undefined
 };
 
 // Helper to reset all mocks
