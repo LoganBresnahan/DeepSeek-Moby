@@ -52,12 +52,17 @@ describe('model registry', () => {
       expect(caps.toolCalling).toBe('native');
       expect(caps.reasoningTokens).toBe('inline');
       expect(caps.shellProtocol).toBe('native-tool');
-      // Thinking mode rejects sampling params.
-      expect(caps.supportsTemperature).toBe(false);
-      // Wire-format flags driven by the V4-thinking transform.
-      expect(caps.sendThinkingParam).toBe(true);
+      // V4 supports temperature — thinking MODE is what rejects it, which is
+      // resolved per request rather than pinned on the model.
+      expect(caps.supportsTemperature).toBe(true);
+      expect(caps.noSamplingParamsWhenThinking).toBe(true);
+      // Declared thinking vocabulary — levels carry their own params.
+      expect(caps.wireModelId).toBe('deepseek-v4-flash');
+      expect(caps.defaultThinkingLevel).toBe('high');
+      expect(Object.keys(caps.thinkingLevels ?? {})).toEqual(['high', 'max']);
+      expect(caps.thinkingLevels?.high).toEqual({ thinking: { type: 'enabled' }, reasoning_effort: 'high' });
+      expect(caps.disableThinkingParam).toEqual({ thinking: { type: 'disabled' } });
       expect(caps.reasoningEcho).toBe('required');
-      expect(caps.reasoningEffort).toBe('high');
       // Phase 3.5 — V4-thinking uses the minimal prompt template.
       expect(caps.promptStyle).toBe('minimal');
       // Phase 4.5 — opted into the streaming-tool-calls pipeline.
@@ -67,11 +72,14 @@ describe('model registry', () => {
     it('registers V4-pro-thinking identically to flash-thinking but with max reasoning effort default', () => {
       const caps = MODEL_REGISTRY['deepseek-v4-pro-thinking'];
       expect(caps).toBeDefined();
-      expect(caps.sendThinkingParam).toBe(true);
       expect(caps.reasoningEcho).toBe('required');
-      expect(caps.reasoningEffort).toBe('max'); // pro defaults to max
+      expect(caps.wireModelId).toBe('deepseek-v4-pro');
+      expect(caps.defaultThinkingLevel).toBe('max'); // pro defaults to max
+      expect(Object.keys(caps.thinkingLevels ?? {})).toEqual(['high', 'max']);
+      expect(caps.disableThinkingParam).toEqual({ thinking: { type: 'disabled' } });
       expect(caps.promptStyle).toBe('minimal');
-      expect(caps.supportsTemperature).toBe(false);
+      expect(caps.supportsTemperature).toBe(true);
+      expect(caps.noSamplingParamsWhenThinking).toBe(true);
       // Phase 4.5 — opted into the streaming-tool-calls pipeline.
       expect(caps.streamingToolCalls).toBe(true);
     });
@@ -249,6 +257,43 @@ describe('model registry', () => {
     describe('validateCustomModelEntry', () => {
       it('accepts a valid entry', () => {
         expect(validateCustomModelEntry(validEntry)).toEqual({ ok: true });
+      });
+
+      // ADR 0017 — extraParams is the escape hatch for provider fields Moby
+      // doesn't model. Its guard rails are the interesting part.
+      it('accepts extraParams with provider-specific fields', () => {
+        expect(validateCustomModelEntry({
+          ...validEntry, extraParams: { safety_settings: [], service_tier: 'flex' }
+        })).toEqual({ ok: true });
+      });
+
+      it('accepts both maxTokensParam values and rejects anything else', () => {
+        expect(validateCustomModelEntry({ ...validEntry, maxTokensParam: 'max_completion_tokens' })).toEqual({ ok: true });
+        expect(validateCustomModelEntry({ ...validEntry, maxTokensParam: 'max_tokens' })).toEqual({ ok: true });
+        const bad = validateCustomModelEntry({ ...validEntry, maxTokensParam: 'maxTokens' });
+        expect(bad.ok).toBe(false);
+      });
+
+      it.each(['model', 'messages', 'stream', 'tools', 'max_tokens', 'max_completion_tokens'])(
+        'rejects extraParams that sets the reserved key %s',
+        (key) => {
+          // Rejected loudly rather than dropped: silently replacing `messages`
+          // would corrupt every request with no error to notice.
+          const result = validateCustomModelEntry({ ...validEntry, extraParams: { [key]: 'x' } });
+          expect(result.ok).toBe(false);
+          if (!result.ok) expect(result.error).toMatch(new RegExp(key));
+        }
+      );
+
+      it('points the token keys at the supported mechanism', () => {
+        const result = validateCustomModelEntry({ ...validEntry, extraParams: { max_tokens: 100 } });
+        expect(result.ok).toBe(false);
+        if (!result.ok) expect(result.error).toMatch(/maxTokensParam/);
+      });
+
+      it('rejects a non-object extraParams', () => {
+        expect(validateCustomModelEntry({ ...validEntry, extraParams: [1, 2] }).ok).toBe(false);
+        expect(validateCustomModelEntry({ ...validEntry, extraParams: 'nope' }).ok).toBe(false);
       });
 
       it('rejects an entry without id', () => {

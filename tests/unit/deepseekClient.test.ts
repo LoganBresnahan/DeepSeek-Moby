@@ -286,20 +286,43 @@ describe('DeepSeekClient — non-streaming', () => {
       expect(body.temperature).toBe(0.42);
     });
 
-    it('honors options.thinkingMode = "disabled" — sets type:disabled, omits reasoning_effort, still strips sampling params', async () => {
+    it('honors options.thinkingMode = "disabled" — sets type:disabled, omits reasoning_effort, and KEEPS temperature', async () => {
       mockConfigValues.set('model', 'deepseek-v4-flash-thinking');
       mockSecrets.get.mockResolvedValue('test-key');
       stubChatResponse();
       const client = new DeepSeekClient(createContext());
 
-      await client.chat([{ role: 'user', content: 'hi' }], undefined, { thinkingMode: 'disabled' });
+      await client.chat([{ role: 'user', content: 'hi' }], undefined, { thinkingMode: 'disabled', temperature: 0.42 });
       const body = lastRequestBody();
       expect(body.thinking).toEqual({ type: 'disabled' });
       expect(body).not.toHaveProperty('reasoning_effort');
-      // suffix still stripped + sampling params still rejected — both
-      // apply regardless of thinking mode.
+      // The wire id comes from `wireModelId` now, not a suffix strip.
       expect(body.model).toBe('deepseek-v4-flash');
-      expect(body).not.toHaveProperty('temperature');
+      // Sampling params are rejected BY THINKING MODE, not by the model. With
+      // thinking off, V4 accepts temperature — stripping it here was the bug
+      // `noSamplingParamsWhenThinking` exists to fix.
+      expect(body.temperature).toBe(0.42);
+    });
+
+    it('omits reasoning_content from history when thinking is disabled, despite reasoningEcho: required', async () => {
+      mockConfigValues.set('model', 'deepseek-v4-flash-thinking');
+      mockSecrets.get.mockResolvedValue('test-key');
+      stubChatResponse();
+      const client = new DeepSeekClient(createContext());
+
+      await client.chat(
+        [
+          { role: 'user', content: 'hi' },
+          { role: 'assistant', content: 'hello', reasoning_content: 'pondering' },
+        ],
+        undefined,
+        { thinkingMode: 'disabled' }
+      );
+      const messages = lastRequestBody().messages as Array<Record<string, unknown>>;
+      const assistant = messages.find(m => m.role === 'assistant');
+      // `reasoningEcho` is a property of thinking mode; the same model id
+      // serves both modes, so echoing here claims a mode we're not in.
+      expect(assistant).not.toHaveProperty('reasoning_content');
     });
 
     it('honors options.thinkingMode = "enabled" explicitly (same as default)', async () => {
@@ -663,6 +686,174 @@ describe('DeepSeekClient — non-streaming', () => {
       expect(body.enable_thinking).toBeUndefined();
       expect(body.thinking).toBeUndefined();
       expect(body.reasoning_effort).toBeUndefined();
+    });
+
+    // Declared thinking levels. The claim `reasoningEffort` could never make:
+    // it validated on a custom entry and was then dropped on the floor,
+    // because applyThinkingMode returned early on !sendThinkingParam.
+    // Shaped after Kimi K3 — bare top-level `reasoning_effort`, no wrapper.
+    const K3_LEVELS = {
+      thinkingLevels: {
+        low: { reasoning_effort: 'low' },
+        high: { reasoning_effort: 'high' },
+        max: { reasoning_effort: 'max' },
+      },
+      defaultThinkingLevel: 'max',
+    };
+
+    it('sends a custom entry declared level params — the default when unset', async () => {
+      const client = await registerCustomAndSelect(K3_LEVELS);
+
+      await client.chat([{ role: 'user', content: 'hi' }]);
+
+      const body = lastRequestBody();
+      expect(body.reasoning_effort).toBe('max');
+      // No `thinking` wrapper — K3 dropped it, and levels are declared per
+      // model precisely so one vendor's shape isn't imposed on another.
+      expect(body.thinking).toBeUndefined();
+    });
+
+    it('honors a user-selected level from moby.modelOptions', async () => {
+      const client = await registerCustomAndSelect(K3_LEVELS);
+      mockConfigValues.set('modelOptions', { 'qwen-test': { thinkingLevel: 'low' } });
+
+      await client.chat([{ role: 'user', content: 'hi' }]);
+
+      expect(lastRequestBody().reasoning_effort).toBe('low');
+    });
+
+    it('falls back to the legacy reasoningEffort key so 0.8.0 settings keep working', async () => {
+      const client = await registerCustomAndSelect(K3_LEVELS);
+      mockConfigValues.set('modelOptions', { 'qwen-test': { reasoningEffort: 'high' } });
+
+      await client.chat([{ role: 'user', content: 'hi' }]);
+
+      expect(lastRequestBody().reasoning_effort).toBe('high');
+    });
+
+    it('falls back to the default when the selected level is not declared', async () => {
+      const client = await registerCustomAndSelect(K3_LEVELS);
+      mockConfigValues.set('modelOptions', { 'qwen-test': { thinkingLevel: 'medium' } });
+
+      await client.chat([{ role: 'user', content: 'hi' }]);
+
+      // Never send an undeclared value — the provider 400s on it.
+      expect(lastRequestBody().reasoning_effort).toBe('max');
+    });
+
+    it('degrades a forced-disable to the cheapest level when the model declares no off-knob', async () => {
+      // K3 always thinks. Honouring "disable" as closely as the model allows
+      // beats inventing a param (a 400) or paying max effort on a digest.
+      const client = await registerCustomAndSelect(K3_LEVELS);
+
+      await client.chat([{ role: 'user', content: 'hi' }], undefined, { thinkingMode: 'disabled' });
+
+      expect(lastRequestBody().reasoning_effort).toBe('low');
+    });
+
+    it('lets a declared off-knob beat the levels when the caller forces disable', async () => {
+      const client = await registerCustomAndSelect({
+        ...K3_LEVELS,
+        disableThinkingParam: { enable_thinking: false },
+      });
+
+      await client.chat([{ role: 'user', content: 'hi' }], undefined, { thinkingMode: 'disabled' });
+
+      const body = lastRequestBody();
+      expect(body.enable_thinking).toBe(false);
+      expect(body.reasoning_effort).toBeUndefined();
+    });
+
+    it('lets a forced disable beat the user pill, so routed sub-calls stay cheap', async () => {
+      const client = await registerCustomAndSelect({
+        ...K3_LEVELS,
+        disableThinkingParam: { enable_thinking: false },
+      });
+      mockConfigValues.set('modelOptions', { 'qwen-test': { thinking: 'on', thinkingLevel: 'max' } });
+
+      await client.chat([{ role: 'user', content: 'hi' }], undefined, { thinkingMode: 'disabled' });
+
+      expect(lastRequestBody().enable_thinking).toBe(false);
+      expect(lastRequestBody().reasoning_effort).toBeUndefined();
+    });
+
+    it('honors the user thinking:off setting with no caller override', async () => {
+      const client = await registerCustomAndSelect({
+        ...K3_LEVELS,
+        disableThinkingParam: { enable_thinking: false },
+      });
+      mockConfigValues.set('modelOptions', { 'qwen-test': { thinking: 'off' } });
+
+      await client.chat([{ role: 'user', content: 'hi' }]);
+
+      expect(lastRequestBody().enable_thinking).toBe(false);
+    });
+  });
+
+  // ADR 0017 — serialization differences are declared, not coded. These two
+  // axes are the escape hatch for providers Moby doesn't model.
+  describe('maxTokensParam + extraParams (ADR 0017)', () => {
+    async function registerAndSelect(extra: Record<string, unknown> = {}) {
+      const { registerCustomModels } = await import('../../src/models/registry');
+      registerCustomModels([{
+        id: 'passthru-test', name: 'Passthrough Test',
+        toolCalling: 'native', reasoningTokens: 'none',
+        editProtocol: ['native-tool'], shellProtocol: 'none',
+        supportsTemperature: true, maxOutputTokens: 8192,
+        maxTokensConfigKey: 'customModels.passthru-test.maxOutputTokens',
+        streaming: true, apiEndpoint: 'https://example.test/v1',
+        requestFormat: 'openai',
+        ...extra
+      }]);
+      mockConfigValues.set('model', 'passthru-test');
+      mockSecrets.get.mockResolvedValue('test-key');
+      stubChatResponse();
+      return new DeepSeekClient(createContext());
+    }
+
+    afterEach(async () => {
+      const { __resetCustomModelsForTests } = await import('../../src/models/registry');
+      __resetCustomModelsForTests();
+    });
+
+    it('sends max_tokens by default', async () => {
+      const client = await registerAndSelect();
+      await client.chat([{ role: 'user', content: 'hi' }], undefined, { maxTokens: 1234 });
+      const body = lastRequestBody();
+      expect(body.max_tokens).toBe(1234);
+      expect(body).not.toHaveProperty('max_completion_tokens');
+    });
+
+    it('renames the field when the model declares max_completion_tokens', async () => {
+      // OpenAI's reasoning models reject max_tokens outright.
+      const client = await registerAndSelect({ maxTokensParam: 'max_completion_tokens' });
+      await client.chat([{ role: 'user', content: 'hi' }], undefined, { maxTokens: 1234 });
+      const body = lastRequestBody();
+      expect(body.max_completion_tokens).toBe(1234);
+      expect(body).not.toHaveProperty('max_tokens');
+    });
+
+    it('merges extraParams onto every request', async () => {
+      const client = await registerAndSelect({
+        extraParams: { service_tier: 'flex', safety_settings: [{ category: 'X' }] }
+      });
+      await client.chat([{ role: 'user', content: 'hi' }]);
+      const body = lastRequestBody();
+      expect(body.service_tier).toBe('flex');
+      expect(body.safety_settings).toEqual([{ category: 'X' }]);
+    });
+
+    it('lets a declared thinking level BEAT extraParams', async () => {
+      // Static config must never deaden a live control — an extraParams
+      // reasoning_effort winning here would make the effort pill inert, which
+      // is the dead-control bug this whole design exists to prevent.
+      const client = await registerAndSelect({
+        extraParams: { reasoning_effort: 'max' },
+        thinkingLevels: { low: { reasoning_effort: 'low' } },
+        defaultThinkingLevel: 'low',
+      });
+      await client.chat([{ role: 'user', content: 'hi' }]);
+      expect(lastRequestBody().reasoning_effort).toBe('low');
     });
   });
 

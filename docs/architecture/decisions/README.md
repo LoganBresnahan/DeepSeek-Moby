@@ -26,6 +26,7 @@ Short, dated records of significant architectural and behavioral decisions. Each
 | [0014](0014-attachment-persistence-and-replay.md) | Attachment persistence and replay (blobs beside the events table) | Accepted | 2026-08-02 |
 | [0015](0015-composer-autocomplete-typed-invocation.md) | Composer autocomplete — typed invocation via a provider registry | Accepted — phases 1–3 shipped | 2026-08-04 |
 | [0016](0016-mcp-client-integration.md) | MCP client integration — stdio tools with user-scope trust | Accepted — all phases shipped; LSP-deprecation gate open (M44) | 2026-08-06 |
+| [0017](0017-declared-provider-differences.md) | Provider differences: declare serialization, code behavior | Accepted — thinking axes shipped; stencil refresh open (phase 7) | 2026-08-12 |
 
 ## When to write an ADR
 

@@ -19,6 +19,14 @@ export type ReasoningEffort = 'high' | 'max';
 export type ReasoningEcho = 'required' | 'optional' | 'none';
 export type PromptStyle = 'minimal' | 'standard';
 
+/** Request-body fields Moby constructs itself. `extraParams` may not set these
+ *  — overriding `messages` or `model` corrupts the request, and overriding the
+ *  token fields bypasses clamping and the context reserve that is computed
+ *  from them. */
+export const RESERVED_REQUEST_KEYS = [
+  'model', 'messages', 'stream', 'tools', 'max_tokens', 'max_completion_tokens',
+];
+
 export interface ModelCapabilities {
   // How the model expresses intent.
   toolCalling: ToolCalling;
@@ -85,11 +93,55 @@ export interface ModelCapabilities {
 
   // ── V4-era axes (see docs/plans/deepseek-v4-integration.md) ─────────
 
-  /** Inject `{"thinking": {"type": "enabled"}}` into the request body.
-   *  Only V4 thinking variants set this. `deepseekClient` also strips any
-   *  Moby-side `-thinking` suffix from the model id before sending, so the
-   *  upstream DeepSeek API sees the bare `deepseek-v4-flash` / `-pro`. */
-  sendThinkingParam?: boolean;
+  /** Selectable thinking levels, in display order. Keys are the labels the
+   *  model selector renders; values are request params merged into the body
+   *  when that level is active. Absent = the model has no level control.
+   *
+   *  Declared rather than enumerated because providers disagree on both the
+   *  values AND the shape: DeepSeek V4 wants a `thinking` wrapper alongside
+   *  `reasoning_effort`, Kimi K3 wants `reasoning_effort` bare at the top
+   *  level (its K2.x predecessor used `thinking`, K3 dropped it). A closed
+   *  union fused to one vendor's wire format can express neither.
+   *  See [docs/plans/thinking-modes-and-levels.md]. */
+  thinkingLevels?: Record<string, Record<string, unknown>>;
+
+  /** Which {@link thinkingLevels} key applies when the user hasn't chosen. */
+  defaultThinkingLevel?: string;
+
+  /** Thinking mode rejects `temperature`/`top_p`/`presence_penalty`/
+   *  `frequency_penalty` — true for the DeepSeek V4 family. Gated on the
+   *  RESOLVED mode, not on the model, so a non-thinking turn on a dual-mode
+   *  model keeps its sampling params. */
+  noSamplingParamsWhenThinking?: boolean;
+
+  /** Name of the max-output-tokens request field. OpenAI's reasoning models
+   *  require `max_completion_tokens` and REJECT `max_tokens`; Kimi K3
+   *  documents the same field. Defaults to `'max_tokens'`.
+   *
+   *  Named rather than aliased because the two are **not** interchangeable:
+   *  `max_completion_tokens` is spent on the reasoning trace as well as the
+   *  visible answer, so the same number means less usable output on a
+   *  reasoning model. See [ADR 0017](../../docs/architecture/decisions/0017-declared-provider-differences.md). */
+  maxTokensParam?: 'max_tokens' | 'max_completion_tokens';
+
+  /** Request params merged into EVERY request for this model — the escape
+   *  hatch for provider fields Moby doesn't model. A named capability is only
+   *  warranted when Moby's own code must read the value (it renders a control,
+   *  computes the number, or branches on it); everything else belongs here and
+   *  Moby never needs to know it exists.
+   *
+   *  Merged BEFORE the thinking params, so a live control always beats static
+   *  config — otherwise an `extraParams.reasoning_effort` would silently
+   *  deaden the effort pill, which is the dead-control bug this design exists
+   *  to prevent. Structural keys are rejected at validation, not silently
+   *  dropped: see {@link RESERVED_REQUEST_KEYS}. */
+  extraParams?: Record<string, unknown>;
+
+  /** Wire model id, when it differs from the registry key. The V4 entries are
+   *  keyed `…-thinking` for historical reasons but the API expects the bare
+   *  `deepseek-v4-flash` / `-pro`. Explicit beats the old implicit suffix
+   *  strip, which silently coupled renaming an entry to changing the wire. */
+  wireModelId?: string;
 
   /** Pin the request temperature to exactly this value, overriding both the
    *  global `moby.temperature` and `supportsTemperature`. For providers that
@@ -97,19 +149,18 @@ export interface ModelCapabilities {
    *  can't express "must be exactly N". */
   temperatureFixedValue?: number;
 
-  /** Custom models only: the provider's own request params for turning
-   *  reasoning OFF, merged into the body when a caller asks for
-   *  `thinkingMode: 'disabled'` (every subagent role does). There is no
-   *  portable OpenAI-compatible knob — e.g. Qwen-style backends take
-   *  `{"enable_thinking": false}`, others `{"reasoning_effort": "none"}` —
-   *  so the entry declares it and we never guess (a wrong guess is a 400).
-   *  Absent = reasoning runs regardless; pick a fast non-reasoning model
-   *  for subagent roles instead. */
+  /** The provider's own request params for turning reasoning OFF, merged
+   *  into the body when the resolved mode is off (the user's pill, or a
+   *  subagent role forcing `thinkingMode: 'disabled'`). There is no portable
+   *  OpenAI-compatible knob — DeepSeek V4 takes `{"thinking": {"type":
+   *  "disabled"}}`, Qwen-style backends `{"enable_thinking": false}` — so the
+   *  entry declares it and we never guess (a wrong guess is a 400).
+   *
+   *  **Absence is meaningful**: it declares the model CANNOT be turned off,
+   *  which is a real capability (Kimi K3 always thinks). The selector renders
+   *  the Off control only when this is present, so a control can never exist
+   *  without params behind it. */
   disableThinkingParam?: Record<string, unknown>;
-
-  /** Default reasoning effort for thinking-capable models. User override
-   *  lives in `moby.modelOptions.<id>.reasoningEffort`. */
-  reasoningEffort?: ReasoningEffort;
 
   /** Whether `reasoning_content` must be echoed back in subsequent
    *  requests when serializing assistant turns that contained tool_calls.
@@ -201,19 +252,29 @@ export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
   },
 
   // ── V4 preview (2026-04-24) ─────────────────────────────────────────
-  // Each upstream model is represented by TWO registry entries — one for
-  // non-thinking, one for thinking. The `-thinking` suffix is a Moby-side
-  // identifier stripped before the API call; upstream sees the bare
-  // `deepseek-v4-flash` / `deepseek-v4-pro`. Keeps the user's cost/quality
-  // decision at model-pick time (same pattern as chat vs reasoner today)
-  // and avoids dynamic capability resolution mid-session.
+  // ONE entry per upstream model. These are dual-mode models, so thinking
+  // on/off and the effort level are per-request state (`thinkingLevels` +
+  // `disableThinkingParam`), not separate model ids.
+  //
+  // An earlier plan called for two entries each, non-thinking and thinking.
+  // Abandoned 2026-08-12: it doubles the dropdown per dual-mode model, forces
+  // a model switch to change one request param, and can't express a model
+  // that grades effort without having two modes at all (Kimi K3). It also
+  // carried a trap — a "non-thinking" entry that simply omits the thinking
+  // param still thinks, because the API defaults to enabled.
+  //
+  // The `-thinking` id suffix survives for settings compatibility only; the
+  // wire id comes from `wireModelId`.
+  // See [docs/plans/thinking-modes-and-levels.md].
 
   'deepseek-v4-flash-thinking': {
     toolCalling: 'native',
     reasoningTokens: 'inline',
     editProtocol: ['native-tool', 'search-replace'],
     shellProtocol: 'native-tool',
-    supportsTemperature: false,        // thinking mode rejects temperature/top_p
+    // V4 accepts temperature in NON-thinking mode; only thinking mode rejects
+    // it. That's `noSamplingParamsWhenThinking`, resolved per request, below.
+    supportsTemperature: true,
     maxOutputTokens: 65536,
     maxOutputTokensCap: 384000,
     contextWindow: 1_048_576,        // 1M (DeepSeek-V4-Flash)
@@ -222,8 +283,18 @@ export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
     apiEndpoint: 'https://api.deepseek.com',
     tokenizer: 'deepseek-v4',
     requestFormat: 'openai',
-    sendThinkingParam: true,
-    reasoningEffort: 'high',
+    // `low` is documented for DeepSeek's Anthropic-format and Responses-API
+    // surfaces but UNCONFIRMED on the OpenAI-format `reasoning_effort` field
+    // we send — left undeclared until one real request settles it, so the
+    // selector can't offer a level that 400s.
+    thinkingLevels: {
+      high: { thinking: { type: 'enabled' }, reasoning_effort: 'high' },
+      max: { thinking: { type: 'enabled' }, reasoning_effort: 'max' },
+    },
+    defaultThinkingLevel: 'high',
+    disableThinkingParam: { thinking: { type: 'disabled' } },
+    noSamplingParamsWhenThinking: true,
+    wireModelId: 'deepseek-v4-flash',
     reasoningEcho: 'required',
     promptStyle: 'minimal',
     // Phase 4.5 — single streaming pipeline replaces the chat() probe +
@@ -241,7 +312,7 @@ export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
     reasoningTokens: 'inline',
     editProtocol: ['native-tool', 'search-replace'],
     shellProtocol: 'native-tool',
-    supportsTemperature: false,
+    supportsTemperature: true,         // see the flash entry
     maxOutputTokens: 65536,
     maxOutputTokensCap: 384000,
     contextWindow: 1_048_576,        // 1M (DeepSeek-V4-Pro)
@@ -250,8 +321,15 @@ export const MODEL_REGISTRY: Record<string, ModelCapabilities> = {
     apiEndpoint: 'https://api.deepseek.com',
     tokenizer: 'deepseek-v4',
     requestFormat: 'openai',
-    sendThinkingParam: true,
-    reasoningEffort: 'max',            // pro defaults to max — paying for quality
+    // See the flash entry for why `low` is undeclared.
+    thinkingLevels: {
+      high: { thinking: { type: 'enabled' }, reasoning_effort: 'high' },
+      max: { thinking: { type: 'enabled' }, reasoning_effort: 'max' },
+    },
+    defaultThinkingLevel: 'max',       // pro defaults to max — paying for quality
+    disableThinkingParam: { thinking: { type: 'disabled' } },
+    noSamplingParamsWhenThinking: true,
+    wireModelId: 'deepseek-v4-pro',
     reasoningEcho: 'required',
     promptStyle: 'minimal',
     // Phase 4.5 — same as flash-thinking. Pro pays a higher rate per
@@ -297,12 +375,21 @@ export interface RegisteredModelInfo {
   name: string;
   maxTokens: number;
   isCustom: boolean;
-  /** Registry default for reasoning_effort (only present on thinking-capable
-   *  models). The model selector uses presence of this field to decide
-   *  whether to render the High/Max pill sub-control. The current effective
-   *  value (override > registry default) is sent as `reasoningEffort` below
-   *  by `sendModelList()`. */
-  reasoningEffortDefault?: ReasoningEffort;
+  /** The model's default output size. `maxTokens` above is the slider's upper
+   *  bound (the API ceiling); defaulting a fresh selection to THAT is what
+   *  starved the context on a model whose ceiling equals its window. */
+  defaultMaxTokens: number;
+  /** Level names this model declares, in display order. The selector renders
+   *  one pill per entry — so it can never offer a level the model doesn't
+   *  have, nor hide one it does. Absent = no level control. */
+  thinkingLevels?: string[];
+  /** Whether the model declares an off-knob. Gates the Off control: a model
+   *  that always reasons (Kimi K3) must not render one. */
+  canDisableThinking?: boolean;
+  /** Effective thinking state, decorated by `sendModelList()` from the user's
+   *  `moby.modelOptions` via the shared {@link resolveThinkingSelection}. */
+  thinking?: 'on' | 'off';
+  thinkingLevel?: string;
   /** Whether manual edit mode is meaningful for this model. Native-tool
    *  models bypass the text channel for edits (they call `edit_file` /
    *  `write_file`), so manual would render an Apply button on code blocks
@@ -325,6 +412,69 @@ export interface RegisteredModelInfo {
  * upper bound — `maxOutputTokensCap` when set (V4), else `maxOutputTokens`
  * (V3 behavior where default and cap coincide).
  */
+/** Per-model user settings under `moby.modelOptions.<id>`, thinking subset. */
+export interface ModelThinkingOptions {
+  thinking?: 'on' | 'off';
+  thinkingLevel?: string;
+  /** Deprecated — superseded by `thinkingLevel`, still read so settings
+   *  written by 0.8.0 keep working. */
+  reasoningEffort?: string;
+}
+
+export interface ThinkingSelection {
+  /** Levels this model declares, in display order. Empty = no level control. */
+  levels: string[];
+  /** Whether the model declares any way to stop reasoning. */
+  canDisable: boolean;
+  /** Effective state for this request. */
+  on: boolean;
+  /** Effective level; null when off, or when the model grades no levels. */
+  level: string | null;
+  /** Set when the caller asked for a level this model doesn't declare — the
+   *  selection falls back, and the caller may want to say so out loud. */
+  unknownRequest?: string;
+}
+
+/**
+ * Resolve which thinking state applies, from capabilities + user settings +
+ * an optional per-call override.
+ *
+ * Shared deliberately: the request path and the model picker must agree, or
+ * the UI shows a level the wire isn't sending. One precedence rule, one place.
+ */
+export function resolveThinkingSelection(
+  modelId: string,
+  options?: ModelThinkingOptions,
+  override?: 'enabled' | 'disabled'
+): ThinkingSelection {
+  const caps = getCapabilities(modelId);
+  const levels = Object.keys(caps.thinkingLevels ?? {});
+  const canDisable = caps.disableThinkingParam !== undefined;
+
+  // A caller's forced 'disabled' (every subagent role) beats the user's pill,
+  // so routed sub-calls stay cheap whatever the main model is set to.
+  if (override === 'disabled' || options?.thinking === 'off') {
+    if (canDisable) return { levels, canDisable, on: false, level: null };
+    // The model can't be turned off (Kimi K3 always thinks). Honour the intent
+    // as closely as it allows — cheapest declared level — rather than invent a
+    // param, which is a 400 instead of merely a slow answer.
+    return { levels, canDisable, on: true, level: levels[0] ?? null };
+  }
+
+  if (levels.length === 0) return { levels, canDisable, on: true, level: null };
+
+  let level = caps.defaultThinkingLevel ?? levels[0];
+  const requested = options?.thinkingLevel ?? options?.reasoningEffort;
+  let unknownRequest: string | undefined;
+  if (requested !== undefined) {
+    if (levels.includes(requested)) level = requested;
+    else unknownRequest = requested;
+  }
+  if (!levels.includes(level)) level = levels[0];
+
+  return { levels, canDisable, on: true, level, ...(unknownRequest && { unknownRequest }) };
+}
+
 export function getAllRegisteredModels(): RegisteredModelInfo[] {
   const out: RegisteredModelInfo[] = [];
   for (const id of Object.keys(MODEL_REGISTRY)) {
@@ -333,11 +483,13 @@ export function getAllRegisteredModels(): RegisteredModelInfo[] {
       id,
       name: BUILTIN_DISPLAY_NAMES[id] ?? id,
       maxTokens: caps.maxOutputTokensCap ?? caps.maxOutputTokens,
+      defaultMaxTokens: caps.maxOutputTokens,
       isCustom: false,
       supportsManualMode: caps.toolCalling !== 'native',
       ...(caps.acceptsImages !== undefined && { acceptsImages: caps.acceptsImages }),
       ...(caps.subagentRoles !== undefined && { subagentRoles: caps.subagentRoles }),
-      ...(caps.reasoningEffort !== undefined && { reasoningEffortDefault: caps.reasoningEffort }),
+      ...(caps.thinkingLevels && { thinkingLevels: Object.keys(caps.thinkingLevels) }),
+      canDisableThinking: caps.disableThinkingParam !== undefined,
     });
   }
   for (const [id, caps] of CUSTOM_MODELS.entries()) {
@@ -346,11 +498,13 @@ export function getAllRegisteredModels(): RegisteredModelInfo[] {
       id,
       name: CUSTOM_MODEL_NAMES.get(id) ?? id,
       maxTokens: caps.maxOutputTokensCap ?? caps.maxOutputTokens,
+      defaultMaxTokens: caps.maxOutputTokens,
       isCustom: true,
       supportsManualMode: caps.toolCalling !== 'native',
       ...(caps.acceptsImages !== undefined && { acceptsImages: caps.acceptsImages }),
       ...(caps.subagentRoles !== undefined && { subagentRoles: caps.subagentRoles }),
-      ...(caps.reasoningEffort !== undefined && { reasoningEffortDefault: caps.reasoningEffort }),
+      ...(caps.thinkingLevels && { thinkingLevels: Object.keys(caps.thinkingLevels) }),
+      canDisableThinking: caps.disableThinkingParam !== undefined,
     });
   }
   return out;
@@ -422,8 +576,58 @@ export function validateCustomModelEntry(entry: unknown): { ok: true } | { ok: f
       return { ok: false, error: 'maxOutputTokensCap must be a number ≥ maxOutputTokens when provided' };
     }
   }
-  if (e.sendThinkingParam !== undefined && typeof e.sendThinkingParam !== 'boolean') {
-    return { ok: false, error: 'sendThinkingParam must be boolean if provided' };
+  if (e.thinkingLevels !== undefined) {
+    if (typeof e.thinkingLevels !== 'object' || e.thinkingLevels === null || Array.isArray(e.thinkingLevels)) {
+      return { ok: false, error: 'thinkingLevels must be an object mapping level name → request params' };
+    }
+    const levels = e.thinkingLevels as Record<string, unknown>;
+    if (Object.keys(levels).length === 0) {
+      return { ok: false, error: 'thinkingLevels must declare at least one level when provided' };
+    }
+    for (const [name, params] of Object.entries(levels)) {
+      if (typeof params !== 'object' || params === null || Array.isArray(params)) {
+        return { ok: false, error: `thinkingLevels."${name}" must be an object of request params` };
+      }
+    }
+  }
+  if (e.defaultThinkingLevel !== undefined) {
+    if (typeof e.defaultThinkingLevel !== 'string') {
+      return { ok: false, error: 'defaultThinkingLevel must be a string if provided' };
+    }
+    // A default naming a level that doesn't exist would silently fall through
+    // to "no params at all" — the failure this whole design exists to prevent.
+    const levels = (e.thinkingLevels ?? {}) as Record<string, unknown>;
+    if (!Object.prototype.hasOwnProperty.call(levels, e.defaultThinkingLevel)) {
+      return { ok: false, error: `defaultThinkingLevel "${e.defaultThinkingLevel}" is not a key of thinkingLevels` };
+    }
+  }
+  if (e.maxTokensParam !== undefined &&
+      e.maxTokensParam !== 'max_tokens' && e.maxTokensParam !== 'max_completion_tokens') {
+    return { ok: false, error: 'maxTokensParam must be "max_tokens" or "max_completion_tokens" if provided' };
+  }
+  if (e.extraParams !== undefined) {
+    if (typeof e.extraParams !== 'object' || e.extraParams === null || Array.isArray(e.extraParams)) {
+      return { ok: false, error: 'extraParams must be an object of request params' };
+    }
+    // Rejected loudly rather than dropped: a config typo that silently
+    // replaced `messages` would corrupt every request with no error to notice.
+    for (const key of Object.keys(e.extraParams as Record<string, unknown>)) {
+      if (RESERVED_REQUEST_KEYS.includes(key)) {
+        return {
+          ok: false,
+          error: `extraParams may not set "${key}" — Moby owns that field. ` +
+            (key === 'max_tokens' || key === 'max_completion_tokens'
+              ? 'Use the maxTokens slider, and "maxTokensParam" to choose the field name.'
+              : 'Reserved: ' + RESERVED_REQUEST_KEYS.join(', ')),
+        };
+      }
+    }
+  }
+  if (e.noSamplingParamsWhenThinking !== undefined && typeof e.noSamplingParamsWhenThinking !== 'boolean') {
+    return { ok: false, error: 'noSamplingParamsWhenThinking must be boolean if provided' };
+  }
+  if (e.wireModelId !== undefined && (typeof e.wireModelId !== 'string' || !e.wireModelId)) {
+    return { ok: false, error: 'wireModelId must be a non-empty string if provided' };
   }
   if (e.temperatureFixedValue !== undefined &&
       (typeof e.temperatureFixedValue !== 'number' || !Number.isFinite(e.temperatureFixedValue))) {
@@ -432,9 +636,6 @@ export function validateCustomModelEntry(entry: unknown): { ok: true } | { ok: f
   if (e.disableThinkingParam !== undefined &&
       (typeof e.disableThinkingParam !== 'object' || e.disableThinkingParam === null || Array.isArray(e.disableThinkingParam))) {
     return { ok: false, error: 'disableThinkingParam must be an object of request params if provided' };
-  }
-  if (e.reasoningEffort !== undefined && e.reasoningEffort !== 'high' && e.reasoningEffort !== 'max') {
-    return { ok: false, error: 'reasoningEffort must be "high" or "max" if provided' };
   }
   if (e.reasoningEcho !== undefined && e.reasoningEcho !== 'required' && e.reasoningEcho !== 'optional' && e.reasoningEcho !== 'none') {
     return { ok: false, error: 'reasoningEcho must be "required", "optional", or "none" if provided' };

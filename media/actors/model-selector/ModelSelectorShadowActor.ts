@@ -33,12 +33,20 @@ export interface ModelOption {
   name: string;
   description: string;
   maxTokens: number;
-  /** Set when the model is thinking-capable. Presence of this field drives
-   *  the "Reasoning effort: [High] [Max]" sub-control in the dropdown. */
-  reasoningEffortDefault?: 'high' | 'max';
-  /** Effective effort (user override if set, otherwise the registry default).
-   *  Drives which pill renders as active. */
-  reasoningEffort?: 'high' | 'max';
+  /** The model's default output size, distinct from `maxTokens` (the API
+   *  ceiling / slider bound). A fresh selection uses this. */
+  defaultMaxTokens?: number;
+  /** Level names this model declares, in display order. One pill each —
+   *  so the row can never offer a level the model doesn't have. Absent or
+   *  empty = no Effort row. */
+  thinkingLevels?: string[];
+  /** Whether the model declares an off-knob. Gates the Thinking row: a model
+   *  that always reasons (Kimi K3) must not render an Off pill it can't honour. */
+  canDisableThinking?: boolean;
+  /** Effective state, resolved extension-side by the same code the request
+   *  path uses — never recomputed here, or the two would drift. */
+  thinking?: 'on' | 'off';
+  thinkingLevel?: string;
 }
 
 export interface ModelSettings {
@@ -57,9 +65,11 @@ export type SettingsChangeHandler = (settings: Partial<ModelSettings>) => void;
 // Default Models
 // ============================================
 
+// Fallback only — replaced by `modelListUpdated` as soon as the extension
+// answers. Kept in sync with the registry by the command-parity check.
 const DEFAULT_MODELS: ModelOption[] = [
-  { id: 'deepseek-v4-pro-thinking', name: 'DeepSeek V4 Pro', description: 'Highest-quality reasoning', maxTokens: 384000, reasoningEffortDefault: 'max' },
-  { id: 'deepseek-v4-flash-thinking', name: 'DeepSeek V4 Flash', description: 'Fast reasoning', maxTokens: 384000, reasoningEffortDefault: 'high' }
+  { id: 'deepseek-v4-pro-thinking', name: 'DeepSeek V4 Pro', description: 'Highest-quality reasoning', maxTokens: 384000, thinkingLevels: ['high', 'max'], canDisableThinking: true, thinking: 'on', thinkingLevel: 'max' },
+  { id: 'deepseek-v4-flash-thinking', name: 'DeepSeek V4 Flash', description: 'Fast reasoning', maxTokens: 384000, thinkingLevels: ['high', 'max'], canDisableThinking: true, thinking: 'on', thinkingLevel: 'high' }
 ];
 
 // ============================================
@@ -186,23 +196,60 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
     // Reasoning-effort sub-control: only on the active model AND only when
     // the model is thinking-capable (registry default present). Inactive
     // models hide the control to keep the dropdown compact.
-    const showEffort = isSelected && model.reasoningEffortDefault !== undefined;
-    const activeEffort = model.reasoningEffort ?? model.reasoningEffortDefault ?? 'high';
-    const effortControl = showEffort
-      ? `
-      <div class="reasoning-effort" data-model="${this.escapeHtml(model.id)}">
-        <span class="reasoning-effort-label">Reasoning effort:</span>
-        <button class="reasoning-effort-pill ${activeEffort === 'high' ? 'active' : ''}" data-action="setReasoningEffort" data-effort="high">High</button>
-        <button class="reasoning-effort-pill ${activeEffort === 'max' ? 'active' : ''}" data-action="setReasoningEffort" data-effort="max">Max</button>
-      </div>`
-      : '';
     return `
       <div class="model-option ${isSelected ? 'selected' : ''}" data-model="${this.escapeHtml(model.id)}">
         <span class="model-option-name">${this.escapeHtml(model.name)}</span>
         <span class="model-option-desc">${this.escapeHtml(model.description)}</span>
       </div>
-      ${effortControl}
+      ${isSelected ? this.renderThinkingControls(model) : ''}
     `;
+  }
+
+  /**
+   * Thinking controls for the active model. Every pill is rendered FROM a
+   * declaration: the Off row only when the model declares an off-knob, one
+   * effort pill per declared level. A control therefore cannot exist without
+   * params behind it — which is the bug the old `reasoningEffortDefault` gate
+   * had, where a custom model rendered a High/Max row that reached no wire.
+   *
+   * Only the active model shows these, to keep the dropdown compact.
+   */
+  private renderThinkingControls(model: ModelOption): string {
+    const levels = model.thinkingLevels ?? [];
+    if (!model.canDisableThinking && levels.length === 0) return '';
+
+    const isOff = model.thinking === 'off';
+    const modelAttr = this.escapeHtml(model.id);
+
+    const thinkingRow = model.canDisableThinking
+      ? `
+      <div class="thinking-control" data-model="${modelAttr}">
+        <span class="thinking-control-label">Thinking:</span>
+        <button class="thinking-pill ${isOff ? '' : 'active'}" data-action="setThinking" data-thinking="on">On</button>
+        <button class="thinking-pill ${isOff ? 'active' : ''}" data-action="setThinking" data-thinking="off">Off</button>
+      </div>`
+      : '';
+
+    // Dimmed rather than hidden when thinking is off: the level is remembered
+    // and comes back on re-enable, so hiding it would read as "lost".
+    const levelRow = levels.length > 0
+      ? `
+      <div class="thinking-control ${isOff ? 'disabled' : ''}" data-model="${modelAttr}">
+        <span class="thinking-control-label">Effort:</span>
+        ${levels.map(level => `
+        <button class="thinking-pill ${!isOff && model.thinkingLevel === level ? 'active' : ''}"
+                data-action="setThinkingLevel" data-level="${this.escapeHtml(level)}"
+                ${isOff ? 'disabled' : ''}>${this.escapeHtml(this.formatLevelLabel(level))}</button>`).join('')}
+      </div>`
+      : '';
+
+    return thinkingRow + levelRow;
+  }
+
+  /** Levels are provider-declared strings (`low`, `max`, a custom `medium`),
+   *  so the label is derived, never mapped from a fixed list. */
+  private formatLevelLabel(level: string): string {
+    return level.charAt(0).toUpperCase() + level.slice(1);
   }
 
   private renderParameterControl(
@@ -265,27 +312,30 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
       this.close();
     });
 
-    // Reasoning-effort pill — writes through to settings.json on the
-    // extension side. The orchestrator reads the override fresh on every
-    // request, so the change takes effect on the next turn without any
-    // local cache to invalidate. We optimistically update the local model
-    // entry so the active pill swaps immediately; the canonical
-    // `modelListUpdated` arriving after the config-change listener fires
-    // will overwrite it (and should match).
-    this.delegate('click', '.reasoning-effort-pill', (e, element) => {
+    // Thinking pills — write through to settings.json on the extension side.
+    // `resolveThinking` reads the setting fresh on every request, so the change
+    // takes effect on the next turn with no local cache to invalidate. We
+    // optimistically update the local entry so the pill flips immediately; the
+    // canonical `modelListUpdated` arriving after the config-change listener
+    // fires will overwrite it (and should match).
+    this.delegate('click', '.thinking-pill', (e, element) => {
       e.stopPropagation();
-      const effort = element.getAttribute('data-effort') as 'high' | 'max' | null;
-      const wrapper = element.closest<HTMLElement>('.reasoning-effort');
+      if (element.hasAttribute('disabled')) return;
+      const wrapper = element.closest<HTMLElement>('.thinking-control');
       const modelId = wrapper?.getAttribute('data-model');
-      if (!effort || !modelId) return;
-      this._vscode.postMessage({
-        type: 'setReasoningEffort',
-        model: modelId,
-        effort
-      });
-      // Optimistic local update so the pill flips immediately.
+      if (!modelId) return;
       const target = this._models.find(m => m.id === modelId);
-      if (target) target.reasoningEffort = effort;
+
+      const thinking = element.getAttribute('data-thinking') as 'on' | 'off' | null;
+      if (thinking) {
+        this._vscode.postMessage({ type: 'setThinking', model: modelId, thinking });
+        if (target) target.thinking = thinking;
+      } else {
+        const level = element.getAttribute('data-level');
+        if (!level) return;
+        this._vscode.postMessage({ type: 'setThinkingLevel', model: modelId, level });
+        if (target) target.thinkingLevel = level;
+      }
       this.updateBodyContent(this.renderPopupContent());
     });
 
@@ -365,12 +415,17 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
 
     this._selectedModel = modelId;
 
-    // Restore the target model's maxTokens (or clamp to its limit)
+    // Restore the target model's maxTokens (or clamp to its limit). With no
+    // saved value this used to fall back to the slider's UPPER BOUND, which is
+    // the API's ceiling, not a sane default — on a model whose ceiling equals
+    // its context window (Kimi K3: both 1,048,576) that left zero budget for
+    // the conversation and every message was dropped. Default to the model's
+    // own default instead; the cap stays the slider's max.
     const newModelMaxTokens = this.getSelectedModelMaxTokens();
     const savedTokens = this._perModelMaxTokens.get(modelId);
     this._maxTokens = savedTokens !== undefined
       ? Math.min(savedTokens, newModelMaxTokens)
-      : newModelMaxTokens;
+      : Math.min(this.getSelectedModelDefaultMaxTokens(), newModelMaxTokens);
 
     // Notify extension of the restored value
     this._vscode.postMessage({ type: 'setMaxTokens', maxTokens: this._maxTokens, model: this._selectedModel });
@@ -463,6 +518,16 @@ export class ModelSelectorShadowActor extends PopupShadowActor {
     const selectedModel = this._selectedModel || 'deepseek-v4-pro-thinking';
     const model = models.find(m => m.id === selectedModel);
     return model?.maxTokens ?? 8192;
+  }
+
+  /** The model's own default output size — what a fresh selection should get.
+   *  Distinct from {@link getSelectedModelMaxTokens}, which is the API ceiling
+   *  and only ever the slider's upper bound. */
+  private getSelectedModelDefaultMaxTokens(): number {
+    const models = this._models || [];
+    const selectedModel = this._selectedModel || 'deepseek-v4-pro-thinking';
+    const model = models.find(m => m.id === selectedModel);
+    return model?.defaultMaxTokens ?? model?.maxTokens ?? 8192;
   }
 
   // ============================================

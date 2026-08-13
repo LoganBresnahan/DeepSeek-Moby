@@ -141,23 +141,41 @@ export const modelSelectorShadowStyles = `
     opacity: 0.7;
   }
 
-  /* Reasoning-effort sub-control — appears under the active model entry
-     when the model is thinking-capable (registry default present). */
-  .reasoning-effort {
+  /* Thinking sub-controls — appear under the active model entry, one row per
+     declared capability (off-knob → Thinking row, levels → Effort row). */
+  .thinking-control {
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 6px 10px 8px 24px;
+    padding: 4px 10px 4px 24px;
     font-size: 11px;
     color: var(--vscode-descriptionForeground);
+    flex-wrap: wrap;
   }
 
-  .reasoning-effort-label {
+  /* Last row carries the bottom padding, so one row and two rows both sit
+     correctly against the next model entry. */
+  .thinking-control:last-of-type {
+    padding-bottom: 8px;
+  }
+
+  .thinking-control-label {
     flex: 0 0 auto;
     opacity: 0.85;
+    min-width: 52px;
   }
 
-  .reasoning-effort-pill {
+  /* Dimmed, not hidden: the level is remembered across an off/on flip, and
+     hiding it would read as the choice being lost. */
+  .thinking-control.disabled {
+    opacity: 0.45;
+  }
+
+  .thinking-control.disabled .thinking-pill {
+    cursor: default;
+  }
+
+  .thinking-pill {
     flex: 0 0 auto;
     padding: 2px 8px;
     font-size: 11px;
@@ -170,11 +188,11 @@ export const modelSelectorShadowStyles = `
     transition: background 0.12s, border-color 0.12s, color 0.12s;
   }
 
-  .reasoning-effort-pill:hover {
+  .thinking-control:not(.disabled) .thinking-pill:hover {
     background: var(--vscode-toolbar-hoverBackground);
   }
 
-  .reasoning-effort-pill.active {
+  .thinking-pill.active {
     background: var(--vscode-button-background);
     border-color: var(--vscode-button-background);
     color: var(--vscode-button-foreground);

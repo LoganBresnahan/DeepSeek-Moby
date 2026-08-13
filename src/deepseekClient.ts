@@ -5,7 +5,8 @@ import { logger } from './utils/logger';
 import { tracer } from './tracing';
 import { TokenCounter, EstimationTokenCounter, DynamicTokenCounter, countRequestTokens, countRequestChars } from './services/tokenCounter';
 import { ContextBuilder, ContextResult, SnapshotSummary } from './context/contextBuilder';
-import { getCapabilities, DEFAULT_MODEL_ID, isReasonerModel as isReasonerModelFromRegistry } from './models/registry';
+import { getCapabilities, DEFAULT_MODEL_ID, isReasonerModel as isReasonerModelFromRegistry, resolveThinkingSelection } from './models/registry';
+import type { ModelThinkingOptions } from './models/registry';
 
 /**
  * Does any message carry an `image_url` content part? Used to exclude
@@ -97,6 +98,18 @@ export interface ChatResponse {
   };
 }
 
+/** Resolved thinking state for a single request. */
+interface ResolvedThinking {
+  /** Whether the model will reason on this turn. Drives the `reasoning_content`
+   *  echo and the sampling-param gates, both of which are wrong if read off
+   *  static capabilities on a dual-mode model. */
+  on: boolean;
+  /** Selected level key; null when off or when the model grades no levels. */
+  level: string | null;
+  /** Params to merge into the request body. */
+  params: Record<string, unknown>;
+}
+
 export interface ChatOptions {
   tools?: Tool[];
   jsonMode?: boolean;
@@ -104,15 +117,15 @@ export interface ChatOptions {
   maxTokens?: number;
   signal?: AbortSignal;
   /**
-   * Per-call override of the V4 `thinking` request param. When set,
-   * `applyThinkingMode` uses this instead of the capability default.
+   * Per-call override of the model's thinking state. Beats the user's
+   * per-model setting — sub-roles (e.g. web-search-digest) pass `'disabled'`
+   * so digestion doesn't pay the reasoning-token latency tax, and that must
+   * hold whatever the main model's pill says.
    *
-   * - `'enabled'`  — `{thinking: {type: 'enabled'}}` + `reasoning_effort` (today's V4-thinking behavior).
-   * - `'disabled'` — `{thinking: {type: 'disabled'}}` and skip `reasoning_effort`.
-   *                 Sub-roles (e.g. web-search-digest) pass this so digestion
-   *                 doesn't pay the reasoning-token latency tax.
-   *
-   * Only meaningful on models with `sendThinkingParam: true`. Ignored otherwise.
+   * The params actually sent come from the model's own `thinkingLevels` /
+   * `disableThinkingParam` declarations, so this is meaningful for any model
+   * that declares them — not just DeepSeek V4. A model that declares no
+   * off-knob cannot be disabled; see {@link DeepSeekClient.resolveThinking}.
    */
   thinkingMode?: 'enabled' | 'disabled';
   /**
@@ -286,25 +299,6 @@ export class DeepSeekClient {
   }
 
   /**
-   * Apply the V4-thinking request-body transforms in place. Called from
-   * both {@link chat} and {@link streamChat} so the wire format is
-   * identical across the two paths.
-   *
-   * When the active model's capabilities have `sendThinkingParam: true`:
-   *   - Strip the Moby-side `-thinking` suffix from the model id so the
-   *     API sees the bare `deepseek-v4-flash` / `-pro` it expects.
-   *   - Inject `thinking: { type: 'enabled' }` at the top level (DeepSeek
-   *     docs describe `extra_body.thinking` for the Python SDK; on the
-   *     raw HTTP surface it's a top-level field).
-   *   - Inject `reasoning_effort` from the per-model user override
-   *     (`moby.modelOptions.<id>.reasoningEffort`) or the registry
-   *     default; fall back to `'high'` if neither is set.
-   *   - Defensively strip `temperature`, `top_p`, `presence_penalty`,
-   *     and `frequency_penalty` — V4-thinking silently rejects these
-   *     and the `supportsTemperature: false` gate on the registry side
-   *     is a secondary layer.
-   */
-  /**
    * Serialize in-memory {@link Message} records into the OpenAI-compatible
    * wire shape. Responsible for one subtle V4-era rule:
    *
@@ -325,9 +319,17 @@ export class DeepSeekClient {
    *
    * Returns an array because the caller `unshift`s the system prompt on it.
    */
-  private serializeMessagesForRequest(messages: Message[], modelId: string): Array<Record<string, unknown>> {
+  private serializeMessagesForRequest(
+    messages: Message[],
+    modelId: string,
+    thinkingOn: boolean
+  ): Array<Record<string, unknown>> {
     const caps = getCapabilities(modelId);
-    const echo = caps.reasoningEcho === 'required';
+    // Gated on the resolved mode as well as the capability: `reasoningEcho` is
+    // a property of thinking mode, and on a dual-mode model the same id serves
+    // both. Stamping the field on a non-thinking request claims a mode we're
+    // not in.
+    const echo = caps.reasoningEcho === 'required' && thinkingOn;
     return messages.map(m => {
       const wire: Record<string, unknown> = {
         role: m.role,
@@ -345,54 +347,80 @@ export class DeepSeekClient {
     });
   }
 
+  /**
+   * Resolve the thinking state for one request. Called BEFORE message
+   * serialization and before the temperature gate, because both of those
+   * depend on the answer — that ordering is the whole point of the helper.
+   *
+   * Precedence: a caller's forced `'disabled'` (every subagent role) beats
+   * the user's per-model setting, so routed sub-calls stay cheap regardless
+   * of what the main model's pill says.
+   *
+   * We never invent params. A model that declares no way to turn itself off
+   * cannot be turned off — the intent is honoured as closely as the model
+   * allows (its cheapest declared level) instead of guessing at a knob,
+   * because a wrong guess is a 400 rather than a slow answer.
+   */
+  private resolveThinking(modelId: string, thinkingModeOverride?: 'enabled' | 'disabled'): ResolvedThinking {
+    const caps = getCapabilities(modelId);
+    const modelOptions = this.config.get<Record<string, ModelThinkingOptions>>('modelOptions') ?? {};
+    const selection = resolveThinkingSelection(modelId, modelOptions[modelId], thinkingModeOverride);
+
+    if (selection.unknownRequest) {
+      logger.warn(
+        `[Thinking] ${modelId} → unknown level "${selection.unknownRequest}"; falling back to "${selection.level}"`
+      );
+    }
+
+    if (!selection.on) {
+      return { on: false, level: null, params: { ...caps.disableThinkingParam } };
+    }
+
+    if ((thinkingModeOverride === 'disabled' || modelOptions[modelId]?.thinking === 'off') && !selection.canDisable) {
+      // Observable on purpose: a subagent role paying a reasoning tax it asked
+      // to skip should be answerable from a log export, not by reading a wire
+      // capture.
+      logger.info(
+        `[Thinking] ${modelId} → cannot be disabled; ` +
+        (selection.level ? `using cheapest declared level "${selection.level}"` : 'reasoning runs unchanged')
+      );
+    }
+
+    if (!selection.level) return { on: true, level: null, params: {} };
+    return { on: true, level: selection.level, params: { ...caps.thinkingLevels?.[selection.level] } };
+  }
+
+  /**
+   * Merge the resolved thinking params into the request body and apply the
+   * model's wire id. No-op for a model that declares neither.
+   */
   private applyThinkingMode(
     requestBody: Record<string, unknown>,
     modelId: string,
-    thinkingModeOverride?: 'enabled' | 'disabled'
+    thinking: ResolvedThinking
   ): void {
     const caps = getCapabilities(modelId);
-    if (!caps.sendThinkingParam) {
-      // Custom-model path. There is no portable OpenAI-compatible "disable
-      // thinking" param, so we never invent one (a wrong guess is a 400) —
-      // but a model entry may DECLARE its provider's knob via
-      // `disableThinkingParam`, and a caller asking for 'disabled' (every
-      // subagent role does) gets it merged in. Without this, the router's
-      // forced non-thinking never reached custom backends and every sub-call
-      // paid the full reasoning tax (30s image digests on Kimi).
-      if (thinkingModeOverride === 'disabled' && caps.disableThinkingParam) {
-        Object.assign(requestBody, caps.disableThinkingParam);
-        logger.info(
-          `[ThinkingMode] ${modelId} → thinking disabled via declared param: ${JSON.stringify(caps.disableThinkingParam)}`
-        );
-      }
-      return;
+
+    if (caps.wireModelId) requestBody.model = caps.wireModelId;
+    Object.assign(requestBody, thinking.params);
+
+    // Gated on the RESOLVED mode, not the model: a non-thinking turn on a
+    // dual-mode model keeps its sampling params. Unconditional deletes here
+    // would silently undo the temperature the gate above correctly added.
+    if (thinking.on && caps.noSamplingParamsWhenThinking) {
+      delete requestBody.temperature;
+      delete requestBody.top_p;
+      delete requestBody.presence_penalty;
+      delete requestBody.frequency_penalty;
     }
 
-    // Strip the `-thinking` suffix for the wire model id.
-    requestBody.model = modelId.replace(/-thinking$/, '');
-
-    // Per-call override wins over capability default. Default is 'enabled'
-    // for any model with sendThinkingParam set — matches today's behavior.
-    const mode = thinkingModeOverride ?? 'enabled';
-    requestBody.thinking = { type: mode };
-
-    if (mode === 'enabled') {
-      const override = this.config.get<Record<string, { reasoningEffort?: 'high' | 'max' }>>('modelOptions') ?? {};
-      const effort = override[modelId]?.reasoningEffort ?? caps.reasoningEffort ?? 'high';
-      requestBody.reasoning_effort = effort;
-      logger.info(`[v4-thinking] ${modelId} → model=${requestBody.model}, reasoning_effort=${effort}`);
-    } else {
-      // Disabled path — no reasoning_effort param (the API ignores it
-      // anyway when thinking is off, but omitting keeps the wire clean).
-      logger.info(`[v4-thinking] ${modelId} → model=${requestBody.model}, thinking=disabled`);
+    if (Object.keys(thinking.params).length > 0) {
+      logger.info(
+        `[Thinking] ${modelId} → model=${requestBody.model}, ` +
+        `${thinking.on ? `level=${thinking.level ?? 'default'}` : 'disabled'}, ` +
+        `params=${JSON.stringify(thinking.params)}`
+      );
     }
-
-    // Sampling params that V4-thinking-family models reject regardless of
-    // the on/off thinking toggle.
-    delete requestBody.temperature;
-    delete requestBody.top_p;
-    delete requestBody.presence_penalty;
-    delete requestBody.frequency_penalty;
   }
 
   // Standard chat completion
@@ -405,16 +433,21 @@ export class DeepSeekClient {
       const rawMaxTokens = options?.maxTokens ?? this.getConfigMaxTokens();
       const maxTokens = this.clampMaxTokens(rawMaxTokens);
 
-      const requestMessages = this.serializeMessagesForRequest(messages, model);
+      // Resolved first: the serializer and the temperature gate below both
+      // depend on whether this particular request reasons.
+      const thinking = this.resolveThinking(model, options?.thinkingMode);
+      const requestMessages = this.serializeMessagesForRequest(messages, model, thinking.on);
 
       if (systemPrompt) {
         requestMessages.unshift({ role: 'system', content: systemPrompt });
       }
 
+      // The max-output field name is provider-declared: OpenAI's reasoning
+      // models reject `max_tokens` and require `max_completion_tokens`.
       const requestBody: any = {
         model,
         messages: requestMessages,
-        max_tokens: maxTokens,
+        [getCapabilities(model).maxTokensParam ?? 'max_tokens']: maxTokens,
         stream: false
       };
 
@@ -429,7 +462,9 @@ export class DeepSeekClient {
         if (caps.temperatureFixedValue !== temperature) {
           logger.info(`[Temperature] Pinned to ${caps.temperatureFixedValue} for ${model} (global setting is ${temperature})`);
         }
-      } else if (caps.supportsTemperature) {
+      } else if (caps.supportsTemperature && !(thinking.on && caps.noSamplingParamsWhenThinking)) {
+        // The second clause is per-request, not per-model: V4 rejects
+        // temperature only while thinking. With thinking off it takes it.
         requestBody.temperature = temperature;
       }
 
@@ -442,10 +477,15 @@ export class DeepSeekClient {
         requestBody.tools = options.tools;
       }
 
-      // V4-thinking transforms (strip suffix, inject thinking + reasoning_effort,
-      // drop unsupported sampling params). No-op for any model without
-      // `sendThinkingParam`.
-      this.applyThinkingMode(requestBody, model, options?.thinkingMode);
+      // Provider fields Moby doesn't model. Merged BEFORE the thinking params
+      // so a live control can't be deadened by static config; structural keys
+      // are rejected at validation, so nothing here can clobber the request
+      // shape. See ADR 0017.
+      if (caps.extraParams) Object.assign(requestBody, caps.extraParams);
+
+      // Merge the resolved thinking params + wire model id. No-op for a model
+      // that declares neither.
+      this.applyThinkingMode(requestBody, model, thinking);
 
       // Per-call span. Mirrors streamChat — gives runToolLoop's non-streaming
       // probe its own trace event instead of being invisible inside the outer
@@ -544,16 +584,20 @@ export class DeepSeekClient {
       const rawMaxTokens = options?.maxTokens ?? this.getConfigMaxTokens();
       const maxTokens = this.clampMaxTokens(rawMaxTokens);
 
-      const requestMessages = this.serializeMessagesForRequest(messages, model);
+      // Resolved first — see the note in `chat()`.
+      const thinking = this.resolveThinking(model, options?.thinkingMode);
+      const requestMessages = this.serializeMessagesForRequest(messages, model, thinking.on);
 
       if (systemPrompt) {
         requestMessages.unshift({ role: 'system', content: systemPrompt });
       }
 
+      // The max-output field name is provider-declared: OpenAI's reasoning
+      // models reject `max_tokens` and require `max_completion_tokens`.
       const requestBody: any = {
         model,
         messages: requestMessages,
-        max_tokens: maxTokens,
+        [getCapabilities(model).maxTokensParam ?? 'max_tokens']: maxTokens,
         stream: true
       };
 
@@ -568,7 +612,9 @@ export class DeepSeekClient {
         if (caps.temperatureFixedValue !== temperature) {
           logger.info(`[Temperature] Pinned to ${caps.temperatureFixedValue} for ${model} (global setting is ${temperature})`);
         }
-      } else if (caps.supportsTemperature) {
+      } else if (caps.supportsTemperature && !(thinking.on && caps.noSamplingParamsWhenThinking)) {
+        // The second clause is per-request, not per-model: V4 rejects
+        // temperature only while thinking. With thinking off it takes it.
         requestBody.temperature = temperature;
       }
 
@@ -586,10 +632,15 @@ export class DeepSeekClient {
         requestBody.tools = options.tools;
       }
 
-      // V4-thinking transforms (strip suffix, inject thinking + reasoning_effort,
-      // drop unsupported sampling params). No-op for any model without
-      // `sendThinkingParam`.
-      this.applyThinkingMode(requestBody, model, options?.thinkingMode);
+      // Provider fields Moby doesn't model. Merged BEFORE the thinking params
+      // so a live control can't be deadened by static config; structural keys
+      // are rejected at validation, so nothing here can clobber the request
+      // shape. See ADR 0017.
+      if (caps.extraParams) Object.assign(requestBody, caps.extraParams);
+
+      // Merge the resolved thinking params + wire model id. No-op for a model
+      // that declares neither.
+      this.applyThinkingMode(requestBody, model, thinking);
 
       const response = await this.getHttpClient().post<ReadableStream<Uint8Array>>('/chat/completions', requestBody, {
         headers: {

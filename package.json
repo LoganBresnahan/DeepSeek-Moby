@@ -62,8 +62,8 @@
           "examples": [
             [
               {
-                "id": "qwen2.5-coder:7b-instruct",
-                "name": "Qwen 2.5 Coder 7B (Ollama)",
+                "id": "qwen3-coder:30b",
+                "name": "Qwen3 Coder 30B (Ollama)",
                 "toolCalling": "native",
                 "reasoningTokens": "none",
                 "editProtocol": [
@@ -72,11 +72,13 @@
                 "shellProtocol": "none",
                 "supportsTemperature": true,
                 "maxOutputTokens": 8192,
+                "contextWindow": 262144,
                 "maxTokensConfigKey": "maxTokensCustomQwen",
                 "streaming": true,
                 "apiEndpoint": "http://localhost:11434/v1",
                 "apiKey": "ollama",
-                "requestFormat": "openai"
+                "requestFormat": "openai",
+                "lspTools": true
               }
             ],
             [
@@ -119,58 +121,41 @@
             ],
             [
               {
-                "id": "gpt-4o-mini",
-                "name": "OpenAI GPT-4o mini",
+                "id": "gpt-5.6",
+                "name": "OpenAI GPT-5.6",
                 "toolCalling": "native",
-                "reasoningTokens": "none",
+                "reasoningTokens": "inline",
                 "editProtocol": [
                   "native-tool"
                 ],
                 "shellProtocol": "none",
-                "supportsTemperature": true,
-                "maxOutputTokens": 16384,
+                "supportsTemperature": false,
+                "maxOutputTokens": 128000,
+                "contextWindow": 1050000,
+                "maxTokensParam": "max_completion_tokens",
                 "maxTokensConfigKey": "maxTokensCustomOpenAI",
                 "streaming": true,
                 "apiEndpoint": "https://api.openai.com/v1",
-                "requestFormat": "openai"
-              }
-            ],
-            [
-              {
-                "id": "moonshot-v1-128k",
-                "name": "Kimi (Moonshot)",
-                "toolCalling": "native",
-                "reasoningTokens": "none",
-                "editProtocol": [
-                  "native-tool"
-                ],
-                "shellProtocol": "none",
-                "supportsTemperature": true,
-                "temperatureFixedValue": 1,
-                "maxOutputTokens": 32768,
-                "maxTokensConfigKey": "maxTokensCustomKimi",
-                "streaming": true,
-                "apiEndpoint": "https://api.moonshot.ai/v1",
-                "requestFormat": "openai"
-              }
-            ],
-            [
-              {
-                "id": "moonshot-v1-128k-vision-preview",
-                "name": "Kimi Vision (Moonshot)",
-                "toolCalling": "native",
-                "reasoningTokens": "none",
-                "editProtocol": [
-                  "native-tool"
-                ],
-                "shellProtocol": "none",
-                "supportsTemperature": true,
-                "temperatureFixedValue": 1,
-                "maxOutputTokens": 32768,
-                "maxTokensConfigKey": "maxTokensCustomKimiVision",
-                "streaming": true,
-                "apiEndpoint": "https://api.moonshot.ai/v1",
                 "requestFormat": "openai",
+                "thinkingLevels": {
+                  "low": {
+                    "reasoning_effort": "low"
+                  },
+                  "medium": {
+                    "reasoning_effort": "medium"
+                  },
+                  "high": {
+                    "reasoning_effort": "high"
+                  },
+                  "xhigh": {
+                    "reasoning_effort": "xhigh"
+                  }
+                },
+                "defaultThinkingLevel": "medium",
+                "disableThinkingParam": {
+                  "reasoning_effort": "none"
+                },
+                "lspTools": true,
                 "acceptsImages": true,
                 "subagentRoles": [
                   "image-describe"
@@ -179,20 +164,218 @@
             ],
             [
               {
-                "id": "llama-3.3-70b-versatile",
-                "name": "Llama 3.3 70B (Groq)",
+                "id": "kimi-k3",
+                "name": "Kimi K3 (Moonshot)",
                 "toolCalling": "native",
-                "reasoningTokens": "none",
+                "reasoningTokens": "inline",
+                "editProtocol": [
+                  "native-tool"
+                ],
+                "shellProtocol": "none",
+                "supportsTemperature": false,
+                "maxOutputTokens": 131072,
+                "maxOutputTokensCap": 1048576,
+                "contextWindow": 1048576,
+                "maxTokensConfigKey": "maxTokensCustomKimi",
+                "streaming": true,
+                "apiEndpoint": "https://api.moonshot.ai/v1",
+                "requestFormat": "openai",
+                "thinkingLevels": {
+                  "low": {
+                    "reasoning_effort": "low"
+                  },
+                  "high": {
+                    "reasoning_effort": "high"
+                  },
+                  "max": {
+                    "reasoning_effort": "max"
+                  }
+                },
+                "defaultThinkingLevel": "max",
+                "reasoningEcho": "required",
+                "lspTools": true,
+                "acceptsImages": true,
+                "subagentRoles": [
+                  "image-describe"
+                ]
+              }
+            ],
+            [
+              {
+                "id": "gemini-3.6-flash",
+                "name": "Gemini 3.6 Flash",
+                "toolCalling": "native",
+                "reasoningTokens": "inline",
                 "editProtocol": [
                   "native-tool"
                 ],
                 "shellProtocol": "none",
                 "supportsTemperature": true,
-                "maxOutputTokens": 32768,
+                "maxOutputTokens": 65536,
+                "contextWindow": 1048576,
+                "maxTokensConfigKey": "maxTokensCustomGemini",
+                "streaming": true,
+                "apiEndpoint": "https://generativelanguage.googleapis.com/v1beta/openai/",
+                "requestFormat": "openai",
+                "thinkingLevels": {
+                  "minimal": {
+                    "reasoning_effort": "minimal"
+                  },
+                  "low": {
+                    "reasoning_effort": "low"
+                  },
+                  "medium": {
+                    "reasoning_effort": "medium"
+                  },
+                  "high": {
+                    "reasoning_effort": "high"
+                  }
+                },
+                "defaultThinkingLevel": "medium",
+                "lspTools": true,
+                "acceptsImages": true,
+                "subagentRoles": [
+                  "image-describe"
+                ]
+              }
+            ],
+            [
+              {
+                "id": "glm-5.2",
+                "name": "GLM-5.2 (Zhipu)",
+                "toolCalling": "native",
+                "reasoningTokens": "inline",
+                "editProtocol": [
+                  "native-tool"
+                ],
+                "shellProtocol": "none",
+                "supportsTemperature": true,
+                "maxOutputTokens": 131072,
+                "contextWindow": 1000000,
+                "maxTokensConfigKey": "maxTokensCustomGLM",
+                "streaming": true,
+                "apiEndpoint": "https://open.bigmodel.cn/api/paas/v4/",
+                "requestFormat": "openai",
+                "thinkingLevels": {
+                  "high": {
+                    "reasoning_effort": "high"
+                  },
+                  "max": {
+                    "reasoning_effort": "max"
+                  }
+                },
+                "defaultThinkingLevel": "high",
+                "disableThinkingParam": {
+                  "enable_thinking": false
+                },
+                "lspTools": true
+              }
+            ],
+            [
+              {
+                "id": "moonshotai/kimi-k3",
+                "name": "Kimi K3 (via OpenRouter)",
+                "toolCalling": "native",
+                "reasoningTokens": "inline",
+                "editProtocol": [
+                  "native-tool"
+                ],
+                "shellProtocol": "none",
+                "supportsTemperature": false,
+                "maxOutputTokens": 131072,
+                "contextWindow": 1048576,
+                "maxTokensConfigKey": "maxTokensCustomOpenRouter",
+                "streaming": true,
+                "apiEndpoint": "https://openrouter.ai/api/v1",
+                "requestFormat": "openai",
+                "thinkingLevels": {
+                  "low": {
+                    "reasoning": {
+                      "effort": "low"
+                    }
+                  },
+                  "medium": {
+                    "reasoning": {
+                      "effort": "medium"
+                    }
+                  },
+                  "high": {
+                    "reasoning": {
+                      "effort": "high"
+                    }
+                  },
+                  "xhigh": {
+                    "reasoning": {
+                      "effort": "xhigh"
+                    }
+                  }
+                },
+                "defaultThinkingLevel": "medium",
+                "reasoningEcho": "required",
+                "extraParams": {
+                  "provider": {
+                    "allow_fallbacks": true
+                  }
+                },
+                "lspTools": true,
+                "acceptsImages": true
+              }
+            ],
+            [
+              {
+                "id": "model-served-by-vllm",
+                "name": "vLLM Server (Local)",
+                "toolCalling": "native",
+                "reasoningTokens": "inline",
+                "editProtocol": [
+                  "native-tool"
+                ],
+                "shellProtocol": "none",
+                "supportsTemperature": true,
+                "maxOutputTokens": 8192,
+                "maxTokensConfigKey": "maxTokensCustomVllm",
+                "streaming": true,
+                "apiEndpoint": "http://localhost:8000/v1",
+                "apiKey": "vllm",
+                "requestFormat": "openai",
+                "disableThinkingParam": {
+                  "chat_template_kwargs": {
+                    "enable_thinking": false
+                  }
+                },
+                "lspTools": true
+              }
+            ],
+            [
+              {
+                "id": "openai/gpt-oss-120b",
+                "name": "GPT-OSS 120B (Groq)",
+                "toolCalling": "native",
+                "reasoningTokens": "inline",
+                "editProtocol": [
+                  "native-tool"
+                ],
+                "shellProtocol": "none",
+                "supportsTemperature": true,
+                "maxOutputTokens": 65536,
+                "contextWindow": 131072,
                 "maxTokensConfigKey": "maxTokensCustomGroq",
                 "streaming": true,
                 "apiEndpoint": "https://api.groq.com/openai/v1",
-                "requestFormat": "openai"
+                "requestFormat": "openai",
+                "thinkingLevels": {
+                  "low": {
+                    "reasoning_effort": "low"
+                  },
+                  "medium": {
+                    "reasoning_effort": "medium"
+                  },
+                  "high": {
+                    "reasoning_effort": "high"
+                  }
+                },
+                "defaultThinkingLevel": "medium",
+                "lspTools": true
               }
             ]
           ],
@@ -335,20 +518,83 @@
               "acceptsImages": {
                 "type": "boolean",
                 "default": false,
-                "markdownDescription": "Model accepts image content (OpenAI `image_url` blocks). Required for the `image-describe` role — DeepSeek's first-party API is text-only, so point this at a vision-capable endpoint (e.g. SiliconFlow `deepseek-ai/deepseek-vl2`)."
+                "markdownDescription": "Model accepts image content (OpenAI `image_url` blocks). Required for the `image-describe` role \u2014 DeepSeek's first-party API is text-only, so point this at a vision-capable endpoint (e.g. SiliconFlow `deepseek-ai/deepseek-vl2`)."
               },
               "temperatureFixedValue": {
                 "type": "number",
-                "markdownDescription": "Pin the request temperature to exactly this value, overriding the global `moby.temperature`. For providers that accept only one temperature — Kimi rejects anything but `1`."
+                "markdownDescription": "Pin the request temperature to exactly this value, overriding the global `moby.temperature`. For providers that accept only one temperature \u2014 Kimi rejects anything but `1`."
               },
               "streamingToolCalls": {
                 "type": "boolean",
                 "default": false,
-                "markdownDescription": "Model streams tool-call deltas (OpenAI-style `tool_calls` in stream chunks). When true, Moby uses the single streaming pipeline instead of the legacy probe-then-stream loop — halving wall-clock on tool turns. Enable only if the provider actually streams tool calls."
+                "markdownDescription": "Model streams tool-call deltas (OpenAI-style `tool_calls` in stream chunks). When true, Moby uses the single streaming pipeline instead of the legacy probe-then-stream loop \u2014 halving wall-clock on tool turns. Enable only if the provider actually streams tool calls."
               },
               "disableThinkingParam": {
                 "type": "object",
-                "markdownDescription": "The provider's own request params for turning reasoning OFF, merged into the request body when Moby needs a non-thinking call (all subagent roles — web-search digests, image descriptions). There is no portable OpenAI-compatible knob, so declare your provider's: e.g. `{\"enable_thinking\": false}` (Qwen-style) or `{\"reasoning_effort\": \"none\"}`. Omit if the provider has none — and prefer a fast non-reasoning model for subagent roles, since these calls block the turn."
+                "markdownDescription": "The provider's own request params for turning reasoning OFF, merged into the request body when Moby needs a non-thinking call (all subagent roles \u2014 web-search digests, image descriptions). There is no portable OpenAI-compatible knob, so declare your provider's: e.g. `{\"enable_thinking\": false}` (Qwen-style) or `{\"reasoning_effort\": \"none\"}`. Omit if the provider has none \u2014 the model then can't be turned off, and Moby uses your cheapest declared level instead of guessing at a param."
+              },
+              "thinkingLevels": {
+                "type": "object",
+                "markdownDescription": "Selectable reasoning levels, in display order. Keys are the labels shown in the model picker; values are the request params sent when that level is active. Providers disagree on both values and shape \u2014 DeepSeek V4 wants a `thinking` wrapper alongside `reasoning_effort`, Kimi K3 wants `reasoning_effort` bare \u2014 so declare yours:\n```jsonc\n\"thinkingLevels\": {\n  \"low\":  { \"reasoning_effort\": \"low\" },\n  \"high\": { \"reasoning_effort\": \"high\" },\n  \"max\":  { \"reasoning_effort\": \"max\" }\n}\n```",
+                "additionalProperties": {
+                  "type": "object"
+                }
+              },
+              "defaultThinkingLevel": {
+                "type": "string",
+                "markdownDescription": "Which `thinkingLevels` key applies when the user hasn't picked one. Must name a declared level."
+              },
+              "noSamplingParamsWhenThinking": {
+                "type": "boolean",
+                "default": false,
+                "markdownDescription": "The provider rejects `temperature`/`top_p`/`presence_penalty`/`frequency_penalty` **while reasoning**. Applied per request, so a non-thinking turn on the same model keeps them. Use `supportsTemperature: false` instead when the provider never accepts temperature at all."
+              },
+              "maxTokensParam": {
+                "type": "string",
+                "enum": [
+                  "max_tokens",
+                  "max_completion_tokens"
+                ],
+                "enumDescriptions": [
+                  "Standard OpenAI field (default)",
+                  "Required by OpenAI's reasoning models and Kimi K3 \u2014 note this budget also covers the reasoning trace, so the same number yields less visible output"
+                ],
+                "markdownDescription": "Which request field carries the max-output value. OpenAI's reasoning models **reject** `max_tokens`. Not a pure rename: `max_completion_tokens` is spent on the reasoning trace as well as the answer."
+              },
+              "extraParams": {
+                "type": "object",
+                "markdownDescription": "Request params merged into **every** request for this model \u2014 the escape hatch for provider fields Moby doesn't model (e.g. `safety_settings`, `service_tier`, a local runner's `num_ctx`). Moby never interprets these; they go straight to the wire.\n\nMerged *before* thinking params, so a declared `thinkingLevels` entry always wins \u2014 otherwise setting `reasoning_effort` here would silently deaden the effort pill.\n\nCannot set `model`, `messages`, `stream`, `tools`, `max_tokens`, or `max_completion_tokens` \u2014 Moby computes those (use `maxTokensParam` to choose the token field's name)."
+              },
+              "wireModelId": {
+                "type": "string",
+                "markdownDescription": "Model id to send on the wire, when it differs from `id`. Rarely needed \u2014 only when you want a distinct id in Moby's settings and picker."
+              },
+              "reasoningEcho": {
+                "type": "string",
+                "enum": [
+                  "required",
+                  "optional",
+                  "none"
+                ],
+                "enumDescriptions": [
+                  "Provider 400s unless prior assistant turns carry reasoning_content back (DeepSeek V4, Kimi K3)",
+                  "Accepted but not required",
+                  "Stripped from history before sending (default)"
+                ],
+                "markdownDescription": "Whether `reasoning_content` must be echoed back on assistant turns in later requests. Set `required` for reasoning models that reject history without it \u2014 the usual symptom is a 400 on the *second* iteration of a tool loop, not the first."
+              },
+              "contextWindow": {
+                "type": "number",
+                "markdownDescription": "Total context window (input + output) in tokens. Drives the conversation-history budget and the tool loop's \"approaching budget\" guard. Defaults to 128,000 when omitted."
+              },
+              "maxOutputTokensCap": {
+                "type": "number",
+                "markdownDescription": "Upper bound for this model's max-tokens slider. Defaults to `maxOutputTokens` when omitted \u2014 set it when the provider's ceiling is far above the practical default."
+              },
+              "lspTools": {
+                "type": "boolean",
+                "default": false,
+                "markdownDescription": "Expose the LSP-backed navigation tools (`outline`, `find_symbol`, `hover`, `get_diagnostics`, \u2026) to this model. Requires `toolCalling: \"native\"`."
               }
             },
             "additionalProperties": false
@@ -358,7 +604,7 @@
           "type": "object",
           "default": {},
           "scope": "window",
-          "markdownDescription": "MCP (Model Context Protocol) servers whose tools Moby exposes to the model. Tools are namespaced `mcp__<server>__<tool>`.\n\n**Read from your user settings only** — servers declared in a workspace's `.vscode/settings.json` are ignored (with a warning in the log), because a configured server's `command` runs on your machine without per-call approval. Each VS Code profile carries its own server list. Only stdio servers are supported.\n\nExample:\n```json\n\"moby.mcpServers\": {\n  \"pharos\": { \"command\": \"pharos\" }\n}\n```",
+          "markdownDescription": "MCP (Model Context Protocol) servers whose tools Moby exposes to the model. Tools are namespaced `mcp__<server>__<tool>`.\n\n**Read from your user settings only** \u2014 servers declared in a workspace's `.vscode/settings.json` are ignored (with a warning in the log), because a configured server's `command` runs on your machine without per-call approval. Each VS Code profile carries its own server list. Only stdio servers are supported.\n\nExample:\n```json\n\"moby.mcpServers\": {\n  \"pharos\": { \"command\": \"pharos\" }\n}\n```",
           "additionalProperties": {
             "type": "object",
             "required": [
@@ -374,7 +620,7 @@
                 "items": {
                   "type": "string"
                 },
-                "description": "Arguments passed to the command. No variable expansion — literal strings only."
+                "description": "Arguments passed to the command. No variable expansion \u2014 literal strings only."
               },
               "env": {
                 "type": "object",
@@ -455,21 +701,30 @@
         "moby.modelOptions": {
           "type": "object",
           "default": {},
-          "markdownDescription": "Per-model options keyed by model id. Currently supports `reasoningEffort` (`high` or `max`) for V4 thinking models. Example:\n```jsonc\n\"moby.modelOptions\": {\n  \"deepseek-v4-flash-thinking\": { \"reasoningEffort\": \"max\" }\n}\n```",
+          "markdownDescription": "Per-model reasoning options, keyed by model id. Usually set from the model picker rather than by hand.\n\n`thinking` turns reasoning on or off; `thinkingLevel` grades it. They are separate keys so turning thinking off and back on remembers your level. Valid `thinkingLevel` values are whatever the model declares (`thinkingLevels` in `moby.customModels`, or the built-in registry) \u2014 an undeclared value is ignored with a warning rather than sent.\n```jsonc\n\"moby.modelOptions\": {\n  \"deepseek-v4-pro-thinking\": { \"thinking\": \"off\" },\n  \"kimi-k3\": { \"thinkingLevel\": \"low\" }\n}\n```\nNote a model that declares no off-knob (Kimi K3 always reasons) ignores `thinking: \"off\"`.",
           "additionalProperties": {
             "type": "object",
             "properties": {
-              "reasoningEffort": {
+              "thinking": {
                 "type": "string",
                 "enum": [
-                  "high",
-                  "max"
+                  "on",
+                  "off"
                 ],
                 "enumDescriptions": [
-                  "Default effort — fast, usually sufficient",
-                  "Maximum effort — higher cost and latency, better on complex agentic tasks"
+                  "Model reasons before answering (default)",
+                  "Skip reasoning \u2014 faster and cheaper. Only honoured by models that declare an off-knob."
                 ],
-                "description": "Override the default reasoning effort for this thinking-capable model."
+                "description": "Turn reasoning on or off for this model."
+              },
+              "thinkingLevel": {
+                "type": "string",
+                "markdownDescription": "How hard the model reasons. Values are model-declared \u2014 DeepSeek V4 takes `high`/`max`; Kimi K3 takes `low`/`high`/`max`. Ignored (with a warning) if the model doesn't declare it."
+              },
+              "reasoningEffort": {
+                "type": "string",
+                "markdownDescription": "**Deprecated** \u2014 use `thinkingLevel`. Still read so settings written by 0.8.0 keep working.",
+                "deprecationMessage": "Use thinkingLevel instead."
               }
             },
             "additionalProperties": false
@@ -569,8 +824,8 @@
             "searxng"
           ],
           "enumDescriptions": [
-            "Tavily — hosted, paid; requires an API key from tavily.com",
-            "SearXNG — self-hosted metasearch; free, no API key; requires a running instance"
+            "Tavily \u2014 hosted, paid; requires an API key from tavily.com",
+            "SearXNG \u2014 self-hosted metasearch; free, no API key; requires a running instance"
           ],
           "description": "Which web search backend to use. Tavily is the default. SearXNG is ideal for local-first / privacy-focused setups."
         },
@@ -617,7 +872,7 @@
           "default": 5,
           "minimum": 1,
           "maximum": 20,
-          "description": "Output cap for the web-search digest subagent. The subagent receives the full web-search results and propagates only the N most relevant to the main model. Range 1–20; default 5. The web-search popup exposes a slider for this."
+          "description": "Output cap for the web-search digest subagent. The subagent receives the full web-search results and propagates only the N most relevant to the main model. Range 1\u201320; default 5. The web-search popup exposes a slider for this."
         },
         "moby.editMode": {
           "type": "string",
@@ -649,24 +904,24 @@
         "moby.editSafety.checkpoint": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "**Edit safety — checkpoint**: In Auto mode, snapshot each file before an auto-applied edit so a batch can be reverted to its last-good state. Pure safety; invisible on the happy path. (ADR 0006)"
+          "markdownDescription": "**Edit safety \u2014 checkpoint**: In Auto mode, snapshot each file before an auto-applied edit so a batch can be reverted to its last-good state. Pure safety; invisible on the happy path. (ADR 0006)"
         },
         "moby.editSafety.validate": {
           "type": "string",
           "default": "auto",
-          "markdownDescription": "**Edit safety — post-apply validation**: After an Auto-mode edit batch, validate against the project's own toolchain. `auto` discovers the check command from workspace markers (dotnet build / npm run / make / cargo check / go build); `off` disables the gate; or set an explicit command string to run. A confirmed regression reverts the batch and feeds the errors back to the model."
+          "markdownDescription": "**Edit safety \u2014 post-apply validation**: After an Auto-mode edit batch, validate against the project's own toolchain. `auto` discovers the check command from workspace markers (dotnet build / npm run / make / cargo check / go build); `off` disables the gate; or set an explicit command string to run. A confirmed regression reverts the batch and feeds the errors back to the model."
         },
         "moby.editSafety.validateTimeoutMs": {
           "type": "number",
           "default": 60000,
           "minimum": 1000,
-          "markdownDescription": "**Edit safety — validation timeout**: Hard timeout (ms) for the post-apply check command. A timeout is treated as inconclusive (not a regression)."
+          "markdownDescription": "**Edit safety \u2014 validation timeout**: Hard timeout (ms) for the post-apply check command. A timeout is treated as inconclusive (not a regression)."
         },
         "moby.editSafety.maxRepairAttempts": {
           "type": "number",
           "default": 3,
           "minimum": 0,
-          "markdownDescription": "**Edit safety — per-file repair budget**: how many times a single file may revert with the *same* build error in a row before the turn halts. Failures across different files don't accumulate, and a changing error resets the count. Auto mode stays Auto — it never demotes to per-edit approval."
+          "markdownDescription": "**Edit safety \u2014 per-file repair budget**: how many times a single file may revert with the *same* build error in a row before the turn halts. Failures across different files don't accumulate, and a changing error resets the count. Auto mode stays Auto \u2014 it never demotes to per-edit approval."
         },
         "moby.editSafety.onInconclusive": {
           "type": "string",
@@ -675,18 +930,18 @@
             "halt"
           ],
           "default": "commit",
-          "markdownDescription": "**Edit safety — inconclusive outcome**: When validation can't run (no check command discovered, timed out, or not approved): `commit` applies the edit with a note (Auto's default expectation); `halt` stops the turn instead. There is deliberately no 'ask' — Auto never becomes Ask."
+          "markdownDescription": "**Edit safety \u2014 inconclusive outcome**: When validation can't run (no check command discovered, timed out, or not approved): `commit` applies the edit with a note (Auto's default expectation); `halt` stops the turn instead. There is deliberately no 'ask' \u2014 Auto never becomes Ask."
         },
         "moby.editSafety.verifyOnStop": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "**Edit safety — verify on stop**: At turn completion (Auto mode), don't accept a model-declared \"done\" when the last build verdict was a regression or when a file the turn just wrote reads back empty. Re-consults the ADR 0006 build verdict and adds a language-agnostic artifact-presence check, giving the model one bounded repair pass. Bounded by the per-file repair budget — no new loop. (ADR 0011)"
+          "markdownDescription": "**Edit safety \u2014 verify on stop**: At turn completion (Auto mode), don't accept a model-declared \"done\" when the last build verdict was a regression or when a file the turn just wrote reads back empty. Re-consults the ADR 0006 build verdict and adds a language-agnostic artifact-presence check, giving the model one bounded repair pass. Bounded by the per-file repair budget \u2014 no new loop. (ADR 0011)"
         },
         "moby.requestTimeoutMs": {
           "type": "number",
           "default": 60000,
           "minimum": 5000,
-          "markdownDescription": "Milliseconds before an API request is aborted. Raise this for slow providers — reasoning models and vision backends routinely take 30s or more, and a timeout mid-turn loses the whole turn. Applies to every endpoint, including custom models."
+          "markdownDescription": "Milliseconds before an API request is aborted. Raise this for slow providers \u2014 reasoning models and vision backends routinely take 30s or more, and a timeout mid-turn loses the whole turn. Applies to every endpoint, including custom models."
         }
       }
     },

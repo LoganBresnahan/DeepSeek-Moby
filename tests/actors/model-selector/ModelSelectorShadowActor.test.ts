@@ -362,110 +362,187 @@ describe('ModelSelectorShadowActor', () => {
     });
   });
 
-  // Phase 4 regression locks: reasoning-effort pills appear only on
-  // the active row, only when the model is thinking-capable, and
-  // clicking a pill posts setReasoningEffort + optimistically flips
-  // the active state without waiting for the round-trip.
-  describe('Reasoning-effort pills (Phase 4)', () => {
+  // Thinking controls. Every pill is rendered FROM a declaration, so the
+  // regression locks are about what does NOT render as much as what does:
+  // no Off pill without an off-knob, no Effort pill for an undeclared level.
+  describe('Thinking controls', () => {
     function publishModelList(models: ModelOption[]) {
       manager.publishDirect('model.list', models);
     }
+
+    const V4_PRO: ModelOption = {
+      id: 'deepseek-v4-pro-thinking', name: 'V4 Pro', description: '', maxTokens: 384000,
+      isCustom: false, thinkingLevels: ['high', 'max'], canDisableThinking: true,
+      thinking: 'on', thinkingLevel: 'max',
+    };
+    // Shaped after Kimi K3: grades effort, but always reasons.
+    const K3: ModelOption = {
+      id: 'kimi-k3', name: 'Kimi K3', description: '', maxTokens: 1048576,
+      isCustom: true, thinkingLevels: ['low', 'high', 'max'], canDisableThinking: false,
+      thinking: 'on', thinkingLevel: 'max',
+    };
 
     beforeEach(() => {
       actor = new ModelSelectorShadowActor(manager, element, mockVSCode);
       actor.toggle();
     });
 
-    it('does NOT render the pill row when no model has reasoningEffortDefault', () => {
+    it('renders no controls for a model that declares neither levels nor an off-knob', () => {
       publishModelList([
         { id: 'deepseek-chat', name: 'V3 Chat', description: '', maxTokens: 8192, isCustom: false },
-        { id: 'deepseek-reasoner', name: 'R1', description: '', maxTokens: 65536, isCustom: false },
-      ]);
-      expect(element.shadowRoot?.querySelector('.reasoning-effort')).toBeNull();
-    });
-
-    it('does NOT render pills on inactive thinking-capable rows (only on selected)', () => {
-      publishModelList([
-        { id: 'deepseek-chat', name: 'V3 Chat', description: '', maxTokens: 8192, isCustom: false },
-        // V4 Pro Thinking exists in the list but is NOT the selected model.
-        { id: 'deepseek-v4-pro-thinking', name: 'V4 Pro (Thinking)', description: '', maxTokens: 384000, isCustom: false, reasoningEffortDefault: 'max' },
       ]);
       manager.publishDirect('model.current', 'deepseek-chat');
-      const pillRows = element.shadowRoot?.querySelectorAll('.reasoning-effort');
-      expect(pillRows?.length).toBe(0);
+      expect(element.shadowRoot?.querySelector('.thinking-control')).toBeNull();
     });
 
-    it('renders pills on the selected row when the model is thinking-capable', () => {
+    it('renders no controls on inactive rows, only on the selected one', () => {
       publishModelList([
-        { id: 'deepseek-v4-flash-thinking', name: 'V4 Flash (Thinking)', description: '', maxTokens: 384000, isCustom: false, reasoningEffortDefault: 'high' },
+        { id: 'deepseek-chat', name: 'V3 Chat', description: '', maxTokens: 8192, isCustom: false },
+        V4_PRO,
       ]);
-      manager.publishDirect('model.current', 'deepseek-v4-flash-thinking');
-      const pillRow = element.shadowRoot?.querySelector('.reasoning-effort');
-      expect(pillRow).toBeTruthy();
-      expect(pillRow?.getAttribute('data-model')).toBe('deepseek-v4-flash-thinking');
-      const pills = pillRow?.querySelectorAll('.reasoning-effort-pill');
-      expect(pills?.length).toBe(2);
+      manager.publishDirect('model.current', 'deepseek-chat');
+      expect(element.shadowRoot?.querySelectorAll('.thinking-control').length).toBe(0);
     });
 
-    it('marks the registry-default pill as active when no per-model override set', () => {
-      publishModelList([
-        { id: 'deepseek-v4-flash-thinking', name: 'V4 Flash (Thinking)', description: '', maxTokens: 384000, isCustom: false, reasoningEffortDefault: 'high' },
-      ]);
-      manager.publishDirect('model.current', 'deepseek-v4-flash-thinking');
-      const high = element.shadowRoot?.querySelector('.reasoning-effort-pill[data-effort="high"]');
-      const max = element.shadowRoot?.querySelector('.reasoning-effort-pill[data-effort="max"]');
+    it('renders a Thinking row and one Effort pill per declared level', () => {
+      publishModelList([V4_PRO]);
+      manager.publishDirect('model.current', V4_PRO.id);
+      const rows = element.shadowRoot?.querySelectorAll('.thinking-control');
+      expect(rows?.length).toBe(2);
+      expect(element.shadowRoot?.querySelectorAll('[data-action="setThinking"]').length).toBe(2);
+      const levels = element.shadowRoot?.querySelectorAll('[data-action="setThinkingLevel"]');
+      expect(Array.from(levels ?? []).map(p => p.getAttribute('data-level'))).toEqual(['high', 'max']);
+    });
+
+    it('renders a level pill per declared level for a custom model — the row reasoningEffortDefault could never drive', () => {
+      publishModelList([K3]);
+      manager.publishDirect('model.current', K3.id);
+      const levels = element.shadowRoot?.querySelectorAll('[data-action="setThinkingLevel"]');
+      expect(Array.from(levels ?? []).map(p => p.textContent?.trim())).toEqual(['Low', 'High', 'Max']);
+    });
+
+    it('omits the Thinking row entirely when the model declares no off-knob', () => {
+      publishModelList([K3]);
+      manager.publishDirect('model.current', K3.id);
+      // K3 always thinks. An Off pill here would be a control with no params
+      // behind it — the exact dead-UI class this design removes.
+      expect(element.shadowRoot?.querySelector('[data-action="setThinking"]')).toBeNull();
+      expect(element.shadowRoot?.querySelectorAll('.thinking-control').length).toBe(1);
+    });
+
+    it('marks the effective level active, not the first pill', () => {
+      publishModelList([{ ...V4_PRO, thinkingLevel: 'high' }]);
+      manager.publishDirect('model.current', V4_PRO.id);
+      const high = element.shadowRoot?.querySelector('[data-level="high"]');
+      const max = element.shadowRoot?.querySelector('[data-level="max"]');
       expect(high?.classList.contains('active')).toBe(true);
       expect(max?.classList.contains('active')).toBe(false);
     });
 
-    it('lets reasoningEffort override reasoningEffortDefault for active state', () => {
-      publishModelList([
-        // Registry default is 'high', but the user already overrode to 'max'.
-        { id: 'deepseek-v4-flash-thinking', name: 'V4 Flash (Thinking)', description: '', maxTokens: 384000, isCustom: false, reasoningEffortDefault: 'high', reasoningEffort: 'max' },
-      ]);
-      manager.publishDirect('model.current', 'deepseek-v4-flash-thinking');
-      const max = element.shadowRoot?.querySelector('.reasoning-effort-pill[data-effort="max"]');
-      const high = element.shadowRoot?.querySelector('.reasoning-effort-pill[data-effort="high"]');
-      expect(max?.classList.contains('active')).toBe(true);
-      expect(high?.classList.contains('active')).toBe(false);
+    it('dims and disables the Effort row when thinking is off, keeping the remembered level', () => {
+      publishModelList([{ ...V4_PRO, thinking: 'off', thinkingLevel: 'max' }]);
+      manager.publishDirect('model.current', V4_PRO.id);
+      const rows = element.shadowRoot?.querySelectorAll('.thinking-control');
+      const effortRow = rows?.[1];
+      expect(effortRow?.classList.contains('disabled')).toBe(true);
+      // Still rendered, so the choice reads as remembered rather than lost.
+      expect(effortRow?.querySelectorAll('[data-level]').length).toBe(2);
+      // ...but not shown as the live setting while thinking is off.
+      expect(element.shadowRoot?.querySelector('[data-level="max"]')?.classList.contains('active')).toBe(false);
+      // Off is the active thinking pill.
+      const off = element.shadowRoot?.querySelector('[data-thinking="off"]');
+      expect(off?.classList.contains('active')).toBe(true);
     });
 
-    it('posts setReasoningEffort and optimistically flips the active pill on click', () => {
-      publishModelList([
-        { id: 'deepseek-v4-pro-thinking', name: 'V4 Pro (Thinking)', description: '', maxTokens: 384000, isCustom: false, reasoningEffortDefault: 'max' },
-      ]);
-      manager.publishDirect('model.current', 'deepseek-v4-pro-thinking');
+    it('posts setThinking and optimistically flips the pill on click', () => {
+      publishModelList([V4_PRO]);
+      manager.publishDirect('model.current', V4_PRO.id);
       mockVSCode.postMessage.mockClear();
 
-      const highPill = element.shadowRoot?.querySelector('.reasoning-effort-pill[data-effort="high"]') as HTMLElement;
-      highPill?.click();
+      (element.shadowRoot?.querySelector('[data-thinking="off"]') as HTMLElement)?.click();
 
       expect(mockVSCode.postMessage).toHaveBeenCalledWith({
-        type: 'setReasoningEffort',
-        model: 'deepseek-v4-pro-thinking',
-        effort: 'high'
+        type: 'setThinking', model: V4_PRO.id, thinking: 'off',
       });
-      // After re-render, the high pill should now be active.
-      const reHigh = element.shadowRoot?.querySelector('.reasoning-effort-pill[data-effort="high"]');
-      const reMax = element.shadowRoot?.querySelector('.reasoning-effort-pill[data-effort="max"]');
-      expect(reHigh?.classList.contains('active')).toBe(true);
-      expect(reMax?.classList.contains('active')).toBe(false);
+      expect(element.shadowRoot?.querySelector('[data-thinking="off"]')?.classList.contains('active')).toBe(true);
+    });
+
+    it('posts setThinkingLevel and optimistically flips the pill on click', () => {
+      publishModelList([V4_PRO]);
+      manager.publishDirect('model.current', V4_PRO.id);
+      mockVSCode.postMessage.mockClear();
+
+      (element.shadowRoot?.querySelector('[data-level="high"]') as HTMLElement)?.click();
+
+      expect(mockVSCode.postMessage).toHaveBeenCalledWith({
+        type: 'setThinkingLevel', model: V4_PRO.id, level: 'high',
+      });
+      expect(element.shadowRoot?.querySelector('[data-level="high"]')?.classList.contains('active')).toBe(true);
+    });
+
+    it('ignores clicks on a disabled level pill', () => {
+      publishModelList([{ ...V4_PRO, thinking: 'off' }]);
+      manager.publishDirect('model.current', V4_PRO.id);
+      mockVSCode.postMessage.mockClear();
+
+      (element.shadowRoot?.querySelector('[data-level="high"]') as HTMLElement)?.click();
+
+      expect(mockVSCode.postMessage).not.toHaveBeenCalled();
     });
 
     it('stops propagation so clicking a pill does NOT also select the row', () => {
-      publishModelList([
-        { id: 'deepseek-v4-pro-thinking', name: 'V4 Pro (Thinking)', description: '', maxTokens: 384000, isCustom: false, reasoningEffortDefault: 'max' },
-      ]);
-      manager.publishDirect('model.current', 'deepseek-v4-pro-thinking');
+      publishModelList([V4_PRO]);
+      manager.publishDirect('model.current', V4_PRO.id);
       mockVSCode.postMessage.mockClear();
 
-      const pill = element.shadowRoot?.querySelector('.reasoning-effort-pill[data-effort="high"]') as HTMLElement;
-      pill?.click();
+      (element.shadowRoot?.querySelector('[data-level="high"]') as HTMLElement)?.click();
 
-      // Should have posted setReasoningEffort but NOT a stray selectModel.
       const calls = mockVSCode.postMessage.mock.calls.map((c: any) => c[0].type);
-      expect(calls).toContain('setReasoningEffort');
+      expect(calls).toContain('setThinkingLevel');
       expect(calls).not.toContain('selectModel');
+    });
+  });
+
+  // A fresh model selection used to adopt the slider's UPPER BOUND as its
+  // value. On a model whose API ceiling equals its context window (Kimi K3:
+  // both 1,048,576) that left zero budget for the conversation — every
+  // message dropped, and the model answered from the system prompt alone.
+  describe('fresh selection uses the model default, not its ceiling', () => {
+    function publishModelList(models: ModelOption[]) {
+      manager.publishDirect('model.list', models);
+    }
+
+    const K3: ModelOption = {
+      id: 'kimi-k3', name: 'Kimi K3', description: '',
+      maxTokens: 1048576,          // API ceiling — slider bound only
+      defaultMaxTokens: 131072,    // what a fresh selection should take
+    } as ModelOption;
+
+    beforeEach(() => {
+      actor = new ModelSelectorShadowActor(manager, element, mockVSCode);
+      actor.toggle();
+    });
+
+    it('posts the default, not the cap, when the model has no saved value', () => {
+      publishModelList([K3]);
+      mockVSCode.postMessage.mockClear();
+
+      (element.shadowRoot?.querySelector('[data-model="kimi-k3"]') as HTMLElement)?.click();
+
+      expect(mockVSCode.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'setMaxTokens', maxTokens: 131072, model: 'kimi-k3' })
+      );
+    });
+
+    it('falls back to the cap when no default is declared', () => {
+      publishModelList([{ ...K3, defaultMaxTokens: undefined } as ModelOption]);
+      mockVSCode.postMessage.mockClear();
+
+      (element.shadowRoot?.querySelector('[data-model="kimi-k3"]') as HTMLElement)?.click();
+
+      expect(mockVSCode.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'setMaxTokens', maxTokens: 1048576 })
+      );
     });
   });
 });
