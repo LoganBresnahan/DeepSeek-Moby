@@ -934,3 +934,49 @@ Two of these matter more than the rest. **S1 (IME)** is the one with a known rev
 When a scenario has been verified in a dev host:
 - If it's a one-time verification of a recent change → delete the section.
 - If it's worth keeping as an evergreen regression → move it to [test-scenarios.md](./test-scenarios.md) with full numbering.
+
+## M47. Kimi K3 stencil + declarative thinking levels (P1)
+
+**Why this matters:** phase 1 of [thinking-modes-and-levels](thinking-modes-and-levels.md) rewired how every model's reasoning params reach the wire, and replaced the `moonshot-v1-128k` stencil pair with one `kimi-k3` entry. The extension-side claims are unit-tested (including a falsification pass — every mutation killed the right tests), but three things no mock can reach: whether a real provider accepts what we now send, whether the K3 field values are right, and whether the V4 default path is genuinely unchanged against the live API rather than just against the test harness.
+
+**Setup:** dev host. A Moonshot API key for S3–S5; a DeepSeek key for S1–S2.
+
+**S1. V4 default path is unchanged.** V4 Pro, default settings, ordinary turn with a tool call or two. **Pass:** identical behavior to 0.8.0 — reasoning renders, `reasoning_effort=max` in the request log, no 400 on iteration 2. **Fail:** any 400 mentioning `reasoning_content` means the echo gate is now reading the mode wrong. This is the regression that matters most; everything else here is new surface.
+
+**S2. V4 with the High pill.** Flip the existing Reasoning-effort pill to High and send. **Pass:** `reasoning_effort=high` in the log — the legacy `moby.modelOptions.<id>.reasoningEffort` key still drives the level after the rewrite. **Fail:** the pill going inert means the back-compat read broke, which would silently reset every existing user's choice.
+
+**S3. Add the K3 stencil.** Run `Moby: Add Custom Model` → *Kimi K3 (Moonshot)*, set the key. **Pass:** the entry lands in `moby.customModels` with **no editor squiggles** — that is the phase-5 schema work (`thinkingLevels`, `reasoningEcho`, `contextWindow`, `maxOutputTokensCap`, `lspTools` were all `additionalProperties: false` errors before). **Fail:** a squiggle names whichever field is still missing from the schema.
+
+**S4. K3 multi-turn tool loop.** Select K3, ask something that takes at least two tool-calling iterations. **Pass:** iteration 2 succeeds. **Fail:** a 400 saying reasoning content must be passed back means `reasoningEcho: 'required'` isn't reaching the serializer for custom models — the exact failure the old stencil would have shipped, and it does **not** show on turn one.
+
+**S5. K3 levels, and the no-off-knob degradation.** Set `"thinkingLevel": "low"` for K3 in `moby.modelOptions`, send a turn; then trigger a subagent call (a web search, or attach an image to use image-describe). **Pass:** the main turn logs `reasoning_effort=low`; the sub-call logs `cannot be disabled; using cheapest declared level "low"` rather than an invented off-param. **Fail:** any `enable_thinking` or `thinking` field on a K3 request — we'd be guessing at a knob the vendor doesn't document, which is a 400.
+
+**S6. Verify the K3 numbers.** Confirm against a real response that the context window and output cap in the stencil are right (1M / 131,072 default, 1,048,576 cap), and that omitting `temperature` is accepted. **These came from vendor docs, not from a turn we ran** — the whole reason the old stencil was wrong is that nobody re-checked it.
+
+**S7. The pills, which are the point.** Open the model picker with V4 Pro selected. **Pass:** two rows under the active model — `Thinking: [On] [Off]` and `Effort: [High] [Max]`, with Max active. Click Off: the Thinking row flips, the Effort row **dims but stays visible** with Max still shown as the remembered choice, and `moby.modelOptions` gains `{"deepseek-v4-pro-thinking": {"thinking": "off"}}`. Send a turn. **Pass:** no reasoning block renders, the request log shows `thinking: {type: disabled}` and **no** `reasoning_effort`. Click On again: Max comes back, not the registry default — that is the entire reason `thinking` and `thinkingLevel` are separate keys.
+
+**S8. K3 shows no Off pill.** Select the K3 entry and open the picker. **Pass:** an Effort row with **three** pills (Low/High/Max) and **no Thinking row at all** — K3 can't be turned off, so a control for it would be a lie. **Fail:** an Off pill appearing means the render stopped keying off `canDisableThinking`, and clicking it would write a setting every request ignores.
+
+**S9. Clicking a level pill takes effect on the next turn.** With K3 selected, click Low, then send. **Pass:** the request log shows `reasoning_effort: low` on **that** turn — the setting is read per request, so no reload should be needed. **Fail:** needing a reload means something cached the value.
+
+**Not covered here:** DeepSeek's `low` level, which is deliberately **undeclared** on the V4 entries until one real request confirms the OpenAI-format `reasoning_effort` field accepts it. That probe is its own step, and if it 400s the level stays undeclared and no pill ever offers it.
+
+## M48. Refreshed custom-model stencils (P1)
+
+**Why this matters:** phase 7 replaced three stale stencils and added two providers. Structural correctness is now unit-tested (56 tests — validation, endpoint/description agreement, context-window presence, the starvation and dropped-reasoning shapes), but **no test can check a stencil against a live API**, and that is exactly where the old Kimi entry was wrong. Every value below marked UNVERIFIED came from vendor docs rather than a turn we ran.
+
+**Setup:** dev host, `Moby: Add Custom Model`, an API key per provider you want to check. Each step is independent — do the ones you have keys for.
+
+**S1. Every stencil lands clean.** Add each of the eight in turn. **Pass:** entry appears in `moby.customModels` with **no editor squiggles**, and `[Registry] Loaded N custom model(s)` counts it. **Fail:** a squiggle names a field still missing from the schema; a rejection line names the validator rule.
+
+**S2. OpenAI GPT-5.6 — the `max_completion_tokens` claim.** Send a turn. **Pass:** completes. **Fail:** a 400 naming `max_tokens` means `maxTokensParam` isn't reaching the wire; a 400 naming `max_completion_tokens` means the direction is wrong for this model. Then set max tokens to ~2,000 and ask for a long answer — **if the reply runs well past 2,000, the param is being ignored**, which is the open question from the K3 survey and would apply to Kimi too.
+
+**S3. OpenAI `reasoning_effort` on /chat/completions.** Click through the effort pills and watch the request log. **Pass:** each level reaches the wire and the turn completes. **Fail:** a 400 means effort is Responses-API-only on this endpoint — drop `thinkingLevels` from the stencil rather than guessing at another field.
+
+**S4. Gemini limits.** Confirm 3.6-flash's real context window and max output; the stencil carries 3.5-flash's numbers as the closest documented sibling. Also confirm the picker shows **no Off pill** — 3.x cannot disable reasoning.
+
+**S5. GLM model id + endpoint.** The likeliest wrong field in the set: Zhipu's own line is `glm-<version>` but resellers publish `zai-org/GLM-5.2` and similar. **Pass:** a turn completes against `https://open.bigmodel.cn/api/paas/v4/`. Then flip Thinking off — **pass:** `enable_thinking: false` appears in the request log, the third disable mechanism in the survey.
+
+**S6. Groq gpt-oss reasoning.** **Pass:** a turn completes with `reasoning_effort` in the body. **Fail:** a 400 means Groq doesn't accept it on its OpenAI-compat surface — remove `thinkingLevels` from that stencil; don't substitute a guess.
+
+**S7. Ollama context.** `qwen3-coder:30b` declares a 262,144 context window, but **Ollama's own `num_ctx` default is far smaller** — the model won't actually see that much unless the server is configured for it. Confirm behaviour on a long conversation, and if it truncates, the stencil comment should say so more loudly (or set it via `extraParams`).
