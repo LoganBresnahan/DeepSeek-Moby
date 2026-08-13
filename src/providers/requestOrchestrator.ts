@@ -178,6 +178,14 @@ export class RequestOrchestrator {
 
   // ── State ──
   private abortController: AbortController | null = null;
+  /** ADR 0008 — true from the synchronous top of `handleMessage` until its
+   *  `finally`. Covers the window before `abortController` exists, which
+   *  `isGenerating()` alone cannot see. */
+  private _starting = false;
+  /** Set when a stop lands during that window. There is no controller to abort
+   *  yet, so the flag is honoured the moment one exists — otherwise the turn
+   *  would run to completion after the user asked it to stop. */
+  private _stopRequestedWhileStarting = false;
   private contentBuffer: ContentTransformBuffer | null = null;
   // Tracks whether the current abort was user-initiated (vs backend error).
   // Determines which marker is shown: *[User interrupted]* vs *[Generation stopped]*.
@@ -910,6 +918,19 @@ export class RequestOrchestrator {
     attachments?: Array<{ content: string; name: string; size: number; type?: 'file' | 'image'; mimeType?: string; archive?: { dataUrl: string; bytes: number; width: number; height: number } }>,
     options?: { skipRecord?: boolean }
   ): Promise<{ sessionId: string | null }> {
+    // ADR 0008 — set SYNCHRONOUSLY, before the first `await`. `isGenerating()`
+    // reads `abortController`, which isn't assigned until ~100 lines below,
+    // after `createSession` awaits; two sends landing in that window both saw
+    // "not generating" and both started a loop (observed 2026-08-12: two
+    // identical requests 1ms apart, caught only by the provider's concurrency
+    // limit). A latch set here is what actually makes the guard sound.
+    this._starting = true;
+    this._stopRequestedWhileStarting = false;
+    // ADR 0008: minted here rather than beside the AbortController below, so a
+    // `stopGeneration` arriving during the starting window awaits THIS turn
+    // instead of a resolved deferred from the previous one (which is what let
+    // a second send proceed immediately).
+    this._teardownDeferred = this.makeDeferred();
     // Clear processed code blocks and pending diffs for new conversation turn
     this.diffManager.clearProcessedBlocks();
     this.diffManager.clearPendingDiffs();
@@ -1020,8 +1041,12 @@ export class RequestOrchestrator {
     this.abortController = new AbortController();
     let signal = this.abortController.signal;
     this._userInitiatedStop = false;
-    // ADR 0008: a fresh teardown signal for this turn, resolved in the finally.
-    this._teardownDeferred = this.makeDeferred();
+    // A stop that landed before this controller existed is applied now.
+    if (this._stopRequestedWhileStarting) {
+      this.abortController.abort();
+      this._stopRequestedWhileStarting = false;
+      logger.apiAborted();
+    }
     // ADR 0008: a fresh request id, minted BEFORE the startResponse fire below so
     // the relay stamps this turn's events with it from the first event on.
     this._currentRequestId = `req-${++this._requestCounter}`;
@@ -1517,6 +1542,7 @@ export class RequestOrchestrator {
     } finally {
       const wasAborted = this.abortController === null || signal.aborted;
       this.abortController = null;
+      this._starting = false;
       // Clean up content buffer — only flush if NOT aborted (user stop or shell interrupt).
       // Flushing during abort would dump partial tags/content into the UI.
       if (this.contentBuffer) {
@@ -1544,9 +1570,13 @@ export class RequestOrchestrator {
     return { promise, resolve };
   }
 
-  /** Check if a request is currently in progress. */
+  /** Check if a request is currently in progress — including one that has
+   *  started but not yet reached its `AbortController`. Both terms are load
+   *  bearing: `_starting` covers the pre-controller window, `abortController`
+   *  covers the rest (and `stopGeneration` clears it while `_starting` may
+   *  still be set on the turn that is unwinding). */
   isGenerating(): boolean {
-    return this.abortController !== null;
+    return this.abortController !== null || this._starting;
   }
 
   /** ADR 0008: the in-flight request's id, read by the chatProvider relay to
@@ -1572,6 +1602,10 @@ export class RequestOrchestrator {
       this.abortController.abort();
       this.abortController = null;
       logger.apiAborted();
+    } else if (this._starting) {
+      // Turn is between its synchronous entry and its AbortController. Record
+      // the intent; the awaited teardown below still serialises the caller.
+      this._stopRequestedWhileStarting = true;
     }
     this.diffManager.cancelPendingApprovals();
     this.commandApprovalManager?.cancelPendingApproval();
@@ -1962,6 +1996,16 @@ data; do not seed it from memory.
     let currentSystemPrompt = streamingSystemPrompt;
     let currentHistoryMessages = [...contextMessages];
 
+    // Does this model emit reasoning we must capture? Was `isReasonerModel`
+    // alone, correct only while R1 was the sole non-V4 model producing
+    // reasoning_content. A custom entry declaring `reasoningTokens: 'inline'`
+    // (Kimi K3) had reasoning dropped at BOTH gates below — the callback was
+    // never wired, so nothing accumulated, and the push was skipped. For a
+    // `reasoningEcho: 'required'` provider that is a latent 400 on the next
+    // tool-calling turn, not merely a missing UI block.
+    const capturesReasoning = isReasonerModel ||
+      getCapabilities(this.deepSeekClient.getModel()).reasoningTokens === 'inline';
+
     // Auto-continuation tracking for R1 — separate counters per reason
     const maxZeroContentRetries = 2;      // C6: R1 put shell tags in reasoning but no content
     const maxFailedEditRetries = 3;       // C9: code edits failed to apply, re-read file
@@ -2070,8 +2114,8 @@ data; do not seed it from memory.
             }
           },
           currentSystemPrompt,
-          // Reasoning callback for deepseek-reasoner
-          isReasonerModel ? (reasoningToken) => {
+          // Reasoning callback — any model that emits reasoning, not just R1.
+          capturesReasoning ? (reasoningToken) => {
             if (!firstReasoningTokenTime) {
               firstReasoningTokenTime = performance.now();
               const waitTime = Math.round(firstReasoningTokenTime - iterationStartTime);
@@ -2434,12 +2478,21 @@ data; do not seed it from memory.
       logger.info(`[Iteration] Iteration ${shellIteration + 1} complete, response length: ${iterationResponse.length} chars`);
       logger.info(`[Iteration] Response preview: ${iterationResponse.substring(0, 300).replace(/\n/g, '\\n')}...`);
 
-      // R1-only: save iteration reasoning/content for the per-iteration replay UI.
-      if (isReasonerModel) {
+      // Any model that emits reasoning: persist it. This gate used to be
+      // `isReasonerModel`, correct only while R1 was the sole non-V4 model
+      // producing reasoning_content — a custom entry declaring
+      // `reasoningTokens: 'inline'` (Kimi K3) had its reasoning dropped on the
+      // floor here, which for a `reasoningEcho: 'required'` provider is a
+      // latent 400 on the next tool-calling turn, not just a missing UI block.
+      if (capturesReasoning) {
         if (state.currentIterationReasoning) {
           state.reasoningIterations.push(state.currentIterationReasoning);
           state.currentIterationReasoning = '';
         }
+      }
+      // R1-only: contentIterations feeds R1's per-iteration replay UI, which
+      // no other model renders. Deliberately NOT widened with the block above.
+      if (isReasonerModel) {
         if (state.currentIterationContent) {
           state.contentIterations.push(state.currentIterationContent);
           state.currentIterationContent = '';

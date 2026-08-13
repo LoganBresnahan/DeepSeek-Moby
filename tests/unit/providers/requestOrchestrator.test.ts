@@ -292,6 +292,98 @@ describe('RequestOrchestrator', () => {
     // directly, no receiver needed from webview side. Tests no longer poke it.
   });
 
+  // Concurrency guards. Both bugs below were found in one dev-host log on
+  // 2026-08-12 and are the same shape: an `async` entry point whose guard is
+  // read before an `await` that the guarded state is only set after.
+  describe('ADR 0008 — the generating latch covers the pre-controller window', () => {
+    it('reports generating SYNCHRONOUSLY, before the AbortController exists', async () => {
+      mockClient.getModel.mockReturnValue('deepseek-chat');
+      mockClient.chat.mockResolvedValue({ content: 'hi', finish_reason: 'stop' });
+
+      // Deliberately NOT awaited: handleMessage assigns `abortController` ~100
+      // lines in, after `createSession` awaits. Two sends landing in that gap
+      // both saw "not generating" and both started a loop — two identical API
+      // requests 1ms apart, caught only by the provider's concurrency limit.
+      const inFlight = orchestrator.handleMessage('Hi', 'session-1', async () => '', undefined);
+
+      expect(orchestrator.isGenerating()).toBe(true);
+      await inFlight;
+      expect(orchestrator.isGenerating()).toBe(false);
+    });
+
+    it('records a stop that arrives during the starting window', async () => {
+      const ro = orchestrator as any;
+      ro.abortController = null;
+      ro._starting = true;
+      ro._stopRequestedWhileStarting = false;
+
+      await orchestrator.stopGeneration();
+
+      // Nothing to abort yet, so the intent is latched and applied the moment
+      // a controller exists — otherwise the turn runs to completion after the
+      // user asked it to stop.
+      expect(ro._stopRequestedWhileStarting).toBe(true);
+      ro._starting = false;
+    });
+  });
+
+  // B3: reasoning capture on the legacy (non-streamingToolCalls) path was
+  // gated `isReasonerModel` — correct while R1 was the only non-V4 model
+  // emitting reasoning_content, wrong once a custom entry can declare
+  // `reasoningTokens: 'inline'`. For a `reasoningEcho: 'required'` provider
+  // that silently-dropped reasoning is a latent 400 on the NEXT tool turn.
+  describe('legacy path persists reasoning for any inline-reasoning model', () => {
+    const LEGACY_REASONING_MODEL = 'test-legacy-reasoning-model';
+    let registry: typeof import('../../../src/models/registry');
+
+    beforeEach(async () => {
+      registry = await import('../../../src/models/registry');
+      registry.registerCustomModels([{
+        id: LEGACY_REASONING_MODEL,
+        name: 'Legacy Reasoning Model',
+        toolCalling: 'native',
+        reasoningTokens: 'inline',
+        editProtocol: ['native-tool'],
+        shellProtocol: 'none',
+        supportsTemperature: false,
+        maxOutputTokens: 8192,
+        maxTokensConfigKey: 'maxTokensTestLegacy',
+        streaming: true,
+        apiEndpoint: 'http://test.local',
+        apiKey: 'test',
+        requestFormat: 'openai',
+        reasoningEcho: 'required',
+        // No streamingToolCalls — this is Kimi K3's shape, so it takes
+        // runToolLoop + streamAndIterate.
+      }]);
+      mockClient.getModel.mockReturnValue(LEGACY_REASONING_MODEL);
+    });
+
+    afterEach(() => {
+      registry.__resetCustomModelsForTests();
+    });
+
+    it('records reasoning emitted by a non-R1 model', async () => {
+      mockClient.chat.mockResolvedValue({ content: 'ok', finish_reason: 'stop' });
+      mockClient.streamChat.mockImplementation(async (
+        _messages: any,
+        onToken: (t: string) => void,
+        _sys: string,
+        onReasoning?: (t: string) => void,
+      ) => {
+        onReasoning?.('weighing the options');
+        onToken('Done.');
+        return { content: 'Done.', reasoning_content: 'weighing the options', finish_reason: 'stop' };
+      });
+
+      await orchestrator.handleMessage('Hi', 'session-1', async () => '', undefined);
+
+      expect(mockConversation.recordAssistantReasoning).toHaveBeenCalledWith(
+        'session-1', 'weighing the options', 0
+      );
+    });
+  });
+
   // Tracks any extra orchestrators constructed inside individual tests
   // (the command-approval-gate suite creates its own with a CAM injected).
   // Without this, those secondary instances leak — each subscribes to its
@@ -2770,7 +2862,6 @@ describe('RequestOrchestrator', () => {
         apiKey: 'test',
         requestFormat: 'openai',
         streamingToolCalls: true,
-        sendThinkingParam: true,
         reasoningEcho: 'required',
       }]);
       mockClient.getModel.mockReturnValue(STREAMING_MODEL_ID);
