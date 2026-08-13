@@ -407,10 +407,10 @@ describe('ChatProvider event wiring contract', () => {
 // default). The model selector's pill renderer uses presence of
 // `reasoningEffortDefault` to decide whether to render pills, and
 // `reasoningEffort` to mark the active one.
-describe('ChatProvider.sendModelList — Phase 4 reasoning-effort decoration', () => {
+describe('ChatProvider.sendModelList — thinking decoration', () => {
   const sendModelList = (ChatProvider.prototype as any).sendModelList;
 
-  it('attaches reasoningEffort to thinking-capable models (override beats default)', async () => {
+  it('attaches the effective thinking level (user setting beats registry default)', async () => {
     const postMessage = vi.fn();
     const cp: any = {
       _view: { webview: { postMessage } },
@@ -434,8 +434,12 @@ describe('ChatProvider.sendModelList — Phase 4 reasoning-effort decoration', (
     const models = postMessage.mock.calls[0][0].models as Array<any>;
     const flashThinking = models.find(m => m.id === 'deepseek-v4-flash-thinking');
     expect(flashThinking).toBeDefined();
-    expect(flashThinking.reasoningEffortDefault).toBe('high'); // registry default
-    expect(flashThinking.reasoningEffort).toBe('max');           // override wins
+    expect(flashThinking.thinkingLevels).toEqual(['high', 'max']); // declared levels
+    expect(flashThinking.canDisableThinking).toBe(true);
+    expect(flashThinking.thinking).toBe('on');
+    // Legacy `reasoningEffort` key still drives the level — 0.8.0 settings
+    // must not silently reset to the default.
+    expect(flashThinking.thinkingLevel).toBe('max');
   });
 
   it('falls back to the registry default when no per-model override is configured', async () => {
@@ -455,11 +459,11 @@ describe('ChatProvider.sendModelList — Phase 4 reasoning-effort decoration', (
     const models = postMessage.mock.calls[0][0].models as Array<any>;
     const proThinking = models.find(m => m.id === 'deepseek-v4-pro-thinking');
     // Pro defaults to 'max' in the registry — confirm that's what gets sent.
-    expect(proThinking.reasoningEffortDefault).toBe('max');
-    expect(proThinking.reasoningEffort).toBe('max');
+    expect(proThinking.thinkingLevel).toBe('max');
+    expect(proThinking.thinking).toBe('on');
   });
 
-  it('omits reasoningEffort from non-thinking models', async () => {
+  it('renders no thinking controls for a model that declares neither levels nor an off-knob', async () => {
     const postMessage = vi.fn();
     const cp: any = {
       _view: { webview: { postMessage } },
@@ -475,14 +479,80 @@ describe('ChatProvider.sendModelList — Phase 4 reasoning-effort decoration', (
 
     const models = postMessage.mock.calls[0][0].models as Array<any>;
     const v3Chat = models.find(m => m.id === 'deepseek-chat');
-    // V3 chat is non-thinking — no default, no effective effort.
-    expect(v3Chat.reasoningEffortDefault).toBeUndefined();
-    expect(v3Chat.reasoningEffort).toBeUndefined();
+    // V3 chat declares nothing, so the selector has no pill to render.
+    expect(v3Chat.thinkingLevels).toBeUndefined();
+    expect(v3Chat.canDisableThinking).toBe(false);
+    expect(v3Chat.thinkingLevel).toBeUndefined();
   });
 
   it('does not post when _view is null (webview not yet resolved)', async () => {
     const cp: any = { _view: null };
     // No throw, no post.
     await expect(sendModelList.call(cp)).resolves.toBeUndefined();
+  });
+});
+
+describe('ChatProvider.clearConversation — re-entrancy', () => {
+  const clearConversation = (ChatProvider.prototype as any).clearConversation;
+  const doClearConversation = (ChatProvider.prototype as any).doClearConversation;
+
+  function buildProvider() {
+    let createCount = 0;
+    const cp: any = {
+      _clearing: null,
+      currentSessionId: 'old-session',
+      doClearConversation,
+      requestOrchestrator: { isGenerating: () => false, stopGeneration: vi.fn() },
+      _view: { webview: { postMessage: vi.fn() } },
+      webSearchManager: { clearCache: vi.fn() },
+      diffManager: { clearSession: vi.fn(), cancelPendingApprovals: vi.fn() },
+      commandApprovalManager: { cancelPendingApproval: vi.fn() },
+      deepSeekClient: { getModel: () => 'deepseek-chat' },
+      saveCurrentSession: vi.fn(async () => {}),
+      conversationManager: {
+        // Async, like the real one — the await is what opened the window.
+        createSession: vi.fn(async () => {
+          await new Promise(r => setTimeout(r, 5));
+          return { id: `session-${++createCount}`, title: 'New Chat' };
+        }),
+      },
+    };
+    return cp;
+  }
+
+  it('creates ONE session when two callers race', async () => {
+    const cp = buildProvider();
+
+    // The `moby.newChat` command, the `clearChat` message, and `selectModel`
+    // on a non-empty session all reach here and nothing serialised them.
+    // Observed 2026-08-12: two "New Chat" rows 1ms apart, one orphaned.
+    await Promise.all([
+      clearConversation.call(cp),
+      clearConversation.call(cp),
+    ]);
+
+    expect(cp.conversationManager.createSession).toHaveBeenCalledTimes(1);
+    expect(cp.currentSessionId).toBe('session-1');
+  });
+
+  it('releases the latch so a later clear still works', async () => {
+    const cp = buildProvider();
+
+    await clearConversation.call(cp);
+    await clearConversation.call(cp);
+
+    // Sequential calls are not the bug — each should create its own session.
+    expect(cp.conversationManager.createSession).toHaveBeenCalledTimes(2);
+    expect(cp._clearing).toBeNull();
+  });
+
+  it('releases the latch even when the clear throws', async () => {
+    const cp = buildProvider();
+    cp.conversationManager.createSession = vi.fn(async () => { throw new Error('db down'); });
+
+    await expect(clearConversation.call(cp)).rejects.toThrow('db down');
+
+    // A stuck latch would wedge new-chat for the rest of the session.
+    expect(cp._clearing).toBeNull();
   });
 });

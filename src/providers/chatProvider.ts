@@ -21,7 +21,8 @@ import { SavedPromptManager } from './savedPromptManager';
 import { PlanManager } from './planManager';
 import { TokenService } from '../services/tokenService';
 import { qrcodegen } from '../vendor/qrcodegen';
-import { getCapabilities, getAllRegisteredModels, supportsManualMode, MODEL_REGISTRY } from '../models/registry';
+import { getCapabilities, getAllRegisteredModels, supportsManualMode, MODEL_REGISTRY, resolveThinkingSelection } from '../models/registry';
+import type { ModelThinkingOptions } from '../models/registry';
 import { SubagentRouter } from '../subagents/router';
 import { isImageDescribeAvailable } from '../subagents/availability';
 
@@ -44,6 +45,9 @@ export class ChatProvider implements vscode.WebviewViewProvider {
   // Message queuing during post-response summarization
   private _summarizing = false;
   private _pendingMessages: Array<{ message: string; attachments?: Array<{ content: string; name: string; size: number; type?: 'file' | 'image'; mimeType?: string; archive?: { dataUrl: string; bytes: number; width: number; height: number } }> }> = [];
+  /** In-flight `clearConversation()`, so concurrent callers join rather than
+   *  each create a session. Null when idle. */
+  private _clearing: Promise<void> | null = null;
   private _lastPendingDiffCount = 0;
   private webSearchManager: WebSearchManager;
   private fileContextManager: FileContextManager;
@@ -626,25 +630,45 @@ export class ChatProvider implements vscode.WebviewViewProvider {
         case 'setFileEditLoops':
           await this.settingsManager.updateSettings({ maxFileEditLoops: data.fileEditLoops });
           break;
-        case 'setReasoningEffort': {
-          // Phase 4 — model-selector pill writes the per-model override into
-          // `moby.modelOptions.<id>.reasoningEffort`. The orchestrator reads
-          // this fresh on every request via `applyThinkingMode`, so the
-          // change takes effect on the next turn without any local cache
-          // invalidation. The config-change listener (registered in
-          // extension.ts) re-broadcasts the model list so the active pill
-          // ends up reflecting persisted state on every webview.
+        // Model-selector thinking controls. Both write into
+        // `moby.modelOptions.<id>`; `resolveThinking` reads it fresh on every
+        // request, so a change takes effect on the next turn with no cache to
+        // invalidate. The config-change listener in extension.ts re-broadcasts
+        // the model list, so every webview converges on persisted state.
+        //
+        // Two keys, not one: `thinking` is a mode and `thinkingLevel` grades
+        // it, so turning thinking off and back on remembers the level.
+        case 'setThinking': {
           const model = data.model as string;
-          const effort = data.effort as 'high' | 'max' | undefined;
-          if (!model || (effort !== 'high' && effort !== 'max')) {
-            logger.warn(`[ChatProvider] setReasoningEffort: invalid payload (model=${model}, effort=${effort})`);
+          const thinking = data.thinking as 'on' | 'off' | undefined;
+          if (!model || (thinking !== 'on' && thinking !== 'off')) {
+            logger.warn(`[ChatProvider] setThinking: invalid payload (model=${model}, thinking=${thinking})`);
             break;
           }
-          const config = vscode.workspace.getConfiguration('moby');
-          const current = config.get<Record<string, { reasoningEffort?: 'high' | 'max' }>>('modelOptions') ?? {};
-          const next = { ...current, [model]: { ...(current[model] ?? {}), reasoningEffort: effort } };
-          await config.update('modelOptions', next, vscode.ConfigurationTarget.Global);
-          logger.info(`[ChatProvider] setReasoningEffort: ${model} → ${effort}`);
+          // Refuse to persist a state the model can't reach — otherwise the
+          // setting reads as authoritative while the wire ignores it.
+          if (thinking === 'off' && !getCapabilities(model).disableThinkingParam) {
+            logger.warn(`[ChatProvider] setThinking: ${model} declares no off-knob; ignoring`);
+            break;
+          }
+          await this.updateModelOptions(model, { thinking });
+          logger.info(`[ChatProvider] setThinking: ${model} → ${thinking}`);
+          break;
+        }
+        case 'setThinkingLevel': {
+          const model = data.model as string;
+          const level = data.level as string | undefined;
+          if (!model || typeof level !== 'string' || !level) {
+            logger.warn(`[ChatProvider] setThinkingLevel: invalid payload (model=${model}, level=${level})`);
+            break;
+          }
+          const declared = Object.keys(getCapabilities(model).thinkingLevels ?? {});
+          if (!declared.includes(level)) {
+            logger.warn(`[ChatProvider] setThinkingLevel: ${model} does not declare "${level}" (has: ${declared.join(', ') || 'none'})`);
+            break;
+          }
+          await this.updateModelOptions(model, { thinkingLevel: level });
+          logger.info(`[ChatProvider] setThinkingLevel: ${model} → ${level}`);
           break;
         }
         case 'setMaxTokens': {
@@ -1247,6 +1271,18 @@ export class ChatProvider implements vscode.WebviewViewProvider {
   // ── Settings & Search Helpers ──
 
   public async clearConversation() {
+    // Re-entrancy latch. Three entry points can fire concurrently — the
+    // `moby.newChat` command, the `clearChat` message, and `selectModel` on a
+    // non-empty session — and the body awaits `createSession` before assigning
+    // `currentSessionId`. Two overlapping calls therefore each created a
+    // session and orphaned one (observed 2026-08-12: two "New Chat" rows 1ms
+    // apart). A second caller now joins the first instead of racing it.
+    if (this._clearing) return this._clearing;
+    this._clearing = this.doClearConversation().finally(() => { this._clearing = null; });
+    return this._clearing;
+  }
+
+  private async doClearConversation() {
     // Block if currently streaming — stop first, then clear
     if (this.requestOrchestrator.isGenerating()) {
       await this.requestOrchestrator.stopGeneration();
@@ -1563,24 +1599,34 @@ export class ChatProvider implements vscode.WebviewViewProvider {
    * a `hasApiKey` flag derived from SecretStorage so the settings popup can
    * reflect key state without exposing the key itself.
    */
+  /** Merge one model's options into `moby.modelOptions`, preserving siblings.
+   *  Read-modify-write of a single object setting — the whole bag is replaced,
+   *  so a shallow spread of both levels is required or the other key is lost. */
+  private async updateModelOptions(modelId: string, patch: ModelThinkingOptions): Promise<void> {
+    const config = vscode.workspace.getConfiguration('moby');
+    const current = config.get<Record<string, ModelThinkingOptions>>('modelOptions') ?? {};
+    const next = { ...current, [modelId]: { ...(current[modelId] ?? {}), ...patch } };
+    await config.update('modelOptions', next, vscode.ConfigurationTarget.Global);
+  }
+
   public async sendModelList(): Promise<void> {
     if (!this._view) return;
     const models = getAllRegisteredModels();
-    // Pull the per-model overrides bag once. Each entry's effective effort
-    // is `override > registry default`. Sending `reasoningEffort` (the
-    // effective value) plus `reasoningEffortDefault` (already on the
-    // RegisteredModelInfo) lets the selector render the right active pill.
+    // Effective thinking state comes from the SAME resolver the request path
+    // uses, so the pill can't show a level the wire isn't sending.
     const modelOptions = vscode.workspace.getConfiguration('moby')
-      .get<Record<string, { reasoningEffort?: 'high' | 'max' }>>('modelOptions') ?? {};
+      .get<Record<string, ModelThinkingOptions>>('modelOptions') ?? {};
     // Decorate custom models with key-presence for the settings popup UI.
     const decorated = await Promise.all(models.map(async (m) => {
-      const reasoningEffort = modelOptions[m.id]?.reasoningEffort ?? m.reasoningEffortDefault;
-      const withEffort = reasoningEffort
-        ? { ...m, reasoningEffort }
-        : m;
-      if (!m.isCustom) return withEffort;
+      const selection = resolveThinkingSelection(m.id, modelOptions[m.id]);
+      const withThinking = {
+        ...m,
+        thinking: selection.on ? 'on' as const : 'off' as const,
+        ...(selection.level && { thinkingLevel: selection.level }),
+      };
+      if (!m.isCustom) return withThinking;
       const hasApiKey = await this.deepSeekClient.hasPerModelKey(m.id);
-      return { ...withEffort, hasApiKey };
+      return { ...withThinking, hasApiKey };
     }));
     this._view.webview.postMessage({
       type: 'modelListUpdated',
