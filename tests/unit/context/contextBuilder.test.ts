@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ContextBuilder, SnapshotSummary } from '../../../src/context/contextBuilder';
 import { EstimationTokenCounter, TokenCounter } from '../../../src/services/tokenCounter';
 import type { Message } from '../../../src/deepseekClient';
@@ -488,5 +488,82 @@ describe('ContextBuilder', () => {
       .filter(([role, content]) => role === 'user' && content === snapshot.summary)
       .length;
     expect(summaryCallCount).toBe(0);
+  });
+
+  // Context starvation. A provider may legitimately allow max_tokens == the
+  // context window (Kimi K3: both 1,048,576), and the max-tokens slider could
+  // persist exactly that. Budget then went to ZERO, every message was dropped
+  // including the current turn, and the request still went out — the model
+  // answered from the system prompt alone and looked confidently wrong, with
+  // nothing in the UI saying the question had been discarded.
+  describe('output reserve never consumes the whole context window', () => {
+    const STARVING_MODEL = 'test-starving-model';
+    let registry: typeof import('../../../src/models/registry');
+
+    beforeEach(async () => {
+      registry = await import('../../../src/models/registry');
+      registry.registerCustomModels([{
+        id: STARVING_MODEL,
+        name: 'Starving Model',
+        toolCalling: 'native',
+        reasoningTokens: 'none',
+        editProtocol: ['native-tool'],
+        shellProtocol: 'none',
+        supportsTemperature: false,
+        // The pathological case, verbatim from the dev-host log.
+        maxOutputTokens: 1048576,
+        maxOutputTokensCap: 1048576,
+        contextWindow: 1048576,
+        maxTokensConfigKey: 'maxTokensStarving',
+        streaming: true,
+        apiEndpoint: 'http://test.local',
+        requestFormat: 'openai',
+      }]);
+    });
+
+    afterEach(() => {
+      registry.__resetCustomModelsForTests();
+    });
+
+    it('keeps the current turn instead of dropping everything', async () => {
+      const builder = new ContextBuilder(createExactCounter());
+
+      const result = await builder.build(
+        [{ role: 'user', content: 'I need you to find all the useEffect handlers' }],
+        'You are a helpful assistant.',
+        STARVING_MODEL
+      );
+
+      expect(result.budget).toBeGreaterThan(0);
+      expect(result.droppedCount).toBe(0);
+      expect(result.messages).toHaveLength(1);
+    });
+
+    it('leaves the conversation a floor of 10% of the window', async () => {
+      const builder = new ContextBuilder(createExactCounter());
+
+      const result = await builder.build(
+        [{ role: 'user', content: 'hello' }],
+        undefined,
+        STARVING_MODEL
+      );
+
+      // Reserve clamped to window - 10%, so the conversation keeps that 10%.
+      expect(result.budget).toBe(Math.floor(1048576 * 0.1));
+    });
+
+    it('does not clamp R1, whose large reserve is a real configuration', async () => {
+      const builder = new ContextBuilder(createExactCounter());
+
+      const result = await builder.build(
+        [{ role: 'user', content: 'hello' }],
+        undefined,
+        'deepseek-reasoner'
+      );
+
+      // 128K window reserving 65,536 leaves 62,464 — legitimate, untouched.
+      // Clamping this would silently shrink a working model's output.
+      expect(result.budget).toBe(128_000 - 65_536);
+    });
   });
 });

@@ -60,7 +60,29 @@ export class ContextBuilder {
     // budget can't drift from the model's real capabilities. V4 = 1M, V3 = 128K.
     const caps = getCapabilities(model);
     const totalContext = caps.contextWindow ?? FALLBACK_CONTEXT_WINDOW;
-    const outputReserve = caps.maxOutputTokens;
+    // The reserve can never eat the whole window. A provider may legitimately
+    // allow max_tokens == context window (Kimi K3), and the max-tokens slider
+    // can persist exactly that — which left `budget = 0`, dropped EVERY
+    // message including the user's current one, and still sent the request.
+    // The model then answered from the system prompt alone and looked
+    // confidently wrong, with nothing in the UI saying the question was
+    // discarded. Same class as the tool-that-cannot-run convention: a context
+    // that cannot hold the turn must not render as a turn that had no content.
+    //
+    // The floor is deliberately small (10% of the window, min 4K) rather than
+    // a generous split: a reserve that legitimately eats most of the window is
+    // a real configuration (R1 reserves 65,536 of 128,000), and clamping THAT
+    // would silently shrink a working model's output. This only intervenes
+    // when the conversation would otherwise get essentially nothing.
+    const minConversationBudget = Math.max(Math.floor(totalContext * 0.1), 4096);
+    const outputReserve = Math.min(caps.maxOutputTokens, totalContext - minConversationBudget);
+    if (outputReserve !== caps.maxOutputTokens) {
+      logger.warn(
+        `[Context] Output reserve clamped ${caps.maxOutputTokens.toLocaleString()} → ` +
+        `${outputReserve.toLocaleString()} for "${model}" (context window ` +
+        `${totalContext.toLocaleString()}); the configured max_tokens leaves no room for the conversation.`
+      );
+    }
 
     const safetyMultiplier = this.tokenCounter.isExact
       ? 1.0
@@ -188,11 +210,22 @@ export class ContextBuilder {
       summaryInjected,
     };
 
-    logger.info(
+    const line =
       `[Context] ${result.tokenCount.toLocaleString()}/${result.budget.toLocaleString()} tokens` +
       ` | ${result.droppedCount} dropped` +
-      (result.summaryInjected ? ' | summary injected' : '')
-    );
+      (result.summaryInjected ? ' | summary injected' : '');
+
+    // Dropping the WHOLE conversation is not truncation, it's starvation: the
+    // model is about to answer a question it cannot see. Never log that at the
+    // same level as ordinary trimming.
+    if (messages.length > 0 && result.droppedCount >= messages.length) {
+      logger.warn(
+        `${line} — every message was dropped, including the current turn. ` +
+        `The model will answer from the system prompt alone. Check max_tokens for "${model}".`
+      );
+    } else {
+      logger.info(line);
+    }
 
     return result;
   }
