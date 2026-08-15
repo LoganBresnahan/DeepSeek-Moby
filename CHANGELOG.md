@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [0.9.0] - 2026-08-13
+## [0.9.0] - 2026-08-15
 
 The reasoning-control release. Thinking is now something you steer rather than something the model decides for you: every reasoning-capable model gets Thinking On/Off and an Effort row in the model picker, including DeepSeek V4 Flash and Pro, whose non-thinking mode existed in the API and had no way to reach it.
 
