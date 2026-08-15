@@ -20,6 +20,29 @@ The development loop: orient → (design doc/ADR → design-plan) → implement 
 - `/verify` — runtime verification recipe: headless webview harness (~5s) or full extension in real VS Code via WSLg (~60s), no real API key needed. This is Moby's deploy-gate analog — `/shipshape` green does not discharge manual-test-backlog items; `/verify` (or hand-testing in the dev host) does.
 - `design-plan` workflow ([.claude/workflows/design-plan.js](.claude/workflows/design-plan.js)) — decompose an accepted design doc or ADR into an effort-ranked, dependency-ordered, model-batched build checklist before implementing. Skip it for small changes where the decomposition would just restate the doc. Write the output into the plan doc (phases + verification roster).
 
+## Release 0.9.0 — SHIPPED 2026-08-15
+
+**`v0.9.0` published to the Marketplace, all six platforms, 2026-08-15 20:41 UTC** ([release run](https://github.com/LoganBresnahan/DeepSeek-Moby/releases/tag/v0.9.0) — 8/8 jobs green: `test`, 6× `vsce publish`, GitHub Release carrying all six VSIXes). Tagged from `35429c9` on main; lightweight tag, matching v0.6.x–v0.8.0.
+
+The reasoning-control release: **thinking modes + declarative levels** ([ADR 0017](docs/architecture/decisions/0017-declared-provider-differences.md), [plan](docs/plans/thinking-modes-and-levels.md)), **ten dated provider stencils**, and four bugs found by the first Kimi K3 dev-host run. 23 commits since `v0.8.0`.
+
+Gates run before the tag, for the record:
+
+- `npm run typecheck` clean; `npm run compile` clean; `npm run test:all` green **twice** (3,734 tests)
+- **`npm run test:e2e` (full tier, real DeepSeek tokens) at `f4d2dc4`: 153 tests, 153 passed, 0 failed, 0 skipped, 0 flaky, 8.2m.** Zero skips confirms the real-API specs actually ran (they self-skip silently without a key). Cleaner than the 0.8.0 run, which carried one flaky.
+- `/shipshape` green on all three gates — but only after it caught a real docs gap (below)
+- CI green on `35429c9` before tagging
+
+**What `/shipshape` caught, worth remembering:** [docs/guides/custom-models.md](docs/guides/custom-models.md) — the user-facing guide — had drifted 8 weeks and documented two removed fields (`sendThinkingParam`, `reasoningEffort`) while missing nine that exist. Someone following it would have written config that silently did nothing, which is the exact dead-field shape this release exists to prevent. It also surfaced the **tenth** instance of the declare-it-and-get-a-squiggle trap: `promptStyle` was runtime-valid and documented but absent from the `customModels` JSON schema. Neither the schema nor the code was wrong alone — they disagreed, and only a third artifact naming both revealed it. Fixed in `661c518`; guide and schema now verified in agreement on all 30 fields.
+
+**Shipped with eyes open (user call, 2026-08-15).** Six of the ten stencils have never touched a real API — `gpt-5.6`, `gemini-3.6-flash`, `glm-5.2`, `openai/gpt-oss-120b`, `qwen3-coder:30b`, and the OpenRouter/vLLM entries carry vendor-doc values marked `UNVERIFIED` in the stencil itself. They fail **loudly** (a wrong model id is a 404 on turn one), which is categorically different from the old Kimi stencil's missing `reasoningEcho` — that one only surfaced on tool iteration *two*. Anything found is 0.9.1 material:
+
+- **[M48](docs/plans/manual-test-backlog.md)** — each refreshed stencil against a live API. S2 is the highest-value unknown: whether `max_completion_tokens` is honoured or silently ignored, which our value matching the vendor default makes indistinguishable. S5 (GLM's model id) is the likeliest wrong field.
+- **[M47](docs/plans/manual-test-backlog.md)** — the thinking UI. Partly discharged already by the K3 dogfood sessions that found this release's four bugs.
+- The 0.8.0 leftovers, now rolling a second time: **M44** (pharos dev-host walk + the LSP-deprecation ledger), **M45**, **M46**.
+
+Known bugs shipping with it, both in Active Bugs: extension-host commands unresponsive mid-generation (pre-existing, diagnosed as far as reading takes it), and the three-test flake set in the MCP/TraceCollector tiers.
+
 ## Release 0.8.0 — SHIPPED 2026-08-11
 
 **`v0.8.0` published to the Marketplace, all six platforms, 2026-08-11 21:43 UTC** ([release run](https://github.com/LoganBresnahan/DeepSeek-Moby/releases/tag/v0.8.0) — 8/8 jobs green: `test`, 6× `vsce publish`, GitHub Release carrying all six VSIXes). Tagged from `b82a7c4` on main; lightweight tag, matching v0.6.x/v0.7.0 (`release.yml` fires on `push: tags: v*`, so the type is irrelevant).
