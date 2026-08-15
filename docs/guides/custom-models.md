@@ -2,26 +2,32 @@
 
 Moby talks to DeepSeek by default, but the same engine works with any OpenAI-compatible API. This lets you point it at a local runner (Ollama, LM Studio, llama.cpp), a proxy/router (LiteLLM), or a hosted provider (OpenAI, together.ai, etc.).
 
+**The fastest route is `Moby: Add Custom Model`** — it offers dated stencils for
+Ollama, LM Studio, llama.cpp, vLLM, OpenAI, Kimi, Gemini, GLM, Groq, and
+OpenRouter, and writes a correct entry for you. Read on if you want to
+hand-write one or understand what the fields mean.
+
 You declare custom models in VS Code settings via `moby.customModels`. Each entry describes *one model* and its capabilities. Moby reads the file at activation, merges the entries into its model registry, and shows them alongside built-ins in the model dropdown.
 
 ## Quick start: Ollama
 
 1. Install and start [Ollama](https://ollama.com/), pull a model:
    ```sh
-   ollama pull qwen2.5-coder:7b-instruct
+   ollama pull qwen3-coder:30b
    ```
 2. Open your VS Code `settings.json` (User or Workspace) and add:
    ```jsonc
    "moby.customModels": [
      {
-       "id": "qwen2.5-coder:7b-instruct",
-       "name": "Qwen 2.5 Coder 7B (Ollama)",
+       "id": "qwen3-coder:30b",
+       "name": "Qwen3 Coder 30B (Ollama)",
        "toolCalling": "native",
        "reasoningTokens": "none",
        "editProtocol": ["native-tool"],
        "shellProtocol": "none",
        "supportsTemperature": true,
        "maxOutputTokens": 8192,
+       "contextWindow": 262144,
        "maxTokensConfigKey": "maxTokensCustomQwen",
        "streaming": true,
        "apiEndpoint": "http://localhost:11434/v1",
@@ -72,9 +78,10 @@ If you want Moby to reach multiple hosted providers (Anthropic, OpenAI, Together
 ### Hosted OpenAI
 ```jsonc
 {
-  "id": "gpt-4o-mini",
+  "id": "gpt-5.6",
   "apiEndpoint": "https://api.openai.com/v1",
-  "apiKey": "sk-...",
+  "maxTokensParam": "max_completion_tokens",  // reasoning models REJECT max_tokens
+  "reasoningTokens": "inline",
   // ...
 }
 ```
@@ -91,8 +98,15 @@ If you want Moby to reach multiple hosted providers (Anthropic, OpenAI, Together
 | `reasoningTokens` | `"inline"` \| `"none"` | Does the API return a separate `reasoning_content` channel (R1, QwQ)? Most models → `"none"`. |
 | `editProtocol` | `["native-tool"]` \| `["search-replace"]` \| `["native-tool", "search-replace"]` | How the model is expected to express file edits. Tool-calling models → `["native-tool"]`. |
 | `shellProtocol` | `"xml-shell"` \| `"native-tool"` \| `"none"` | How the model expresses shell commands. R1 uses `"xml-shell"` (`<shell>…</shell>` tags in content). Native-tool models use `"native-tool"` (a `run_shell` tool in the tools array). Almost always `"native-tool"` for custom models with `toolCalling: "native"`. |
-| `sendThinkingParam` | boolean | Inject `{"thinking": {"type": "enabled"}}` into the request. Only needed for V4-thinking variants. Defaults to `false`. |
-| `reasoningEffort` | `"high"` \| `"max"` | Default reasoning effort for thinking-capable models. User override via `moby.modelOptions.<id>.reasoningEffort`. Only meaningful when `sendThinkingParam` is `true`. |
+| `thinkingLevels` | object (optional) | Selectable reasoning levels, in display order. Keys become the labels in the model picker; values are the request params sent when that level is active. See [Declaring reasoning](#declaring-reasoning) below. |
+| `defaultThinkingLevel` | string (optional) | Which `thinkingLevels` key applies when the user hasn't picked one. Must name a declared level. |
+| `disableThinkingParam` | object (optional) | Your provider's params for turning reasoning **off**. **Absence is meaningful**: it declares the model cannot be turned off, and the picker then renders no Off control rather than one that does nothing. |
+| `noSamplingParamsWhenThinking` | boolean (optional) | The provider rejects `temperature`/`top_p`/`presence_penalty`/`frequency_penalty` **while reasoning**. Applied per request, so a non-thinking turn on the same model keeps them. Use `supportsTemperature: false` instead when the provider never accepts temperature at all. |
+| `maxTokensParam` | `"max_tokens"` \| `"max_completion_tokens"` | Which field carries the max-output value. OpenAI's reasoning models **reject** `max_tokens`. Not a pure rename — `max_completion_tokens` is spent on the reasoning trace as well as the answer, so the same number buys less visible output. Defaults to `"max_tokens"`. |
+| `extraParams` | object (optional) | Params merged into **every** request — the escape hatch for provider fields Moby doesn't model (`safety_settings`, `service_tier`, a router's provider preferences). Moby never interprets them. Cannot set `model`, `messages`, `stream`, `tools`, `max_tokens`, or `max_completion_tokens`. |
+| `wireModelId` | string (optional) | Model id to send on the wire when it differs from `id`. Rarely needed. |
+| `temperatureFixedValue` | number (optional) | Pin temperature to exactly this value, overriding the global setting. For providers that accept only one (some reject anything but `1`). |
+| `acceptsImages` | boolean (optional) | Model accepts image content parts. Required for the `image-describe` subagent role. |
 | `reasoningEcho` | `"required"` \| `"optional"` \| `"none"` | Whether `reasoning_content` must be echoed back in subsequent requests after tool calls. V4-thinking requires `"required"` or the API 400s. Defaults to `"none"`. |
 | `promptStyle` | `"minimal"` \| `"standard"` | System-prompt flavor. `"minimal"` drops the reference-vs-edit decision tree and most numbered rules — calibrated for thinking-style models that infer intent. `"standard"` (default) is the full prompt for V3 / non-thinking / custom models. |
 | `streamingToolCalls` | boolean | Route through a single streaming pipeline that accumulates `delta.tool_calls` alongside content. Eliminates duplicate generation on no-tool turns. Set `true` for all native-tool models unless your runner has buggy SSE tool-call streaming. Defaults to `false`. |
@@ -108,6 +122,62 @@ If you want Moby to reach multiple hosted providers (Anthropic, OpenAI, Together
 | `lspTools` | boolean (optional) | Expose the LSP-backed navigation tools (`outline`, `get_symbol_source`) to this model. Defaults to `false`; native-tool models can opt in. |
 | `subagentRoles` | string[] (optional) | Subagent roles this model may serve when wired up via `moby.subagents` (e.g. `["web-search-digest"]`). Empty/absent = main-loop only. |
 | `requestFormat` | `"openai"` | Wire format. Only `"openai"` is supported today. |
+
+## Declaring reasoning
+
+Providers disagree about reasoning more than about anything else — not just the
+values, but the *shape* of the request. Rather than Moby guessing, each entry
+declares its own vocabulary: `thinkingLevels` maps a level name to the params
+that level sends, and `disableThinkingParam` holds whatever turns reasoning off.
+Moby merges them verbatim and never invents a knob, because a wrong guess is a
+400 rather than a slow answer.
+
+Four real shapes, all expressed the same way:
+
+```jsonc
+// Kimi K3 — bare top-level field, and NO off switch (it always reasons)
+"thinkingLevels": {
+  "low":  { "reasoning_effort": "low" },
+  "high": { "reasoning_effort": "high" },
+  "max":  { "reasoning_effort": "max" }
+},
+"defaultThinkingLevel": "max"
+
+// DeepSeek V4 — a wrapper object alongside the effort
+"thinkingLevels": {
+  "high": { "thinking": { "type": "enabled" }, "reasoning_effort": "high" }
+},
+"disableThinkingParam": { "thinking": { "type": "disabled" } }
+
+// OpenAI — "off" is itself a level value
+"disableThinkingParam": { "reasoning_effort": "none" }
+
+// A Qwen3 served by vLLM — the knob lives in the chat template, nested two deep
+"disableThinkingParam": { "chat_template_kwargs": { "enable_thinking": false } }
+```
+
+The model picker renders one pill per declared level, and an Off pill only when
+`disableThinkingParam` is present — so a control can never exist without params
+behind it. Level labels come from the key, so declaring `"medium"` renders
+*Medium* with no code change on Moby's side.
+
+Users override the active level in `moby.modelOptions`:
+
+```jsonc
+"moby.modelOptions": {
+  "kimi-k3": { "thinking": "on", "thinkingLevel": "low" }
+}
+```
+
+Two keys rather than one so that turning reasoning off and back on remembers the
+level. A `thinkingLevel` the model doesn't declare is ignored with a warning
+rather than sent.
+
+**If your model returns reasoning**, also set `reasoningTokens: "inline"` — and
+check whether the provider requires `reasoning_content` echoed back on later
+requests (`reasoningEcho: "required"`). That one is easy to miss: the symptom is
+a 400 on the *second* iteration of a tool loop, not the first, so a quick test
+looks fine.
 
 ## What falls back to estimation
 

@@ -595,6 +595,18 @@
                 "type": "boolean",
                 "default": false,
                 "markdownDescription": "Expose the LSP-backed navigation tools (`outline`, `find_symbol`, `hover`, `get_diagnostics`, \u2026) to this model. Requires `toolCalling: \"native\"`."
+              },
+              "promptStyle": {
+                "type": "string",
+                "enum": [
+                  "minimal",
+                  "standard"
+                ],
+                "enumDescriptions": [
+                  "Calibrated for thinking-style models that infer intent from phrasing \u2014 drops the reference-vs-edit decision tree and most numbered file rules, keeping only load-bearing guardrails",
+                  "The full prompt (default) \u2014 explicit instructions, for non-thinking models that benefit from them"
+                ],
+                "markdownDescription": "System-prompt flavor. Runtime-valid and documented since the V4 work, but omitted from this schema until 2026-08-13 \u2014 so declaring it was an editor error under `additionalProperties: false`. Defaults to `\"standard\"`."
               }
             },
             "additionalProperties": false
