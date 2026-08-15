@@ -4,7 +4,7 @@
 </p>
 
 <h1 align="center">DeepSeek Moby</h1>
-<h2 align="center">v0.7.0</h2>
+<h2 align="center">v0.9.0</h2>
 
 <p align="center">
   <strong>An AI coding assistant for VS Code.</strong>
@@ -82,6 +82,7 @@ The model doesn't just answer — it reads your files, searches your workspace, 
 | DeepSeek Reasoner (R1) | Legacy chain-of-thought, shell-driven | 128K tokens | 64K tokens |
 
 - Reasoning streams live in expandable **Thinking** dropdowns; tool calls dispatch inline as the model emits them
+- **Steer the reasoning** — the model picker carries Thinking On/Off and an Effort row for models that support them, so you can drop to a fast non-reasoning turn or spend more on a hard one. Both render from what the model declares, so a model that can't be switched off simply shows no Off pill
 - **Every shell command needs your approval** before it runs — allow/block once or permanently, with an editable rule list. (An "Allow All Commands" override exists for the brave.)
 - **LSP-backed navigation** — where VS Code's "Go to Definition" works, the model gets symbol-level tools instead of grepping blind: `outline`, `find_symbol`, `find_definition`, `find_references`, `get_symbol_source`, `hover` for a resolved type signature, and `get_diagnostics` to check whether an edit actually compiled. Availability is probed per language and declared to the model up front, and it uses your installed language extensions — nothing extra to install
 - **Extensible via [MCP](#mcp-servers)** — point Moby at an MCP server and its tools join the same toolset
