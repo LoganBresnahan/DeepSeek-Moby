@@ -2,6 +2,76 @@
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-13
+
+The reasoning-control release. Thinking is now something you steer rather than something the model decides for you: every reasoning-capable model gets Thinking On/Off and an Effort row in the model picker, including DeepSeek V4 Flash and Pro, whose non-thinking mode existed in the API and had no way to reach it.
+
+Underneath, models stopped being matched against DeepSeek's wire format and started **declaring their own**. A survey of six providers found six different reasoning shapes and four structurally different ways to turn reasoning off — plus two models with no off state at all. All of it is now expressed as data on a model entry, so a provider shipping a new level is a settings edit rather than a Moby release.
+
+Minor, not patch: new features, new settings, ten refreshed provider stencils. No breaking changes — the `moby.modelOptions.<id>.reasoningEffort` key written by 0.8.0 is still read.
+
+### Thinking controls in the model picker
+
+Select a reasoning-capable model and two rows appear under it:
+
+```
+DeepSeek V4 Pro          Highest-quality reasoning
+Thinking:  [ On ] [ Off ]
+Effort:    [ High ] [ Max ]
+```
+
+Turning thinking off sends the provider's own disable params and drops the reasoning block; the answer comes back faster and cheaper. Effort grades it when it's on.
+
+Both rows render **from what the model declares**, which is the point rather than an implementation detail:
+
+- The Off row appears only when the model declares an off-knob. Kimi K3 always reasons, so it gets no Off pill — a control that can't work is not shown rather than shown and ignored.
+- One Effort pill per declared level, labelled from the level name. A provider that offers `medium` renders *Medium* with no code change here.
+- Off **dims** the Effort row instead of hiding it, and your level is remembered across the toggle. That's why thinking and level are two separate settings keys.
+
+The same resolver decides what the picker shows and what the request sends, so a pill can't display a level the wire isn't using. Settings that name a state the model can't reach — off on a model with no off-knob, or an undeclared level — are refused rather than persisted, because a setting that reads as authoritative while every request ignores it is worse than no setting.
+
+### Models declare their reasoning vocabulary (ADR 0017)
+
+`thinkingLevels` maps a level name to the request params that level sends; `disableThinkingParam` holds whatever turns reasoning off. Moby merges them verbatim and never invents a knob, because a wrong guess is a 400 rather than a slow answer. Six shapes, one mechanism:
+
+| Provider | Shape |
+| --- | --- |
+| DeepSeek V4 | a `thinking` wrapper alongside `reasoning_effort` |
+| Kimi K3 | `reasoning_effort` bare — and no off state at all |
+| GLM (Zhipu) | `reasoning_effort` plus a sibling `enable_thinking` boolean |
+| OpenAI GPT-5.x | `reasoning_effort`, where `"none"` *is* the off switch |
+| Gemini | `reasoning_effort`; the 3.x line cannot be disabled |
+| OpenRouter | a nested `reasoning: { effort }` object |
+
+**Absence is meaningful.** An entry that declares no `disableThinkingParam` is declaring that the model cannot be turned off — a real capability, not a missing field.
+
+Two escape hatches come with it. `extraParams` merges provider fields Moby doesn't model (routing preferences, safety settings, a local runner's knobs) into every request, so an unanticipated backend is a settings edit rather than an issue report; structural keys are rejected at validation instead of silently clobbering the request. `maxTokensParam` names the max-output field, because OpenAI's reasoning models reject `max_tokens` outright. That one is deliberately *not* an alias: `max_completion_tokens` is spent on the reasoning trace as well as the answer, so treating them as interchangeable would silently change what your number means.
+
+The rule behind both, for anyone adding an axis later: a field earns a named capability only when Moby's own code must read it. Everything else is pass-through.
+
+### Ten provider stencils, all dated
+
+`Moby: Add Custom Model` now offers Ollama, LM Studio, llama.cpp, vLLM, OpenAI, Kimi, Gemini, GLM, Groq, and OpenRouter — each carrying the date its facts were checked, because a stencil that looks authoritative while being wrong is worse than no stencil.
+
+Three were pointing at superseded models and Groq's was worse: `llama-3.3-70b-versatile` had been **deprecated upstream on 2026-06-17**, so that stencil handed out a dead model id. The Kimi pair collapsed into one `kimi-k3` entry, which is natively multimodal and serves both the main loop and image description.
+
+Every hosted stencil now declares `contextWindow`. None of the previous five did, so they all silently fell back to 128,000 — harmless on a small local model, wrong by an order of magnitude on anything modern, and invisible because nothing errored.
+
+The stencils also moved into their own module and gained tests, having previously had none: each is checked against the same validator a hand-written entry faces, and against the two shapes that caused real bugs — an output cap that leaves no room for the conversation, and a reasoning model that forgets to say it reasons.
+
+### Fixed
+
+- **Your message could be silently discarded and the model would answer anyway.** The conversation budget is the context window minus the reserved output size, and a model whose maximum output *equals* its context window (Kimi K3: both 1,048,576) drove it to zero — every message dropped, including the one you just typed, with the request sent regardless. The reply looked like a non-sequitur. Three causes, all fixed: the model picker defaulted a new model to the API's *ceiling* rather than its default; the budget was allowed to reach zero; and total starvation was logged identically to ordinary trimming. A context that cannot hold your turn now says so.
+- **Two turns could start at once.** The guard against concurrent sends tested a flag that the send path doesn't set until roughly a hundred lines and an `await` later, so two sends arriving together both passed it. Only the provider's concurrency limit caught the second. The related teardown signal had the same shape and had to move with it.
+- **Starting a new chat twice in quick succession created two sessions** and orphaned one — three entry points reached the same un-serialized code.
+- **Custom reasoning models lost their reasoning.** A gate written when DeepSeek R1 was the only such model meant any other model's `reasoning_content` was dropped before it could be stored — and for providers that require it echoed back, that surfaces as a failure on the *second* tool iteration, not the first.
+- The custom-models guide documented two fields that no longer exist and omitted nine that do; `promptStyle` was valid at runtime but rejected by the settings schema.
+
+### Known limitations
+
+- The refreshed stencils' model ids and limits come from vendor documentation rather than a live request for every provider. Values not yet confirmed against a real API are marked `UNVERIFIED` in the stencil itself. A wrong id fails loudly on the first turn.
+- Whether `max_completion_tokens` is honoured or quietly ignored is still unconfirmed for Kimi; the value currently matches the vendor default, which makes the two indistinguishable.
+
 ## [0.8.0] - 2026-08-11
 
 The extensibility release. Moby becomes an **MCP client**, so the tools available to the model are no longer a closed set the extension ships — you declare servers in your settings and their tools merge into every request. Alongside it: typed invocation in the composer (`/` commands, `@` files, `:` emoji), a rebuilt LSP availability probe that stops declaring working language servers dead, and two new navigation tools.

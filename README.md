@@ -57,7 +57,7 @@ Pick either path — a DeepSeek account is **not** required if you bring your ow
 
 **Option A — DeepSeek:** get a key from [platform.deepseek.com](https://platform.deepseek.com), then run **DeepSeek Moby: Set API Key** from the Command Palette (`Ctrl+Shift+P`). For CI or headless setups, `export DEEPSEEK_API_KEY="sk-..."` works too — SecretStorage is checked first, environment second.
 
-**Option B — your own model (local or hosted):** run **DeepSeek Moby: Add Custom Model** and pick a template — Ollama, LM Studio, llama.cpp Server, OpenAI, Groq, Kimi (Moonshot) — or point it at any OpenAI-compatible endpoint. Local models need no API key at all. Full walkthroughs: [docs/guides/custom-models.md](docs/guides/custom-models.md).
+**Option B — your own model (local or hosted):** run **DeepSeek Moby: Add Custom Model** and pick a template — Ollama, LM Studio, llama.cpp, vLLM, OpenAI, Kimi, Gemini, GLM, Groq, OpenRouter — or point it at any OpenAI-compatible endpoint. Local models need no API key at all. Full walkthroughs: [docs/guides/custom-models.md](docs/guides/custom-models.md).
 
 ### 3. Chat
 
@@ -110,7 +110,7 @@ Moby gets there by routing, not pretending: a **vision model you configure** des
 - Images are **downscaled in your browser** before anything is sent or stored, so transcripts stay fast to load
 - Descriptions **persist with the conversation** — reload or fork a session and the model still knows what the screenshot said; attached images render as thumbnails in the transcript
 
-**Setup:** add a vision-capable model under custom models declaring `"acceptsImages": true` and `"subagentRoles": ["image-describe"]` — the **Kimi Vision (Moonshot)** template does both — then select it under **Settings → Image Description (Vision)**. Any OpenAI-compatible vision endpoint works. Prefer a fast non-reasoning model for this role; if your provider has a thinking-off switch, declare it as `disableThinkingParam` (e.g. `{"enable_thinking": false}`) and Moby sends it.
+**Setup:** add a vision-capable model under custom models declaring `"acceptsImages": true` and `"subagentRoles": ["image-describe"]` — the **Kimi K3 (Moonshot)**, **Gemini** and **OpenAI** templates all do both — then select it under **Settings → Image Description (Vision)**. Any OpenAI-compatible vision endpoint works. Prefer a fast non-reasoning model for this role; if your provider has a thinking-off switch, declare it as `disableThinkingParam` (e.g. `{"enable_thinking": false}`) and Moby sends it.
 
 ### Web search
 
@@ -145,7 +145,7 @@ Any OpenAI-compatible endpoint registers as a first-class model next to the buil
 
 - **Local:** Ollama, LM Studio, llama.cpp Server, vLLM — no API key, nothing leaves your machine
 - **Hosted:** OpenAI, Groq, Moonshot/Kimi, OpenRouter, Together, Fireworks, or anything speaking the Chat Completions wire format
-- Capability flags describe what each model can do — native tool calling vs. text-only protocols, reasoning tokens, streaming tool calls, vision — and Moby picks matching pipelines automatically. Provider quirks are declarable too: a fixed temperature the provider insists on (`temperatureFixedValue`), or its thinking-off knob (`disableThinkingParam`)
+- Capability flags describe what each model can do — native tool calling vs. text-only protocols, reasoning tokens, streaming tool calls, vision — and Moby picks matching pipelines automatically. Provider quirks are declarable too, as data rather than code: the reasoning levels a model offers (`thinkingLevels`) and how to switch reasoning off (`disableThinkingParam`), a fixed temperature the provider insists on (`temperatureFixedValue`), which field carries the output cap (`maxTokensParam`), and anything Moby doesn't model at all (`extraParams`)
 - Per-model API keys live encrypted in SecretStorage (**Set Custom Model API Key**)
 
 Templates for common setups ship in the **Add Custom Model** picker; end-to-end examples in [docs/guides/custom-models.md](docs/guides/custom-models.md).
@@ -205,8 +205,8 @@ The settings most people touch:
 |---------|---------|-------------|
 | `moby.model` | `deepseek-v4-pro-thinking` | Active model. Built-ins: `deepseek-v4-pro-thinking`, `deepseek-v4-flash-thinking`, `deepseek-chat`, `deepseek-reasoner`. Also accepts any custom model `id`. |
 | `moby.customModels` | `[]` | Array of custom OpenAI-compatible models to register alongside the built-ins. |
-| `moby.modelOptions` | `{}` | Per-model options keyed by model id. Currently supports `reasoningEffort` (`high` or `max`) for V4 models. |
-| `moby.temperature` | `0.7` | Creativity (0–2), for models that accept it (V3 chat, custom models). V4 and R1 reject temperature; a custom entry can pin its own via `temperatureFixedValue`. |
+| `moby.modelOptions` | `{}` | Per-model reasoning options keyed by model id — `thinking` (`on`/`off`) and `thinkingLevel` (whatever the model declares). Usually set from the model picker rather than by hand. |
+| `moby.temperature` | `0.7` | Creativity (0–2), for models that accept it. R1 rejects it always; V4 rejects it only *while thinking*, so it applies again with Thinking off. A custom entry can pin its own via `temperatureFixedValue`. |
 
 **Token / iteration limits**
 
